@@ -7,5 +7,5 @@ while true; do
   gh api \
     -H "Accept: application/vnd.github+json" \
     "/repos/PowerShell/PowerShell/issues?state=all&per_page=100&page=${page}" \
-    > "data/issues/${page}.json"
+    > "issues/${page}.json"
 done
