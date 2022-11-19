@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4704",
+  "author": "jared-is-ray",
+  "body": "In Win10 (10.0.16275.1000) and beta6, I am unable to use powershell to modify registry keys that are named \"*\". \r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nRemove-Item \"HKCU:\\Software\\Classes\\*\\shell\\\"\r\n# or try with escape\r\nRemove-Item \"HKCU:\\Software\\Classes\\``*\\shell\\\"\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nRegistry key is removed.\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nRemove-Item : Illegal characters in path.\r\nParameter name: path\r\nAt line:1 char:1\r\n+ Remove-Item \"HKCU:\\Software\\Classes\\``*\\shell\\\"\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Remove-Item], ArgumentException\r\n    + FullyQualifiedErrorId : System.ArgumentException,Microsoft.PowerShell.Commands.RemoveItemCommand\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-beta\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-beta.6\r\nOS                             Microsoft Windows 10.0.16275\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2017-09-25T17:15:39Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You did hit a bug, but there are two important asides:  \r\n\r\nYou should always use `-LiteralPath` to prevent (potentially unwanted) wildcard matching:\r\n\r\n```powershell\r\nRemove-Item -LiteralPath \"HKCU:\\Software\\Classes\\*\\shell\\\"\r\n```\r\n\r\nPositionally, your argument binds to `-Path`, which performs wildcard matching, which would delete the `shell` subkeys of _all_ subkeys of `HKCU:\\Software\\Classes`.\r\n\r\n~Also, there is no escaping of wildcard expressions; `\"HKCU:\\Software\\Classes\\``*\\shell\\\"` tries to match `` HKCU:\\Software\\Classes\\`*\\shell\\ `` as a pattern, which is not the intent.~\r\n\r\n~The only way to suppress wildcard matching is to use `-LiteralPath`~.\r\n",
+      "created_at": "2017-08-30T21:03:34Z",
+      "updated_at": "2017-09-01T12:32:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A test case to demonstrate the problem succinctly:\r\n\r\n```powershell\r\n# Note that paths passed to New-Item are *always* interpreted as literals paths.\r\n# (Its -Path parameter is the equivalent of the -LiteralPath parameter in the Get-* and Remove-* cmdlets.)\r\nNew-Item -Force HKCU:\\_tmp\\*\\sub, HKCU:\\_tmp\\foo\\sub\r\n\r\n# -LiteralPath: Should only delete the key with the *literal* \"*\" in its path.\r\nRemove-Item -LiteralPath HKCU:\\_tmp\\*\\sub\\\r\n\r\n# -Path (implied by positional use: should apply wildcard matching and delete\r\n# the \"sub\"  subkeys of ALL \"HKCU:\\_tmp\" subkeys.\r\nRemove-Item HKCU:\\_tmp\\*\\sub\\\r\n\r\nRemove-Item -Recurse HKCU:\\_tmp\r\n```\r\n\r\nCurrently, the first 2 `Remove-Item` calls fail with `Illegal characters in path.`\r\n\r\nNote that the commands fail on Windows PowerShell too, but _quietly_.\r\n",
+      "created_at": "2017-08-30T21:16:08Z",
+      "updated_at": "2017-08-30T21:22:00Z"
+    },
+    {
+      "author": "jared-is-ray",
+      "author_association": "NONE",
+      "body": "Thank you very much for quick response and for the tip on -LiteralPath, I was unaware of this option. \r\n\r\nOne other note on where I got `HKCU:\\Software\\Classes\\``*\\shell\\` from: as part of my debugging, I was trying to `cd` into the path with the \"*\" key in it. It seems that `cd` _does_ expand the wildcard. I was able to prevent the expansion of the wildcard and `cd` into the path with no problem when I escaped the backtick. I assumed this was because it might be getting passed to some code downstream that turns the backtick into an actual escape sequence. I have no idea if this is related, but perhaps it gives a little more info on the bug.\r\n\r\nWith unescaped wildcard:\r\n```powershell\r\ncd \"HKCU:\\Software\\Classes\\*\\shell\\\" \r\ncd : Cannot set the location because path 'HKCU:\\Software\\Classes\\*\\shell\\' resolved to multiple containers. You can only the set location to a\r\nsingle container at a time.\r\nAt line:1 char:1\r\n+ cd \"HKCU:\\Software\\Classes\\*\\shell\\\"\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Set-Location], PSArgumentException\r\n    + FullyQualifiedErrorId : Argument,Microsoft.PowerShell.Commands.SetLocationCommand\r\n```\r\nWith escaped backtick:\r\n```powershell\r\ncd \"HKCU:\\Software\\Classes\\``*\\shell\\\" \r\npwd\r\n\r\nPath\r\n----\r\nHKCU:\\Software\\Classes\\*\\shell\\\r\n```",
+      "created_at": "2017-08-30T21:24:16Z",
+      "updated_at": "2017-08-30T21:24:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jared-is-ray: \r\n\r\nThe escaping trick is intriguing - ~~I would _not_ expect that to work, and~~, bizarrely, it even works with _two_ backticks (but no more):\r\n\r\n```powershell\r\n# Inexplicably works even with *2* (effective) backticks.\r\ncd \"HKCU:\\Software\\Classes\\````*\\shell\\\" # same as: 'HKCU:\\Software\\Classes\\``*\\shell\\'\r\n```\r\n\r\nAgain, however, `-LiteralPath` is the right solution:\r\n\r\n```powershell\r\ncd -LiteralPath HKCU:\\Software\\Classes\\*\\shell\\\r\n```",
+      "created_at": "2017-08-30T21:37:42Z",
+      "updated_at": "2017-09-01T12:17:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jared-is-ray: \r\n\r\nMy bad: You _can_ escape wildcard patterns, and what you tried should have worked, after all.\r\n\r\n```powershell\r\n> [System.Management.Automation.WildcardPattern]::Escape('HKCU:\\Software\\Classes\\*\\shell\\')\r\nHKCU:\\Software\\Classes\\`*\\shell\\\r\n```\r\n\r\n* I still puzzled by the escaping with _two_ `` ` `` (effective) instances, however, given the following:\r\n\r\n```powershell\r\n[System.Management.Automation.WildcardPattern]::Unescape('``*')\r\n`*   # !! 1 ` retained, as expected.\r\n```\r\n\r\n* Given that it's easy to get the escaping wrong manually and it is cumbersome to apply it programmatically, escaping is best reserved for cases where you have a wildcard expression in which you must escape _parts_ as literals; in other words: if you know that your path is meant to be taken literally, `-LiteralPath` is the simple and robust choice.\r\n\r\n",
+      "created_at": "2017-09-01T12:41:17Z",
+      "updated_at": "2017-09-01T12:41:17Z"
+    }
+  ],
+  "created_at": "2017-08-30T17:12:06Z",
+  "number": 4704,
+  "state": "closed",
+  "title": "Wildcard character in registry paths results in \"Illegal characters in path.\"",
+  "updated_at": "2017-09-26T07:59:49Z"
+}

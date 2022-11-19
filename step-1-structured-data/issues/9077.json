@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9077",
+  "author": "alx9r",
+  "body": "\r\n[The docs for ScriptBlock.GetNewClosure()](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.scriptblock.getnewclosure?view=pscore-6.0.0) state the following:\r\n\r\n>Returns a new scriptblock bound to a module. Any local variables in the callers context will be copied into the module.\r\n\r\nI have been assuming that repeat invocations of GetNewClosure() would result in scriptblocks bound to different modules.  However, this does not seem to be the case.  The following code\r\n\r\n```PowerShell\r\n$m = New-Module {}\r\n\r\nforeach ($sb in @(\r\n    { $v = 'normal assignment'                        }\r\n    { Set-Variable v 'Set-Variable'                   }\r\n    { Set-Variable v 'Set-Variable -Scope 1' -Scope 1 }\r\n))\r\n{\r\n    . ( $sb  | . $m { process { $_.GetNewClosure() } } ) # set value\r\n    . ( {$v} | . $m { process { $_.GetNewClosure() } } ) # output value\r\n}\r\n```\r\n\r\noutputs \r\n\r\n```\r\nSet-Variable -Scope 1\r\n```\r\n\r\nIn other words, a variable set by `$sb.GetNewClosure()` is visible from `{$v}.GetNewClosure()`.  The modules bound to each scriptblock seem to be somehow related, but not identical.  \r\n\r\nI'm hoping someone can shed some light on the nature of the module to which each of the scriptblocks output by repeat calls to GetNewClosure() is bound and how those modules are related to one another.\r\n\r\n## Environment Data\r\n\r\nWritten as of : \r\n\r\n```\r\nPowerShell Core 6.1.3 release\r\n```",
+  "closed_at": "2019-03-06T19:00:36Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r When you're dotsourcing a module bound scriptblock, the current scope will be the `ModuleScope` (same as psm1) while it's being invoked.  So \"Scope 1\" there is global.",
+      "created_at": "2019-03-06T18:09:31Z",
+      "updated_at": "2019-03-06T18:09:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also, @alx9r, ~~there's only _one_ module instance in your code, `$m`, and all your `.` invocations happen in its top-level scope~~ (where, as @SeeminglyScience points out, `-Scope 1` refers to the _global_ scope).\r\n",
+      "created_at": "2019-03-06T18:16:06Z",
+      "updated_at": "2019-03-06T19:08:20Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">So \"Scope 1\" there is global.\r\n\r\nOh I see.  Thanks @SeeminglyScience.  \r\n\r\n(For posterity, that link to \"global\" is more nuanced than I remembered: See [\"One last detail...\" in #6139](https://github.com/PowerShell/PowerShell/issues/6139#issuecomment-364262570).)\r\n\r\n>there's only one module instance in your code, $m, and all your . invocations happen in its top-level scope\r\n\r\nI count 7 module instances: `$m` plus the 6 produced by the 6 invocations of .GetNewClosure().  @mklement0 are you saying that those are all actually the same module?  \r\n\r\nInvoking \r\n\r\n```PowerShell\r\n$m = New-Module {}\r\n$m.Name\r\n\r\nforeach ($sb in @(\r\n    { $v = 'normal assignment'                        }\r\n    { Set-Variable v 'Set-Variable'                   }\r\n    { Set-Variable v 'Set-Variable -Scope 1' -Scope 1 }\r\n))\r\n{\r\n    $sb  | . $m { process { $_.GetNewClosure() } } | % {$_.Module.Name}\r\n    {$v} | . $m { process { $_.GetNewClosure() } } | % {$_.Module.Name}\r\n}\r\n```\r\n\r\nshows 7 different module names on my computer.",
+      "created_at": "2019-03-06T19:00:36Z",
+      "updated_at": "2019-03-06T19:00:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @alx9r - clearly I had a misconception there. \r\n\r\nI missed that `.GetNewClosure()` _creates_ a new module, correct?\r\n\r\n\r\n",
+      "created_at": "2019-03-06T19:07:25Z",
+      "updated_at": "2019-03-06T19:08:33Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">I missed that .GetNewClosure() creates a new module, correct?\r\n\r\n@mklement0 That's my current understanding of what happens.",
+      "created_at": "2019-03-06T19:12:44Z",
+      "updated_at": "2019-03-06T19:12:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for the link to the global scope: it is possible - though I've never seen it in the wild - to create a module that _doesn't_ have that link - or, rather, it _does and it doesn't_. A bug?\r\n\r\n@PetSerAl  pointed me to this [`PSModuleInfo` constructor](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.psmoduleinfo.-ctor?view=powershellsdk-1.1.0#System_Management_Automation_PSModuleInfo__ctor_System_Boolean_) that, when passed `$false`, purports to create a module that opts out of the link:\r\n\r\n```powershell\r\n# WITH link to global scope.\r\nPS> $global:var = 42; . ([psmoduleinfo]::new($true)) { $global:var }\r\n42\r\n\r\n# WITHOUT link to global scope.\r\nPS> $global:var = 42; . ([psmoduleinfo]::new($false)) { $global:var }\r\n  # NO OUTPUT. Get-Variable -Scope Global var would fail.\r\n```\r\n\r\nHowever, _without a scope qualifier_ the global variable _is_ seen:\r\n\r\n```powershell\r\n# WITHOUT link to global scope, but REFERENCE WITHOUT SCOPE QUALIFIER\r\nPS> $global:var = 42; . ([psmoduleinfo]::new($false)) { $var }\r\n42 # !! Unexpectedly still seen; ditto with `Get-Variable var` (without -Scope)\r\n```\r\n\r\n",
+      "created_at": "2019-03-06T19:30:46Z",
+      "updated_at": "2019-03-06T20:48:55Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@mklement0 It seems like that might be a bug.  It reminds me of the inconsistent behavior in #6378.  That turned out to be a bug.",
+      "created_at": "2019-03-06T21:06:07Z",
+      "updated_at": "2019-03-06T21:06:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @alx9r  - I've created #9080.",
+      "created_at": "2019-03-06T21:45:06Z",
+      "updated_at": "2019-03-06T21:45:06Z"
+    }
+  ],
+  "created_at": "2019-03-06T17:43:24Z",
+  "number": 9077,
+  "state": "closed",
+  "title": "Modules produced by repeat calls to GetNewClosure() are related.  But how, exactly?",
+  "updated_at": "2019-04-02T06:23:04Z"
+}

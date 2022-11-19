@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7769",
+  "author": "cspotcode",
+  "body": "`.cmd` scripts launch in an external window when:\r\n* another file exists with same name but without file extension\r\n* cmd script is invoked via *absolute* path without file extension\r\n\r\nPowerShell can't pipe the script's stdout when this happens.\r\n\r\nSpecifically, this happens to me when invoking commands installed via npm / nodejs.  npm installs commands with a bash script -- no file extension -- and a `.cmd` script in the same directory.  The following invocation triggers this behavior:\r\n\r\n```\r\n& \"$PSScriptRoot\\node_modules\\.bin\\webpack\"\r\n```\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nCreate two files in the current directory (I did it in C:\\Users\\abradley\\Desktop)\r\n\r\n\"echoFoo\": create an empty file  \r\n\r\n\"echoFoo.cmd\":\r\n```\r\n@echo foo\r\n```\r\n\r\nThen run the following in PowerShell:\r\n\r\n```powershell\r\n# Using Pester assertions to show what's expected\r\n./echoFoo | should -be 'foo'\r\n../Desktop/echoFoo | should -be 'foo'\r\n../../../Users/abradley/Desktop/echoFoo | should -be 'foo'\r\nC:/Users/abradley/Desktop/echoFoo | should -be 'foo' # <-- Error: Cannot run a document in the middle of a pipeline\r\nC:/Users/abradley/Desktop/echoFoo # <-- External cmd window pops up to run this script\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nAll 4 assertions in the example above should succeed; output of 5th invocation should appear in same console.\r\n\r\nActual behavior\r\n---------------\r\n\r\nFourth assertion fails; fifth invocation runs in an external window.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0-rc.1\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT It seems this important omission.",
+      "created_at": "2018-09-13T05:04:04Z",
+      "updated_at": "2018-09-13T05:04:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good find, @cspotcode.\r\n\r\nTo add some more details:\r\n\r\n* Windows PowerShell is affected too. \r\n\r\n* _All_ executable extensions (as per `$env:PATHEXT`) are affected.\r\n\r\nHere's a quick way to reproduce the problem, using sample file `t` and  dummy executables with the same filename root for all executable extensions, in sequence:\r\n\r\n```powershell\r\nSet-Location $env:TEMP\r\nPush-Location $env:TEMP\r\n$null > '.\\t'\r\n$env:PATHEXT -split ';' | % { \r\n    ri t.*\r\n    $n = \"t$_\"; '' | set-content -enc ascii $n\r\n    $fn = (rvpa $n).path; \r\n    $fnne = $fn -replace '\\..+$'\r\n    \"$_`: Invoking '$fnne' with '$fn' present...\"\r\n    & $fnne\r\n    read-host 'Press Enter to test next extension'\r\n    ri $fn\r\n}\r\n```\r\n\r\nNote that only `.com`, `.exe`, `.cmd` and `.bat` files actually _execute_ - albeit unexpectedly in a _new_ window, as described - whereas the other extensions pop up a dialog for selecting an application, as if you had double-clicked / called `Invoke-Item` on a  _document_ not associated with an application.\r\n\r\n",
+      "created_at": "2018-09-13T20:28:16Z",
+      "updated_at": "2019-04-10T12:39:45Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "In the case where a file is not `executable`, PowerShell automatically does a `ShellExecute` (equivalent to explicitly calling `Invoke-Item`) which leaves it to the desktop shell to determine how to \"run\" the file.  If you try it with a .txt file, it should open notepad on Windows or textedit on macOS.  So this is expected.  In the case where there's no extension that makes it executable, it leaves it to the shell to take care of it.\r\n\r\nIn the case where you have `file` and `file.cmd`, it will make an exact match first so it finds `file` and not `file.cmd`.  So it does a `ShellExecute` on `file` and the shell seems to find `file.cmd` and executes that but to do so it needs to open a new console window.  You can see the same behavior with Win+R and give the absolute path to `echoFoo` (sans extension).\r\n\r\nThis all seems to be working as designed and (I think) only the edge case of having two files with same name differing by extension brings unintuitive results.",
+      "created_at": "2018-09-21T23:26:32Z",
+      "updated_at": "2018-09-21T23:26:32Z"
+    },
+    {
+      "author": "cspotcode",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT It runs the .cmd correctly using a *relative* path but not an *absolute* path.\r\n\r\nIn both situations, I have `file` and `file.cmd`.  Using a relative path, it runs the .cmd in the same console window.  Using an absolute path, it runs the .cmd in a new console window.\r\n\r\n`C:\\Users\\abradley\\Desktop\\foo` runs in new console window.\r\n`.\\foo` runs in same console window.\r\n\r\nSo I'm still pretty sure this is a bug.",
+      "created_at": "2018-09-21T23:50:14Z",
+      "updated_at": "2018-09-21T23:50:14Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@cspotcode to be clear, I'm not saying the experience couldn't be improved, but is having two files the same name one without an extension and one with executable extension common?  I would be open to reviewing a community submitted PR, but this doesn't seem critical to fix vs other issues.",
+      "created_at": "2018-09-21T23:56:17Z",
+      "updated_at": "2018-09-21T23:56:17Z"
+    },
+    {
+      "author": "cspotcode",
+      "author_association": "NONE",
+      "body": "You said it was deferring to ShellExecute, and that was causing it to open a new window.  Yet with a relative path it does *not* open a new window.  So the behavior is different from what you described, correct?  I'm just trying to understand why the behavior is different for an absolute path, when it already does the correct thing for a relative path.\r\n\r\nThis will happen for anything installed via `npm`, the nodejs package manager.  `npm`'s installation mechanism always creates both a `.cmd` script and an extensionless bash script for every module that declares a binary.\r\n\r\nFor example, it affects TypeScript.  The example I cited in my original post is webpack, another popular tool.\r\n\r\n`npm` installs binaries into a project-local `.bin` directory so it's common to invoke binaries at this path.  And to avoid issues where I need to `cd` back to the root of my project, I use `$PSScriptRoot` to get the right path.  Here's an invocation that's affected by this issue:\r\n\r\n`& \"$PSScriptRoot\\node_modules\\.bin\\tsc\" # Compile TypeScript`\r\n\r\n(sorry if I sound repetitive; I'm just trying to ensure we're on the same page and that I'm not missing anything)",
+      "created_at": "2018-09-22T00:14:53Z",
+      "updated_at": "2018-09-22T00:14:53Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "When given a relative path, a search is used to find a match.  However, when an absolute path is given, it's a literal.",
+      "created_at": "2018-09-22T01:04:32Z",
+      "updated_at": "2018-09-22T01:04:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: @cspotcode has demonstrated that there's an inconsistency, and that its effects surface in a common use case.\r\n\r\n> When given a relative path, a search is used to find a match. However, when an absolute path is given, it's a literal.\r\n\r\nWhat search? The only way to resolve a relative path is relative to the current filesystem location; and a relative path such as `.\\.bin\\webpack` is a literal too.\r\n\r\nIn any event, there's no good reason to treat targeting a file by relative path differently than by absolute path.\r\n\r\n---\r\n\r\nWhat makes sense _conceptually_:\r\n\r\n* Let _direct invocation_ / invocation via `&` (or even `.`) / `Start-Process` - typically used for _invoking executables_ -  _prioritize_ finding _executable_ files, which means that if no extension is specified, to start looking for files with one of the extensions in `$env:PATHEXT` _first_.\r\n\r\n   * `Start-Process` already does that with both relative and full paths.\r\n   * Direct invocation / `&` currently only does it for _relative_ paths, so we must fix it to do the same with absolute ones.\r\n\r\n* Let `Invoke-Item` - typically used for opening _documents_ - _prioritize_ finding extension-less files _as specified_, with a _fallback_ to looking for executables.\r\n\r\n  * This would technically be a breaking change from how `Invoke-Item` functions currently, but I doubt that someone relied on the old behavior, as it is mostly useless: Currently, it behaves like direct invocation does with absolute paths even with relative paths (so, unlike direct invocation, it is internally consistent, but arguably consistently does the wrong thing).\r\n   \r\nNow that we know that having `file` and `file.cmd` in the same folder _does_ happen in practice, and fairly commonly (`npm`), this separation would allow targeting either file in a predictable manner.\r\n\r\nI haven't looked into how to convince `ShellExecute` to treat a given file path _as-is_, without looking for variants with implied executable extensions, but I hope that's a solvable problem.\r\n",
+      "created_at": "2018-09-22T01:53:52Z",
+      "updated_at": "2019-04-10T12:40:45Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Agree that npm is a sufficient scenario that warrants more investigation into this.",
+      "created_at": "2018-09-22T04:58:46Z",
+      "updated_at": "2018-09-22T04:58:46Z"
+    },
+    {
+      "author": "mabasic",
+      "author_association": "NONE",
+      "body": "I'm having issues with using absolute and relative paths for running phpunit. If I use a relative path like `.\\vendor\\bin\\phpunit` it works as expected, but if I use the absolute path `c:/Users/xxx/vendor/bin/phpunit` it opens a new **cmd** window which run the command and then closes itself.",
+      "created_at": "2018-12-18T10:02:23Z",
+      "updated_at": "2018-12-18T10:02:23Z"
+    }
+  ],
+  "created_at": "2018-09-12T19:12:16Z",
+  "number": 7769,
+  "state": "open",
+  "title": ".cmd invocation in new window, can't pipe stdout, when using absolute path to .cmd",
+  "updated_at": "2019-04-10T12:40:45Z"
+}

@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16763",
+  "author": "LqkUWp",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\n1. run `Enable-PSRemoting` in pwsh v7.2.0 and config winrm to listen to HTTPS.\r\n2. update pwsh from 7.2.0 to 7.2.1 manually, i.e. installing pwsh v7.2.1 to overwrite v7.2.0\r\n3. delete directory 'C:\\Windows\\System32\\PowerShell\\7.2.0' manually\r\n4. run `Unregister-PSSessionConfiguration PowerShell.7`\r\n5. run `winrm invoke Restore http://schemas.microsoft.com/wbem/wsman/1/config/plugin '@{}'`\r\n6. run `Enable-PSRemoting` in pwsh v7.2.1 and re-config winrm to listen to HTTPS.\r\n7. run \r\n    ```\r\n    New-PSSession -cn . -Port xxx -UseSSL -ConfigurationName Powershell.7\r\n    ```\r\n\r\np.s. \r\n\r\n1. sorry for that i've forgotten the order between step 3&4. \r\n2. everything is fine before pwsh v7.2.1. after updating to v7.2.1, step 3-4 messed up winrm. i tried to repair that via step 5 according to error info of `Get-PSSessionConfiguration`. \r\n\r\n### Expected behavior\r\n\r\n```console\r\nall pssession stuff runs in background and no black window pops up.\r\n```\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\n1. a black window named 'c:\\windows\\system32\\wsmprovhost.exe' pops up.\r\n2. there are wsmprovhost and conhost foreground processes in task manager. \r\n3. black window is auto closed after running `Remove-PSSession xxx`.\r\n```\r\n\r\n\r\n### Error details\r\n\r\n_No response_\r\n\r\n### Environment data\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.1\r\nPSEdition                      Core\r\nGitCommitId                    7.2.1\r\nOS                             Microsoft Windows 10.0.19043\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n1. snapshot of task manager after all procedure in 'Steps to reproduce'\r\n    ![image](https://user-images.githubusercontent.com/28478572/149802820-eb36012f-884d-49fd-9d2e-c3d4c8be60a2.png)\r\n2. snapshot of the pop-up black window\r\n    ![image](https://user-images.githubusercontent.com/28478572/149808850-915894c7-73db-4c3a-83bc-3e849cf441e7.png)",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Looks like this is an unintended consequence of https://github.com/PowerShell/PowerShell-Native/pull/70. The fact that it appears on your interactive desktop would indicate you also have `-EnableNetworkAccess` are you able to confirm that by checking `$PSDefaultParameterValues`? I'm only able to replicate it myself with `-EnableNetworkAccess` and not without.\r\n\r\nThe reason why this is happening is because `-EnableNetworkAccess` will spawn the `wsmprovhost.exe` process on the session the WinRM plugin is starting on. Without `-EnableNetworkAccess` the session used to spawn the remote process is session 0 which is hidden from the user but when you set `-EnableNetworkAccess` it will spawn it on the same interactive session as the caller as it's using the same access token for network access. Since the PR mentioned it will also now explicitly call `AllocConsole` to spawn a new console and because it's in the same session as the caller this console appears in the form of a new conhost that is blank.\r\n\r\nThis essentially means that we either need to\r\n\r\n* Revert the change\r\n  * Simplest option but brings back the problem https://github.com/PowerShell/PowerShell/issues/15128\r\n* Don't create the console if not on session 0\r\n  * Would require a check on the access token to see what session it is in and conditionally spawn the console if in session 0\r\n  * This means the issue above will affect `-EnableNetworkAccess` sessions but normal ones are still unaffected\r\n* Explicitly hide the console\r\n  * Simplest method will result in a flash on the screen when the conhost appears when allocated but before it is hidden\r\n  * A more complex method to avoid this flash is to call `CreateProcess` to spawn a new console app (like `cmd.exe` in a hidden state) and attach that hidden console to `wsmprovhost.exe`\r\n  * The latter has performance implications as now a new connection needs to start up an extra process\r\n* Do nothing\r\n  * AFAIK this will only affect `-EnableNetworkAccess` and cannot see how it could affect anything else as they would all be spawned in session 0\r\n\r\n@SteveL-MSFT @PaulHigin do you have any thoughts on the matter? Personally I think the console should be explicitly hidden and I don't really think we should go out of our way to avoid the flash due to the limited use case where it will appear.",
+      "created_at": "2022-01-18T19:23:56Z",
+      "updated_at": "2022-01-18T19:23:56Z"
+    },
+    {
+      "author": "tbakerweb",
+      "author_association": "NONE",
+      "body": "Hello,\r\nI found this in trying to identify this exact behavior.\r\n\r\nI felt it worth weighing in on this since the `Do nothing` option would break functionality in our product's usage.\r\n\r\nI'm the architect and lead developer on an Enterprise grade automation tool which leverages PSSessions, Runspaces, etc to properly scope execution assignments.  Our inherent process requires the `-EnableNetworkAccess` switch while simultaneously hiding the `wsmprovhost.exe` window.\r\n\r\nHaving read through the #15128 and understanding as much of it as I could without a deep dive, I wonder if there's a more elegant solution to solve this, considering that 'EnableNetworkAccess' isn't even present in the linked comments.\r\n\r\n",
+      "created_at": "2022-01-18T22:45:48Z",
+      "updated_at": "2022-01-18T22:45:48Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@jborean93 Thanks for your analysis on this.  I agree that the `AllocConsole()` change should be reverted or modified so that it is only called when in a non-interactive session.  Is there any other way to set the .NET code page correctly?\r\n\r\n/cc: @SteveL-MSFT ",
+      "created_at": "2022-01-18T23:44:54Z",
+      "updated_at": "2022-01-18T23:44:54Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> I felt it worth weighing in on this since the Do nothing option would break functionality in our product's usage.\r\n\r\nThanks for sharing your use case, I personally don't think it's a viable option as there are some nice low hanging fruit to try and reduce the impact here.\r\n\r\nOne question I do, is there a reason why you are using `-EnableNetworkAccess` at all? This essentially uses the WSMan API to spawn a process using the same access token as the caller. You can achieve the same thing with a `NamedPipeConnectionInfo` or even just a new Runspace in a separate thread. Jobs are also essentially the same thing but might be a bit hard if you are relying on the `Invoke-Command`/`Enter-PSSession` interfaces.\r\n\r\n> Having read through the #15128 and understanding as much of it as I could without a deep dive, I wonder if there's a more elegant solution to solve this, considering that 'EnableNetworkAccess' isn't even present in the linked comments.\r\n\r\nAn alternative solution IIRC was to try and fix .NET so that `Console.OutputEncoding` looked up the value but there's no real way of doing this without first spawning the console anyway. I personally see 3 viable options here (in no particular order and really juse psuedo code)\r\n\r\n### Option 1 - Hide the Console After Spawning\r\n\r\n```c\r\nAllocConsole();\r\nShowWindow(GetConsoleWindow(), SW_HIDE);\r\n```\r\n\r\nOnly downside here is that there will still be a flash that occurs after it is spawned but before it is hidden. Advantages is that it's very simple and doesn't have much of an overhead.\r\n\r\n### Option 2 - Hide the Console Before Spawning\r\n\r\n```c\r\nSTARTUPINFO startupInfo;\r\nstartupInfo.cb = sizeof(startupInfo);\r\nstartupInfo.dwFlags = STARTF_USESHOWWINDOW;\r\nstartupInfo.wShowWindow = SW_HIDE;\r\n\r\nPROCESS_INFORMATION processInfo;\r\n\r\nif (CreateProcess(NULL, \"cmd.exe\", NULL, NULL, FALSE, \r\n    CREATE_NEW_CONSOLE, NULL, NULL, &startupInfo, &processInfo))\r\n{\r\n    AttachConsole(processInfo.dwProcessId);\r\n    TerminateProcess(processInfo.hProcess, 0);\r\n}\r\n```\r\n\r\nThis spawns a new console app (`cmd.exe` in this case) that is hidden and then attaches it's console to the `wsmprovhost` process. The Advantages here is that there shouldn't be any flash as it is spawned as a hidden window but the disadvantage is that there's now the overhead of spawning cmd everytime a new connection is made.\r\n\r\n### Option 3 - Do not spawn a console for -EnableNetworkAccess\r\n\r\n```c\r\nHANDLE token\r\nDWORD length = 0;\r\nDWORD sessionId = 0;\r\n\r\nOpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token);\r\nif (GetTokenInformation(token, TokenSessionId, &sessionId, sizeof(sessionId), &length))\r\n{\r\n    if (sessionId == 0)\r\n    {\r\n        AllocConsole();\r\n    }\r\n}\r\n```\r\n\r\nThis only spawns the console when running in session 0 (not `-EnableNetworkAccess`). Advantages is that it solves the original issue it tried to fix but the disadvantage is now `-EnableNetworkAccess` suffers from that same problem when processing non-ASCII output from native applications.\r\n\r\n@tbakerweb do you find option 1 (with the brief flash) an acceptable middle ground here?",
+      "created_at": "2022-01-18T23:57:06Z",
+      "updated_at": "2022-01-18T23:57:06Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": ">  Is there any other way to set the .NET code page correctly?\r\n\r\nNot that I'm aware of, PowerShell could just assume a code page but then it will have the same problem when it spawns a new process which creates the conhost and is set to a different code page. It could add some heuristics to try and find the correct default but even then that's not a guarantee it will be correct, you essentially need to have a console attached to get the actual value. PowerShell could delay the initialization of the conhost (what's in option 2) until it spawns it's first process but that doesn't help code that might call `[Console]::OutputEncoding` beforehand.",
+      "created_at": "2022-01-18T23:59:48Z",
+      "updated_at": "2022-01-18T23:59:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Notice, we already have `internal static bool AllocateHiddenConsole()` in native process run code. I guess it is more correctly for PowerShell _always_ have a console whether it is started as CUI or no. Perhaps we could find right place in Engine to do that.",
+      "created_at": "2022-01-19T05:09:39Z",
+      "updated_at": "2022-01-19T05:09:39Z"
+    },
+    {
+      "author": "LqkUWp",
+      "author_association": "NONE",
+      "body": "hi @jborean93 , `$PSDefaultParameterValues` outputs nothing",
+      "created_at": "2022-01-19T06:41:55Z",
+      "updated_at": "2022-01-19T06:41:55Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> hi @jborean93 , $PSDefaultParameterValues outputs nothing\r\n\r\nHmm I have no idea why it appears for you then, without `-EnableNetworkAccess` the spawned session should happen in session 0 which is hidden from the user. SOmething else might be at play but I'm fairly certain your issue is due to the changes introduced with https://github.com/PowerShell/PowerShell/issues/15128.",
+      "created_at": "2022-01-20T05:09:21Z",
+      "updated_at": "2022-01-20T05:09:21Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": "hi @tbakerweb  \r\nhave a look my powershell project \u300akasini3000\u300b\r\nWelcome use , questions are welcome.\r\nIt is currently being translated into English, and you are also welcome to help translate.\r\n\r\n---------------\r\n\r\n[kasini3000](https://gitee.com/chuanjiao10/kasini3000)    \r\nwin,linux devops automation batch script framework.(It is similar to Puppet\uff0cAnsible\uff0cpipeline) \r\nOpen source, free, cross-platform \r\nEnglish manual: https://gitee.com/chuanjiao10/kasini3000/blob/master/docs/kasini3000_manual.xlsx\r\n\r\n[kasini3000_agent_linux](https://gitee.com/chuanjiao10/kasini3000_agent_linux) Shell script,one click install powershell on linux,modify sshd_config for PsRemote.\r\n\n\n<blockquote><img src=\"https://gitee.com/static/images/logo_themecolor.png\" width=\"48\" align=\"right\"><div>Gitee</div><div><strong><a href=\"http://gitee.com/chuanjiao10/kasini3000/blob/master/docs/kasini3000_manual.xlsx\">docs/kasini3000_manual.xlsx \u00b7 chuanjiao10/kasini3000 - Gitee.com</a></strong></div><div>\u7c7b\u4f3c\u4e8ePuppet\uff0cAnsible\uff0cpipeline\u3002\u53f7\u79f0\u6bd4ansible\u597d10\u500d\uff0c\u5177\u6709\u6279\u91cf\u8fdc\u7a0b\u63a8\u9001\u811a\u672c\uff0c\u6267\u884c\u811a\u672c\uff0c\u8fdc\u7a0b\u4f20\u9012\u4ee3\u7801\u5757\uff0c\u5b9a\u65f6\u6267\u884c\u7684\uff0cdevops\u8fd0\u7ef4\u5de5\u5177\u3002</div></blockquote>",
+      "created_at": "2022-01-20T05:17:55Z",
+      "updated_at": "2022-01-20T05:17:58Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@WG-Remoting\r\nRemoting working group agrees that this is likely due to this change:\r\nhttps://github.com/PowerShell/PowerShell-Native/pull/70\r\n\r\nRemoving WG-Remoting label since this is not a remoting issue, but instead a PowerShell console issue.",
+      "created_at": "2022-04-07T17:33:39Z",
+      "updated_at": "2022-04-07T17:33:39Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT   This issue may be causing another recent remoting problem with GMSA accounts (#17367).  I feel this change should be reverted.",
+      "created_at": "2022-05-25T20:17:29Z",
+      "updated_at": "2022-05-25T20:17:29Z"
+    }
+  ],
+  "created_at": "2022-01-17T16:26:13Z",
+  "number": 16763,
+  "state": "open",
+  "title": "`New-PSSession` throws a black window named 'c:\\windows\\system32\\wsmprovhost.exe'",
+  "updated_at": "2022-05-25T20:17:29Z"
+}

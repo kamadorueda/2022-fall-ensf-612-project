@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5205",
+  "author": "TylerLeonhardt",
+  "body": "PowerShell Core hangs when exiting and using a PowerShell runspace pool. On Windows PowerShell it exits successfully.\r\n\r\nSteps to reproduce\r\n------------------\r\nhere's the gist for my code: https://gist.github.com/tylerl0706/2d87a13c6147278bb4e8565585aa9722\r\n\r\nSteps:\r\n```powershell\r\nPS > Add-Type -Path \"path/to/TestHttpListener/bin/Debug/netstandard2.0/TestHttpListener.dll\"\r\nPS > $app = [TestHttpListener.TestHttpListener]::new()\r\nPS > $app.Start(8081)\r\nPS > Invoke-WebRequest -Uri http://localhost:8081 # VERY IMPORTANT\r\nPS > exit\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nPowerShell successfully exists\r\n\r\nActual behavior\r\n---------------\r\nPowerShell hangs and doesn't give the prompt back - this is causing my AppVeyor and Travis builds to fail due to timeout :( \r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-beta.8\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-beta.8\r\nOS                             Darwin 16.7.0 Darwin Kernel Version 16.7.0: Thu Jun 15 17:36:27 PDT 2017; root:xnu-3789.70.16~2/RELEASE_X86_64\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2017-11-14T22:16:26Z",
+  "comments": [
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "@vors and I were both able to repro this locally.",
+      "created_at": "2017-10-23T18:22:15Z",
+      "updated_at": "2017-10-23T18:22:15Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I think I have a simpler repro without using httplistener\r\n\r\n```powershell\r\nPS /Users/steve> $rs = [runspacefactory]::CreateRunspacePool(1,5)                                                                                               \r\nPS /Users/steve> $rs.Open()                                                                                                                                     \r\nPS /Users/steve> $ps = [powershell]::Create()                                                                                                                   \r\nPS /Users/steve> $ps.RunspacePool = $rs                                                                                                                         \r\nPS /Users/steve> $null = $ps.AddScript({1+1})                                                                                                                           \r\nPS /Users/steve> $ps.Invoke()\r\nPS /Users/steve> exit #hangs            \r\n```",
+      "created_at": "2017-10-25T06:33:38Z",
+      "updated_at": "2017-10-25T06:33:38Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is hanging on the PipelineThread._workItemReady event wait.  On exit this event should get set and release the thread wait via the finalizer:\r\nhttps://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/hostifaces/LocalPipeline.cs#L1340\r\n\r\nBut it looks like the finalizer is not being called.\r\n@daxian-dbw  This appears to be a bug in the .Net Core CLR since it works in Windows PowerShell.",
+      "created_at": "2017-10-25T19:13:36Z",
+      "updated_at": "2017-10-25T19:13:36Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "Is this something we should open on .NET Core CLR?",
+      "created_at": "2017-11-03T02:59:29Z",
+      "updated_at": "2017-11-03T02:59:29Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@tylerl0706 need more data to provide to dotnetcore team before we hand it off to them",
+      "created_at": "2017-11-03T03:36:34Z",
+      "updated_at": "2017-11-03T03:36:34Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think we can depend on a finalizer being run. We should invoke dispose explicitly if we depend on it to run. There are quite a few cases where finalizers are not run - see https://blogs.msdn.microsoft.com/oldnewthing/20100809-00/?p=13203/ and \r\nhttps://stackoverflow.com/questions/3458177/are-net-finalizers-always-executed.\r\n\r\n",
+      "created_at": "2017-11-03T15:20:35Z",
+      "updated_at": "2017-11-03T15:20:35Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Sure, finalizers sometimes don't run due to various reasons, but in this case the finalizer *never* runs.  Also this cleanup has relied on finalizers for years without any problems.  So this appears to be a CLR regression.\r\n\r\nWe can (and do) do some cleanup during exit, such as closing remote runspaces and disconnect running remote jobs.  But this cleanup is not guaranteed to run in all cases same as the finalizer thread.",
+      "created_at": "2017-11-03T15:36:09Z",
+      "updated_at": "2017-11-03T15:36:09Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Unless you are suggesting that there is a bug in PowerShell that is causing the finalizer thread not to run (such as throwing an unhandled exception on the thread).  That would be a regression on our part.  But with my experimentation I don't see any unhandled exceptions.  It looks like the finalizer is just not getting called.",
+      "created_at": "2017-11-03T15:50:05Z",
+      "updated_at": "2017-11-03T15:50:05Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I'm saying that it is brittle. Any type a user loads with a misbehaving finalizer may cause this to happen.\r\nIf we have control of these objects, (and the `PipelineThread` seems like it should fall in this category) we should also be able to write infrastructure to dispose of them.",
+      "created_at": "2017-11-03T15:52:47Z",
+      "updated_at": "2017-11-03T15:52:47Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I understand.  And we have that infrastructure on exit.  My point is that anything we write is just as susceptible to catastrophic failures.",
+      "created_at": "2017-11-03T16:17:16Z",
+      "updated_at": "2017-11-03T16:17:16Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin I don't know... Yes, finalizer never getting called might be a CLR regression, but it feels like we should be able to set _workItemReady (e.g. by calling LocalPipeline:Dispose()) in our code without relying on the mercy of the garbage collector.",
+      "created_at": "2017-11-03T18:32:54Z",
+      "updated_at": "2017-11-03T18:32:54Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@anmenaga, We really need to be able to depend on the CLR to work as advertised.  We have other places in the code that relies on the finalizer to work.  I'll investigate more and if this looks like a CLR regression I'll notify the team.\r\n\r\nBut for the short term I'll create a workaround to fix this particular hang problem for RC using our existing cleanup on exit code.",
+      "created_at": "2017-11-03T18:44:39Z",
+      "updated_at": "2017-11-03T18:44:39Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Close via #5356",
+      "created_at": "2017-11-14T22:16:26Z",
+      "updated_at": "2017-11-14T22:16:26Z"
+    }
+  ],
+  "created_at": "2017-10-23T18:21:38Z",
+  "number": 5205,
+  "state": "closed",
+  "title": "PowerShell hangs when exiting having used a PowerShell runspace pool/runspace",
+  "updated_at": "2017-11-14T22:16:26Z"
+}

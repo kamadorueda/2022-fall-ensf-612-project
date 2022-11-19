@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13631",
+  "author": "KirkMunro",
+  "body": "## Steps to reproduce\r\n\r\nFirst run this in a new PowerShell session with `-noprofile`:\r\n\r\n```powershell\r\nWrite-Information 'Information'\r\nWrite-Verbose 'Verbose'\r\nWrite-Debug 'Debug'\r\n```\r\n\r\nNote how none of those produce any output, because each of their corresponding `$*Preference` variables is set to `[System.Management.Automation.ActionPreference]::SilentlyContinue` by default.\r\n\r\nNow run this in the same session:\r\n\r\n```powershell\r\n$ps = [powershell]::Create()\r\n$ps.AddScript(@'\r\nWrite-Information 'Information'\r\nWrite-Verbose 'Verbose'\r\nWrite-Debug 'Debug'\r\n'@).Invoke()\r\n$ps.Streams.Verbose # Empty, as expected\r\n$ps.Streams.Debug # Empty, as expected\r\n$ps.Streams.Information # Not empty, and outputs \"Information\"...why?\r\n```\r\n\r\n## Expected behavior\r\n\r\nBoth blocks of code would not output anything.\r\n\r\n## Actual behavior\r\n\r\nThe second block outputs the following text:\r\n\r\n```none\r\nInformation\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.3\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Some general comments on this: I have a C# project that runs PowerShell. I want to control the streams. When I put logic in place to allow the streams to be controlled, whether or not I have turned the Information stream \"on\", I get output from that stream, with no metadata to let me know if that output should show up or not. This seems like a bug, because `InformationPreference` is `SilentlyContinue`, just like it is for `VerbosePreference` and `DebugPreference`.\r\n\r\nI have found a workaround for this, but it shouldn't be necessary, and I want to make sure it isn't doing something that I don't want to do. If I set `InformationPreference` to `Ignore`, the logic works as expected, and I can turn on Information stream output on demand within my script by using `InformationAction` on commands where I want that output. That workaround seems to be the only way that I can make the `Information` stream behave like it does in native PowerShell, but it shouldn't be necessary. Here is the above snippet with the workaround where I get the results that I expected in the first place:\r\n\r\n```powershell\r\n$ps = [powershell]::Create()\r\n$ps.AddScript(@'\r\n$InformationPreference = [System.Management.Automation.ActionPreference]::Ignore\r\nWrite-Information 'Information'\r\nWrite-Verbose 'Verbose'\r\nWrite-Debug 'Debug'\r\n'@).Invoke()\r\n$ps.Streams.Verbose # Empty, as expected\r\n$ps.Streams.Debug # Empty, as expected\r\n$ps.Streams.Information # Empty, as expected\r\n```\r\n",
+      "created_at": "2020-09-14T19:32:20Z",
+      "updated_at": "2020-09-14T19:32:31Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "After discussing this in Discord, I bet this is probably due to the desire for `Write-Host` output to be capturable in the transcript, but if that is the desired result, the implementation is wrong because there is no use of `Write-Host` here.",
+      "created_at": "2020-09-14T19:38:30Z",
+      "updated_at": "2020-09-14T19:38:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`Write-Information` is by default also capturable in a transcript, even if it never appears on screen. I always assumed that was intentional.",
+      "created_at": "2020-09-14T20:56:35Z",
+      "updated_at": "2020-09-14T20:56:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is not for Write-Host and not for a transcript. The code explicitly is `if (preference != ActionPreference.Ignore)` - write if not \"Ignore\". I believe it is by design and changing this would be huge breaking change since events are triggered there for other threads.",
+      "created_at": "2020-09-15T13:50:33Z",
+      "updated_at": "2020-09-15T13:50:33Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I suppose, why be consistent, right? Just because the error, warning, verbose, debug and progress streams can be silenced using `System.Management.Automation.ActionPreference.SilentlyContinue`, why should the information stream work the same way? That would make too much sense. \ud83d\ude44 ",
+      "created_at": "2020-09-15T16:32:18Z",
+      "updated_at": "2020-09-15T16:32:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The code is so simple that I can only say it is definitely by design and I don't know why. Perhaps someone from MSFT team knows this history.\r\n",
+      "created_at": "2020-09-15T17:13:22Z",
+      "updated_at": "2020-09-15T17:13:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, the transcript behavior with respect to `Write-Information` has been fixed (after all, a transcript should not show different output than the console), though I'm not sure in what version exactly, and I'm not aware of an associated bug report (still affects Windows PowerShell; see also: #4645).\r\n\r\nLet me try to summarize the troubling inconsistency (derived from observation, not source-code analysis):\r\n\r\n* Unlike with all other streams, `SilentlyContinue` for stream `6` (`Write-Information`) does _not_ suppress _writing to the stream at the source_.\r\n\r\n* Seemingly, it is unexpectedly left to the _host_ to enforce the silence _for display_.\r\n\r\nThis is easy to demonstrate: a redirection of stream `6` succeeds even with `-InformationAction SilentlyContinue`:\r\n\r\n```powershell\r\nPS> Write-Information info -Infa SilentlyContinue 6>&1 | % { \"[$_]\" }\r\n[info]  # !! stream output was still produced and redirected to the success stream.\r\n```\r\n\r\nTo contrast this with the behavior of the `Write-*` cmdlets for the other streams:\r\n\r\n```powershell\r\n'Write-Error', 'Write-Warning', 'Write-Verbose', 'Write-Debug', 'Write-Information' | % {\r\n  $stream = ($_ -split '-')[-1]\r\n  $htArgs = if ($stream -in 'Debug', 'Verbose') { # Boolean common parameters\r\n    @{\r\n      $stream = $false\r\n    }\r\n  } else { # enum-based common parameters\r\n    @{\r\n      ($stream + 'Action') = 'SilentlyContinue'\r\n    }\r\n  }\r\n  $out = & $_ @htArgs $stream *>&1\r\n  \"redirected $stream`: [$out]\"\r\n}\r\n```\r\n\r\n```none\r\nredirected Error: []\r\nredirected Warning: []\r\nredirected Verbose: []\r\nredirected Debug: []\r\nredirected Information: [Information]\r\n```\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-09-15T18:29:54Z",
+      "updated_at": "2020-09-15T18:30:28Z"
+    }
+  ],
+  "created_at": "2020-09-14T19:27:32Z",
+  "number": 13631,
+  "state": "open",
+  "title": "Write-Information results in InformationRecord being added to the Information stream unexpectedly in some cases",
+  "updated_at": "2020-09-25T01:03:21Z"
+}

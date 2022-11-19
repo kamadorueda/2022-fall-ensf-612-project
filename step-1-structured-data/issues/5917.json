@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5917",
+  "author": "dfinke",
+  "body": "![image](https://user-images.githubusercontent.com/67258/34968067-eeab4a08-fa34-11e7-9eea-59574b97afe6.png)\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "These also produce the same error:\r\n\r\n```powershell\r\n$services = Get-Service\r\nforeach($service in $services){$service.Name} &\r\n```\r\n\r\n```powershell\r\nfor($i=1; $i -lt 10; $i++){$i} &\r\n```\r\n\r\n```powershell\r\n$i = 1\r\ndo{$i; $i++} While($i -lt 10) &\r\n```\r\n\r\nI'm guessing anything that doesn't produce a pipeline will result in this kind of error.\r\n\r\n",
+      "created_at": "2018-01-16T02:23:16Z",
+      "updated_at": "2018-01-16T02:23:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay Could you please comment the Issue?",
+      "created_at": "2018-01-16T03:12:31Z",
+      "updated_at": "2018-01-16T03:12:31Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I was going to suggest a workaround, but you'll get a confusing error.\r\n\r\nIn general, you can turn a statement into a pipeline by putting it in a script block, e.g.\r\n\r\n```powershell\r\n& { while ($true) { ... } }\r\n```\r\n\r\nUnfortunately, the transformation to use `Start-Job` makes an invalid change to your script by adding `$using` to an expression that does not support `$using`.\r\n",
+      "created_at": "2018-01-16T21:56:21Z",
+      "updated_at": "2018-01-16T21:56:21Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "```powershell\r\n& { while($x -lt 10000) { sleep 100; $x+=1 } } &\r\n```\r\nThat's a delicious and-sandwich.\r\n ",
+      "created_at": "2018-01-16T22:21:05Z",
+      "updated_at": "2018-01-16T22:21:05Z"
+    },
+    {
+      "author": "MaximoTrinidad",
+      "author_association": "NONE",
+      "body": "Just an FYI - This is happening also in Windows PowerShell.  I had to check just in case it was just a PowerShell Core issue.\r\n\r\nAh! Two different error as in Windows states \"The ampersand (&) character is not allowed. The & operator is reserved for future use...\".\r\n\r\n:)",
+      "created_at": "2018-01-16T22:42:14Z",
+      "updated_at": "2018-01-16T22:49:45Z"
+    },
+    {
+      "author": "alexandair",
+      "author_association": "CONTRIBUTOR",
+      "body": "@MaximoTrinidad \"&\" is not implemented in Windows PowerShell to start a background job. You cannot test it in PS 5.1.",
+      "created_at": "2018-01-17T01:22:22Z",
+      "updated_at": "2018-01-17T01:22:22Z"
+    },
+    {
+      "author": "dfinke",
+      "author_association": "NONE",
+      "body": "@markekraus Yeah, but the job doesn't complete\r\n",
+      "created_at": "2018-01-17T01:54:49Z",
+      "updated_at": "2018-01-17T01:54:49Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@dfinke `while($x -lt 10000) { sleep 100; $x+=1 }` would take 11 days to run. That's 1,000,000 seconds minium.",
+      "created_at": "2018-01-17T09:55:49Z",
+      "updated_at": "2018-01-17T09:55:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "We should get clarity on what the real issue is:\r\n\r\n(I haven't looked at the source code, so do tell me if I got things wrong.)\r\n\r\nPost-positional `&` not  being supported with a \"naked\" expression-based statement _involving flow-control keywords_ is consistent with not being able to use such statements in a _pipeline_:\r\n\r\n```powershell\r\ndo { 1 } while ($false) & # FAILS: \"Missing expression after '&' in pipeline element.\"\r\ndo { 1 } while ($false) | Measure-Object # FAILS: \"An empty pipe element is not allowed.\"\r\n```\r\n (By contrast, a simple expression without flow-control keywords works fine in both cases).\r\n\r\n**It looks like such statements aren't supported by the _parser_**:\r\nThe error messages stem from the parser considering `do { 1 } while ($false)` a _complete statement in its own right_ and parsing the `&` / `| Measure-Object` as a _new_ statement, which obviously fails; in short: you'll get the same error message if you execute `&` and `| Measure-Object` in isolation.\r\n\r\n* If the intent is to support such statements, the parser needs to be fixed (and the confusing errors would go away).\r\n\r\n* If the intent is NOT to support such statements - and require explicit conversion to a _command_ first - the confusing error messages are problematic.\r\n\r\n---\r\n\r\nThere is an **additional, unrelated problem**:\r\n\r\nWhen you convert such a statement to a _command_ with `& { ... }`, `. { ... }`, `$(...)` or `@(...)` - as a prerequisite for combining it with `&` or `|` - you _may_ run into the `$using:` problem @lzybkr has discovered when using `&`.\r\n\r\nSeemingly, the problem surfaces only if a namesake variable of a variable used as a _loop variable_ in the script block exists in the _calling_ scope, execution fails:\r\n\r\n```powershell\r\n$v = 0 # define $v in calling scope\r\n$jb = & { foreach($v in 1..2) { $v } } &  # use $v as loop variable in script block\r\nReceive-Job $jb -Wait -AutoRemove\r\n```\r\n\r\nThe above yields:\r\n\r\n```none\r\nCannot find drive. A drive with the name 'using' does not exist.\r\n+ CategoryInfo          : ObjectNotFound: (using:String) [], DriveNotFoundException\r\n+ FullyQualifiedErrorId : DriveNotFound\r\n+ PSComputerName        : localhost\r\n```\r\n\r\n* Using `$(...)` or `@(...)` (to run the enclosed command to completion first) rather than `& { ... }` results in the same behavior, as does `. { ... }`.\r\n* If `$v` is not defined in the calling scope, the problem doesn't occur.",
+      "created_at": "2018-01-19T20:45:31Z",
+      "updated_at": "2018-01-19T20:45:31Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "The behaviour for & is going to be weird because it has different meanings at the beginning (call operator) and end (backgrounding) of a statement. In the case of\r\n`while (1) { $true } & `\r\nyou get an error because the closing brace ends that statement. The next token read (the '&') is the first token of the next statement i.e. the call operator. There is nothing after it so you get the correct error. You get the same error with\r\n`write-output hi; &`\r\nsince ';' terminates the current statement and & is the beginning of the next statement.  If you do provide an argument to '&', it works properly:\r\n```\r\nPS[1] (117) > while ($false) { \"Hi\" } & write-output Hi\r\nHi\r\n```\r\nIn other words, everything is working properly and returning the \"right\" error message in the case of an error. Now if attempting to background a flow-control statement is a very common, we can probably hack the parser to provide a more specific error e.g. \"you can't background flow-control statements; try using & { ... } &\" or something.\r\n\r\n(Historical note: we used & as the call operator because that's what Perl used. Very early in the project, we aligned the syntax with Perl since that was, at the time, the dominant sysadmin language. After not too long, we switched the base syntax to align with C# but retained some of the Perl-isms: trap from a Perl 6 proposal, using the @ symbol for hashes, $_ and & as the call operator. In retrospect, we probably should have used a different symbol (e.g. ^) instead since we always intended to implement backgrounding.)\r\n\r\nThe `using:` error is a result of the runtime trying to be smart and adding `$using:` to variables in the statement to be backgrounded for which there is a current in-scope variable. I'll have to look at the code to see why it's failing. I think this should be tracked as a seperate issue if it isn't already.",
+      "created_at": "2018-03-13T22:43:33Z",
+      "updated_at": "2018-03-13T22:43:33Z"
+    }
+  ],
+  "created_at": "2018-01-16T01:45:14Z",
+  "number": 5917,
+  "state": "open",
+  "title": "Missing expression after '&' in pipeline element",
+  "updated_at": "2018-03-13T22:43:33Z"
+}

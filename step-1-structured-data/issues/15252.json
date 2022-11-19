@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15252",
+  "author": "mklement0",
+  "body": "To hide a progress bar explicitly, you call `Write-Progress -Completed`\r\n\r\nDoing so currently requires that an `-Activity` argument be passed as well, even though that shouldn't be necessary, given that such an argument is only relevant for _displaying_ the progress bar, not when _hiding_ it.\r\n\r\nTherefore, `Write-Progress -Completed` by itself should be sufficient to hide a progress bar (potentially combined with `-Id` to disambiguate, should multiple ones have been created).\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nforeach ($i in 1..10) { Write-Progress $i -Activity foo; start-sleep -ms 100 }\r\nWrite-Progress -Completed\r\n'Done'\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe progress bar should display, then disappear, followed by output `'Done'`.\r\n\r\n## Actual behavior\r\n\r\n`Write-Progress -Completed` unexpectedly prompts for an `-Activity` parameter value.\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.2.0-preview.5\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Somewhat relevant is that (at least to my memory) you have to pass a ProgressRecord with the `IsCompleted` property set to `true` when using the internal `Cmdlet.WriteProgress()` api, and you can't currently instantiate a ProgressRecord with a null or empty string as the Activity value.\r\n\r\nI may be misremembering, but that's probably where this comes from -- and it should be fixed in some way that makes it much easier to use for both PowerShell and in C# cmdlets.",
+      "created_at": "2021-04-16T19:15:12Z",
+      "updated_at": "2021-04-16T19:15:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @vexx32. Sounds like a simple fix would be to simply pass a dummy value behind the scenes.",
+      "created_at": "2021-04-16T19:17:41Z",
+      "updated_at": "2021-04-16T19:17:41Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It seems that `Completed` should be a separate parameterset from `Activity` (which is mandatory).  And I think this should just work as `Activity` should just be an empty string if not defined and `Id` will default to 0.",
+      "created_at": "2021-04-16T20:52:48Z",
+      "updated_at": "2021-04-16T20:52:48Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "```powershell\r\nPS> [System.Management.Automation.ProgressRecord]::new(0, '', '')\r\nException calling \".ctor\" with \"3\" argument(s): \"Cannot process the argument because the value of activity cannot be\r\nnull or empty.\"\r\nAt line:1 char:1\r\n+ [System.Management.Automation.ProgressRecord]::new(0, '', '')\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException\r\n    + FullyQualifiedErrorId : PSArgumentException\r\n```\r\n\r\nThis will require additional changes to the ProgressRecord API to allow the cmdlet to construct a ProgressRecord in this way.\r\n\r\nAlso, if I'm not mistaken, `Completed` and `Id` will still need to share a set, otherwise it will become impossible to mark other progress messages as completed if they have been given a custom ID.",
+      "created_at": "2021-04-17T01:36:51Z",
+      "updated_at": "2021-04-17T01:36:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Activity is an unique identifier. How this can be changed if there can be many progress bars at the same time.",
+      "created_at": "2021-04-17T14:58:05Z",
+      "updated_at": "2021-04-17T14:58:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It is the `-Id` parameter that provides the unique identifier; `-Activity` is just display text.\r\n\r\nThough, come to think of it: it's unclear how `-SourceId` relates to `-Id`; the [help topic](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/write-progress) doesn't make that clear:\r\n\r\n> You can use this in place of Id but cannot be used with other parameters like ParentId.\r\n\r\n",
+      "created_at": "2021-04-17T15:05:16Z",
+      "updated_at": "2021-04-17T15:05:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> It is the `-Id` parameter that provides the unique identifier; `-Activity` is just display text.\r\n\r\nNo \ud83d\ude04 These names are deceiving. Please see the cmdlet sources. Only `-Activity` is mandatory. `-Id` is for subordinate activities.\r\n\r\nYes, documentation could be better.",
+      "created_at": "2021-04-17T15:12:15Z",
+      "updated_at": "2021-04-17T15:14:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "\ud83d\ude01 Well, you know how much I love looking at the source code.\r\nLet's try it my way for a second (on Windows):\r\n\r\nWith different `-Activity` arguments and with an _implied_ `-Id`:\r\n\r\n```powershell\r\nWrite-Progress -Activity 'Bar 1'; Start-Sleep 1\r\nWrite-Progress -Activity 'Bar Harbor' -Completed\r\nchoice  # The bar is gone, implying that the -Completed call successfully hid it - the differing -Activity values did not matter\r\n```\r\n\r\nWith different `-Id` arguments but identical `-Activity` arguments:\r\n\r\n```powershell\r\nWrite-Progress -Id 1 -Activity 'Bar 1'; Start-Sleep 1\r\nWrite-Progress -Id 2 -Activity 'Bar 1' -Completed\r\nchoice  # The bar is still there, because the -Completed call didn't hide the original bar, due to using a different ID.\r\n```\r\n\r\nLet's mix and match: different `-Activity` values, but same `-Id` value:\r\n\r\n```powershell\r\nWrite-Progress -Id 1 -Activity 'Bar 1'; Start-Sleep 1\r\nWrite-Progress -Id 1 -Activity 'Bar Harbor' -Completed\r\nchoice  # The bar is gone, implying that the -Completed call successfully hid it, due to targeting the same -ID\r\n```\r\n\r\nIn short: The `-Activity` argument is irrelevant with respect to identifying the target progress bar.\r\n",
+      "created_at": "2021-04-17T15:30:43Z",
+      "updated_at": "2021-04-17T15:31:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yep. `Id` is the identifier for the progress bar. The only reason it's not mandatory is because the cmdlet explicitly chose to default it to zero. All that means is that using `Write-Progress` without specifying an ID will simply overrule other usages of Write-Progress that also don't specify the ID.\r\n\r\nActivity is mandatory because you can't construct an instance of ProgressRecord without it, and there isn't much of a sensible default you can provide.\r\n\r\nIt's sort of surprising that to clear a progress record from the UI, you need to submit a new record to the stream with the correct ID and flagged as completed, there doesn't appear to be a way to simply tell PowerShell that a given progress record is done, you have to write the same record (with the Completed flag this time) or a new record with a matching ID to the stream to indicate it is done.\r\n\r\nIt's very odd to work with in C# cmdlets, and the weird parameter requirements of Write-Progress are mostly a natural extension of that.",
+      "created_at": "2021-04-17T16:30:37Z",
+      "updated_at": "2021-04-17T16:33:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good points, @vexx32.\r\n\r\nTo summarize:\r\n\r\n* In terms of the user-facing cmdlet syntax, `-Completed`, with `-Id` optional (and possibly `-SourceId`?) must become a new parameter set that permits no other parameters - except _optionally_ `-Activity` _for backward compatibility only_.\r\n\r\n* With respect to the underlying API, [`System.Management.Automation.ProgressRecord`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.ProgressRecord):\r\n  * A quick and dirty fix would be to let the `Write-Progress` implementation pass non-empty _dummy values_ to the current constructor, in case `-Completed` was specified.\r\n  * Preferably, we should extend this API to allow constructing a record of type [`Completed `](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.progressrecordtype) without needing to specify additional, unnecessary values. \r\n  \r\n\r\nExample API extension:\r\n\r\nProvide a new constructor such as the following:\r\n\r\n```csharp\r\npublic ProgressRecord (int completedActivityId);\r\n```\r\n\r\nwhich would result in a `ProgressRecord` instance with `.RecordType` set to `Completed` and `.ActivityId` to the specified ID.\r\n\r\n",
+      "created_at": "2021-04-17T16:43:53Z",
+      "updated_at": "2021-04-18T15:08:32Z"
+    }
+  ],
+  "created_at": "2021-04-16T18:56:24Z",
+  "number": 15252,
+  "state": "open",
+  "title": "Write-Progress -Completed requires an -Activity argument, even though it is pointless",
+  "updated_at": "2022-11-06T10:56:26Z"
+}

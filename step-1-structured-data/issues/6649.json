@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6649",
+  "author": "rkeithhill",
+  "body": "With Windows PowerShell pinned to my taskbar, I can easily run it as an administrator with the action at the top:\r\n\r\n![image](https://user-images.githubusercontent.com/5177512/38760786-32e3607a-3f3b-11e8-9b90-8156935cf478.png)\r\n\r\nBut with PowerShell Core, this action is missing:\r\n\r\n![image](https://user-images.githubusercontent.com/5177512/38760790-3ad10850-3f3b-11e8-8ca3-843bd5197ade.png)\r\n\r\nYeah, I know I can right click on PowerShell-6.x.x and then get the option to run as admin but that is buried UI and is harder to find than it should be.",
+  "closed_at": "2018-05-31T19:24:20Z",
+  "comments": [
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I did some quick research on this one and it looks like the old code for this is still here: https://github.com/PowerShell/PowerShell/blob/c1c5344a8897262433141ecbc13bb06ac2c4bbef/src/powershell-native/nativemsh/pwrshexe/MainEntry.cpp#L1270 but I can't tell that it gets called anywhere. At a glance, this looks like it needs to be refactored.",
+      "created_at": "2018-04-14T18:56:11Z",
+      "updated_at": "2018-04-14T18:56:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@KevinMarquette the `nativemsh` code is no longer built as of PSCore6 we've gone with a full managed code host.  Seems like we should reuse that code in the managed host on Windows.",
+      "created_at": "2018-04-18T12:13:10Z",
+      "updated_at": "2018-04-18T12:13:10Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks @KevinMarquette for the research. I will take a look at this one as I would be interested in having this feature as well.",
+      "created_at": "2018-04-29T19:38:14Z",
+      "updated_at": "2018-04-29T19:38:14Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT \r\nI got a simple prototype that works but does not do the elevation. Before proceeding I would like to discuss if my approach is acceptable.\r\nTo avoid having to write unsafe code, I used the [Microsoft.WindowsAPICodePack-Shell](\r\nMicrosoft.WindowsAPICodePack-Shell) and [Microsoft.WindowsAPICodePack-Core](https://www.nuget.org/packages/Microsoft.WindowsAPICodePack-Core/1.1.0.2) NuGet packages from MSFT that are compiled in full .Net 3.5 (but work in netcore 2.1 for our purposes due to fallback) and therefore I have to suppress [NU1701](https://docs.microsoft.com/en-us/nuget/reference/errors-and-warnings#nu1701) for the `Microsoft.PowerShell.ConsoleHost` project. The 2 DLLs add 634KB of footprint in total. Would you be OK with that? I exclude Linux in the custom code, I assume Win-ARM needs to be excluded as well? Due to missing methods in the NuGet packes, elevation is outstanding and I would need a COM pointer to the shelllink for calling the [IShellLinkDataList ](https://msdn.microsoft.com/en-us/library/windows/desktop/bb774916(v=vs.85).aspx )interface on it.  Unfortunately the NuGet packages are a complete COM wrapper and do not expose the private low level pointers to the shell objects (or do you maybe you know a trick for that?) and the `ICustomDestinationList` interfaces also do not offer `Get` methods. The Microsoft.WindowsAPICodePack  package is not maintained/supported by Microsoft any more by the way.\r\nTo conclude: It seems I would need to modify and recompile the WindowsAPICodePacks in order to add the missing methods for elevation or one would would have to rewrite all that C++ code from Windows PowerShell to C# but since it is mainly using COM to talk to the Windows API it is not really managed code anyway and it will be quite a bit of work. What are your thoughts on the direction?\r\nMy crude prototype is [here](https://github.com/bergmeister/PowerShell/commit/58115eb5028c4b368dddf19173520d36f1e9e1d1). Any comments/pointers on the code, like e.g. its place in ConsoleHost would be appreciated. By looking at the test results, it seems I need to check if the account running pwsh is interactive (I would check `Environment.UserInteractive) and also if the current pwsh process is the parent process and was not launched from a different shell (e.g. Windows PowerShell or when calling pwsh from pwsh).\r\n![image](https://user-images.githubusercontent.com/9250262/39961300-e2e43a0c-562a-11e8-972f-1821ad1cf621.png)",
+      "created_at": "2018-05-13T22:10:45Z",
+      "updated_at": "2018-05-13T22:12:18Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@bergmeister it seems that with the additions you would need to add to that library, it's not really providing good value to cost.  My recommendation would be to write new C# code to wrap the COM code.",
+      "created_at": "2018-05-14T21:11:04Z",
+      "updated_at": "2018-05-14T21:11:04Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the feedback, I had some success.\r\nI first gave it a try to convert the C++ code to C# myself but it is kind of hairy due to the APIs requiring special structures like [PropVariant ](https://msdn.microsoft.com/en-us/library/windows/desktop/aa380072(v=vs.85).aspx )that are non-trivial to implement in C#. I then took the approach of decompiling some of those structural equivalents from the WindowApiPack NuGet packages and when I finally had the bits together, the COM calls started to fail in the middle of it.\r\nMy second, more successful approach was to take the whole source code of the WindowApiPack packages and port it to .Net Core by removing various classes/methods referencing stuff like WinForms, etc. I added then my needed `IShellLinkDataList` calls for elevation and voila, I have now a working proof of concept \ud83d\ude03 \r\nArmed with that now, I will try to see if I can get my first, more minimal approach working or otherwise I will look into minimising the code of my customised WindowApiPack packages.",
+      "created_at": "2018-05-16T21:54:05Z",
+      "updated_at": "2018-05-16T21:54:05Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rkeithhill Can you please amend the title to remove the word `Installer` since nothing happens at install time.",
+      "created_at": "2018-05-27T12:07:44Z",
+      "updated_at": "2018-05-27T12:07:55Z"
+    }
+  ],
+  "created_at": "2018-04-13T22:56:31Z",
+  "number": 6649,
+  "state": "closed",
+  "title": "PowerShell Core for Windows - add the \"Run as Administrator\" action to taskbar button.",
+  "updated_at": "2018-06-01T03:07:09Z"
+}

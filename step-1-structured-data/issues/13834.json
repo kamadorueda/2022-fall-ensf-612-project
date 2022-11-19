@@ -1,0 +1,209 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13834",
+  "author": "mklement0",
+  "body": "## Summary of the new feature/enhancement\r\n\r\n_Update for clarification_: **The gist of this proposal is to bring valuable filter functionality that currently only exists in the _in-memory_ `.Where()` array method to its _pipeline_ counterpart, `Where-Object`.**\r\n(Always using `.Where()` isn't an option with large input sets, because you'd have to collect all input in memory first.)\r\n\r\n\r\nThe [`.Where()` array method](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_Arrays#where), which is the in-memory equivalent of the pipeline-based `Where-Object` cmdlet, offers a number of additional features, such as the ability to optionally stop matching after the first match is found, which can be an important optimization technique, and the ability to output all objects that come before/after a matching one:\r\n\r\n`First` / `-First` example:\r\n\r\n```powershell\r\n# OK - very fast, because - despite the large input collection - processing stops after the first match.\r\n(1..1e6).Where({ $_ -eq 10 }, 'First')  # -> 10\r\n\r\n# WISHFUL THINKING: Add a -First switch (among several others - see below).\r\n1..1e6 | Where-Object { $_ -eq 10 } -First\r\n\r\n# Without it, ALL elements are processed - SLOW\r\n1..1e6 | Where-Object { $_ -eq 10 }\r\n\r\n# Current workaround is cumbersome.\r\n1..1e6  | Where-Object { $_ -eq 10 } | Select-Object -First 1\r\n```\r\n\r\n`SkipUntil` / `-SkipUntil` example:\r\n\r\n```powershell\r\n(1, 2, 42, 43).Where({ $_ -eq 42 }, 'SkipUntil') # -> 42, 43\r\n\r\n# WISHFUL THINKING: Add a -SkipUntil switch.\r\n1, 2, 42, 43 | Where-Object { $_ -eq 42 } -SkipUntil\r\n```\r\n\r\nBased on the current `.Where()` features, the following switches should be introduced with the same behavior, mirroring the [`WhereOperatorSelectionMode`](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.whereoperatorselectionmode) enumeration values:\r\n\r\n`-First`, `-Last`, `-SkipUntil`, `-Until`, `-Split`\r\n\r\nNote:\r\n\r\n*  `-Split` partitions the input into two and returns two collections, so it would in effect require collecting all input in memory first before producing output, which would have to be clearly documented.\r\n\r\n* The `.Where()` method has an optional numeric parameter, `numberToReturn`, that modifies the operations, such as `2` with `First` returning the first _two_ matches; since we don't have a syntax for switches with _optional (non-Boolean) arguments_  for commands (see #12104), we have the following options:\r\n\r\n   * Option A: Simply omit this aspect of the functionality and invariably default to `1`, which is likely fine in the majority of cases; if a different number is needed, `Select-Object -First/-Last $n` can be piped to.\r\n\r\n   * Option B: Implement `-First` and `-Last not as _switches, but as `-First <int>` and `-Last <int>` ; the potential downside is that a number argument is then _mandatory_.\r\n\r\n   * Option C: Given that `numberToReturn` also modifies all other functionality - though there's likely less of a need for that -  implement a separate `-Count <int>` parameter, which in the absence of any of the switches would imply `-First`.\r\n\r\n* For these behaviors to be implemented efficiently, they have to stop the pipeline on demand, as `Select-Object` already does. However, the latter does so in a problematic fashion - not giving other cmdlets a chance to run their `End` blocks - which should be addressed (independently) as well: see #7930\r\n\r\n\r\n**On a meta note: You can skip the obsolete comments that follow and resume reading at [this comment](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-714686798).**",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Eh, I'd say the only reason `.Where()` handles that is because we don't have a `.Select()` magic method.\r\n\r\nI don't see a real need to add this to `Where-Object` given that `Select-Object` already performs this function. \ud83e\udd37 ",
+      "created_at": "2020-10-22T15:33:41Z",
+      "updated_at": "2020-10-22T15:33:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32:\r\n\r\n `Select-Object` is for _transforming_ input and/or extracting objects _by position_, which is completely separate from the _filtering_ that `Where-Object` performs.\r\n\r\nAs an aside, there's no need for a `.Select()` array method, because the `.ForEach()` array method and indexing fulfill that role for in-memory collections.\r\n\r\nThe point is that `.Where()` provides useful functionality for in-memory collections that would be equally useful for `Where-Object`'s pipeline processing, and in the case of `-First` offers an important performance optimizations.\r\n",
+      "created_at": "2020-10-22T16:01:39Z",
+      "updated_at": "2020-10-22T18:58:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`Select-Object -First $x` already short-circuits the pipeline.\r\n\r\nAdding it to `Where-Object` as well would 1) duplicate the code path (unless you move that code somewhere common) and 2) not really gain a whole lot above that, I wouldn't think.",
+      "created_at": "2020-10-22T16:31:42Z",
+      "updated_at": "2020-10-22T16:31:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You misunderstand the intent of what I'm proposing:\r\n\r\n* `Select-Object -First $n` _unconditionally_  selects the _first $n_ input objects (possibly modified  by the equally positional `-Skip $m`).\r\n\r\n* `Where-Object { <condition> } -First` would select (only) the first input object _that matches the filter criterion_.\r\n\r\nE.g.:\r\n\r\n```powershell\r\n# WISHFUL THINKING\r\nPS> 'foo', 'bar', 'baz', 'bar', 'bar' | Where-Object { $_ -eq 'bar' } -First\r\nbar  # only the first 'bar' match\r\n```\r\n\r\nThe above is the pipeline equivalent of the following in-memory operation based on the `Where()`_method_:\r\n\r\n```powershell\r\nPS>  ('foo', 'bar', 'baz', 'bar', 'bar').Where({$_ -eq 'bar' }, 'First')\r\nbar\r\n```",
+      "created_at": "2020-10-22T16:47:27Z",
+      "updated_at": "2020-10-22T18:58:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "No, I understand well enough.\r\n\r\nI'm just saying I don't think that's meaningfully or usefully better than just doing `$stuff | Where-Object { $_ -eq 'bar' } | Select-Object -First 1`",
+      "created_at": "2020-10-22T17:04:20Z",
+      "updated_at": "2020-10-22T17:04:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> No, I understand well enough.\r\n\r\nI guess I was confused by you repeating the cumbersome workaround already shown in the OP.\r\n\r\nFirst, the `-First` and `-Last` switches alone have two benefits:\r\n\r\n* primarily: concision\r\n\r\n* secondarily: performance (though probably negligible in practice)\r\n\r\nSecond, the `-SkipUntil`, `-Until`, `-Split` functionality doesn't even have straightforward-but-cumbersome `Select-Object` workarounds.\r\n\r\nThese are natural extensions, especially given that the conceptually equivalent _method_ already offers these features.\r\n\r\nOn a more general note:  Duplicating functionality is nothing new, and has proven helpful in other cases:\r\n\r\n```powershell\r\nGet-Content -First 2 file.txt\r\n# vs.\r\nGet-Content file.txt | Select-Object -First 2\r\n\r\n'foo' | Select-String 'o' -Raw\r\n# vs.\r\n'foo' | Select-Sting 'o' | Select-Object -ExpandProperty Line\r\n```",
+      "created_at": "2020-10-22T17:17:00Z",
+      "updated_at": "2020-10-22T18:58:38Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "In the case of Get-Content it's able to take additional shortcuts due to how the IO reading works.\r\n\r\nFor the case of whether there's a switch/parameter for Where-Object vs Select-Object I think there's even less reason to do it. If you really want it I guess I have nothing specifically against it, I just don't consider it worth the time to do. \ud83d\ude42 ",
+      "created_at": "2020-10-22T17:47:54Z",
+      "updated_at": "2020-10-22T17:47:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "While that is a matter of preference with respect to `-First` and `-Last`, your `Select-Object` workaround doesn't apply to the remaining 3 switches proposed: `-SkipUntil`, `-Until`, `-Split`\r\n",
+      "created_at": "2020-10-22T17:55:45Z",
+      "updated_at": "2020-10-24T01:57:50Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, those are probably worth adding and more aligned with Where-Object's general role IMO.",
+      "created_at": "2020-10-22T17:57:22Z",
+      "updated_at": "2020-10-22T17:57:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, let me try to summarize, and, if we agree, I suggest we hide all previous comments:\r\n\r\n**The gist of this proposal is to bring valuable filter functionality that currently only exists in the _in-memory_ `.Where()` array method to its _pipeline_ counterpart, `Where-Object`.**\r\n(Always using `.Where()` isn't an option with large input sets, because you'd have to collect all input in memory first.)\r\n\r\nThe proposed new switches, `-First`, `-Last`, `-SkipUntil`, `-Until`, `-Split` would directly correspond to the [`WhereOperatorSelectionMode`](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.whereoperatorselectionmode) operation enumeration values (except for `Default`) accepted by the `.Where()` method.\r\n\r\nYou, @vexx32, disagree with this proposal _in part_:\r\n\r\n * You agree that the functionality of `-SkipUntil`, `-Until`, `-Split` is worth adding,\r\n * while thinking that `-First` and `-Last` aren't needed, because you can pipe to `Select-Object -First 1` and `Select-Object -Last 1` instead and therefore do not strictly need to this functionality in `Where-Object` itself.\r\n\r\nI disagree with this for the following reasons:\r\n\r\n* Concision and convenience: `1..1e6 | Where-Object { $_ -eq 10 } -First` is much shorter to type than \r\n`1..1e6  | Where-Object { $_ -eq 10 } | Select-Object -First 1`\r\n\r\n  * There is precedent for duplicating functionality in-cmdlet that can also be had by combining cmdlets, notably `Get-Content -First $n` instead of `Get-Content | Select-Object -First $n` and `Select-String -Raw` instead of `Select-String | Select-Object -ExpandProperty Line`\r\n\r\n* Symmetry: Only adding _some_ of the operations of the analogous `.Where()` method is awkward.\r\n\r\n* Performance: While the performance gain is negligible in the `-First` case, with `-Last` it matters:\r\n  * If many input objects match in a `Where-Object` call, an internal `-Last` implementation could keep only the most recent match  and replace it if another one comes around; by contrast, if the `-Last` functionality is provided by `Select-Object`, `Where-Object` would send _all_ matches through the pipeline before `Select-Object` can select the last.\r\n\r\n\r\n\r\n \r\n",
+      "created_at": "2020-10-22T18:42:58Z",
+      "updated_at": "2020-10-24T01:56:52Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "What about new commands? `Select-Object -First 1` doesn't feel great interactively.  That's why I have `first`, `last`, `skip`, and `at` (indexing) defined in my profile ([Source](https://gist.github.com/SeeminglyScience/7eb62053bd16dc4406ac6d9e7004fe75)).\r\n\r\ne.g.\r\n\r\n```powershell\r\ngci | skip 2 | at -1 | % children | first\r\n```\r\n\r\nAlso would be nice to be able to stop the pipeline without killing it completely like `Select-Object -First 1` does (well, an easier way then the nightmare of reflection and implementation detail abuse I linked above).",
+      "created_at": "2020-10-22T19:35:21Z",
+      "updated_at": "2020-10-22T19:35:21Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "If this moves forward, I'd love to see `-First` and `-Last` implemented as `<Switchable[int]>` values, so that you don't need to provide a number if you are getting the very first one or the very last one. If you don't know what I mean, I proposed on another PR that there are scenarios where we might want a parameter to have a default value when used as a switch, or accept a specific value as input as well. This is one of those scenarios.\r\n\r\nAre these new parameters being proposed only for the `-ScriptBlock` parameter sets? Or for all parameter sets. Maybe we could have a new poster boy for parameter set nightmares. Let's see...31 parameter sets times 5 new incompatible, optional switches per parameter set, so 135 parameter sets in total. \ud83e\udd23 \r\n\r\nAlso FWIW, I would agree with all 5 new parameters to cover all options, especially given @mklement0's argument for `-Last`.",
+      "created_at": "2020-10-22T19:52:11Z",
+      "updated_at": "2020-10-22T19:55:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience, those are interesting ideas, but it's really a separate discussion.\r\n\r\n@KirkMunro :\r\n\r\n\ud83d\ude01   re parameter sets, though perhaps that will inspires us to improve matters there, such as implementing simpler mutual exclusion... - ideally, we wouldn't  have to restrict this to the script-block parameter set solely for technical reasons.\r\n\r\nRe `<Switchable[int]>` - something like that was also proposed in  #12104, which I mention in the OP (couldn't find the PR you're referring to).\r\n\r\nWhile I like the idea in general, in this particular case I'm leaning toward option C from the (updated) OP: A separate, optional `-Count <int>` parameter, given that such a quantifier applies to _all_ operations supported by the `.Where()` method - we would need that for full feature parity.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-10-22T20:04:02Z",
+      "updated_at": "2020-10-22T20:06:13Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0: The PR discussion I was referring to can be found [here](https://github.com/PowerShell/PowerShell/pull/10238#issuecomment-515812255).",
+      "created_at": "2020-10-22T23:30:37Z",
+      "updated_at": "2020-10-22T23:30:37Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience, those are interesting ideas, but it's really a separate discussion.\r\n\r\nIt's not, I'm suggesting the functionality be built out into separate commands instead of continuing to add the the monolith that is `Where-Object`.  It's already got some super complicated parameter binding.",
+      "created_at": "2020-10-22T23:38:26Z",
+      "updated_at": "2020-10-22T23:38:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience:\r\n\r\n> It's not\r\n\r\nIt is: _Unequivocally_ for `-SkipUntil`, `-Until`, `-Split`, and _debatably_ for `-Last` (pros: symmetry, concision performance) and `-First` (pros: symmetry, concision)\r\n\r\n>  instead of continuing to add the the monolith that is Where-Object. It's already got some super complicated parameter binding.\r\n\r\n_Implementation_ concerns should not trump what is _conceptually_ the right thing to do.",
+      "created_at": "2020-10-23T02:03:24Z",
+      "updated_at": "2020-10-23T02:05:22Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> It is: _Unequivocally_ for `-SkipUntil`, `-Until`, `-Split`, and _debatably_ for `-Last` (pros: symmetry, concision performance) and `-First` (pros: symmetry, concision)\r\n\r\nI understand you disagree with the suggestion, that doesn't mean it's a separate discussion.  Maybe I'm missing which part of this is clarification.\r\n\r\n> _Implementation_ concerns should not trump what is _conceptually_ the right thing to do.\r\n\r\nDon't know what to tell ya there.  It'd be nice, but implementation concerns are a big factor in what gets implemented and how.",
+      "created_at": "2020-10-23T02:48:38Z",
+      "updated_at": "2020-10-23T02:48:38Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, frankly... good luck trying to mess with Where-Object much further without introducing some _really_ nasty and hard to pin down parameter binder issues. It's already pushing the limit of what the parameter binder can handle.\r\n\r\nIf you wanna try, go right on ahead, but I have my doubts this is likely to be implemented otherwise. ^^",
+      "created_at": "2020-10-23T02:56:50Z",
+      "updated_at": "2020-10-23T02:56:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Maybe I'm missing which part of this is clarification.\r\n\r\nYou could address the arguments made. \r\n\r\n> Implementation concerns are a big factor in what gets implemented and how.\r\n\r\nYou could choose to retain the intellectual freedom to distinguish between what is _conceptually_ the right thing to do from what _regrettably cannot be done due to real-world constraints_, instead of using the latter to argue against the former.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-10-23T02:58:47Z",
+      "updated_at": "2020-10-23T02:58:47Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> You could address the arguments made.\r\n\r\nI'm not trying to be snarky I really don't see them.  All I see is the comment I quoted and you saying it should be a different discussion.\r\n\r\n> You could choose to retain the intellectual freedom to distinguish between what is _conceptually_ the right thing to do from what _regrettably cannot be done due to real-world constraints_, instead of using the latter to argue against the former.\r\n\r\nI really don't know what you want from me here.  We're talking about what thing gets implemented.  There's a lot of great ideas that aren't feasible, if it's not actionable there isn't a lot point talking about them.",
+      "created_at": "2020-10-23T03:14:07Z",
+      "updated_at": "2020-10-23T03:14:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I'm not trying to be snarky I really don't see them.\r\n\r\nI've tried my best to lay them out. Reaching a shared understanding is always what I strive for, but if points made aren't even acknowledged as such, it is time to stop.\r\n\r\n> I really don't know what you want from me here\r\n\r\nI want you to realize that it's important to always acknowledge what is at least _hypothetically_ the right thing to do, even if it cannot (currently) be done (and, for the record, I'm not saying that this is necessarily the case here).\r\n\r\nConversely, I want you to realize that it is detrimental to champion / advocate against something solely on the basis of (current) real-world constraints, thereby obscuring what could (some day) be a better solution.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-10-23T03:23:09Z",
+      "updated_at": "2020-10-23T03:25:39Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I've tried my best to lay them out. Reaching a shared understanding is always what I strive for, but if points made aren't even acknowledged as such, it is time to stop.\r\n\r\nAll I was asking for is clarification to what you want a response to, just a link. If you want to move on, that's fine too.\r\n\r\n> I want you to realize that it's important to always acknowledge what is at least _hypothetically_ the right thing to do, even if it cannot (currently) be done (and, for the record, I'm not saying that this is the case here).\r\n> \r\n> Conversely, I want you to realize that it is detrimental to champion something solely on the basis of (current) real-world constraints, thereby obscuring what could (some day) be a better solution.\r\n\r\nIf it's not feasible, I'm not going to argue about why something isn't a good idea conceptually. I may not even spend much time considering **if** it's a good idea, assuming the fix that would make it feasible isn't likely to happen in the nearish future.\r\n\r\nIf I bring up an insurmountable implementation challenge, and *then* spend several paragraphs tearing the idea apart, that doesn't really help anyone. If/when it becomes actionable, that's when it's useful to debate.  The thread can always be bumped, or a new issue can be made.",
+      "created_at": "2020-10-23T03:49:52Z",
+      "updated_at": "2020-10-23T03:49:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, I forgot to address your comments:\r\n\r\nAfter [this summary](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-714686798) was posted to bring closure to my misinterpretation of your objections and to summarize the state of the discussion, I hid my comments that related to this part of the exchange. Your comments above the linked comment - now lacking context without their since-hidden responses -  are still visible and create a needless distraction: please hide them too.\r\n\r\nAs for the evolution of your stance:\r\n\r\nGoing from [this](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-714660621) (referring to the  `-SkipUntil`, `-Until`, `-Split` switches among the proposed ones):\r\n\r\n> Yeah, those are probably worth adding and more aligned with Where-Object's general role IMO)\r\n\r\nto [this](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-714876087):\r\n\r\n> Yeah, frankly... good luck trying to mess with Where-Object much further without introducing some really nasty and hard to pin down parameter binder issues.\r\n\r\nwithout even so much as acknowledging this baffling change of heart - let alone offering how, if the functionality is deemed worthwhile, it should be offered _differently_ -  is perhaps even more disconcerting and disheartening than the I'm-dismissing-this-for-implementation-concerns-alone logic [discussed above](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-714884065).\r\n\r\n",
+      "created_at": "2020-10-24T02:31:47Z",
+      "updated_at": "2020-10-24T02:31:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If that baffles you, you've clearly never tried to add parameters to Where-Object ^^\r\n\r\nWe can talk philosophy all day, but I find it exhausting and wasteful to continue discourse which can derive no useful and/or practical solution. \ud83d\ude42 ",
+      "created_at": "2020-10-24T04:23:51Z",
+      "updated_at": "2020-10-24T04:23:51Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> is perhaps even more disconcerting and disheartening than the I'm-dismissing-this-for-implementation-concerns-alone logic [discussed above](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-714884065).\r\n\r\nCome on man, is that really necessary? We can have a minor disagreement and still remain civil.\r\n",
+      "created_at": "2020-10-24T12:12:59Z",
+      "updated_at": "2020-10-24T12:12:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience:\r\n\r\nWhat is necessary is to address the issue of how this debate unfolded so as to inform future debates, and my comment was part of that.\r\n\r\nMy intent was not to be uncivil: perhaps I was dramatic in my (genuine) expression of my disappointment, but that was only the _garnish_ to the arguments made, and I ask you to focus on that, just as am I trying to see past the \"Ehs\", \"\ud83e\udd37\", \"Don't know what to tell ya\"s, \"Yeah, frankly\"s, \"good luck!\"s, and \"man\"s - civility is in the eye of the beholder.\r\nBut, point taken: I will try without expressions of disappointment going forward.\r\n\r\nSo let us exhaust the exhaustion, and lay waste to the wastefulness:\r\n\r\n@vexx32:\r\n\r\n> If that baffles you, you've clearly never tried to add parameters to Where-Object ^^\r\n\r\nMy bafflement was about something different: It was about first saying \"let's do this\" and then seamlessly transitioning to \"good luck trying to do that!\", and considering that to be the end of the discussion.\r\n\r\nAgain, having clarity on what _should be done_ even if it _currently cannot be done_ and to also _communicate it that way_ is important - it is an investment in a potentially better future.\r\n\r\nConversely, the clarity on what should be done informs the investigation into whether it _can_ currently be done, after all.\r\n\r\nConcluding the discussion with \"Good luck trying to do that!\" thwarts both those goals.\r\n\r\nNotice how @KirkMunro was the first to bring up implementation concerns above, yet he commendably did _not_ use that to dismiss the proposal.\r\n\r\nReturning to the issue at hand and its implementation challenges:\r\n\r\n* The proliferation of parameter sets can be worked around by implementing the mutual exclusion inside the command - not great, but doesn't impact users much.\r\n\r\n* Re stopping the pipeline prematurely, which is necessary to implement the proposed behaviors efficiently: Agreed that it should be done in a way that gives the other cmdlets in the pipeline a chance to run their `End` blocks, as [@SeeminglyScience has advocated](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-714715995), albeit in the context of an unrelated proposal that couldn't be used to implement the bulk of this proposal's functionality, but that too is  a separate issue: #7930\r\n\r\n",
+      "created_at": "2020-10-24T13:45:07Z",
+      "updated_at": "2020-10-24T13:45:07Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> But, point taken: I will try without expressions of disappointment going forward.\r\n\r\nYou can express disappointment without being disrespectful. Specifically \"than the I'm-dismissing-this-for-implementation-concerns-alone logic discussed above.\" is incredibly rude.  I'm no stranger to folks being rude on the internet and typically I don't say anything, but if you actually want to have productive discussions that's a sure fire way to kill that possibility.\r\n\r\n> My bafflement was about something different: It was about first saying \"let's do this\" and then seamlessly transitioning to \"good luck trying to do that!\", and considering that to be the end of the discussion.\r\n\r\nFolks are free to change their mind in a discussion.  The 32 already existing parameter sets were probably not at the top of his mind.  Also saying something \"is probably worth adding\" is not a promise to fight for the thing you want.\r\n\r\n> Again, having clarity on what _should be done_ even if it _currently cannot be done_ and to also _communicate it that way_ is important - it is an investment in a potentially better future.\r\n\r\nThis is your issue.  While it's certainly a nice bonus for folks to come up with an alternate solution to implement the thing **you** are asking for, it is not a requirement or even an expectation.\r\n\r\n> Notice how @KirkMunro was the first to bring up implementation concerns above, yet he commendably did _not_ use that to dismiss the proposal.\r\n\r\nI want to point out that at no point did I actually dismiss anything.  I proposed an alternate solution, and **you** dismissed it as irrelevant to the conversation completely.  For the majority of the discussion following that, I was mainly asserting that it did not belong in a different issue.\r\n\r\nMore than that though, I don't know why you find the idea of dismissing an implementation due to concerns of said implementation to be so horrible.  The benefit of a feature or change **always** has to out weigh the amount of effort and risk involved.\r\n\r\nI know this applies to you as well, but please keep in mind none of us are being paid to be here.  If someone chimes into a thread with an implementation concern, it's not fair for you to demand that they also debate you on the merits of the idea that they do not think is actionable.",
+      "created_at": "2020-10-24T14:56:46Z",
+      "updated_at": "2020-10-24T14:56:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> You can express disappointment without being disrespectful. \r\n\r\nLike civility (and flippancy), disrespect is in the eye of the beholder. To me, \"I'm-dismissing-this-for-implementation-concerns-alone\" still seems like a condensed, but accurate summary of your comments. \r\nI'm not taking responsibility for this being \"incredibly rude\", but I'm sorry that your perception of it as such caused you distress - it wasn't my intent.\r\n\r\n> Folks are free to change their mind in a discussion.\r\n> not a promise to fight for the thing you want.\r\n\r\nAbsolutely, but that wasn't [my point](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-715917411) at all.\r\n\r\n> While it's certainly a nice bonus for folks to come up with an alternate solution \r\n\r\nThat's not what I was asking for, though it would indeed be nice.\r\n\r\n>  I proposed an alternate solution\r\n\r\nI've argued multiple times why your alternate solution isn't one (to recap again: you can't use it to implement the bulk of the functionality in this proposal - perhaps I should have led with that, but it seemed obvious to me), but there was no engagement on these points.\r\n\r\n> I don't know why you find the idea of dismissing an implementation due to concerns of said implementation to be so horrible\r\n\r\nI don't find it horrible either - it _may_ just be a fact of life, recognized as such _after an earnest investigation_ - but, again, not [my point](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-715917411).\r\n \r\n> If someone chimes into a thread with an implementation concern, it's not fair for you to demand that they also debate you on the merits of the idea that they do not think is actionable.\r\n\r\nWhat is fair is to _expect_ and _ask for_ - not demand - that implementation concerns be presented in a _constructive_ manner, and a flippant about-face to \"Good luck with that!\" doesn't qualify.\r\n\r\nSimilarly, it is fair to ask that the merits of the proposal be evaluated _separately_, because even if something cannot get implemented _now_, it's still valuable to have clarity on what _some day_ can be done, perhaps in a different context.\r\n\r\nAnd it is perfectly fine for someone to only contribute to the former, constructively, without wanting to engage in the latter (which some may consider wasted effort) - but that's not what happened here.\r\n\r\nA constructive discussion can be had that way, and those that agree that the proposal has merit can then [discuss the actual implementation concerns](https://github.com/PowerShell/PowerShell/issues/13834#issuecomment-715917411) to assess whether it can be done and, if so, with how much effort.\r\n\r\nIt's ultimately always a tradeoff, but it should be driven by clarity on the merits of the proposal. And only with an interest in the proposal is someone likely to expend energy _investigating_ the implementation challenges.\r\nConversely, using a lack of interest / objection to the proposal to make a categorical claim of infeasibility is unhelpful.\r\n\r\nOf course, the outcome may still be that implementation is currently not feasible, but that determination would be the result of a constructive collaborative process, not a foregone conclusion.\r\n",
+      "created_at": "2020-10-24T16:38:39Z",
+      "updated_at": "2020-10-25T21:30:28Z"
+    }
+  ],
+  "created_at": "2020-10-22T14:22:30Z",
+  "number": 13834,
+  "state": "open",
+  "title": "Close the feature gap between the Where-Object cmdlet and Where array method, introduce -First, -Last, ... switches",
+  "updated_at": "2020-10-26T09:44:21Z"
+}

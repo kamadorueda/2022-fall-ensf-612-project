@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6833",
+  "author": "iSazonov",
+  "body": "Currently we do agressively path normalizations by replacing '/' with '\\\\' on Windows and '\\\\' with '/' on Unix. [NormalizePath()](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L97)\r\nIt is acceptable for Windows but has side affects on Unix because '\\\\' is valid char in directory/file names.\r\n\r\n.Net Core do the same for Windows but don't  the normalization for Unix.\r\n[IsPathRooted on Unix](https://github.com/dotnet/corefx/blob/3cfab0ce729f8f9c09db0da42e56bd8bae0090de/src/Common/src/CoreLib/System/IO/Path.Unix.cs#L114) ([IsDirectorySeparator](https://github.com/dotnet/corefx/blob/16f26ba855f5cc6d52a738e8bc3856c6f77cf761/src/Common/src/System/IO/PathInternal.Unix.cs#L19))\r\n[IsPathRooted on Windows](https://github.com/dotnet/corefx/blob/3cfab0ce729f8f9c09db0da42e56bd8bae0090de/src/Common/src/CoreLib/System/IO/Path.Windows.cs#L158) ([IsDirectorySeparator](https://github.com/dotnet/corefx/blob/16f26ba855f5cc6d52a738e8bc3856c6f77cf761/src/Common/src/System/IO/PathInternal.Windows.cs#L241))\r\n\r\n[NormalizeDirectorySeparators on Unix](https://github.com/dotnet/corefx/blob/3cfab0ce729f8f9c09db0da42e56bd8bae0090de/src/Common/src/CoreLib/System/IO/PathInternal.Unix.cs#L42)\r\n[NormalizeDirectorySeparators on Windows](https://github.com/dotnet/corefx/blob/3cfab0ce729f8f9c09db0da42e56bd8bae0090de/src/Common/src/CoreLib/System/IO/PathInternal.Windows.cs#L352)\r\n\r\nAs you see Unix takes into account only '/' and Windows both '\\\\' and '/'.\r\n\r\nShould we follow .Net Core in the path normalization?\r\n\r\nRelated issues:\r\n- Set-Location preserves case instead of matching filesystem on case-insensitive/preserving system  #5678\r\n- Location completion should be case-insensitive  #1273\r\n- Bug: can not handle \"/\" correctly when reading registry item #5536 \r\n- Replace string-compare-based test for copying to same file with more #3441\r\n- File mode in Linux should reflect Linux modes #1817\r\n\r\n- History #1115\r\n- On Unix, PowerShell will not find files with backslashes in their names #3666\r\n-  New-Item -ItemType SymbolicLink should support creating symlinks with relative paths #3500.\r\n\r\n\r\nSimple side affect repo on Unix below:\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nmkdir /\\\r\n\r\ncd \\\r\n$pwd\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\n\\\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n/\r\n```\r\n",
+  "closed_at": "2019-03-29T03:16:53Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "My vote is to follow .NET Core's lead.\r\n\r\nIn general we should avoid hiding native capabilities, unless absolutely necessary.\r\n\r\nJust to add another example:\r\n\r\nOn Unix, `New-Item -Directory Path a\\b`, instead of creating a single dir. literally named `a\\b` - which is what the native`mkdir a\\b` does - it creates _two_ directories, subdir `a` with a subdir `b`; again a consequence of automatically translating `a\\b` into `a/b`.\r\n\r\nConversely, `Set-Location` won't let you change to a directory  literally named `a\\b`.",
+      "created_at": "2018-05-08T14:05:18Z",
+      "updated_at": "2018-05-08T14:05:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I found the same problem in registry provider. #5536\r\n\r\nIt seems we have to move the normalization of paths and possibly (partially) globbing into providers.",
+      "created_at": "2018-05-08T15:16:16Z",
+      "updated_at": "2018-05-08T15:16:16Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Worth noting that changing the behaviour so that only forward slashes work on UNIX(-like) would potentially break a lot of otherwise cross-platform scripts, and would mean that PowerShell 6 on Windows supports UNIX-style paths, but PowerShell 6 on UNIX does not support Windows-style paths (which seems sort of the wrong way round).",
+      "created_at": "2018-05-08T16:46:15Z",
+      "updated_at": "2018-05-08T16:46:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  cross-platform scripts\r\n\r\nThey don't exist before 6.0. And cross-platform paths too. We can't break what does not yet exist. Currently we can get  cross-platform paths only by means of `Join-Path`. A script must be written this way to be cross platform (If ignore invalid characters in paths). But this is not a complete solution because some paths is masked by the normalization.\r\n\r\nIn addition to `Join-Path`, we could consider an accelerator like [portablepathinfo]@($Home, \"etc\", \"app.cfg\") to get `$Home/etc/app.cfg` on Unix and `$Home\\etc\\app.cfg` on Windows. Both should take in account invalid characters in paths. To allow non-portable characters we could use special parameter in `Join-Path` and maybe [pathinfo] accelerator. With this in mind, we could do the normalization of smarter.",
+      "created_at": "2018-05-08T17:51:12Z",
+      "updated_at": "2018-05-08T17:51:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Note that you've always been able to use `\\` and `/` interchangeably on Windows - while there may be individual external utilities that don't support `/` (also, support in `cmd.exe` is patchy), all the major APIs support it (WinAPI, COM, .NET).\r\n\r\nThus - aside from ruling out illegal-in-a-filename characters - literal use of `/` works as a cross-platform filesystem-path separator.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-05-08T18:20:35Z",
+      "updated_at": "2018-05-08T18:28:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also note that we currently have few abstractions for well-known locations: it's currently just `$HOME` and `$PSHOME`; `$env:PSModulePath` _contains_ well-known locations, but not in an individually identifiable manner.\r\n\r\nEven a platform-abstracted temporary-files location is currently not implemented - remember #4216?",
+      "created_at": "2018-05-08T18:32:44Z",
+      "updated_at": "2018-05-08T18:32:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> all the major APIs support it (WinAPI, COM, .NET).\r\n\r\n> literal use of / works as a cross-platform filesystem-path separator.\r\n\r\nI wonder - PowerShell do normalization, .Net do normalization and Win32 do too - why need this on three levels? And after that someone says that PowerShell (Windows) is slow. \r\nAlso we do repeated path parsing and rebuilding, To be more resource-efficient and fast we need to delegate common methods to providers, .Net and kernel APIs.\r\n",
+      "created_at": "2018-05-11T19:00:09Z",
+      "updated_at": "2018-05-11T19:00:09Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I wonder - PowerShell do normalization, .Net do normalization and Win32 do too - why need this on three levels? And after that someone says that PowerShell (Windows) is slow.\r\nAlso we do repeated path parsing and rebuilding, To be more resource-efficient and fast we need to delegate common methods to providers, .Net and kernel APIs.\r\n\r\nEven in PowerShell, I think [we're doing it multiple times](https://github.com/PowerShell/PowerShell/issues/5536#issuecomment-371225592).\r\n\r\nThe other problem, like I mentioned in https://github.com/PowerShell/PowerShell/issues/5536#issuecomment-387476149, is that we already promise to support multiple [container-enabled providers](https://msdn.microsoft.com/en-us/library/ee126198(v=vs.85).aspx) that use conflicting path separators and legal name characters. So PowerShell has to do some abstract, provider-based path handling I imagine. But once we know it's a filesystem path, I agree that we should do as little as possible on top of .NET.\r\n\r\nAlso, by \"breaking change\" above, I mean that PSCore 6 has already shipped as GA and people are already writing scripts with backslashes in their paths to be used cross-platform.\r\n\r\nI fervently agree that just using `/` would be better, especially since all the major APIs support it, it was designed into Windows from the start, and backslashes are just the bad legacy of CMD/DOS.\r\n\r\nBut I think there are scripts already being written as cross-platform that would break, and scripts from older PowerShell versions that should work cross-platform with PS6 if not for the path-separator changing.",
+      "created_at": "2018-05-11T20:29:03Z",
+      "updated_at": "2018-05-11T20:31:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rjmholt \r\n\r\n> Also, by \"breaking change\" above, I mean that PSCore 6 has already shipped as GA and people are already writing scripts with backslashes in their paths to be used cross-platform.\r\n\r\nThat's definitely possible (and perhaps you have already found examples), but do note that the current lack of platform-abstracted locations limits the scenarios in which  `\\`-based path literals are potentially useful in cross-platform code:\r\n\r\n* constructing _literal_ paths _relative_ to `$HOME`\r\n* constructing _literal_ paths _relative_ to manually determined platform-specific locations, such as relative to `$env:TEMP`  (Windows), `$env:TMPDIR` (macOS), `/tmp` (Linux).\r\n* constructing _literal_ paths based on an explicitly established PS drive (with a platform-appropriate root location).\r\n\r\nI personally have no sense of how much that has happened already.\r\n\r\n",
+      "created_at": "2018-05-11T20:40:08Z",
+      "updated_at": "2018-05-11T20:40:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.: My _guess_ is that someone savvy enough to have implemented their own platform abstractions, which requires some knowledge of the Unix world,  is  likely to have used `/` as the path separator.",
+      "created_at": "2018-05-11T21:20:26Z",
+      "updated_at": "2018-05-11T21:20:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Seems we don't mention that if we send paths through pipeline we again parse, normalize and so on.",
+      "created_at": "2018-05-12T11:18:32Z",
+      "updated_at": "2018-05-12T11:18:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Add #3441,#1817 in PR description.",
+      "created_at": "2018-05-12T12:44:41Z",
+      "updated_at": "2018-05-12T19:20:20Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  We agree that the utility of supporting both forward and backslashes as a directory separator is valuable for cross platform scripts as well as being existing behavior.  The fundamental issue seems to be that escaped characters in paths are not propagating through providers and this is a bug that should be fixed.",
+      "created_at": "2018-05-16T22:48:31Z",
+      "updated_at": "2018-05-16T22:48:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Seems I don't understand the conclusion. :confused:\r\nThe fundamental issue is that currently PowerShell _encourages_ the creation of non-portable scripts and thus produces a huge number of auxiliary operations consuming a lot of resources.\r\nPortable scripts shouldn't contain literal paths. We should use Join-Path and something like `[portablepath]@()`. \r\nPowerShell should works with native paths in `dir | copy-item` without reparsing if we want to somehow get closer to productivity of cmd/bash shells.\r\nPowerShell should works with native paths internally and on top level (-Path/-LiteralPath parameters) - especially in interactive mode. Here we have some Issue and should address them. Why we should be escaping in Unix path on Unix? I suppose it's very annoying. Why we don't support '\\' in Unix path?\r\nI'm pretty sure that work in this direction can keep backward compatibility with Windows PowerShell.\r\n\r\nMaybe @mklement0 could make more-in-depth review provider path issues.",
+      "created_at": "2018-05-17T04:44:42Z",
+      "updated_at": "2018-05-17T04:44:42Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "https://github.com/PowerShell/PowerShell/issues/9244",
+      "created_at": "2019-03-29T03:16:53Z",
+      "updated_at": "2019-03-29T03:16:53Z"
+    }
+  ],
+  "created_at": "2018-05-07T13:21:08Z",
+  "number": 6833,
+  "state": "closed",
+  "title": "Should we do path normalizations on Unix well as on Windows?",
+  "updated_at": "2021-12-01T15:40:40Z"
+}

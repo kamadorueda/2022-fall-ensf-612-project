@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3359",
+  "author": "mklement0",
+  "body": "Not sure if this behavior is by design; if so, it would help to understand the rationale.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nGet-Item -EA SilentlyContinue NoSuchItem; $?  # Failure is reflected in $? being $False\r\n(Get-Item -EA SilentlyContinue NoSuchItem); $? #  Using (...) resets $? to $True \r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```\r\nFalse\r\nFalse\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```\r\nFalse\r\nTrue\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```none\r\nPowerShell Core v6.0.0-alpha (v6.0.0-alpha.17) on Darwin Kernel Version 16.4.0: Thu Dec 22 22:53:21 PST 2016; root:xnu-3789.41.3~3/RELEASE_X86_64\r\n```\r\n",
+  "closed_at": "2021-06-16T21:19:17Z",
+  "comments": [
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "I'm seeing the same behavior. I'm not sure what the rationale for this is though, or if it's a bug. It seems like this is a bug to me, but open to ideas.",
+      "created_at": "2017-03-17T20:28:51Z",
+      "updated_at": "2017-03-17T20:28:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "`$?` tell us a status of _last_ command. See [docs](https://msdn.microsoft.com/en-us/powershell/reference/4.0/microsoft.powershell.core/about/about_automatic_variables).\r\n`$? is $true` tell us that \"The last command was successful\".\r\nIn your sample the command is Expression `()` and the expression was executed successfully.",
+      "created_at": "2017-03-18T09:31:02Z",
+      "updated_at": "2017-03-18T09:34:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nI see. So you're saying that `(...)` is an expression in its own right? If so, does it ever reflect `$False`? In other words: is its `$?` status useful in any way?\r\n\r\nWhy does the following, which also uses `()`, yield `$False`, preserving the status of the enclosed the command?\r\n\r\n```\r\n> (5 + 'not a number'); $?\r\nFalse\r\n```\r\n\r\n",
+      "created_at": "2017-03-18T13:07:09Z",
+      "updated_at": "2017-03-18T13:07:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "`$?` returns a _Command_ status not _Expression_.\r\nThe first sample is \"command in expresson\" and your sample is \"command is an expression\"\r\n```powershell\r\n(Invoke-Expression -Command '(5/0); $?' -EA SilentlyContinue); $?\r\n```",
+      "created_at": "2017-03-18T17:16:15Z",
+      "updated_at": "2017-03-18T17:18:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov  That's helpful, thanks.\r\n\r\nThe documentation talks about the \"last _operation_\", without defining what _operation_ means in this context.\r\n\r\nIn practice, as you've demonstrated, that means it's about the last _command_ OR _expression_.\r\n\r\nBy _command_ I mean specifically mean something parsed in _argument mode_ (a single function/cmdlet call/external utility call), as opposed to an _expression_. I'm not sure if there's an established umbrella term for both (perhaps the aforementioned operation? or statement?), but calling the umbrella term \"command\" too is obviously not a good choice.\r\n\r\nNote that even if we assume that \"operation\" means command or expression, the claim that `$?` reflects the _last_ operation isn't always true:\r\n\r\n**Exceptions**:\r\n\r\n ```\r\n> Get-Item NoSuchItem, / 2>$null | Get-Date; $?\r\nWednesday, March 15, 2017 5:19:57 PM\r\nFalse\r\n```\r\n\r\nEven though `Get-Date` succeeded, `$?` still reflects the (partial) failure of `Get-Item`.\r\n\r\nAnother exception appears to be when the last expression is executed inside a _conditional_:\r\n\r\n```\r\ndo { Get-Item NoSuchItem 2>$null } until ($true); $?\r\nFalse\r\n```\r\n\r\nEven though `true` is the last expression evaluated - and was clearly evaluated successfully - `$?` still reflects the failure of `Get-Item`.\r\n\r\nThere _is_ a case where the command's `$?` status is preserved, at least a command in the _syntactical_ sense: if a command by the specified name cannot be found:\r\n\r\n```\r\n(noSuchCmd); $?\r\nFalse\r\n```\r\n\r\nDespite embedding in an expression, the inability to find the command is reflected in `$?` - contrast this with `(Get-Item -EA SilentlyContinue NoSuchItem)`.\r\n\r\nYes, there is a difference between PowerShell not finding the command and an invoked command reporting a non-terminating error, but is it worth treating these two cases differently in terms of their `$?` behavior?\r\n\r\n**Conclusions:**\r\n\r\n* Currently, making a command part of an expression invariably loses its `$?` status - except if the command name isn't recognized at all.\r\n\r\n* You could make the case that errors in _expressions_ should always result in _terminating_ errors [_update: I meant _script_-terminating errors, such as generated with `Throw`_] that should be handled with `try / catch`, with `$?` only reporting _command_ errors, irrespective of whether a command is part of an expression or not. \r\nDoes it really make sense to treat `1 / 0` as a _non_-terminating error, for instance? [_update: in reality it is a _statement_-terminating error, which, however, means that execution still _continues_ by default (with the next statement)_]\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-03-20T04:27:22Z",
+      "updated_at": "2018-03-18T16:39:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe \"Last operation\" is exclusively \"Command\". It is include \"Command\" in [pipeline](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L463). No Expression.\r\n```powershell\r\ndo { Get-Item NoSuchItem 2>$null } until (Get-Date); $?\r\ntrue\r\n```\r\nOne exclusion is for [Condition](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/parser/Compiler.cs#L1965):\r\n>// If we're generating code for a condition and the condition contains some command invocation, \r\n  // we want to be sure that $? is set to true even if the condition fails, e.g.: \r\n  //     if (get-command foo -ea SilentlyContinue) { foo } \r\n  //     $?  # never $false here \r\n // Many conditions don't invoke commands though, and in trivial empty loops, setting $? = $true\r\n // does have a measurable impact, so only set $? = $true if the condition might change $? to $false.\r\n // We do this after evaluating the condition so that you could do something like:\r\n //    if ((dir file1,file2 -ea SilentlyContinue) -and $?) { <# files both exist, otherwise $? would be $false if 0 or 1 files existed #> }\r\n\r\n\r\n",
+      "created_at": "2017-03-20T06:54:34Z",
+      "updated_at": "2017-03-20T06:54:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\n> I believe \"Last operation\" is exclusively \"Command\". \r\n\r\nI wish that were true; it was my initial expectation, reflected in the first post. \r\n\r\nHowever, as you pointed out, if the entire \"operation\" is an _expression_ (unrelated to a conditional), `$?` reflects the _expression's_ success, not that of the embedded command:\r\n\r\n`(Get-Item -EA SilentlyContinue NoSuchItem); $?` yields `True`, with the expression's success eclipsing `Get-Item`'s failure.\r\n\r\nExcluding commands in conditionals makes sense, but note that failing _expressions_ are still reflected in `$?`:\r\n\r\n```powershell\r\n> do { Get-Date } while (1/0); $?\r\n...\r\nFalse\r\n```\r\n\r\nThis is a contrived example, but it leads me back to my point that perhaps _expressions themselves_ should _never_ set `$?`, only _commands_ (outside conditionals).\r\n\r\nAnd even if we assume that the current behavior is by design,\r\n\r\n* the rules, [as in other cases](https://github.com/PowerShell/PowerShell/issues/3217), are hard to remember.\r\n\r\n* the rules aren't adequately explained in [`Get-Help about_Automatic_Variables`](https://msdn.microsoft.com/en-us/powershell/reference/5.1/microsoft.powershell.core/about/about_automatic_variables).\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-03-20T13:23:08Z",
+      "updated_at": "2017-03-20T14:00:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Seems like we may just need better documentation",
+      "created_at": "2017-03-20T16:17:40Z",
+      "updated_at": "2017-03-20T16:17:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 \r\n>However, as you pointed out, if the entire \"operation\" is an expression \r\n\r\nNo. You means my:\r\n> In your sample the command is Expression  ()  and the expression was executed successfully.\r\n\r\nYou should understand this as:\r\n> The command consists of one expression\r\n\r\nAnd yes, we need update docs.\r\n",
+      "created_at": "2017-03-20T16:21:22Z",
+      "updated_at": "2017-03-20T16:21:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT, @iSazonov: I'm glad that **we agree that the docs need updating**.\r\n\r\nFor the sake of updating the docs, **let's see if we agree what the _current_ behavior is**:\r\n\r\n> The command consists of one expression\r\n\r\nAgain, using the term \"command\" in this abstract way is inviting confusion, given the fundamental distinction between a command proper (something parsed in argument mode) and an expression (something parsed in expression mode).\r\n\r\nWhen I use the terms \"command\" an \"expression\" below, I'm referring to their _specific_ definitions, and by \"operation\" I mean the _abstraction_ over the two, _excluding_ multi-command pipelines.\r\n\r\nI'm not covering the case where _terminating_ errors are treated as non-terminating ones.  \r\nAlso note that the behavior described was arrived at by trial and error, not source-code analysis.\r\n\r\n**Current behavior**:\r\n\r\n* If a command is executed by itself, Boolean variable `$?` reflects whether it ran successfully; success / failure is determined by (a) if a cmdlet/script/function generated at least one non-terminating error, or (b) in the case of calling an external utility, if its exit code is zero (zero indicating success).\r\n\r\n* Inside a conditional, _command_ success is by design _not_ reflected in `$?` (but a failing _expression_ is - see below).\r\n\r\n* If a command is embedded in an expression - whether via `()`, `$()`, or `@()` - its `$?` status is lost, because the success of the expression _itself_ is reflected in `$?`\r\n  * Reasons why expressions  may fail include: invalid operands (`1 / 0`, `'foo' -replace 'bar', 'baz', 'ohno'` and .NET method calls that throw exceptions (`[int]::Parse('foo')`)\r\n\r\n* In a pipeline composed of at least 2 commands, `$?` reflects whether _any_ of the commands involved reported at least one non-terminating error, not the _last_ one in the _pipeline_.\r\n\r\n* All of the above is overruled in the following cases: `$?` is _always_ `$False` if the operation involves (a) a _nonexistent_ command or (b) a cmdlet/script/function invoked with an _invalid parameter name_ or (c) a _failed expression_ - in the case of commands, that applies whether or not an expression is involved, and whether or not the command is called in a conditional.  [_Update: In other words: what matters is that a **statement-terminating** error occurred._]\r\n\r\n---\r\n\r\n**If the rules governing the current behavior are somewhat confusing, that's precisely my point**:\r\n\r\n* _Expression_ status overruling _command_ status makes the command status unavailable and complicates things needlessly. \r\n\r\n* Making _expressions_ never update `$?` would fix that.\r\n\r\n* [_Update: This paragraph is ultimately about whether statement-terminating errors should be fatal by default - see [this thread](https://github.com/PowerShell/PowerShell/issues/3798#issuecomment-374013538)_] Treating failed expressions _somewhat_ like _nonterminating_ errors is problematic in general.\r\nArguably, a failed expression should always be a _terminating_ error that needs to be handled with `try / catch`.  \r\nNote that failed _expressions_ already are somewhat of a \"hybrid\" in that while they do not cause termination, you _can_ use `try / catch` to catch them - something you cannot do with non-terminating _command_ errors.\r\n\r\nI'm happy to create a new issue focused on just that.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-03-20T17:49:33Z",
+      "updated_at": "2018-04-21T13:27:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "CC @BrucePay ",
+      "created_at": "2017-03-20T18:00:55Z",
+      "updated_at": "2017-03-20T18:00:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Forget \"expression\". The key here is:\r\n> `$?`  returns a _Command_ status not Expression.",
+      "created_at": "2017-03-20T18:07:33Z",
+      "updated_at": "2017-03-20T18:07:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\nIf we leave the terminology discussion (see below) and to what extent the current docs reflect the intent of the by-design behavior aside, **I've tried to point out problematic aspects of the current behavior**, and I'd love to hear your thoughts on that:\r\n\r\n* Aside from the terms that I used, is there something incorrect about how I've described the current behavior?\r\n\r\n* Is it clear what I've described as problematic about the current behavior (terminology, history, docs aside)?\r\n\r\n---\r\n\r\nIt seems that there's still **confusion over terminology**.\r\n\r\nLet's first agree that the following two \"commands\" are different; in fact, their different behavior with respect to `$?` was the very reason for starting this thread:\r\n\r\n(a) `Get-Item NoSuchItem` - what I've called \"command\"\r\n\r\n(b) `(Get-Item NoSuchItem)` - what I've called \"expression\", though, perhaps more accurately, a \"value expression\", according to [`Get-Help about_Parsing`](https://msdn.microsoft.com/powershell/reference/5.1/Microsoft.PowerShell.Core/about/about_Parsing)\r\n\r\nFrom what I understand you've chosen to use \"command\" as the _umbrella term_ for _both_ forms, something that is:\r\n\r\n* not reflected in the [`Get-Help about_Automatic_Variables`](https://msdn.microsoft.com/en-us/powershell/reference/5.1/microsoft.powershell.core/about/about_automatic_variables) help topic, which, as discussed, uses the somewhat nebulous term \"operation\".\r\n\r\n* at odds with how the term \"command\" is used in `Get-Help about_Command_Syntax`, which uses \"command\" to mean (a) only.\r\n",
+      "created_at": "2017-03-20T18:59:24Z",
+      "updated_at": "2017-03-20T19:00:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe you skip the trick: there are commands consisting of one expression:\r\n- Get-Item NoSuchItem  - Command\r\n- ( Get-Item NoSuchItem  ) - looks as Expression\r\n- ( Get-Item NoSuchItem  ); - in this context it is Command\r\n- if ( Get-Item NoSuchItem  ) {} - in this context it is Expression consisting of one Command\r\n\r\nSo your \"current behavior\" description should consider it to be extremely accurate.\r\nI also believe that we cannot create correct documentation without formal description language. So we get the exact terms. I believe you are somewhere nearby.\r\nWe already have Issue #2254 \"Add PowerShell language specification document\". Welcome! \ud83d\ude04 \r\n",
+      "created_at": "2017-03-21T05:00:03Z",
+      "updated_at": "2017-03-21T05:00:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nThanks for the link. \r\n\r\nMy final thought re terminology (and I'm happy to leave it at that) is that it's confusing to use the same name (\"command\") for both something specific ((a) above) and an abstraction from it that encompasses other specific things ((a) _and_ (b) above) - perhaps \"statement\" is the best abstract term, given that it's already being used in many conceptual topics.\r\n\r\nTo use a natural language analogy: The same problem has given native English speakers the perennial debate over whether a thumb is a finger, because \"finger\" can be both something specific (a digit of the hand other than a thumb) and something more abstract (any digit of the hand, including the thumb).\r\n",
+      "created_at": "2017-03-21T11:44:11Z",
+      "updated_at": "2017-03-21T11:44:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell parser use \"statement\" \ud83d\ude04 (You can see this in PowerShell notation.)",
+      "created_at": "2017-03-21T12:03:54Z",
+      "updated_at": "2017-03-21T12:03:54Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Two comments:\r\n\r\n(1) $? applies to expressions as well as commands:\r\n\r\n```PS[1] (42) > 1/0; $?\r\nAttempted to divide by zero.\r\nAt line:1 char:1\r\n+ 1/0; $?\r\n+ ~~~\r\n    + CategoryInfo          : NotSpecified: (:) [], RuntimeException\r\n    + FullyQualifiedErrorId : RuntimeException\r\n\r\nFalse\r\nPS[1] (43) > 1/1; $?\r\n1\r\nTrue\r\n```\r\n(2) The best way to think about commands in parenthesis is as follows:\r\n\r\n`(get-item blargh) ; $?`\r\n\r\nis \"equivalent\" to:\r\n\r\n`write-output (get-item blargh) ; $?`\r\n\r\nIn other words, a command in parenthesis is evaluated, the result is returned and then a second command is used to output those results. Even if the command in parens fails with an error, the parent command succeeds setting $? to true.\r\n",
+      "created_at": "2018-03-12T23:17:04Z",
+      "updated_at": "2018-03-12T23:17:04Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm. I see the rationale there in part, @BrucePay... but this behaviour is always going to be confusing and counterintuitive to users.\r\n\r\nChiefly because in a lot of ways, the following are otherwise perfectly equivalent:\r\n\r\n```ps\r\nGet-Item blargh\r\n(Get-Item blargh)\r\n```\r\n\r\nBoth of them are written to the pipeline in the same way in almost all circumstances. The only case (I can think of) where it differs is if they are part of a pipeline:\r\n\r\n```ps\r\n(Get-Item blargh) | Select Name, Length\r\nGet-Item blargh | Select Name, Length\r\n```\r\n\r\nAnd even then, the behavioural change is often not particularly noticeable (though handy to know at times).\r\n\r\nThat this creates a difference in `$?` is probably the only really noticeable difference. And given that when using `(Command)` syntax there is only ever one possible result, I don't think it's a _useful_ difference in any way?\r\n\r\nGiven also that the current behaviour will complicate working with @rjmholt's chaining operators (#9849) needlessly, I can't help but think it may be time that the behaviour of `$?` in this case is changed.",
+      "created_at": "2019-09-06T18:21:05Z",
+      "updated_at": "2019-09-06T18:21:05Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Fixed in https://github.com/PowerShell/PowerShell/pull/11040",
+      "created_at": "2021-06-16T21:19:17Z",
+      "updated_at": "2021-06-16T21:19:17Z"
+    }
+  ],
+  "created_at": "2017-03-17T20:06:19Z",
+  "number": 3359,
+  "state": "closed",
+  "title": "Automatic $? variable (success indicator) is reset to $true when a command is enclosed in parentheses - make $? only reflect command status, not expression status",
+  "updated_at": "2021-06-17T02:51:44Z"
+}

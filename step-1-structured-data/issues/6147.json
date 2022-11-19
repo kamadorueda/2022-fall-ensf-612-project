@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6147",
+  "author": "alx9r",
+  "body": "I have been experimenting with a (hopefully) more robust mechanism for mocking commands than Pester currently uses.  [Here is a proof of concept](https://gist.github.com/alx9r/ed9d837b83866ddae4b079700e935e66).  In general, the mechanism relies on invoking scriptblocks with the SessionState where the mock needs to exist.  This is trivial for a SessionState associated with a module: Invoking `& $module $scriptblock` achieves the desired result.  I haven't, however, found a straightforward way of invoking a scriptblock defined inside a module with the \"global\" SessionState.\r\n\r\nConsider this working code\r\n\r\n```PowerShell\r\nGet-Module LibraryModule,m | Remove-Module\r\nNew-Module LibraryModule {\r\n    $sb = {\r\n        Write-Host 'control flow: 1'\r\n        Write-Host $v\r\n        'output'\r\n        Write-Host 'control flow: 3'\r\n    }\r\n    function DownStream {\r\n        param([Parameter(ValueFromPipeline)]$i)\r\n        process {\r\n            Write-Host 'control flow: 2'\r\n        }\r\n    }\r\n    function InvokeWithModuleSessionState {\r\n        param([psmoduleinfo]$mi)\r\n        & $mi $sb | DownStream\r\n    }\r\n    function InvokeWithGlobalSessionState {\r\n        [CmdletBinding()]\r\n        param($ss)\r\n\r\n        <#\r\n        This doesn't execute in the \"global\" SessionState.  \r\n        (ie. it has no access to 'g.v')\r\n        #>\r\n        # & $ss.InvokeCommand.NewScriptBlock($sb) | DownStream\r\n\r\n        <#\r\n        Each of these neither\r\n            1. has the correct control flow (ie. they don't yield to DownStream), nor\r\n            2. executes in the global SessionState (ie. they have no access to 'g.v').\r\n        #>\r\n\r\n        # $ss.InvokeCommand.InvokeScript($sb) | DownStream\r\n        # $ss.InvokeCommand.InvokeScript($ss,$sb,$null) | DownStream\r\n        # $ss.InvokeCommand.InvokeScript($true,$sb,$null,$null) | DownStream\r\n        # $ss.InvokeCommand.InvokeScript($false,$sb,$null,$null) | DownStream\r\n        # $ss.InvokeCommand.InvokeScript($sb,$true,'Output',$null,$null) | DownStream\r\n        # $ss.InvokeCommand.InvokeScript($sb,$false,'Output',$null,$null) | DownStream\r\n\r\n        <#\r\n        This works, but it's in bucket 4.\r\n        #>\r\n\r\n        $copyOfSb = [scriptblock]::Create($sb)\r\n        $flags = [System.Reflection.BindingFlags]'Instance,NonPublic'\r\n        $internalSessionState = [System.Management.Automation.SessionState].GetProperty('Internal', $flags).GetValue($ss, $null)\r\n        $property = [ScriptBlock].GetProperty('SessionStateInternal', $flags)\r\n        $property.SetValue($copyOfSb, $internalSessionState, $null) | Out-Null\r\n        & $copyOfSb | DownStream\r\n    }\r\n} | Import-Module\r\n\r\nNew-Module m {\r\n    $v = 'm.v'\r\n} | Import-Module\r\n\r\n& {\r\n    $v = 'g.v'\r\n    Write-Host '=== Module ==='\r\n    InvokeWithModuleSessionState -sb $sb -mi (Get-Module m)\r\n\r\n    Write-Host '=== Global ==='\r\n    InvokeWithGlobalSessionState -ss $ExecutionContext.SessionState\r\n}\r\n```\r\n\r\nwhich outputs\r\n\r\n```none\r\n=== Module ===\r\ncontrol flow: 1\r\nm.v\r\ncontrol flow: 2\r\ncontrol flow: 3\r\n=== Global ===\r\ncontrol flow: 1\r\ng.v\r\ncontrol flow: 2\r\ncontrol flow: 3\r\n```\r\n\r\nThis implementation of `InvokeWithGlobalSessionState` relies on private reflection to bind a scriptblock to the SessionState.  This is clearly vulnerable to bucket 4 changes which, per the [breaking changes contract](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md), \"don't require up-front approval.\"  I'd like to avoid such sudden breakage, if there is a better way.\r\n\r\n1. Is there a supported way of binding an unbound scriptblock to the \"global\" session state?\r\n2. Is there a supported way of invoking an unbound scriptblock in the \"global\" session state?  In other words, is there a supported analog to `& $module $scriptblock` that works for the \"global\" session state as opposed to a module session state?\r\n3. Is there some other way of creating a scriptblock from a module, but invoking it in the \"global\" session state?\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I believe you'll have to rely on a conversion to string, but something like the following might work:\r\n\r\n```powershell\r\nfunction global:BindToGlobalSessionState([scriptblock]$sb)\r\n{\r\n    Invoke-Expression \"{`n$sb`n}\"\r\n}\r\n```\r\n\r\nThe idea is to recreate the script block in global scope.\r\n\r\nBasically, you want to get [this line of code](https://github.com/PowerShell/PowerShell/blob/6cbcf5dd3e32099b8ca0eea13a3a6cfe8577d4f9/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L1251) executed with the correct session state.\r\n\r\nThere are other places where `SessionState` is assigned, but this is typically the first, and once set, the session state can't change.",
+      "created_at": "2018-02-12T21:16:52Z",
+      "updated_at": "2018-02-12T21:16:52Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "If you already have the session state, you can create a dummy module to store it.  The `SessionState` property is writable (mistake, maybe?)\r\n\r\n```powershell\r\nfunction InvokeWithSessionState {\r\n    param($SessionState, $ScriptBlock)\r\n    end {\r\n        $module = [psmoduleinfo]::new(<# linkToGlobal: #> $false)\r\n        $module.SessionState = $SessionState\r\n        & $module $ScriptBlock\r\n    }\r\n}\r\n```\r\n\r\nThat said, I assume the actual implementation of this will be running within Pester's `SessionState`.  If that's the case, actually obtaining the global `SessionState` is the harder part.  I haven't been able to find a way to get that without reflection.",
+      "created_at": "2018-02-12T22:29:55Z",
+      "updated_at": "2018-02-12T22:37:35Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">I believe you'll have to rely on a conversion to string...The idea is to recreate the script block in global scope.\r\n\r\nI see.  It's not obvious to me how to do that from a module.\r\n\r\n```PowerShell\r\nNew-Module m {\r\n    function global:GetGlobalSessionState { $ExecutionContext.SessionState }\r\n} | Import-Module\r\n\r\n[object]::ReferenceEquals((f),$ExecutionContext.SessionState)\r\n```\r\noutputs `False`.\r\n\r\nIn other words, despite the `global:` prefix, `GetGlobalSessionState`'s scriptblock is bound to the module.\r\n\r\nIs there some other way to reliably get a reference to a scriptblock associated with the global session state?\r\n\r\n>If you already have the session state, you can create a dummy module to store it.\r\n\r\nThis seems promising, and `$PSCmdlet.SessionState` seems to contain the caller's session state.  The following code seems to prove the concept:\r\n\r\n```PowerShell\r\nNew-Module m {\r\n    New-Module n {\r\n        $v = 'n.v'\r\n        $sb = {$v}\r\n        function InvokeWithSessionState {\r\n            param($SessionState, $ScriptBlock)\r\n            $module = [psmoduleinfo]::new(<# linkToGlobal: #> $false)\r\n            $module.SessionState = $SessionState\r\n            & $module $ScriptBlock\r\n        }\r\n        function a {\r\n            [CmdletBinding()]param()\r\n            InvokeWithSessionState -SessionState $PSCmdlet.SessionState -ScriptBlock $sb\r\n        }\r\n        function b {a}\r\n    } | Import-Module\r\n\r\n    $v = 'm.v'\r\n    function c { a }\r\n} | Import-Module\r\n\r\n& {\r\n    $v = 'g.v'\r\n    a\r\n    b\r\n    c\r\n}\r\n```\r\n\r\nThat outputs\r\n\r\n```none\r\ng.v\r\nn.v\r\nm.v\r\n```\r\n\r\nIt _seems_ like this technique would not be vulnerable to any of the acceptable breaking changes in the [breaking changes contract](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md).  @lzybkr Can you comment on whether this behavior is likely to be broken in the future?",
+      "created_at": "2018-02-13T01:15:17Z",
+      "updated_at": "2018-02-13T01:15:17Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r `$PSCmdlet` won't reliably get you the global session state because you can't tell what scope it's coming from.  You can't really even be sure that it'll actually be there, if the module is called from a command prompt or a script without `CmdletBinding` that won't work.\r\n\r\nYou could get a little closer by iterating the call stack, something like\r\n\r\n```powershell\r\n(Get-PSCallStack).GetFrameVariables().PSCmdlet.Value |\r\n    Where-Object { -not $_.SessionState.Module }\r\n```\r\n\r\nBut that still depends on some part of the call stack outside of a module declaring `CmdletBinding`",
+      "created_at": "2018-02-13T01:51:14Z",
+      "updated_at": "2018-02-13T01:51:14Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@alx9r - I can see why that example doesn't work using `new-module`, but it should work if you defined the function in module when you use the `ScriptsToProcess` entry in the module manifest.\r\n\r\nI agree with @SeeminglyScience that a writable `SessionState` property in `ModuleInfo` seems unintentional. Changes to apis are generally conservative, so maybe you'd be safe using it, but I'd continue looking for alternatives so you have options to consider, or even fall back on if the api was removed.",
+      "created_at": "2018-02-13T02:03:56Z",
+      "updated_at": "2018-02-13T02:03:56Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">$PSCmdlet won't reliably get you the global session state because you can't tell what scope it's coming from.\r\n\r\nI agree.  I've been experimenting with different approaches since my OP and I think the question I should have been asking is this:  Is there a supported way of invoking a scriptblock with the caller's SessionState?  It seems like `$PSCmdlet.SessionState` reliably gets the caller's SessionState.\r\n",
+      "created_at": "2018-02-13T02:09:10Z",
+      "updated_at": "2018-02-13T02:23:21Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">it should work if you defined the function in module when you use the ScriptsToProcess entry in the module manifest.\r\n\r\nI thought so too.  And it does work, but that approach is brittle to nested modules.  If any module loads the module with `ScriptToProcess` first, then `BindToGlobalSessionState` actually binds to that module's SessionState.\r\n\r\n>Changes to apis are generally conservative, so maybe you'd be safe using it, but I'd continue looking for alternatives so you have options to consider, or even fall back on if the api was removed.\r\n\r\nI think I'm out of ideas for now.  Do you have any other ideas I should explore?  FWIW, I think the question I probably should have been asking is this: Is there a supported way of invoking a scriptblock with the caller's SessionState?",
+      "created_at": "2018-02-13T02:23:58Z",
+      "updated_at": "2018-02-13T02:23:58Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> It seems like $PSCmdlet.SessionState reliably gets the caller's SessionState.\r\n\r\n@alx9r not reliably, because you can't guarantee `CmdletBinding` was declared in the caller.  You could make that a requirement to mock, but if it wasn't declared and instead `PSCmdlet` came from a different `SessionState` than the caller it would be very difficult to debug unless you are intimately familiar with the engine.\r\n\r\nYour best bet at reliability (not taking support into account) is to get `InvocationInfo` from the call stack and get the `SessionStateInternal` of the caller.\r\n\r\n```powershell\r\n$callerScriptBlock = (Get-PSCallStack)[1].InvocationInfo.MyCommand.ScriptBlock\r\n\r\n$ssi = $callerScriptBlock.GetType().\r\n    GetProperty('SessionStateInternal', [System.Reflection.BindingFlags]'Instance, NonPublic').\r\n    GetValue($callerScriptBlock)\r\n```\r\n\r\nBut even then there are some instances where the `ScriptBlock` property is `null` (like class methods and script blocks invoked directly with `Invoke*` api's)",
+      "created_at": "2018-02-13T02:35:16Z",
+      "updated_at": "2018-02-13T02:37:59Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "FWIW I have settled on implementing a function called `BindToCallerSessionState`, for now.  The function does the following:\r\n\r\n* Attempts each of the following strategies and uses the one highest in the list that succeeds:\r\n   1. setting the session state property of a new `[psmoduleinfo]`\r\n   2. setting a scriptblock's `SessionStateInternal` property using private reflection\r\n   3. calling `BindToImporterSessionState` which is implemented using `ScriptToProcess`\r\n* Writes to the warning stream if any strategy fails.\r\n* Throws and exception if they all fail.\r\n\r\nThe problem with strategies (i) and (ii) is that they might be broken by changes to PowerShell.  The problem with (iii) is that it doesn't do the right thing -- binding to the importer session state is _not_ the same as binding to the caller session state.  This seems to be a matter of choosing the least evil.\r\n\r\nI have also implemented a number of automated tests around each of the strategies.  If there is a breaking change, it should be detected early either by the warnings seen by users or by the automated tests for the mock library failing.\r\n\r\nIt does seem a bit odd that PowerShell has a first class way of invoking a scriptblock in a given module (ie. `& $module $scriptblock`) but no supported way of invoking a scriptblock in either the \"global\" session state or the caller's session state.",
+      "created_at": "2018-02-13T16:21:34Z",
+      "updated_at": "2018-02-13T16:21:34Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">not reliably, because you can't guarantee CmdletBinding was declared in the caller.\r\n\r\nThis code\r\n\r\n```PowerShell\r\nNew-Module m {\r\n    $v = 'm.v'\r\n    function s { {$v} }\r\n    function InvokeWithCallerSessionState {\r\n        [CmdletBinding()]\r\n        param($ScriptBlock)\r\n        $module = [psmoduleinfo]::new(<# linkToGlobal: #> $false)\r\n        $module.SessionState = $PSCmdlet.SessionState\r\n        & $module $ScriptBlock\r\n    }\r\n} | Import-Module\r\n\r\n$v = 'g.v'\r\n$sb = s\r\n\r\n& $sb # m.v\r\nInvokeWithCallerSessionState -ScriptBlock $sb # g.v\r\n```\r\n\r\nseems to demonstrate that declaring CmdletBinding in the caller is not necessary.  Do you have an example demonstrating your concern?",
+      "created_at": "2018-02-13T16:40:19Z",
+      "updated_at": "2018-02-13T16:40:19Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Do you have an example demonstrating your concern?\r\n\r\nNope! I'm wrong.  I could have sworn `$PSCmdlet.SessionState` gave the *current* session state, but that isn't the case.  Learn something new every day :)",
+      "created_at": "2018-02-13T22:09:24Z",
+      "updated_at": "2018-02-13T22:12:32Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "I think there is another alternative.  As far as I can tell, when a PSCmdlet implemented in C# is invoked its SessionState property is the caller's SessionState.  In other words,\r\n\r\n * when such a cmdlet is invoked from outside a module, .SessionState is the \"global\" SessionState, and\r\n * when such a cmdlet is invoked from a script module, .SessionState is the module's SessionState.\r\n\r\n@lzybkr Can you confirm whether this is true?  I'm also wondering whether this behavior is by design or by chance.  In other words, can I rely on the correspondence between call site and .SessionState as described in the above bullets?\r\n\r\nBelow is (what I _think_ is) a working example.  It looks like utilizing this technique requires that any command to whose call site you need to bind a scriptblock be implemented as a binary command.  I haven't succeeded at replicating this technique for implementing commands as scriptblocks.\r\n\r\n```PowerShell\r\nAdd-Type '\r\n    using System.Management.Automation;\r\n\r\n    [Cmdlet(VerbsData.ConvertTo,\"CallerBound\")]\r\n    public class ConvertToCallerBound : PSCmdlet\r\n    {\r\n        [Parameter(Mandatory=true)]\r\n        public ScriptBlock ScriptBlock;\r\n\r\n        protected override void ProcessRecord()\r\n        {\r\n            WriteObject(\r\n                SessionState.InvokeCommand.InvokeScript(\r\n                    \"{$v}\"\r\n                )[0]);\r\n        }\r\n    }\r\n' -PassThru | % Assembly | Import-Module\r\n\r\n$null = New-Module {\r\n    $v = 'm.v'\r\n    function ConvertTo-ModuleBound\r\n    {\r\n        param(\r\n            [Parameter(Mandatory)]\r\n            $ScriptBlock\r\n        )\r\n        <#\r\n        .SessionState in this call to ConvertTo-CallerBound\r\n        is this module's SessionState.\r\n        #>\r\n        ConvertTo-CallerBound -ScriptBlock $ScriptBlock\r\n    }\r\n    function Invoke-ScriptBlock{\r\n        param($ScriptBlock)\r\n        & $ScriptBlock\r\n    }\r\n}\r\n\r\n$v = 'g.v'\r\n\r\n<#\r\nReturns a new scriptblock that is\r\nbound the \"global\" scope.\r\n\r\n.SessionState in this call to ConverTo-CallerBound\r\nis the \"global\" scope.\r\n#>\r\n$g = ConvertTo-CallerBound -ScriptBlock {$v}\r\n\r\n& $g # g.v\r\nInvoke-ScriptBlock $g # g.v\r\n\r\n\r\n<#\r\nReturns a new scriptblock that is \r\nbound to the module's scope.\r\n#>\r\n$m = ConvertTo-ModuleBound -ScriptBlock {$v}\r\n& $m # m.v\r\nInvoke-ScriptBlock $m # m.v\r\n```",
+      "created_at": "2019-06-18T17:16:34Z",
+      "updated_at": "2019-06-18T17:16:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Heh, can't believe I never found this issue.\r\n\r\nI've wrestled with this extensively myself in PSKoans, so that I could invoke the koan files in a global session rather than accidentally invoking them inside the module itself.\r\n\r\nMy own solution was basically to spin up a new runspace and work with that.\r\n\r\nIf there is a simpler way to bind a scriptblock to the global session state I'd very much appreciate it.",
+      "created_at": "2019-06-18T17:49:33Z",
+      "updated_at": "2019-06-18T17:49:33Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm not going to answer your question directly because it's been a long time since I've looked at this area and your observations are going to be more correct than my possibly faulty memory.\r\n\r\nIIRC, `SessionState` can be set upon first access (or explicitly) and I didn't like that as it wasn't explicit enough for my liking.\r\n\r\nBecause of this, I think it's possible it gets set by chance somewhere now, but I think @BrucePay was careful enough when originally implementing modules that everything is (or at least once was) by design.",
+      "created_at": "2019-06-18T20:04:15Z",
+      "updated_at": "2019-06-18T20:04:15Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@lzybkr Ah.  I see.  Got it.  Thanks for the background.  I think I've got enough tests around the behavior I need that I'll probably detect an inadvertent change early enough.",
+      "created_at": "2019-06-18T20:19:58Z",
+      "updated_at": "2019-06-18T20:19:58Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">If there is a simpler way to bind a scriptblock to the global session state I'd very much appreciate it.\r\n\r\n@vexx32 The best I've been able to come up with is the methods for binding to the caller's session state (which may or may not be the global session state) discussed above.  Binding to the global session state is a bridge further than I have explored.",
+      "created_at": "2019-06-18T20:23:34Z",
+      "updated_at": "2019-06-18T20:23:34Z"
+    }
+  ],
+  "created_at": "2018-02-12T19:20:37Z",
+  "number": 6147,
+  "state": "open",
+  "title": "Is there a supported way of binding an unbound scriptblock to the \"global\" SessionState?",
+  "updated_at": "2019-06-18T20:23:34Z"
+}

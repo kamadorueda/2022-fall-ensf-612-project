@@ -1,0 +1,153 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11478",
+  "author": "OtterKring",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\n$messageids | ForEach-Object -Parallel {$mid = $_; $using:log | \r\n    ? messageid -eq $mid | \r\n    Sort-Object ExactTimeStamp | \r\n    Select-Object -first 1} | \r\n    Export-Csv mtl_midunique.csv -Encoding utf8 -NoTypeInformation\r\n```\r\n\r\n$log held ~70000 lines imported from a csv holding the export of get-messagetrackinglog, $messageids had ~60000 lines imported from a csv, holding unique messageids\r\n\"ExactTimeStamp\" was build from the TimeStamp property, format 'yyyyMMddHHmmssfff'\r\n\r\n# Expected behavior\r\n\r\nquicker iteration through the date than single threaded, steady memory usage\r\n\r\n# Actual behavior\r\n\r\nmemory usage of the process building up to several GBs, slowing down the iteration to much less than this single threaded code:\r\n```powershell\r\n &{foreach ($mid in $messageids) {&{foreach ($entry in $log) {if ($entry.messageid -eq $mid) {$entry}}} | \r\n    Sort-Object ExactTimeStamp | \r\n    Select-Object -first 1}} | \r\n    Export-Csv mtl_midunique.csv -Encoding utf8 -NoTypeInformation\r\n```\r\n\r\n# Environment data\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.1\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0",
+  "closed_at": "2020-03-14T17:35:37Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "What's in `$log`? If that's a logfile with a few hundred or a few thousand lines, keep in mind that in order to be parallelized in this manner, that data has to be _copied_ to each runspace before it can be used.\r\n\r\nSo yeah, I'd expect some extra memory usage for that. I daresay this would be the kind of task you should _not_ parallelize, since you have one data input source that you're now copying probably quite a few times.\r\n\r\nI would guess that you could make this a lot quicker by simply skipping the internal foreach loop on your single-threaded code:\r\n\r\n```powershell\r\n$messageids = [System.Collections.Generic.List[string]]$messageids\r\n$uniqueEntries = foreach ($entry in $log) {\r\n    if ($entry.messageid -in $messageids) {\r\n        # remove the message ID we found from our list so we only get the first item of that ID\r\n        $messageids.Remove($entry.messageid) > $null\r\n        $entry\r\n    }\r\n\r\n    # If we find one of all our IDs, we can exit here\r\n    if ($messageids.Count -eq 0) {\r\n        break\r\n    }\r\n}\r\n\r\n$uniqueEntries | Export-Csv -Path mtl_midunique.csv -Encoding UTF8\r\n```\r\n\r\nThere's a lot of unnecessary piping and re-iterating the same large collection both in single and multithreaded versions of your code. In either case, it's not going to be particularly efficient. For the multithreaded case, though, copying a large log file to multiple runspaces is always going to be rather tricky to do with any kind of efficiency.",
+      "created_at": "2020-01-03T16:01:32Z",
+      "updated_at": "2020-01-03T16:04:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps you could create and use `$Global:log`. Also I'd create a (global) hash for messageid-s from the log before parallelize.",
+      "created_at": "2020-01-04T08:22:08Z",
+      "updated_at": "2020-01-04T08:22:08Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-02-02T00:00:27Z",
+      "updated_at": "2020-02-02T00:00:27Z"
+    },
+    {
+      "author": "awickham10",
+      "author_association": "NONE",
+      "body": "I'm going to agree that there seems to be a memory leak. I ran the below code and pwsh.exe got up to 8 GB private working set before dropping down to 2 GB - around 7,500 items in. After the code completed it was back to 6 GB and did not return the memory - manual garbage collection had to be run at which point the memory quickly dropped to 120 MB.\r\n\r\n```powershell\r\n1..10000 | Foreach-Object -Parallel {\r\n    $guid = New-Guid\r\n}\r\n```\r\n\r\nI tried this without going parallel and was able to assign 10,000 GUIDs to a hash table using only 12 MB of memory.\r\n\r\n```powershell\r\n$hash = @{}\r\n1..10000 | Foreach-Object { \r\n    $hash[$_] = New-Guid\r\n}\r\n```\r\n\r\nPSVersionTable output\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.2\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+      "created_at": "2020-02-13T19:52:36Z",
+      "updated_at": "2020-02-13T19:53:37Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I certainly would expect that the memory is returned... interesting. It's never really clear exactly when the garbage collector does run, unfortunately. @paulhigin is it worth looking into whether we want to manually call garbage collection during `EndProcessing()` or `Dispose()` for `ForEach-Object -Parallel` invocations to avoid this memory-leak-like behaviour?",
+      "created_at": "2020-02-13T21:52:22Z",
+      "updated_at": "2020-02-13T21:52:22Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "No, I don't think we should perform garbage collection for the user.  I don't like to second guess the user because it seems to always end up doing the wrong thing.  Garbage collection can really slow a system down.  For general behavior, we need to rely on CLR garbage collection algorithms.  A user knows more about what is going on, and can add manual garbage collection step if needed.",
+      "created_at": "2020-02-13T23:06:26Z",
+      "updated_at": "2020-02-13T23:06:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "To confirm a memory leak you should run your _whole_ test _script_ (not only commands in the cycle body!) many times and measure diffs.\r\n\r\n> After the code completed it was back to 6 GB and did not return the memory - manual garbage collection had to be run at which point the memory quickly dropped to 120 MB.\r\n\r\nIn PowerShell 6 we saw the behavior in many scenarios. It is .Net Core 2.1 behavior. Now in PowerShell 7.0 we use .Net Core 3.1 and garbage collector works great in most scenarios. You can report in .Net Core repo if you see an issue with garbage collector.",
+      "created_at": "2020-02-14T03:27:17Z",
+      "updated_at": "2020-02-14T03:27:43Z"
+    },
+    {
+      "author": "awickham10",
+      "author_association": "NONE",
+      "body": "As a script writer I would expect the memory usage to be more related to the number of parallel threads I'm running and not the total number of items I've piped through the `Foreach-Object -Parallel`. I'm not sure what the technology being used for the parallel implementation is but using a runspace pool to go through the same scriptblock I mentioned above introduced almost no memory overhead (analysis done with task manager). I'm not a developer and don't have any background on optimizing memory usage, but overall this just doesn't feel right. Garbage collection takes care of the memory usage if it's run after the scriptblock is complete but I can't figure out how to make garbage collection release the memory while the scriptblock is still being executed.\r\n\r\nMaybe it's just a usage pattern thing? Maybe `Foreach-Object -Parallel` works better for a small number of long running tasks and not a large number of short running tasks?",
+      "created_at": "2020-02-14T17:46:58Z",
+      "updated_at": "2020-02-14T17:46:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  Maybe Foreach-Object -Parallel works better for a small number of long running tasks and not a large number of short running tasks?\r\n\r\nYes, runspaces is not lightweight. See https://devblogs.microsoft.com/powershell/powershell-foreach-object-parallel-feature/\n\n<blockquote><img src=\"https://devblogs.microsoft.com/powershell/wp-content/uploads/sites/30/2018/09/Powershell_256.png\" width=\"48\" align=\"right\"><div><img src=\"https://devblogs.microsoft.com/powershell/wp-content/uploads/sites/30/2019/02/Powershell_2561.png\" height=\"14\"> PowerShell</div><div><strong><a href=\"https://devblogs.microsoft.com/powershell/powershell-foreach-object-parallel-feature/\">PowerShell ForEach-Object Parallel Feature | PowerShell</a></strong></div><div>PowerShell ForEach-Object Parallel Feature\nPowerShell 7.0 Preview 3 is now available with a new ForEach-Object Parallel Experimental feature. This feature is a great new tool for parallelizing work, but like any tool, it has its uses and drawbacks.\nThis article describes this new feature,</div></blockquote>",
+      "created_at": "2020-02-15T08:13:46Z",
+      "updated_at": "2020-02-15T08:13:48Z"
+    },
+    {
+      "author": "awickham10",
+      "author_association": "NONE",
+      "body": "This is a great blog article illustrating the memory problems with Foreach-Object -Parallel. I had similar results - even if I was trying to do manual garbage collection it wouldn't clear things out like I would have expected.\r\n\r\nhttps://xkln.net/blog/powershell-7-foreach-object-parallel-memory-consumption/\n\n<blockquote><img src=\"https://xkln.net/images/header_image.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://xkln.net/blog/powershell-7-foreach-object-parallel-memory-consumption/\">PowerShell 7 ForEach-Object -Parallel Memory Consumption</a></strong></div><div>I\u2019m undertaking a project where one of of the tasks involves processing some 350,000 XML files. If each file takes one second to process that\u2019s just over 4 days\u2026</div></blockquote>",
+      "created_at": "2020-03-11T20:27:06Z",
+      "updated_at": "2020-03-11T20:27:08Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "That is an awesome article.  And now I am re-thinking how foreach -parallel is implemented.  Currently a new runspace is created for each iteration, but it is clear that the .Net GC has trouble keeping up and manual collection is needed.  One solution may be @iSazonov idea of having foreach -parallel perform regular GC for the user.  My main concern with that is possible perf degradation that the user can't control.  Also, I didn't originally go with the runspace pool because I was concerned with state leakage between iterations.  But that may be the way to go.  I'll reopen this Issue.",
+      "created_at": "2020-03-11T20:46:23Z",
+      "updated_at": "2020-03-11T20:46:23Z"
+    },
+    {
+      "author": "awickham10",
+      "author_association": "NONE",
+      "body": "Thank you! The Parallel option is probably the most talked about feature and I would hate to see adoption fall off because of something like this. If you need some testing I'm happy to help.",
+      "created_at": "2020-03-11T20:54:13Z",
+      "updated_at": "2020-03-11T20:54:13Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@awickham10  Great!  I'll make some changes and we can test on your benchmark.  I think I'll start with runspace pooling since that should give us the best perf/memory improvement.  ",
+      "created_at": "2020-03-11T21:13:55Z",
+      "updated_at": "2020-03-11T21:13:55Z"
+    },
+    {
+      "author": "mdjx",
+      "author_association": "NONE",
+      "body": "> That is an awesome article. And now I am re-thinking how foreach -parallel is implemented. Currently a new runspace is created for each iteration, but it is clear that the .Net GC has trouble keeping up and manual collection is needed. \r\n\r\nI wrote the linked piece, that explanation brings some clarity to what I was seeing... I was a little confused because I incorrectly thought runspace pools were being used under the hood. \r\n\r\nAlso happy to help out with any testing and can update the post with new results if changes get implemented. ",
+      "created_at": "2020-03-12T00:41:10Z",
+      "updated_at": "2020-03-12T04:13:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I agree that using a pooling may be great.\r\nAlso I found latest GC is very robust. If it is not true for the scenario I think we should investigate why, apply GC options and use this with the pooling.",
+      "created_at": "2020-03-12T04:05:55Z",
+      "updated_at": "2020-03-12T04:05:55Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@awickham10 , @mdjx I have a PR that implements runspace reuse (https://github.com/PowerShell/PowerShell/pull/12122).\r\n\r\nThis change greatly affects memory use and perf (especially for loops that do a small amount of work).  My main concern is side effects due to state leakage between loop iterations, but hopefully there won't be any or they will be insignificant.  \r\n\r\nThe PR is currently marked as WIP.  Can you clone my fork and build the branch (foreach-parallel-rsreuse), and test?",
+      "created_at": "2020-03-13T18:30:46Z",
+      "updated_at": "2020-03-13T18:30:46Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin I'm not particularly familiar with this part of the codebase, so I'm curious -- I notice in the code you're not using [RunspacePool](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.runspaces.runspacepool?view=pscore-6.2.0) at all. Is there a reason for that? Typically when I see parallelisation code, they're using that in one fashion or another. ",
+      "created_at": "2020-03-13T19:35:51Z",
+      "updated_at": "2020-03-13T19:35:51Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 RunspacePool is overkill for my needs here and I can go with a much simpler solution.  Also I want to control the health and lifetime of the runspace objects myself and ensure the throttle limit is honored.",
+      "created_at": "2020-03-13T22:22:05Z",
+      "updated_at": "2020-03-13T22:22:05Z"
+    },
+    {
+      "author": "mdjx",
+      "author_association": "NONE",
+      "body": "@PaulHigin I had a chance to build and test today, hopefully I did it right as the built $PSVer shows v6.x, but I had access to `-Parallel`, so I assume it's correct (first time doing something like this, sorry :)). \r\n\r\n```\r\n$PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-alpha.9\r\nPSEdition                      Core\r\nGitCommitId                    6.0.0-alpha.9-4077-gbb145502f10c6dca37d1a714d8be58e487a78546\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nI tested using the same files and method as the blog post, here are the results. \r\n\r\n**2 Threads**\r\n`TaskPool runspace pool count: 2`\r\n- Peak memory: 0.23 GB\r\n- Exec time: ~45 seconds\r\n\r\n**6 Threads**\r\n`TaskPool runspace pool count: 6`\r\n- Peak memory: 0.33 GB\r\n- Exec time: ~ 30 seconds\r\n\r\n**6 Threads w/ Remove-Variable**\r\n`TaskPool runspace pool count: 6`\r\n- Peak memory: 0.26 GB\r\n- Exec time: ~30 seconds\r\n\r\nMemory usage looks really good, execution time is still a little faster using the old way of creating runspace pools (~10 secs vs ~30). \r\n\r\nAlso did a test with 6 threads and 100,000 files:\r\n\r\n**6 Threads, 100,000 files**\r\n`TaskPool runspace pool count: 6`\r\n- Peak memory: 0.71 GB\r\n- Exec time:  ~730 seconds",
+      "created_at": "2020-03-15T09:22:37Z",
+      "updated_at": "2020-03-15T09:22:54Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@mdjx  Thanks for performing these tests!  This generally agrees with my own simpler tests.  But all of my tests were noticeably faster than before, since much less time is spent creating and initializing runspaces, so I wonder if there are other factors causing yours to run slightly slower.\r\n\r\nBTW the 'TaskPool runspace pool count: x' console output is temporary and will be removed if these changes are accepted.",
+      "created_at": "2020-03-16T15:38:39Z",
+      "updated_at": "2020-03-16T15:38:39Z"
+    }
+  ],
+  "created_at": "2020-01-03T10:10:34Z",
+  "number": 11478,
+  "state": "closed",
+  "title": "Possible Memory Leak in Foreach -Parallel, version 7.rc1",
+  "updated_at": "2020-03-16T15:38:39Z"
+}

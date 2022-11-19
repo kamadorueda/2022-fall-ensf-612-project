@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3313",
+  "author": "viorel-m",
+  "body": "Steps to reproduce\r\n------------------\r\nDescription: I can't make powershell use correctly types like [uint32] or [uint64]. It seems like it always tries to dumb down every number to [int], and does it poorly. The bug seems to be that PS doesn't realize that is has to upcast 0xffffffff to int64 and not to int32, as it won't fit.\r\n\r\nPS C:\\> [uint32]$b=0xffffffff\r\nCannot convert value \"-1\" to type \"System.UInt32\". Error: \"Value was either too large or too small for a UInt32.\"\r\n\r\nPS C:\\> $b=[uint32]0xffffffff\r\nCannot convert value \"-1\" to type \"System.UInt32\". Error: \"Value was either too large or too small for a UInt32.\"\r\n\r\nPS C:\\> $b=[uint64]0x1ffffffff\r\n<so this works, because powershell realizes that 1ffffffff doesn't fit into 31 bit>\r\n\r\nPS C:\\> $b=[uint64]0xffffffff\r\nCannot convert value \"-1\" to type \"System.UInt64\". Error: \"Value was either too large or too small for a UInt64.\"\r\n\r\nExpected behavior\r\n-----------------\r\nPS C:\\ > [uint32]$b = 0xffffffff\r\nPS C:\\ > $b\r\n4294967295\r\n\r\nActual behavior\r\n---------------\r\nPS C:\\> [uint32]$b = 0xffffffff\r\nCannot convert value \"-1\" to type \"System.UInt32\". Error: \"Value was either too large or too small for a UInt32.\"\r\nAt line:1 char:1\r\n+ [uint32]$b = 0xffffffff\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : MetadataError: (:) [], ArgumentTransformationMetadataException\r\n    + FullyQualifiedErrorId : RuntimeException\r\n \r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nPS C:\\> $PSVersionTable\r\n\r\nName                           Value                                                                                                                                                      \r\n----                           -----                                                                                                                                                      \r\nPSVersion                      5.1.15050.0                                                                                                                                                \r\nPSEdition                      Desktop                                                                                                                                                    \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                                                                                                                                    \r\nBuildVersion                   10.0.15050.0                                                                                                                                               \r\nCLRVersion                     4.0.30319.42000                                                                                                                                            \r\nWSManStackVersion              3.0                                                                                                                                                        \r\nPSRemotingProtocolVersion      2.3                                                                                                                                                        \r\nSerializationVersion           1.1.0.1                                                                                                                                                    \r\n\r\n```\r\n",
+  "closed_at": "2018-09-28T20:27:33Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "By default PowerShell convert to signed values. Workaround:\r\n```powershell\r\n[uint32]\"0xffffffff\"\r\n```",
+      "created_at": "2017-03-13T03:55:47Z",
+      "updated_at": "2017-03-13T03:55:47Z"
+    },
+    {
+      "author": "viorel-m",
+      "author_association": "NONE",
+      "body": "I am aware of the workaround. It tends to breakdown when you move away from the simple repro steps I added here, and try to use expressions, pass parameters to functions or scripts, or use in classes. It basically forces me to not only pay attention to unwanted conversions to [int], but also add convert back and forth to [string] into the mix.\r\n\r\nAny other language I know knows to upcast numbers to the next type that fits. If the given value does not fit in an int32, PowerShell should upcast it to [uint32]. Or to [int64], if it really wants to use signed.\r\n\r\nParticularly for uint64 this makes no sense:\r\n\r\n0x00000000 - 0x7fffffff works\r\n0x80000000 - 0xffffffff throws\r\n0x0000000100000000 - 0xffffffffffffffff works again\r\n\r\nFor consistency, I would expect anything above 0x7fffffffffffffff to also throw, because the signed [int64] cannot take it. But here PowerShell knows to silently convert to [uint64]. Why doesn't it know the same for 0x80000000?",
+      "created_at": "2017-03-13T16:14:33Z",
+      "updated_at": "2017-03-13T16:14:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I suppose the \"0x\" prefix to be enough to correct the behavior.",
+      "created_at": "2017-03-13T17:07:36Z",
+      "updated_at": "2017-03-13T17:07:36Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell arithmetic is complicated with all of the implicit type conversions, implicit widening, etc. We decided not to include unsigned in V1 because it would have made the algorithm significantly more complicated (this was probably a mistake). Anyway, as an alternate workaround, you can use the 'l' long suffix to force 64 bit integers in your constants as in:\r\n`[uint32]$b = 0xffffffffl`\r\nwhich works as you'd expect.",
+      "created_at": "2017-03-13T22:30:26Z",
+      "updated_at": "2017-03-13T22:30:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We would carry out the necessary cast at parse time in the case of the following notation:\r\n```powershell\r\n$var = [uint32] 123\r\n$var = [decimal] 123\r\n...\r\n```",
+      "created_at": "2017-03-14T04:20:50Z",
+      "updated_at": "2017-03-14T04:20:50Z"
+    },
+    {
+      "author": "viorel-m",
+      "author_association": "NONE",
+      "body": "Thank you both for the suggestions!\r\nMy example uses constants because I wanted to simplify the repro. For the real project I read an uint64 value from a binary file. The value is a bit field of 64 flags and I want to translate them to strings. Like 0x9 would translate to (\"alpha\", \"delta\") where alpha=0x1 and delta=0x8, for example.\r\nBecause of this issue I'm complaining about, writing the script is unnecessarily complicated. I spent more time trying to fix it than to actually write it.\r\n\r\n(Thanks for the tip with the 'l' suffix - I didn't know it. I checked and there is a 'd' suffix as well, for decimal.)",
+      "created_at": "2017-03-15T04:06:59Z",
+      "updated_at": "2017-03-15T04:06:59Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I don't agree that we should convert negative numbers to unsigned values via a simple cast - we can't infer intent from values:\r\n\r\n```PowerShell\r\n0xffffffff, -1 | % { [uint64]$_ }\r\n```\r\n\r\nDespite the syntax, PowerShell doesn't have the notion of an explicit conversion - all conversions are implicit. So in that sense, allowing this conversion with this syntax would be unsafe.\r\n\r\nEven if we allowed the conversion from a i32 to u64, I don't think it would behave how you want - it would sign extend before changing types - this is how languages like C or Rust work.\r\n\r\nIf your code is reading a file, I would suggest using something like `[System.BitConverter]::ToUInt64($bytes, 0)`.\r\n\r\nIf you have fewer bytes in the file than the ultimate type, you can use `ToUint32` and that will properly zero-extend to u64 without any complaints from PowerShell.",
+      "created_at": "2017-03-15T15:24:57Z",
+      "updated_at": "2017-03-15T15:24:57Z"
+    },
+    {
+      "author": "viorel-m",
+      "author_association": "NONE",
+      "body": "I'm not sure how this addresses my problem. I don't want to use signed. I don't need signed. I would gladly use unsigned all the way. Except, as you say, powershell does things under the covers, like converting to [int], whether I like it or not, and outside of my control.\r\nWhen I say [uint32] $b = 0xffffffff it's pretty clear to me that I mean to use [uint32]. If I wanted signed I would have said $b = -1.\r\nI don't know about Rust, but in C/C++ when I say UINT64 c = 0xffffffff the result is 0x00000000ffffffff and not 0xffffffffffffffff, or an exception thrown.\r\n\r\nTo give another example where powershell gets in the way with its obsession with [int]:\r\n\r\n$a = @{};\r\n$a.Add(0, 'Zero');\r\n$a.Add(1, 'One')\r\n\r\n$a[0]\r\n**Zero**\r\n\r\n[uint32] $b = 0\r\n$a[$b]\r\n**Nothing**\r\n\r\n$a[[int]$b]\r\n**Zero**\r\n\r\nYou may argue that this is by some sort of design - but you cannot argue that this is very error prone.\r\n\r\nThere used to be another bug, where switch($b) wouldn't match if $b was [byte] or [uint32] - only when $b was [int]. I don't see this repro-ing anymore, so I guess it was fixed.\r\n",
+      "created_at": "2017-03-18T21:26:41Z",
+      "updated_at": "2017-03-18T21:26:41Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Many years ago, I worked on C++ compilers, and I always felt hexadecimal literals should never be signed, so I agree with you.\r\n\r\nIn C++, a hex literal can be either an `int` or `unsigned int` depending on the value. I was never a fan of that design, but implicit conversions and the `u` suffix make it mostly not a big deal.\r\n\r\nPowerShell is missing the `u` suffix and we need to be more cautious with conversions because they are so permissive and there is no distinction between implicit and explicit conversions.\r\n\r\nIf you're curious about Rust, here is a simple program:\r\n\r\n```Rust\r\nfn main() {\r\n    let val = 0xffffffff;\r\n    let val2: u64 = val as u64;\r\n    println!(\"{}\", val2);\r\n}\r\n```\r\n\r\nYou can run it here: https://play.rust-lang.org/\r\n\r\nThe compiler issues a warning and prints out the sign extended value.\r\n\r\n```\r\nrustc 1.16.0 (30cf806ef 2017-03-10)\r\nwarning: literal out of range for i32, #[warn(overflowing_literals)] on by default\r\n --> <anon>:2:15\r\n  |\r\n2 |     let val = 0xffffffff;\r\n  |               ^^^^^^^^^^\r\n\r\n18446744073709551615\r\n```\r\n\r\nMy point in bringing up Rust is that it is also a popular language and seems to have chosen consistency (always an i32) instead of sometimes unsigned. Again, I think it would be better to use an unsigned type for hex literals.\r\n\r\nAs for your `hashtable` example, I've seen people hit the same problem with strings instead of integers, and I've seen problems in C#, so it's more the unsafe nature of weakly typed keys of `hashtable` than anything else.",
+      "created_at": "2017-03-19T06:23:24Z",
+      "updated_at": "2017-03-19T06:23:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Like C++, C# also chooses `int` / `Int64` or `uint` / `UInt64`  based on the value of a [hex] literal.\r\n\r\nWhile the approaches differ - Rust sticks with `int`, but warns if the result would be a negative number - what these languages have in common is that **they honor the fundamental user expectation that a [hex] literal specified without a sign result in a _positive_ number**.\r\n\r\nBy contrast, **PowerShell's current behavior depends on whether the literal is in _hex_ or _decimal_ format** (base-10 representation, not the `[decimal]` data type):\r\n\r\n* With _decimal_ literals, the expectation is honored: the type is chosen so that the value fits _as a positive number_ into an - always _signed_ - integer type, and the type chosen goes even beyond `[int64]`, up to `[decimal]` and, ultimately, `[double]`.\r\n\r\n    * On a side note, I found the following discrepancy surprising (`2147483648` is `[int32]::MaxValue + 1`):  \r\n`(2147483648).GetType().Name` yields `Int64`, as expected: the smallest signed type that can accommodate the value.  \r\nIf you use an _expression_ with the same value, the type instantly widens to `[Double]` rather than `[Int64]`:  \r\n`(2147483647 + 1).GetType().Name` yields `Double`.\r\n\r\n\r\n* With _hexadecimal_ literals, the value is unexpectedly treated like a _bit pattern_: the  always _signed_ target type is chosen based on whether it can _accommodate all bits_, _even if the resulting number is negative_.   \r\nThat is, whenever the bit pattern happens to have the high bit set in the resulting data type, a negative number results.\r\nUnlike with _decimal_ literals,  `[int64]` is the largest type supported in this case.\r\n\r\n**Perhaps v6 is an opportunity to fix this problem**, a change that probably falls into [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).  \r\n\r\nAs for how this can be done:\r\n\r\n* If hex literals are treated the same as decimal literals - always resulting in _signed_ types - the range `0x8000000000000000` to `0xffffffffffffffff` becomes unavailable, given that widening to `[decimal]` probably makes no sense for values that are presumed to be bit fields.\r\n\r\n* Perhaps hex literals could therefore truly be converted to _unsigned_ types, assuming that PowerShell's type-conversion magic prevents any ill follow-on effects.\r\n\r\nI presume that generally introducing an `u` suffix is a more problematic change in terms of backward compatibility.\r\n\r\n@viorel-m-git \r\n\r\n> I would expect anything above 0x7fffffffffffffff to also throw, because the signed [int64] cannot take it. But here PowerShell knows to silently convert to [uint64].\r\n\r\nI don't think that's happening : PowerShell _never_ implicitly converts to `[uint64]`.  Values between `0x8000000000000000` (`0x7fffffffffffffff + 1`)  and `0xffffffffffffffff` are converted to `[int64]` (signed) and result in _negative_ values (`-9223372036854775808` and `-1`, respectively).\r\n",
+      "created_at": "2017-04-25T17:22:01Z",
+      "updated_at": "2018-09-03T14:55:22Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @vexx32  \r\n\r\nI think the discussion should considered by PowerShell Committee too with #7557 \r\n/cc @SteveL-MSFT ",
+      "created_at": "2018-09-03T11:49:51Z",
+      "updated_at": "2018-09-03T11:53:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks for digging this up! I think... Yeah, I think I pretty much have covered all these cases in #7575.\n\nHigh-bit hex numbers still get treated as negative, but you can specify the `u` suffix to parse them as large unsigned numbers.\n\nHowever, that works only up to uint64, because there are no larger unsigned types to work with. I'm not sure how to deal with a sign bit there, to be honest, but I think at the moment I permit the signed bit for decimals to be used.\n\nWhether that makes the most sense... I can't really say. It does progress to big integer after that if you attempt to go *really* high, but dealing with a sign bit in that range is essentially meaningless, really. I'm tempted to just have it parse all super large hex literals as always positive (which can then just be prefixed with a negative sign to invert them), but I'm not sure.",
+      "created_at": "2018-09-03T12:00:25Z",
+      "updated_at": "2018-09-03T12:00:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  By default, all number literals are signed in PowerShell.  We would accept a proposal to introduce a `u` suffix to indicate unsigned numeric literals.",
+      "created_at": "2018-09-19T22:38:02Z",
+      "updated_at": "2018-09-19T22:38:02Z"
+    }
+  ],
+  "created_at": "2017-03-12T22:17:56Z",
+  "number": 3313,
+  "state": "closed",
+  "title": "PowerShell doesn't understand unsigned numbers",
+  "updated_at": "2018-09-29T16:47:56Z"
+}

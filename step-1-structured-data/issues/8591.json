@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8591",
+  "author": "vexx32",
+  "body": "The documentation on switch statements [here](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_switch?view=powershell-6#syntax) has this to say about scriptblock-expression case statements (emphasis added):\r\n\r\n> If the condition is an expression or a script block, it is evaluated just before it is compared to the value. The value is assigned to the $_ automatic variable and is available in the expression. **The match succeeds if the expression is true** ***or matches the value.*** The expression is evaluated in its own scope.\r\n\r\nA case statement like `{ $false }` (or one evaluating to such) is currently skipped, even if the value passed into the switch is `$false` explicitly.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nswitch ($false) {\r\n    $false {\r\n        \"This is expected.\"\r\n    }\r\n    { $false } {\r\n        \"This should also pass as it evaluates to the specified target value.\"\r\n    }\r\n    { 1 -eq 2 } {\r\n        \"Once again, a false boolean statement should trigger the match.\"\r\n    }\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nThis is expected.\r\nThis should also pass as it evaluates to the specified target value.\r\nOnce again, a false boolean statement should trigger the match.\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nThis is expected.\r\n```\r\n\r\n# Actual Encounter\r\n\r\nI was attempting to use logic like this to determine if types were already loaded for use in PSKoans, much like this:\r\n\r\n```powershell\r\nswitch ($false) {\r\n    { 'MyType' -as [type] } {\r\n        class MyType {}\r\n    }\r\n    { 'MyType2' -as [type] } {\r\n        class MyType2 {}\r\n    }\r\n}\r\n```\r\n\r\nI had to flip the logic, add a series of `-not ()` and make the switch check against `$true` instead to make this work, which seems silly and unnecessary. \ud83d\ude04 \r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-01-07T20:25:41Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Note this only affects expressions encased in script blocks, _not_ expressions in parentheses:\r\n\r\n```powershell\r\nswitch ($false) {\r\n    (1 -eq 2) {\r\n        \"surprise!\"\r\n    }\r\n    { 1-eq 2 } {\r\n        \"surprise2!\"\r\n    }\r\n}\r\n```\r\nyields:\r\n```\r\nsurprise!\r\n```",
+      "created_at": "2019-01-04T18:36:55Z",
+      "updated_at": "2019-01-04T18:38:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's an interesting find, and it applies to all \"falsy\" values, including `0` and `''`.\r\n\r\nMy vote would be to _only_ support signaling a scriptblock-based match via (implied) Boolean result, not also by value identity, which is where the ambiguity comes from.\r\n\r\nNot sure about backward compatibility, but at the very least we should update the docs to recommend using the Boolean approach only.\r\n\r\nNote that the only good reason to use a scriptblock to begin with is if you need to determine a match via `$_`; otherwise, an expression is preferable anyway.",
+      "created_at": "2019-01-07T13:18:35Z",
+      "updated_at": "2019-01-07T13:19:59Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Yeah, I've been playing with it and I'm really not sure it _is_ behaving as the docs say at all. \r\n\r\n```powershell\r\nPS C:\\Program Files\\PowerShell\\6> switch (7) {\r\n>> 7 { \"bare number\"}\r\n>> 6 { \"different bare number\" }\r\n>> {7} {\"scriptblock number\"}\r\n>> {6} {\"different scriptblock number\"}\r\n>> {1} {\"still positive\"}\r\n>> {0} {\"falsey numeral\"}\r\n>> {\"hello\"}{\"truthy string\"}\r\n>> {\"\"}{\"falsy string\"}\r\n>> }\r\nbare number\r\nscriptblock number\r\ndifferent scriptblock number\r\nstill positive\r\ntruthy string\r\n```\r\n\r\nSo this _might_ just be an issue of the docs not clearly indicating the difference between a **scriptblock expression** and a **bare or parenthesis-wrapped expression**.\r\n\r\nFWIW I did find a better solution for my original intent for type-checking, as well:\r\n\r\n```powershell\r\nswitch ($null) {\r\n    ('MyType' -as [type]) {\r\n        class MyType {}\r\n    }\r\n    ('MyType2' -as [type]) {\r\n        class MyType2 {}\r\n    }\r\n}\r\n```",
+      "created_at": "2019-01-07T13:33:45Z",
+      "updated_at": "2019-01-07T13:36:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @vexx32 - your test command suggests that the script block output is (sensibly) _always_ coerced to a Boolean (without a value comparison), so, yes, this smells like a mere documentation bug.\r\n\r\nTo provide some fodder for updating the docs:\r\n\r\n* Use an **expression** (`(...)`) if you want to dynamically calculate _the value_ to match; that is, use an expression  if you want its result to be compared directly to the input value; by default, the equivalent of <br>`<input> -eq <expr>` determines a match, where `<input>` is the input value and `<expr>` the branch condition. Note that you cannot reference the current input value as `$_`  in such an expression; use a script block for that - see below.\r\n\r\n* Use a **script block** (`{ ... }`)  to dynamically test for a match via a  _conditional_ that involves the  _current input value_, as in `$_`. That is, the script block must return a (possibly coerced) _Boolean_ that indicates whether the input is considered a match or not.\r\n\r\n",
+      "created_at": "2019-01-07T14:18:40Z",
+      "updated_at": "2019-01-07T15:15:24Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Looks good, @mklement0! I would also mention that any invariant (not `$_`-based) script block expression that evaluates or coerces to `$true` is essentially similar to a `default` case, and will always be run unless a previous case exits the switch statement before it can be reached.",
+      "created_at": "2019-01-07T14:34:00Z",
+      "updated_at": "2019-01-07T14:34:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I\u2019ve opened docs issue https://github.com/PowerShell/PowerShell-Docs/issues/3512 (it covers other issues too). ",
+      "created_at": "2019-01-07T17:06:32Z",
+      "updated_at": "2019-01-07T17:06:32Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Yeah this is a doc bug. The docs are mixing two very different concepts. A `switch` statement clause may begin with either :\r\n1. an expression whose _value_ is used to match against.\r\nor\r\n2. a literal scriptblock whose value is *not* matched against but instead, is executed during clause processing. It receives the object to match in `$_` and the match succeeds only if the scriptblock returns a true value. So a scriptblock `{$false}` will always fail regardless of the value being matched but a scriptblock `{$_ -eq $false}` will succeed if the value to match is `$false`:\r\n```powershell\r\nPSCore (1:54) >  switch ($false) {{$_ -eq $false} {\"True\" }}\r\nTrue\r\n```\r\n",
+      "created_at": "2019-01-07T20:22:12Z",
+      "updated_at": "2019-01-07T20:22:12Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sounds good! I'll close this one for now since @mklement0 has gone ahead and created the docs issue. \ud83d\ude42 \r\n",
+      "created_at": "2019-01-07T20:25:41Z",
+      "updated_at": "2019-01-07T20:25:41Z"
+    }
+  ],
+  "created_at": "2019-01-04T18:24:28Z",
+  "number": 8591,
+  "state": "closed",
+  "title": "{ $false } cases in switch statements are skipped even if the value it's matching is also $false",
+  "updated_at": "2019-01-19T08:00:50Z"
+}

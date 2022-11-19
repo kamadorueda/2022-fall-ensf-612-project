@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16829",
+  "author": "hero101111",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nRun the following code:\r\n\r\n```\r\nSet-StrictMode -version latest\r\n\r\n[string] $content = @\"\r\n[\r\n  {\r\n    \"First\": \"1\"\r\n  },\r\n  {\r\n    \"Second\": \"2\"\r\n  }\r\n]\r\n\"@\r\n\r\n$json = (ConvertFrom-Json -InputObject $content)\r\n$json.Second\r\n```\n\n### Expected behavior\n\n```console\nTo get `2`.\n```\n\n\n### Actual behavior\n\n```console\nAn error that says `The property 'Second' cannot be found on this object. Verify that the property exists.`\n```\n\n\n### Error details\n\n```console\nThis issue was exhibiting itself in the context of a much larger script and it took me a while to narrow it down to Strict Mode... \r\n\r\nInspecting the issue, I discovered that setting the Strict Mode to lower than 2 causes the issue to stop appearing and the input text to get parsed correctly.\r\n\r\nCould not find any documentation about ConvertFrom-Json changing behavior in respect to Strict Mode, so I am guessing that this is a bug.\n```\n\n\n### Environment data\n\n```powershell\nPowerShell 7.2.1 on Windows 11 Professional x64.\r\n\r\nAs a note, the issue also is also reproducible on Windows PowerShell.\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": "2022-02-04T12:00:45Z",
+  "comments": [
+    {
+      "author": "hero101111",
+      "author_association": "NONE",
+      "body": "Additional findings: If I change the format of the input text to be more compact, e.g. \r\n```\r\nSet-StrictMode -version latest\r\n\r\n[string] $content = @\"\r\n[\r\n  {\r\n    \"First\": \"1\",\r\n    \"Second\": \"2\"\r\n  }\r\n]\r\n\"@\r\n\r\n$json = (ConvertFrom-Json -InputObject $content)\r\n$json.Second\r\n```\r\n\r\nthen the code runs successfully, and prints '2', even though Strict Mode is set to 2 or higher.\r\n\r\n\r\nUnfortunately, I cannot control the format of the input text so this is not a usable workaround for me.",
+      "created_at": "2022-02-02T16:12:17Z",
+      "updated_at": "2022-02-02T16:14:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "```powershell\r\n$json=(ConvertFrom-Json -InputObject $content)\r\n$json\r\n\r\nFirst\r\n-----\r\n1\r\n```\r\nWith strict mode off the code shows First - only the property presents as NoteProperty. If we call $json.Second this shows Second. So it is expected behavior if strict mode is on to do not show Second.\r\n```powershell\r\n$json | Get-Member\r\n\r\n   TypeName: System.Management.Automation.PSCustomObject\r\n\r\nName        MemberType   Definition\r\n----        ----------   ----------\r\nEquals      Method       bool Equals(System.Object obj)\r\nGetHashCode Method       int GetHashCode()\r\nGetType     Method       type GetType()\r\nToString    Method       string ToString()\r\nFirst       NoteProperty string First=1\r\n```\r\n\r\n And question is whether the cmdlet works right and do not add Second. I think it would be amazing if this cmdlet added each element of the array as a property since the array could be very large.\r\n",
+      "created_at": "2022-02-02T17:52:12Z",
+      "updated_at": "2022-02-02T17:52:12Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Isn't this because of how pwsh gets a property when the object itself is a collection. With the written json you have 2 objects that are stored with their own unique properties, the equivalent pwsh code is\r\n\r\n```powershell\r\n$json = @(\r\n    [PSCustomObject]@{First = \"1\"}\r\n    [PSCustomObject]@{Second = \"2\"}\r\n)\r\n```\r\n\r\nThe way PowerShell's formatter works is it only displays the properties in the first object (AFAIK) and because your 2nd object doesn't have `First` then it looks like it isn't there. Strict mode is also failing because the array itself does not have a property called `First` or `Second` thus to get what you want you need to do\r\n\r\n```powershell\r\nSet-StrictMode -version latest\r\n\r\n[string] $content = @\"\r\n[\r\n  {\r\n    \"First\": \"1\"\r\n  },\r\n  {\r\n    \"Second\": \"2\"\r\n  }\r\n]\r\n\"@\r\n\r\n$json = (ConvertFrom-Json -InputObject $content)\r\n$json[1].Second # Note the [1] here\r\n```",
+      "created_at": "2022-02-02T19:02:18Z",
+      "updated_at": "2022-02-02T19:02:18Z"
+    },
+    {
+      "author": "zett42",
+      "author_association": "NONE",
+      "body": "I think the behaviour is as-expected. What you are doing with `$json.Second` is called [member enumeration](https://stackoverflow.com/questions/44607064/powershell-null-file-always-generated-output-of-compare-object/44620191#44620191). Member enumeration tries to read the given property from all array elements. Without strict mode, you can get by even if not all array elements contain the given property. With strict mode on, trying to access a non-existing property is an error.\r\n\r\nWith strict mode you get some safety but it comes at the price of some inconvenience.\r\n\r\nHere is a possible workaround:\r\n~~~powershell\r\n$json.Where{ $_ | Get-Member Second }.Second\r\n\r\n# Short form\r\n$json.Where{ $_ | gm Second }.Second\r\n~~~\r\n\r\nThis implements a safeguard against non-existing properties. The [array method](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_arrays?view=powershell-7.2#methods-of-arrays) `.Where` returns all array elements that match the given predicate. Using `Get-Member` we check if the property `Second` exists. Finally we read the value of the property only from elements that actually have such a property, so strict mode won't complain.\r\n\r\nNote that the output can be an array if there are more than one elements in the JSON with a `Second` member. Here is a way to return the value of the `Second` property only from the first found array element.\r\n\r\n~~~powershell\r\n$json.Where({ $_ | Get-Member Second }, 'First').Second\r\n~~~\r\n",
+      "created_at": "2022-02-02T22:15:38Z",
+      "updated_at": "2022-02-02T22:42:50Z"
+    },
+    {
+      "author": "hero101111",
+      "author_association": "NONE",
+      "body": "Glad to see this is not a bug of `ConvertFrom-Json`. Thanks for the concise answers and workaround.",
+      "created_at": "2022-02-03T08:54:49Z",
+      "updated_at": "2022-02-03T08:55:05Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-02-04T12:00:44Z",
+      "updated_at": "2022-02-04T12:00:44Z"
+    }
+  ],
+  "created_at": "2022-02-02T16:08:38Z",
+  "number": 16829,
+  "state": "closed",
+  "title": "ConvertFrom-Json does not fully parse input when StrictMode is set to 2 or higher",
+  "updated_at": "2022-02-04T12:00:45Z"
+}

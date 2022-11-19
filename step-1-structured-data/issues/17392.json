@@ -1,0 +1,293 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17392",
+  "author": "SetTrend",
+  "body": "### Summary of the new feature / enhancement\r\n\r\n`Format-Table`, which is implicitly called by a number of Cmdlets, tries to calculate the width of display columns in a separate thread for approx. 300 ms before displaying content.\r\n\r\n`Start-Sleep` pauses the main thread and, thus, a previous command's output, still in the pipeline for being displayed, won't be displayed before `Start-Sleep` elapses.\r\n\r\n([See here for a description of the problem.](https://stackoverflow.com/questions/59330539/weird-delay-of-the-output-of-an-object-when-followed-by-start-sleep-or-until-sc))\r\n\r\nThis is undesired, unpredictable, confusing, unwanted, \u2026 behavior.\r\n\r\n### Proposed technical implementation details (optional)\r\n\r\nI suggest to implement a semaphore into `Format-Table`/`Start-Sleep` that will keep `Start-Sleep` from pausing the current thread until `Format-Table` has finished displaying its output (in case such output is still pending).",
+  "closed_at": "2022-05-30T22:00:43Z",
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "I think \"Start-Sleep pauses ...  a previous command's output\" is not the case the in a single threaded world. The output gets processed before the  Start-Sleep is run .  Here's a simple test. \r\n\r\n```\r\n dir | select -last 5 -Property name,LastWriteTime | % {$_ ; Write-host \".\" ; sleep 1 }  \r\n\r\n.\r\nName                  LastWriteTime\r\n----                  -------------\r\nUIAutomationTypes.dll 15/03/2022 19:29:54\r\nvcruntime140_cor3.dll 07/03/2022 15:19:38\r\n.\r\nWindowsBase.dll       15/03/2022 19:29:56\r\n.\r\nWindowsFormsIntegrat\u2026 15/03/2022 19:29:56\r\n.\r\nwpfgfx_cor3.dll       15/03/2022 17:39:36\r\n.\r\n```\r\nThe Write-host \".\"  and the sleep get processed after the output has been written.  EXCEPT for the first item So we see the \".\" for the first item, then the  output of TWO items - because 300ms has elapsed. Then we get the second item's \".\" then the third item followed by its \".\" and so on.  Format-Table has waited for the second item (or the end of input) before outputting anything and this is commonly seen in debugging.  \r\n\r\nIf we shorten the time we get multiple \".\" output until `format-table` has been waiting 300 ms, then it generates output with as many items as it has received upto that point - followed by the \".\" and the sleep operation    \r\n\r\n```\r\n> dir | select -last 5 -Property name,LastWriteTime | % {$_ ; Write-host \".\" ; sleep -Milliseconds 80 } \r\n\r\n.\r\n.\r\n.\r\nName                        LastWriteTime\r\n----                        -------------\r\nUIAutomationTypes.dll       15/03/2022 19:29:54\r\nvcruntime140_cor3.dll       07/03/2022 15:19:38\r\nWindowsBase.dll             15/03/2022 19:29:56\r\nWindowsFormsIntegration.dll 15/03/2022 19:29:56\r\n.\r\nwpfgfx_cor3.dll             15/03/2022 17:39:36\r\n.\r\n``` \r\n\r\nSo the delay to wat for a minimum of 2 items AND  300ms, \r\n\r\nI had a version of this to test the how slow catastrophic backtracking regexes can get \r\n\r\n```\r\n$r = [regex]::new(\"(.*)+x\", \"Compiled\")  \r\n$s = \"A\" * 24   \r\nforeach ($i in (25..28)) {  \r\n    $s+= \"A\" ;  \r\n    [PSCustomobject]@{Count=$i;time= (measure-command {$r.IsMatch($s)}).TotalMilliseconds.tostring(\"N1\")}\r\n}\r\n```\r\n\r\nOn my machine the first object gets output after ~2 seconds, and I see a blank line which is format table waking up. The next one takes ~4 seconds and at that point I get the first two objects. The thread doesn't get back to format-table until the second object is written, and the (AFAIK) the 300ms timer can't suspend the regex and get format-table to output the first item. \r\n\r\n  ",
+      "created_at": "2022-05-21T18:37:25Z",
+      "updated_at": "2022-05-21T18:37:25Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "Here's a simple example:\r\n\r\n```powershell\r\nGet-Location\r\nStart-Sleep 5\r\n```",
+      "created_at": "2022-05-23T02:07:05Z",
+      "updated_at": "2022-05-23T02:10:48Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "As I said before, Sleep is the easiest way to show what format table does, but there is nothing special about the delay being a sleep command . Put something else slow after the command. for example.  \r\n\r\n```\r\nget-location  ;  foreach ($a in 1..10000) {$b += \"x\"*50}\r\n```\r\n\r\nIt won't output anything until there are TWO items AND 300ms has elapsed. Give it one item and it just waits.  If we make it more complicated we can see when the second item is received, if 300ms has elapsed, the information is output.  \r\n\r\n```\r\n$b= $null;  get-location ; foreach ($a in 1..10000) {$b += \"x\"*50} ; get-location ; foreach ($a in 1..1000) {$b += \"x\"*50};  get-location ; foreach ($a in 1..1000) {$b += \"x\"*50}; \r\n```\r\n\r\nSo here there is\r\n- no output after the first - 1 item queued 300ms hasn't elapsed.\r\n-Delay\r\n-2 items output after the second - 2 items queued , 300ms _has_ elapsed\r\n- Delay\r\n-3rd item output immediately\r\n- Delay\r\n-Prompt returns.\r\n\r\nIf you still think that Format-Table's timer is paused by the sleep command try this. \r\n```\r\n$x= \"\" +( Get-date) ; Get-Location ;  sleep 1 ; $x+=Get-date ; sleep 10  ; $x+=Get-date ; sleep 10\r\n```\r\nIf it were the sleep timer delaying format-table, when a timer expires and another command runs execution would find its way back to ft - but it doesn't. Format-table doesn't get to do anything until either another item goes in OR the command ends, and if a terminating error occurs before that happens the output is lost. \r\n```\r\n Get-Location ; throw \"No output\"\r\n```\r\n1 item queued or 300ms not elapsed\r\n``` \r\nGet-Location ; Get-Location ; throw \"No output\"\r\n```\r\nbut \r\n```\r\nGet-Location ; sleep -Milliseconds 400 ; get-location; throw \"some output\"\r\n```\r\n\r\n",
+      "created_at": "2022-05-23T08:59:05Z",
+      "updated_at": "2022-05-23T15:41:16Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "OK, so the sleep timer isn't the source for the delay.\r\n\r\nStill, this delay is unexpected and a source of misunderstanding. So, then shouldn't `Format-Table` just output before other commands continue to be evaluated?",
+      "created_at": "2022-05-23T18:17:17Z",
+      "updated_at": "2022-05-23T18:17:41Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "The behaviour is a compromise. \r\nIn early versions of PowerShell if autosize wasn't specified the sizing was just screen-width/number of columns, so (IIRC) it did output the first row immediately.  That sizing wasn't good so another solution was tried.  \r\nThings getting stuck in the buffer is annoying - especially when debugging, and potential to lose the data in the buffer isn't good. Do those things outweigh the better use of space?  I don't know enough about other people's experience; I'll live with it to get better formatting most of the time  \r\n",
+      "created_at": "2022-05-23T20:24:01Z",
+      "updated_at": "2022-05-23T20:24:01Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "I see.\r\n\r\nYes, I'd very much appreciate the better layout, too. Yet, I suppose PowerShell should not run another command before `Format-Table` has finished outputting.\r\n\r\nFrom your excellent explanation I believe the current issue title doesn't correctly reflect the situation anymore. Would you agree to rename this issue to: _\"PowerShell should not run follow-up commands before `Format-Table` has finished output\"_?",
+      "created_at": "2022-05-24T10:21:12Z",
+      "updated_at": "2022-05-24T12:36:03Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "Glad the explanation helped. And yes the title is now describing the problem wrongly . \r\n\r\nBut there is a problem with the not running another command before format-table has finished. \r\n\r\nif you have  A | B  \r\nA's begin block runs (and shouldn't output any objects - but might)\r\nB's begin block runs \r\n\r\nA's process block outputs an object\r\nB's process block does something with the object and may output zero, one or more objects (which go down the pipeline) \r\nA's process block outputs another object\r\nB's process block does something...\r\n<which repeats > Then \r\nA  Finishes sending objects\r\nA's End block runs\r\nB's End block runs\r\n\r\n(there are some controls so thing go in batches along the pipeline so that's slightly simplified) \r\n\r\nThe problem with format table is the process block asks \"Have I output anything yet ?\" If the answer is yes it outputs the object. If it is no then \"Is this the first object\" , if the answer is yes that object is always queued. If that answer is no then it applies and 300ms test, and either adds things to queue or outputs everything\" \r\nAnd when it gets to the end block it makes sure it outputs anything left in the queue. \r\n\r\nThe problem is that process would need to change so it is always finished when it reaches the end of the process block - in other words not  queue anything. But then we're back to fixed column sizes or sizing based on the first object.     \r\nWe wouldn't want that all the time,  but a switch for Equal Widths which could be used when we expect this behaviour would work.  \r\n\r\n",
+      "created_at": "2022-05-24T12:14:59Z",
+      "updated_at": "2022-05-24T12:14:59Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "As far as I read, the implicit call to `Format-Table` \u2013 and that's what this thread is mainly about \u2013 [is only done when _**displaying**_ the result](https://stackoverflow.com/questions/59330539/weird-delay-of-the-output-of-an-object-when-followed-by-start-sleep-or-until-sc#answer-59331305). So, when piping the output, `Format-Table` shouldn't get called, as far as I understood?",
+      "created_at": "2022-05-24T12:41:49Z",
+      "updated_at": "2022-05-24T12:41:49Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "I have just read the question two different ways, so hopefully this covers both :-) \r\n\r\nAt the weekend someone tweeted this (old) article by Jeffery Snover on \"what really happens\" https://devblogs.microsoft.com/powershell/how-powershell-formatting-and-outputting-really-works/  \r\nI think it's still valid - because you can define Out-Default with `Function out-default {$null = $null}` and nothing goes to the screen anymore -   the way I visualize it is commands get processed as  `  & { << command you entered >>  } | Out-Default`    \r\n\r\nOut-Default sends strings straight to out-host  and forks other objects to format table or format list, so yes -  the implicit call to format table / format-list won't happen until something which needs to be displayed goes into Out-Default.\r\n It is easier to explain with  explicit calls to format-table - I imagine Out-Default creates a steppable pipeline for format-table or format-list when it knows which it will use, calls its begin and process blocks for the first item, and then calls the pipeline's end block from its own end block. \n\n<blockquote><img src=\"https://devblogs.microsoft.com/powershell/wp-content/uploads/sites/30/2018/09/Powershell_256.png\" width=\"48\" align=\"right\"><div><img src=\"https://devblogs.microsoft.com/powershell/wp-content/uploads/sites/30/2019/02/Powershell_2561.png\" height=\"14\"> PowerShell Team</div><div><strong><a href=\"https://devblogs.microsoft.com/powershell/how-powershell-formatting-and-outputting-really-works/\">How PowerShell Formatting and Outputting REALLY works</a></strong></div><div><WIZARD WARNING> Dreeschkind posted a question in the Microsoft.Public.Windows.Server.Scripting newsgroup about how PowerShell formatting worked with Select.\u00a0 He saw some behavior that he thought was a bug.\u00a0 Here is what he saw: PoSh C:\\>gps | sort starttime | select name,starttimeSort-Object : Exception getting \u201cStartTime\u201d: \u201cZugriff verweigert\u201dAt line:1 char:11+ gps | sort\u00a0</div></blockquote>",
+      "created_at": "2022-05-24T15:39:30Z",
+      "updated_at": "2022-05-24T15:39:33Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "I read that thread \u2026 It's very interesting, yet, unfortunately, it doesn't add value to this current thread.",
+      "created_at": "2022-05-25T11:00:02Z",
+      "updated_at": "2022-05-25T11:00:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I think @jhoneill had great explanation on the observed behavior differences between `Get-Location ; Get-Location ; throw \"No output\"` and `Get-Location ; sleep -Milliseconds 400 ; get-location; throw \"some output\"`, and called out that the `Start-Sleep` command is not related to the delay behavior when `Format-Tab` is used for the implicit formatting. Thank you, @jhoneill!\r\n\r\nThe delay and waiting-for-2-objects behaviors are by design to `Format-Table`, for better table view calculation. Also as called out in https://github.com/PowerShell/PowerShell/issues/17392#issuecomment-1135104280, it's a compromise.",
+      "created_at": "2022-05-27T17:50:47Z",
+      "updated_at": "2022-05-27T17:50:47Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@daxian-dbw  You're welcome :-) ",
+      "created_at": "2022-05-27T18:56:22Z",
+      "updated_at": "2022-05-27T18:56:22Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "Yes, I'm not disputing the delay and the waiting-for-2-objects behavior.\r\n\r\nI'm supposing subsequent commands to ***wait*** for `Format-Table` to finish its job.\r\n\r\nAll the discussion in here doesn't engage with the issue itself, but only with how `Format-Table` works. But that's not the actual issue described here.\r\n\r\nAgain: I supposed to have PowerShell ***wait*** for for `Format-Table` to finish its job before continuing to execute other commands.",
+      "created_at": "2022-05-27T19:29:51Z",
+      "updated_at": "2022-05-27T19:30:24Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Yes, I'm not disputing the delay and the waiting-for-2-objects behavior.\r\n> \r\n> I'm supposing subsequent commands to _**wait**_ for `Format-Table` to finish its job.\r\n\r\nNothing is interrupting Format-Table. It accepts one item, queues it, and allows the other commands to run  \r\n\r\n> All the discussion in here doesn't engage with the issue itself, but only with how `Format-Table` works. But that's not the actual issue described here.\r\n\r\nThe two are the same thing. An item is sent to format-table. Format-table puts in a queue and waits for the next item. If you want the first item sent to be output immediately Format-Table would need to work in a different way - sizing columns after the first  item\r\n\r\n> Again: I supposed to have PowerShell _**wait**_ for for `Format-Table` to finish its job before continuing to execute other commands.\r\n\r\nFormat-Table signals \"I have done everything with _that_ item. Send me the next one\" \r\n",
+      "created_at": "2022-05-27T20:09:21Z",
+      "updated_at": "2022-05-27T20:09:21Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "I don't know where I'm giving false leads \u2026\r\n\r\n> If you want the first item sent to be output immediately\r\n\r\nNOOOOO, I DON'T want the first item sent to be output immediately. That's what I'm writing here over and over and over again.\r\n\r\nI want subsequent commands to ***wait*** for `Format-Table` to finish \u2013 you see: WAIT. Where's the misunderstanding in the term \"wait\"?",
+      "created_at": "2022-05-27T22:12:42Z",
+      "updated_at": "2022-05-27T22:12:42Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "Nothing can \"wait for format-table to finish\" because it declares it _has_ done all its work after putting the first item (and others received before 300ms has elapsed) in a queue.  If it queues _anything_ and waits for more items, then a delay and possible data loss is the result. \r\n\r\nI think you're saying in a piece of code like this \r\n```\r\nget-process -id $pid  | select name,WS \r\nsleep 3 \r\nget-process -id $pid  | select name,WS \r\nsleep 3 \r\nget-process -id $pid  | select name,WS \r\nsleep 3\r\n```\r\nThe output from the first line should emerge before the first sleep and the second should have it's own instance of format table, if you convert it to  \r\n```\r\n get-process -id $pid  | select name,WS  | ft\r\nsleep 3 \r\nget-process -id $pid  | select name,WS  | ft\r\nsleep 3 \r\nget-process -id $pid  | select name,WS  | ft\r\nsleep 3\r\n```\r\n_that_ works finishes each of the FTs before getting to the sleep  but the first version is doing\r\n```\r\n& {\r\n get-process -id $pid  | select name,WS  \r\nsleep 3 \r\nget-process -id $pid  | select name,WS  \r\nsleep 3 \r\nget-process -id $pid  | select name,WS  \r\nsleep 3 \r\n} | ft\r\n```\r\nwith a single ft.\r\nIts the same reason that \r\n```get-process -id $pid  | select name,WS ; Get-Process -id $pid | select name,BasePriority``` doesn't output a basepriority. One format to rule them all. \r\n\r\n",
+      "created_at": "2022-05-27T23:32:49Z",
+      "updated_at": "2022-05-27T23:32:49Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "You're describing it correctly.\r\n\r\nI feel the current behavior doesn't make any sense. Why should anyone expect a behavior like you described above to occur?\r\n\r\n> ```powershell\r\n> & {\r\n>  get-process -id $pid  | select name,WS  \r\n> sleep 3 \r\n> get-process -id $pid  | select name,WS  \r\n> sleep 3 \r\n> get-process -id $pid  | select name,WS  \r\n> sleep 3 \r\n> } | ft\r\n> ```\r\n\r\nThat's exactly my proposal:\r\n\r\nLet's \u2026\r\n\r\n> ```powershell\r\n> get-process -id $pid  | select name,WS \r\n> sleep 3 \r\n> get-process -id $pid  | select name,WS \r\n> sleep 3 \r\n> get-process -id $pid  | select name,WS \r\n> sleep 3\r\n> ```\r\n\r\n\u2026 behave like \u2026\r\n\r\n> ```powershell\r\n> get-process -id $pid  | select name,WS  | ft\r\n> sleep 3 \r\n> get-process -id $pid  | select name,WS  | ft\r\n> sleep 3 \r\n> get-process -id $pid  | select name,WS  | ft\r\n> sleep 3\r\n> ```\r\n\r\nThat's what, from my point of view, anyone would expect to occur natively.",
+      "created_at": "2022-05-28T09:13:09Z",
+      "updated_at": "2022-05-28T09:13:38Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "OK.  Should the output of\r\n```\r\nGet-Process pwsh  | select name,wS ; \r\nGet-Process powershell | select name,ws\r\nGet-Process cmd | select name,ws\r\n```\r\nLook like this \r\n```\r\nName              WS\r\n----              --\r\npwsh       106479616\r\npowershell 101736448\r\ncmd          4673536\r\n```\r\nor like this \r\n\r\n```\r\nName        WS\r\n----        --\r\npwsh 110518272\r\n\r\n\r\nName              WS\r\n----              --\r\npowershell 101867520\r\n\r\n\r\nName      WS\r\n----      --\r\ncmd  4673536\r\n```\r\n\r\nBecause you're asking for the second although you did say   \r\n> NOOOOO, I DON'T want the first item sent to be output immediately.\r\n\r\n\r\n> That's what, from my point of view, anyone would expect to occur natively\r\n\r\nI think people would expect that if a something outputs 3 objects they go into one table.  And they would not expect a command which returned 3 of something produce one table when the command is a compiled c# cmdlet, but 3 tables when the command is function.  You may well be right that someone taking their first steps with PowerShell _could_ think a function which sends output in 3 places would process the three independently , (and think that PowerShell would also do a better job when the objects were of different types, and wouldn't lose output if an error occurred after the output had been sent.) But when you work through what that would means, they would probably conclude it is better not to do that. \r\n\r\n\r\n",
+      "created_at": "2022-05-28T16:29:02Z",
+      "updated_at": "2022-05-28T16:29:02Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "Yes, I would expect output number 2 to occur.\r\n\r\nI wouldn't know of a single use case where output number 1 would feel appropriate and desired. I believe it's quite exotic. If someone would really need such aggregation, there'd be loads of alternatives to use for aggregating the data into one single output. Coding these aggregating alternatives explicitly would als provide clear semantics of the aggregating intention.\r\n\r\nAnd I'm quite sure that if there'd be a poll asking 100,000 PowerShell users what they'd expect, at least 99,990 would respond: \"output number 2\".\r\n",
+      "created_at": "2022-05-28T21:19:00Z",
+      "updated_at": "2022-05-28T21:22:10Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "\r\nIf a poll asked whether `Get-Process` should create  1 table or 317 (I have 317 processes on my system right now) 9999 out of every 10,000 are going say 1,  right ?   \r\nIf second questions was \"if a command produces custom objects for _n_ processes, 1 table or _n_\" it's still going be 1 (these examples use `select` because the objects normally emitted by `Get-Process `have formatting defined for them which gives the columns a fixed width.  We are only talking about objects which have no formatting defined.) \r\n\r\nNot many people are going to answer - it depends what is inside the command.  You're looking inside the function and saying there are 3 calls to compiled blocks of c#, so there should be 3 end-to-end runs of format table - the function shouldn't be treated as an atomic thing that it is now. But really that's not logical - imagine the code as \r\n``` \r\n$coreps =  Get-Process pwsh  | select name,wS ; \r\n$winps = Get-Process powershell | select name,ws\r\n$legacy = Get-Process cmd | select name,ws\r\n````\r\nSo far nothing has been output do the following produce the same or different output  \r\n```\r\n$coreps , $winps, $legacy \r\n```\r\n\r\n```\r\n$coreps ;  $winps;  $legacy \r\n```\r\n\r\n```\r\n$coreps \r\n$winps\r\n$legacy \r\n```\r\n\r\nWhy would you have 3 tables for someone who writes their code like this \r\n\r\n```\r\nforeach ($name in @(\"pwsh\",\"PowerShell\",\"cmd\") {\r\n  Get-Process $name | select name,ws\r\n}\r\n```\r\n  \r\nand 1 if they write it like this \r\n```\r\n  Get-Process  @(\"pwsh\",\"PowerShell\",\"cmd\") | select name,ws\r\n```\r\n\r\nIronically what you're advocating would mean if the author wanted to results displayed as a multi-row table, rather than single rows with their own column headings, their code would need to accumulate all the results and return them in a single operation, so returning results as they are available (and displaying them after 300ms) delaying out rather than having it happen sooner..  \r\n\r\nThe issued is flagged as declined, and really should be flagged by-design as well. There's not a more I can say. \r\n\r\n",
+      "created_at": "2022-05-28T23:32:27Z",
+      "updated_at": "2022-05-28T23:32:27Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "I know this issue has been declined. And I disagree, because of common sense.\r\n\r\nYes, aggregating items takes aggregation commands. What you're describing is an array of three elements to forward to `Format-Table`, nothing else. There's absolutely no need for PowerShell to assume this desire without being explicitly told to do so.\r\n\r\nAgain, this is unexpected, undesired, unpredictable, confusing, \u2026 behavior.",
+      "created_at": "2022-05-29T09:45:17Z",
+      "updated_at": "2022-05-29T09:47:54Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "I know, it's hard to think of this behaviour from a different perspective for those (few) who got acquainted with it over the years. And I comprehend it takes time to overcome this perception bubble that evolved over time.\r\n\r\nStill, I suggest (particularly to @daxian-dbw) to free your mind and look at this issue from a fresh, unbiased perspective.",
+      "created_at": "2022-05-29T10:22:30Z",
+      "updated_at": "2022-05-29T10:23:09Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "We are turning into an XKCD cartoon https://xkcd.com/386/  \r\n\r\nBut one last try, because something you said makes me think I can still explain it. \r\n\r\n> aggregating items takes aggregation commands. \r\n\r\nActually it needs no explicit command.  \r\n\r\nWhen you put multiple commands into a script block (and that includes saving it as script file, or defining it as function) that performs aggregation  \r\n\r\n>What you're describing is an array of three elements to forward to `Format-Table`, nothing else.\r\n\r\nYES !  \r\nWhatever calls this \r\n{  \r\n  Get-Process pwsh  | select name,wS ;   \r\n  Get-Process powershell | select name,ws\r\n  Get-Process cmd | select name,ws\r\n}\r\nor this \r\n```\r\n{\r\n$coreps =  Get-Process pwsh  | select name,wS ; \r\n$winps = Get-Process powershell | select name,ws\r\n$legacy = Get-Process cmd | select name,ws\r\n\r\n$coreps , $winps, $legacy \r\n}\r\n```\r\nAnd all the other variations sees an array of three items.  The _output_ is identical, so the process to display it should put the same thing on the console.  \r\n\r\nAggregation means we don't get a change of display type if command outputs file and process objects. This is an accepted consequence of the design - not a design goal - but the behaviour is by design. The pause to allow format-table to size columns better combines with aggregation to mean in a few cases data can be lost or delayed, again that's not a goal but an accepted consequence, and by design.  \r\n\r\nI think what you are saying amounts to - these things should not aggregate, they should run as if each was submitted at a prompt and ran to completion before the next started. \r\n\r\n> There's absolutely no need for PowerShell to assume this desire without being explicitly told to do so\r\n.\r\nA script / function / scriptblock multi-part command is treated as one command  _not_ as its constituent parts. Creating one of those IS telling PowerShell to aggregate the output of the parts.  Some languages force aggregation by making \"send output\" and \"exit function\" a single return operation. PowerShell does not, and in C# cmdlets it is not a single \"return from function\" which sends output to the pipeline but a write-object-to-pipeline operation - and there can be be many of those \r\n\r\n> Again, this is unexpected, undesired, unpredictable, confusing, \u2026 behavior.\r\n\r\nIt is completely predictable (including the cases which aren't desirable) and only confusing or unexpected if you don't see functions etc as unifying their parts.    \r\n\n\n<blockquote><img src=\"https://imgs.xkcd.com/comics/\" width=\"48\" align=\"right\"><div><img src=\"/s/919f27.ico\" height=\"14\"> xkcd</div><div><strong><a href=\"https://xkcd.com/386/\">Duty Calls</a></strong></div></blockquote>",
+      "created_at": "2022-05-29T11:17:05Z",
+      "updated_at": "2022-05-29T11:17:07Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "> I think what you are saying amounts to - these things should not aggregate, they should run as if each was submitted at a prompt and ran to completion before the next started.\r\n\r\nYes, but only in the case of three distinct (piped) commands. Like this:\r\n\r\n```powershell\r\nGet-Process pwsh | select name,ws\r\nGet-Process powershell | select name,ws\r\nGet-Process cmd | select name,ws\r\n```\r\n\r\nThese distinct commands should not be considered an array but instead considered disjunct and produce three distinct outputs. That's what common sense would expect.",
+      "created_at": "2022-05-29T12:39:38Z",
+      "updated_at": "2022-05-29T12:48:53Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as declined and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-05-30T22:00:43Z",
+      "updated_at": "2022-05-30T22:00:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "See also:\r\n\r\n* #4594\r\n* #13985",
+      "created_at": "2022-06-04T15:11:33Z",
+      "updated_at": "2022-06-04T15:11:33Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@mklement0     Would value any thoughts on what might be practical to improve things \r\n\r\n\r\nTo me there seems to be a single core problem - to make good decisions about sizing `format-table` queues some data, and things we might not like can happen while something is in the queue (delay, loss of the queued data, or something overtaking it being main ones).  I think you nailed that in your summary of #4594 on 18 Aug 2017, and I'm not sure much has changed since.\r\n",
+      "created_at": "2022-06-04T17:42:44Z",
+      "updated_at": "2022-06-04T17:42:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jhoneill\r\n\r\nI can't speak to technical solutions - perhaps @SeeminglyScience  or @jborean93  can - but it's clear that the asynchronous behavior is a perennial headache that ranges from baffling output sequencing to loss of data.\r\n\r\nGiven that we're talking about _for-display_ formatting, I think it would be acceptable to make the delay _synchronous_.\r\n",
+      "created_at": "2022-06-09T15:07:40Z",
+      "updated_at": "2022-06-09T15:07:40Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The reason that the delay is asynchronous is so that we can get more objects before deciding what the format should be. If it were synchronous, we would simply delay 200ms and then still only take the first object into account.\r\n\r\nI can't think of a general solution other than only taking the first object into account (which is not desirable for different reasons).",
+      "created_at": "2022-06-09T15:45:44Z",
+      "updated_at": "2022-06-09T15:45:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience - the synchronous behavior I had in mind relates to cross-stream behavior; that is, all other streams should be blocked while the objects are being collected. Is there no good technical solution for that?",
+      "created_at": "2022-06-09T16:00:51Z",
+      "updated_at": "2022-06-09T16:00:51Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Not that I can think of personally. None of these systems talk to each other currently so it would be non-trivial to hook that up. Not impossible of course, but there's a solid chance that such a fix would only surface different issues. I'd hesitate to recommend anyone try as a PR for this would be very time consuming to even review.",
+      "created_at": "2022-06-09T17:48:01Z",
+      "updated_at": "2022-06-09T17:48:01Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "> The reason that the delay is asynchronous is so that we can get more objects before deciding what the format should be.\r\n\r\nTo me the question is: Why is a collection of items compiled across distinct commands at all? If that intrinsic compilation was dropped, all the headache was gone: No delay, no question of synchronous vs. asynchronous execution. Just immediate output \u2013 that's all.\r\n\r\nAs I wrote in https://github.com/PowerShell/PowerShell/issues/17392#issuecomment-1140441196, no-one expects distinct commands' output to be compiled into a single output.",
+      "created_at": "2022-06-09T19:00:50Z",
+      "updated_at": "2022-06-09T19:56:36Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> As I wrote in [#17392 (comment)](https://github.com/PowerShell/PowerShell/issues/17392#issuecomment-1140441196), no-one expects distinct commands' output to be compiled into a single output.\r\n\r\nMost folks expect that when you output multiple objects they are aggregated into a single table. That is definitely the expectation of the user base, if we switched to outputting a separate table for every object many folks would break.",
+      "created_at": "2022-06-09T21:56:07Z",
+      "updated_at": "2022-06-09T21:56:07Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience: I assume you've not been following this thread.\r\n\r\nOutputting a **single collection**, e.g. `Get-Process | select name,ws`, as a single table isn't considered the issue. Yet, outputting **two distinct collections** as a single table, however, is unexpected:\r\n\r\n```powershell\r\nGet-Process powershell | select name,ws;\r\nGet-Process powershell | select name,ws;\r\n```\r\n\u2026 is supposed to output this:\r\n\r\n```\r\nName             WS\r\n----             --\r\npowershell 83128320\r\n\r\nName             WS\r\n----             --\r\npowershell 83169280\r\n```\r\n\r\n\u2026 not this:\r\n\r\n```\r\nName             WS\r\n----             --\r\npowershell 83189760\r\npowershell 83193856\r\n```\r\n\r\nThe first example doesn't require any kind of delay or asynchronicity to occur.",
+      "created_at": "2022-06-09T22:14:53Z",
+      "updated_at": "2022-06-09T22:17:09Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "All output is enumerated across the pipeline, so they aren't really grouped like that. All output is sent item by item so that downstream commands can process it concurrently.\r\n\r\ne.g. it's expected that this:\r\n\r\n```powershell\r\n$items = Get-ChildItem ./\r\nforeach ($item in $items) {\r\n    [PSCustomObject]@{\r\n        File = $item\r\n    }\r\n}\r\n```\r\n\r\nwould be emitted the same way that this is:\r\n\r\n```powershell\r\nGet-ChildItem ./ | Select-Object @{ Name = 'File'; Expression = { $_ } }\r\n```\r\n\r\nThis behavior is foundational to PowerShell and heavily relied on.",
+      "created_at": "2022-06-09T22:19:30Z",
+      "updated_at": "2022-06-09T22:19:30Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "Probably, yes.\r\n\r\nStill, it doesn't make sense, though.\r\n\r\nThis is particularly true if you consider the generic case of multiple commands uttering distinct objects' collections:\r\n\r\n```powershell\r\nGet-Process powershell | Select-Object name;\r\nGet-Process powershell | Select-Object ws;\r\n```\r\n\r\nIf merging these outputs into a single table was intentional, then the user should be required to create an array first:\r\n\r\n```powershell\r\n(Get-Process powershell | Select-Object name),\r\n(Get-Process powershell | Select-Object ws)\r\n```",
+      "created_at": "2022-06-09T23:19:38Z",
+      "updated_at": "2022-06-09T23:25:34Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "I'm not sure if there is an explanation which will resonate with you but \r\n\r\n```\r\n> & { \r\n  Get-Process powershell | Select-Object name\r\n  Get-Process powershell | Select-Object ws \r\n  }\r\n```\r\n that is:  running two cmdlets by entering one thing at the prompt is functionally the same as this \r\n```\r\n@(\r\n(Get-Process powershell | Select-Object name),\r\n(Get-Process powershell | Select-Object ws)\r\n)\r\n```\r\nor this \r\n```\r\nGet-Process powershell | Select-Object name  ;  Get-Process powershell | Select-Object ws\r\n```\r\n\r\n\r\nThere is also a core expectation that if a function , script or cmdlet returns multiple objects those objects are of the the same type, or of types which are similar enough to be treated as the same (e.g. files and directories). If I write a function like this \r\n```\r\nfunction get-psstuff1 {\r\nget-item Powershell* | out-string \r\nget-process pwsh | out-string\r\n}\r\n```\r\nanything trying to process the output is going have difficulty because of the mixture of object types.  The onus is the on me as a developer to say \"This is only really for humans to read, not for programs to process so I will do this\" ... \r\n```\r\nfunction get-psstuff2 {\r\nget-item Powershell* | out-string \r\nget-process pwsh | out-string\r\n}\r\n```\r\n\r\nIf PowerShell used your model of \"those lines are completed commands therefore I will end this pipeline and start another if there is another object\"  `get-psstuff1 | format-Table`  would produce a table per line. \r\n\r\nbut `get-psstuff2 | Out-File PSStuff.txt`  would write the first output to a file, close it, and then overwrite it with the second output. \r\n\r\nThe design was to allow things to do a writeOutput operation whenever they had something to send (not queue it to send everything as one item - and queuing was the problem we started with) , and all the output from a collection of statements issued as one command is treated as part of the same whole. \r\n \r\n ",
+      "created_at": "2022-06-10T13:36:44Z",
+      "updated_at": "2022-06-13T08:29:28Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> This is particularly true if you consider the generic case of multiple commands uttering distinct objects' collections:\r\n> \r\n> ```powershell\r\n> Get-Process powershell | Select-Object name;\r\n> Get-Process powershell | Select-Object ws;\r\n> ```\r\n\r\nI believe that's more a quirk with `PSCustomObject` specifically. With concrete objects the format view is broken, but there's a significant amount of extra processing that would have to be done every single item to tell that a break is warranted. Every object has the same type identity, so the property bag itself would need to be enumerated and checked against the last object.\r\n\r\nA different scenario of `Get-Process pwsh; Get-Item .` causes the formatter to break into a new view as they have different type identities.\r\n\r\nThere's also the general best practice of only returning one type of object at a time. This makes most folks unlikely to hit this issue in general, making the impact of a fix not worth the potentially substantial performance hit (imo).\r\n\r\nGenerally if you are hitting this, you aren't actually trying to use the objects as literal output to be consumed by a user, but rather just for display purposes. In that case you can pipe each thing you want to be displayed in a separate view to `Out-Host`.",
+      "created_at": "2022-06-10T16:51:16Z",
+      "updated_at": "2022-06-10T16:51:16Z"
+    },
+    {
+      "author": "SetTrend",
+      "author_association": "NONE",
+      "body": "> Generally if you are hitting this, you aren't actually trying to use the objects as literal output to be consumed by a user, but rather just for display purposes. In that case you can pipe each thing you want to be displayed in a separate view to `Out-Host`.\r\n\r\nExactly. Yet, (and that's my proposal). for display purposes, this should be done automatically by PowerShell. `Format-Table` only applies for display purposes. So it should be easy to determine the output target and behave accordingly.\r\n\r\nHere's another example of unexpected output:\r\n\r\n```powershell\r\nGet-Location | Select-Object Path; Get-Process powershell | Select-Object name;\r\n```",
+      "created_at": "2022-06-14T20:26:57Z",
+      "updated_at": "2022-06-14T20:26:57Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Here's another example of unexpected output:\r\n> \r\n> ```powershell\r\n> Get-Location | Select-Object Path; Get-Process powershell | Select-Object name;\r\n> ```\r\n\r\nIt does exactly what you've asked it to do. Create an object with a path property, and create one or more objects with a name property and output both types as part of a single command , using the default object formatting. It's only \"unexpected\" if you think `;` should work differently to the way it does.   \r\n \r\nIf you want to see a path and name(s)  you can\r\n\r\n1. Run the two parts as separate commands. \r\n\r\n2. Output the property alone, rather than a single property custom object\r\n ```powershell\r\nGet-Location | % Path; Get-Process powershell | %  name;\r\n ```\r\n\r\n3.  Include formatting in partial commands (it's not needed in the last one) \r\n```\r\n Get-Location | Select-Object Path | Out-Default; Get-Process pwsh | Select-Object name | Out-Default;\r\n```\r\n\r\n",
+      "created_at": "2022-06-14T21:15:24Z",
+      "updated_at": "2022-06-14T21:15:24Z"
+    }
+  ],
+  "created_at": "2022-05-20T10:01:50Z",
+  "number": 17392,
+  "state": "closed",
+  "title": "PowerShell should not run follow-up commands before `Format-Table` has finished output",
+  "updated_at": "2022-06-14T21:15:24Z"
+}

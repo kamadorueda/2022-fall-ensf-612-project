@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3575",
+  "author": "mpw",
+  "body": "Steps to reproduce\r\n------------------\r\nType 'dir -r >/tmp/dir-output' at the top of a directory subtree containing around 5K files.\r\n\r\nExpected behavior\r\n-----------------\r\nCommand completes quickly. \r\n\r\nThe comparable Unix command\r\n\r\n    find . -print0 | xargs -0 ls -al  >/tmp/dir-output\r\n\r\nconsistently takes less than 300ms to complete.\r\n\r\nActual behavior\r\n---------------\r\nCommand takes between 3.7 and 4.1 seconds to complete, both using wall clock and\r\n\r\n      Measure-Command { dir -r >/tmp/dir-output } \r\n\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n> $PSVersionTable\r\n\r\nFor me, this returns no result.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mpw Thanks for your report!\r\n\r\nNative utilities on Unix and Windows use low level APIs and work with raw data. PowerShell work on top the APIs and add extra code levels (convert all in PSObjects). So it will always be slower. Of course we try to do things faster.",
+      "created_at": "2017-04-16T12:56:08Z",
+      "updated_at": "2017-04-16T12:56:08Z"
+    },
+    {
+      "author": "mpw",
+      "author_association": "NONE",
+      "body": "Hmmm...an order of magnitude is rather significant, especially considering that the Unix version was doing significantly more work, splitting the task between two processes, communicating paths between the processes, parsing strings and therefore also doing full path evaluation for each file.\r\n\r\nMy bad, I was actually going for something different when I hit upon this by accident.  The more efficient Unix version would of course be  ls -lR, and that executes in \r\n\r\nreal\t0m0.062s\r\nuser\t0m0.029s\r\nsys\t0m0.028s\r\n\r\nSo PowerShell is actually more than 50 times slower.  I realize layers can add overhead, but should simple CPU processing be able to add almost 2 orders of magnitude to filesystem/kernel operations?\r\n\r\nSample attached.  Surprisingly informative despite all the jitted code not showing up.\r\n\r\n[powershell_2017-04-21_002049_AH6L.sample.txt](https://github.com/PowerShell/PowerShell/files/945624/powershell_2017-04-21_002049_AH6L.sample.txt)\r\n",
+      "created_at": "2017-04-20T22:26:05Z",
+      "updated_at": "2017-04-20T22:26:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What PowerShell versions you use for testing?\r\nCurrently we moved to .Net Cor 2.0 and since Alfa.19 you can test based on this version.",
+      "created_at": "2017-04-21T07:57:46Z",
+      "updated_at": "2017-04-21T07:57:46Z"
+    },
+    {
+      "author": "mpw",
+      "author_association": "NONE",
+      "body": "I just tried the same command with PowerShell on Windows (running emulated in Parallels) and it also took 3 seconds.  While there is likely some virtualization overhead, it almost certainly isn't 50x.\r\n\r\nThis was a fresh install of Windows + VS downloaded just yesterday.",
+      "created_at": "2017-04-21T08:17:16Z",
+      "updated_at": "2017-04-21T10:24:04Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "There are many layers of abstraction involved. PSDrives, PSProviders, Get-Childitem with generalized filtering, a generic, programmable, formatting system, an object pipeline with extremely powerful (and expensive) parameter binding and all this on top of the CLR. So we are comparing apples to oranges. \r\n\r\nThat said: it's too slow. We are in need of a performance push for the core scenarios, and ls -R is definitely one of those.\r\n\r\nI was actually profiling this last night, as I also feel the pain. \r\n",
+      "created_at": "2017-04-22T05:49:56Z",
+      "updated_at": "2017-04-22T05:49:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "CoreFX has performance issues with file system too. ",
+      "created_at": "2017-10-08T16:31:34Z",
+      "updated_at": "2017-10-08T16:31:34Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Is is also interesting to see how much of it is formatting.\r\nWhat times to you get if you pipe the output to Out-Null?\r\n\r\n```powershell\r\ngci -r | out-null\r\n```\r\nThat should give us the raw powershell provider filesystem times.\r\n```\r\n[io.directory]::EnumerateFileSystemEntries($pwd.ProviderPath, \"*.*\", [IO.SearchOption]::AllDirectories)\r\n```\r\nIs also something to compare against. Just getting the filenames, without stat-ing each file.\r\n\r\nI think .NET is quite inefficient when doing this, stat-ing each file instead of getting that at the same time as enumerating the files.\r\nMaybe this should be fixed in System.IO.Directory, with another method that enumerates items returning FileSystemInfo instead of string.\r\n",
+      "created_at": "2017-10-10T08:58:35Z",
+      "updated_at": "2017-10-10T08:59:17Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I wonder if we can do some optimization where we know it's being run interactively and not piped to something else, we can have a faster path that doesn't use objects and just outputs the text",
+      "created_at": "2019-02-19T21:42:47Z",
+      "updated_at": "2019-02-19T21:42:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT given that one can play with default parameter values to automatically capture output, that may be considered detrimental in some cases...\r\n\r\n```powershell\r\n$PSDefaultParameterValues[\"Out-Default:OutVariable\"] = 'LastOut'\r\n```\r\n",
+      "created_at": "2019-02-19T22:38:37Z",
+      "updated_at": "2019-02-19T22:38:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 excellent point!  If we wanted to pursue this, it would have to be an opt-in feature.",
+      "created_at": "2019-02-19T23:28:36Z",
+      "updated_at": "2019-02-19T23:28:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe such optimizations are tracked by PSMore #7857 - it is best strategic investments.",
+      "created_at": "2019-02-20T06:04:08Z",
+      "updated_at": "2019-02-20T06:04:22Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I have a branch where this is so fast that the console output is what limits everything. Working to wrap that in a experimental feature. But if we only can get some of the PRs that I've made in this area through, I don't think we have such a big perf issue with the file system.",
+      "created_at": "2019-02-25T21:45:22Z",
+      "updated_at": "2019-02-25T21:45:22Z"
+    },
+    {
+      "author": "BillyONeal",
+      "author_association": "NONE",
+      "body": "Also happens on Windows vs. cmd's `dir /s`\r\n\r\n![image](https://user-images.githubusercontent.com/1544943/82938735-1dd1bb00-9f47-11ea-8528-f136b89836f5.png)\r\n\r\nIf I target my operating system disk `pwsh` is so slow that I gave up letting it finish after ~10 minutes. I think it runs into lots of access denied errors there which trigger exceptions which are rather slow.",
+      "created_at": "2020-05-26T18:51:43Z",
+      "updated_at": "2020-05-26T18:51:43Z"
+    },
+    {
+      "author": "asklar",
+      "author_association": "NONE",
+      "body": "See also #12817 ",
+      "created_at": "2020-05-27T17:46:53Z",
+      "updated_at": "2020-05-27T17:46:53Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "Unfortunately, this is a large body of work that we wouldn't want to do until we embark on a hypothetical FileSystemProvider v2, as opposed to band-aiding the existing FileSystemProvider. ",
+      "created_at": "2020-12-07T19:36:33Z",
+      "updated_at": "2020-12-07T19:36:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@joeyaiello Please see #12834 - we can improve performance for most scenarios today (only current limitation for new approach is Depth parameter - the feature request has been opened by me in .Net Runtime repository).",
+      "created_at": "2020-12-08T10:18:12Z",
+      "updated_at": "2020-12-08T10:18:12Z"
+    }
+  ],
+  "created_at": "2017-04-16T11:45:26Z",
+  "number": 3575,
+  "state": "open",
+  "title": "Improve performance of `Get-ChildItem`",
+  "updated_at": "2020-12-08T10:18:12Z"
+}

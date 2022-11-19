@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9469",
+  "author": "mklement0",
+  "body": "PowerShell - unlike `cmd.exe` - sensibly prevents invoking _executables_ located in the _current_ directory by _file name only_, so as to prevent accidental - or malicious - execution of an executable in the current directory when the intent is to execute an executable located in one of the standard directories listed in `$env:PATH`.\r\n\r\nTo invoke a file in the current directory, an _explicit path reference_ is needed, in the simplest form `./<name>`.\r\n\r\nAs an aside: #9468 demonstrates the loophole of unexpectedly being able to bypass that requirement with a file name that starts with `.`\r\n\r\nWhile this safeguard also applies to _document_ files - e.g., `*.txt` files, such document files can surprisingly _also_ be located by `$env:PATH` lookup - which is unexpected and can lead to surprising results.\r\n\r\nFor instance, if I try to open file `file.txt` by executing just that - `file.txt` - I wouldn't expect a file named `file.txt` to open just because a file by that name happens to be located in one of the directories listed in `$env:PATH` - yet that is exactly what happens now.\r\n\r\nTherefore, **_files that aren't considered executables_ should be exempt from this `$env:PATH` lookup and you shouldn't be able to open them by file name only**:\r\n\r\n* on Windows, this means ignoring file names whose extension is not listed in `$env:PATHEXT`\r\n\r\n* on Unix-like platforms, this means ignoring files that don't have the executable permissions bit set.\r\n\r\nNote: Technically, this amounts to a breaking change; my sense is that falls into [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).\r\n\r\n~~**Alternative**:~~\r\n\r\n~~The alternative is to _allow_  opening non-executable files by file name only, but _only_ in the _current_ directory.~~\r\n\r\nOn second thought: To keep things simple, it's better to limit filename-only invocation to _executables_ in `$env:PATH`.\r\n\r\n# Steps to reproduce\r\n\r\nOn Windows - RUN WITH ELEVATION:\r\n\r\n```powershell\r\nSet-Location $HOME\r\n\r\n'hi' > $env:SystemRoot\\t.txt\r\n\r\n# Try to open 't.txt' by file name only.\r\nt.txt\r\n```\r\n\r\n# Expected behavior\r\n\r\nAn error message that indicates:\r\n\r\n*  `The term 't.txt' is not recognized as the name of a cmdlet, function, script file, or operable program.`\r\n\r\n* Additionally - if a `.txt` file happens to be present in the current dir. - `Suggestion [3,General]: The command t.txt was not found, but does exist in the current location. ...`\r\n\r\n# Actual behavior\r\n\r\n`$env:SystemRoot\\t.txt` is opened in the text editor defined for the file type associated with extension `.txt`.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 6.2.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The alternative is to allow opening non-executable files by file name only, but only in the current directory.\r\n\r\nOr maybe if at least a relative path is provided?",
+      "created_at": "2019-04-25T22:32:47Z",
+      "updated_at": "2019-04-25T22:32:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@msftrncs: That already works and should continue to work.",
+      "created_at": "2019-04-25T22:49:30Z",
+      "updated_at": "2019-04-25T22:49:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "On second thought: To keep things simple, it's better to limit filename-only invocation to _executables_ in `$env:PATH`, so I suggest _always_ requiring a (potentially relative with `./`) path for non-executables (documents).  \r\n\r\nFilename-only targeting (for documents in the current dir.) can be already had via _commands_, namely `Invoke-Item <documentFileName>` and `Start-Process <documentFileName>`.\r\n",
+      "created_at": "2019-04-26T01:30:29Z",
+      "updated_at": "2019-04-26T01:30:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What about script files with shebang? My thoughts is that we don't analyze that file is executable.",
+      "created_at": "2019-04-26T06:08:55Z",
+      "updated_at": "2019-04-26T06:08:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let me summarize (partly for myself to get clarity):\r\n\r\n* On Windows, it is only a file's filename extension that determines whether you can directly invoke it _without needing to specify its extension_ (and even native binaries need such an extension on Windows).\r\n\r\n  * If you do specify the filename _with its extension_, there is ultimately no difference between an executable and a document: the file type associated with the filename extension determines (via the registry) determines whether the file is executed directly or what interpreter / application to pass it to.\r\n\r\n* On Unix, it is solely the executable permissions bit (set via `chmod`) that makes a file executable.\r\n\r\n  * If an executable file is a native binary, it executes directly.\r\n  * If it is a plain-text file, it is the shebang line that determines what interpreter the file is passed to for execution.\r\n  * Filename extensions (more typically called _suffixes_ in the Unix world) are _incidental_ to this mechanism - you must always specify the filename exactly in order to execute a file - _including_ the suffix, _if_ it has one, which is unusual in the Unix world (leaving the bad habit of creating shell scripts with suffix `.sh` aside).\r\n  * Non-executable files (documents) can _never_ be executed directly; you either execute the appropriate application instead and pass the document file path to it, or you use a generic utility that locates and executes the appropriate application based on the filename suffix, analogous to file-type definitions on Windows. \r\n  * There is no standard for such a utility in the Unix world, because there is no standardized GUI shell; for instance, macOS has the `open` utility, and `xdg-open` is used on (typically) Linux distros that use [freedesktop.org](http://freedesktop.org)-compliant desktops, such as Ubuntu.\r\n\r\nIn other words: on neither platform do you need to look at the _content_ of the file to determine _whether_ it is executable (and, as stated, if you specify the filename _including extension_ on Windows, any file is \"executable\").\r\n\r\nWhat that means for extension-less files _on Windows_, including those that happen to be plain-text script files with a shebang line:\r\n\r\n* While `*.cmd` exe does allow opening documents (non-executables) by exact filename without a path component via `$env:Path`, by default it does _not_ support that mechanism for _extension-less_ files; extension-less filenames are only supported if you explicitly add pseudo extension `.` to `$env:PATHEXT`.\r\n\r\n  * Note that it is precisely this open-a-document via `$env:Path` behavior I'm proposing be _disabled_ in PowerShell, because to me it makes conceptually more sense to limit `$env:Path` lookups to true executables.\r\nThat way you won't be able to accidentally open a document in a location other than the current one by specifying its file name only: users expect to be able to invoke _executables_ by file name only that are located in some standard location, not _documents_.\r\n\r\n* By contrast, PowerShell _already_ supports direct invocation of extension-less files via `$env:Path`, though by default there is no file type defined for such files, and you - sensibly get the default dialog allowing you to choose what application to open the file with (given that the appropriate application cannot be _inferred_, due to the absence of an extension).\r\n\r\n  * Note that if this proposal is implemented, PowerShell should then _only_ allow direct invocation of extension-less files if pseudo extension `.` has been added to `$env:PATHEXT` (given that without it, such files should be considered _documents_).\r\n\r\n  * To install a custom file type for handling extension-less files, you must define a file type as, say, `HKEY_CLASSES_ROOT\\ShebangFile` and map pseudo extension `.` to it, via `HKEY_CLASSES_ROOT\\.`\r\n  \r\n  * You can use this mechanism to install a _custom_ shebang-line handler: make the file type invoke a helper utility that analyzes the shebang line, if any, of the extension-less file being invoked, and pass the file to the appropriate interpreter (note that installing such a mechanism could be considered a security risk).\r\n\r\n  * The above is what I've attempted in [this Stack Overflow answer](https://stackoverflow.com/a/55619189/45375), but its functioning is currently hampered by PowerShell invariably using `ShellExecute` to invoke extension-less files, which means that the custom handler invariably runs in a _new_ console window - see #9430 and #7769.\r\n\r\n---\r\n\r\nNow, what was your question? \ud83d\ude01\r\n",
+      "created_at": "2019-04-26T13:56:40Z",
+      "updated_at": "2019-04-26T14:01:02Z"
+    }
+  ],
+  "created_at": "2019-04-25T22:10:20Z",
+  "number": 9469,
+  "state": "open",
+  "title": "Directly invoking (opening) documents (non-executable files) by file name only should not perform $env:PATH lookups",
+  "updated_at": "2019-11-26T11:45:00Z"
+}

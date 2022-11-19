@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11666",
+  "author": "mklement0",
+  "body": "`Measure-Command` currently unexpectedly executes the given script block (via the unfortunately named `-Expression` parameter, which should probably be given a `-ScriptBlock` alias) directly in the _caller's_ scope rather than in a _child_ scope.\r\n\r\nThat is, it effectively _dot-sources_ the given script block, which is unexpected and has two undesired consequences:\r\n\r\n* It has side effects for the caller, notably variables created inside the script block lingering in the caller's scope.\r\n\r\n* It distorts the measurement, because dot-sourced code executes noticeably more slowly - see #8911\r\n\r\nI therefore suggest that we make `Measure-Command` run the given script block be run in a _child_ scope. If needed, a `-NoNewScope` switch (analogous to `Invoke-Command`'s) could be added as an opt-in for dot-sourced execution.\r\n\r\nIf there is concern that there is code out there that _relies_ on the side effects from execution of the given script block, the next best thing is to reverse the logic: keep dot-sourcing by default, offer a `-NewScope` switch.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n$($null = Measure-Command { $foo = 'hi' }; $foo) | Should -Not -Be 'hi'\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe  test should pass.\r\n\r\n# Actual behavior\r\n\r\nThe test fails, because the `$foo` variable created inside the script block was effectively created in the caller's scope, due to implicit dot-sourcing.\r\n\r\n```none\r\nExpected 'hi' to be different from the actual value, but got the same value.\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-rc.2\r\n```\r\n",
+  "closed_at": "2020-01-23T20:46:47Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think the design comes from the scenario - user has a script and wrap one line in the cmdlet to see the line impact.",
+      "created_at": "2020-01-23T17:55:20Z",
+      "updated_at": "2020-01-23T17:55:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's a good point, @iSazonov  - I hadn't considered that scenario, I was looking at it from the perspective of \"measure execution time of a self-contained piece of code\", which is how I personally use it.\r\n\r\nThat said, even dot-sourced use of `Measure-Command` is of limited use, given that it suppresses the script block's output.\r\n\r\nThat is, you can't just wrap an existing line in `Measure-Command` and _generally_ expect the script to function normally (except for the additional `[timespan]` output with the timing result).\r\n\r\nIt would be a different story, if `Measure-Command` passed output _through_ and instead used, say, the information stream to report the timing.\r\n\r\nThe question is what the backward-compatibility impact is, but I can see two distinct modes as being helpful:\r\n\r\n* _with_  a hypothetical `-PassThru` switch:\r\n   * dot-source the script block\r\n   * pass the output through\r\n   * output the timing result (`[timespan]`) via the information stream (where it can be retrieved as such via the `System.Management.Automation.InformationRecord`'s instances `.MessageData` property), or, perhaps with an always-on verbose message?\r\n\r\n* _without_ that switch:\r\n  * Like the current behavior, except that the script block will run in a _child_ scope.\r\n",
+      "created_at": "2020-01-23T19:19:19Z",
+      "updated_at": "2020-01-23T19:19:19Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The scenarios where it'll actually impact the time aren't super common, and changing this won't exactly make `Measure-Command` particularly reliable.  I don't think the breaking change is worth it personally.",
+      "created_at": "2020-01-23T19:32:47Z",
+      "updated_at": "2020-01-23T19:32:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience. Based on your clarification in  https://github.com/PowerShell/PowerShell/issues/11663#issuecomment-577799560, I agree that the performance impact shouldn't drive the decision (not least because https://github.com/PowerShell/PowerShell/issues/8911#issuecomment-464954324 outlines a potential remedy).\r\n\r\nThe - at least to me - potentially unexpected pollution of the caller's scope is more problematic, however.\r\n\r\nAt the very least, documenting the behavior is certainly called for - see https://github.com/MicrosoftDocs/PowerShell-Docs/issues/5345\r\n\r\nAssuming a user is aware of the problem, they can always do `Measure-Command { & { $foo = 'hi' } }` to force running in a child scope, but, needless to say, that is awkward.\r\n\r\nSo at the second least, if you will, a `-NewScope` switch would be helpful.\r\n\r\nNote that this would be the _inverse_ of `Invoke-Command`'s behavior, which runs a script block in a child scope by default, and offers `-NoNewScope` as an opt-in for dot-sourcing - and that inversion is another reason why the current behavior is problematic (as are other inconsistencies in scoping behavior - see #7157)\r\n\r\n",
+      "created_at": "2020-01-23T19:55:33Z",
+      "updated_at": "2020-01-23T19:55:33Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience. Based on your clarification in [#11663 (comment)](https://github.com/PowerShell/PowerShell/issues/11663#issuecomment-577799560), I agree that the performance impact shouldn't drive the decision (not least because [#8911 (comment)](https://github.com/PowerShell/PowerShell/issues/8911#issuecomment-464954324) outlines a potential remedy).\r\n> \r\n> The - at least to me - potentially unexpected pollution of the caller's scope is more problematic, however.\r\n\r\nEh, `Invoke-Command` is the only default one I know of that doesn't (assuming the invocation happens immediately and in the current process).\r\n> \r\n> At the very least, documenting the behavior is certainly called for - see [MicrosoftDocs/PowerShell-Docs#5345](https://github.com/MicrosoftDocs/PowerShell-Docs/issues/5345)\r\n\r\nDefinitely.\r\n\r\n> So at the second least, if you will, a `-NewScope` switch would be helpful.\r\n>\r\n> Note that this would be the _inverse_ of `Invoke-Command`'s behavior, which runs a script block in a child scope by default, and offers `-NoNewScope` as an opt-in for dot-sourcing - and that inversion is another reason why the current behavior is problematic (as are other inconsistencies in scoping behavior - see #7157)\r\n\r\nI think it's infrequently enough required that the slight awkwardness of wrapping the block isn't that big of a deal.  The `Invoke-Command` parameter makes sense because you can't undo creating a new scope through the language, like you can the inverse.",
+      "created_at": "2020-01-23T20:11:36Z",
+      "updated_at": "2020-01-23T20:11:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think the primary problem - at least to me - is that I do expect child-scoped invocation and no side effects.\r\n\r\nI see your point re `Invoke-Command` being the only one (and the technical necessity for it), still I think it's generally more sensible to default to invocation in a child scope, except in cases intimately connected to the caller's scope (`%`, `?`, calculated properties).\r\n\r\nFair enough, though.\r\n\r\nI've added the nested-block technique to the docs issue, and I'm closing this.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-01-23T20:46:47Z",
+      "updated_at": "2020-01-23T20:46:47Z"
+    }
+  ],
+  "created_at": "2020-01-23T17:42:26Z",
+  "number": 11666,
+  "state": "closed",
+  "title": "Measure-Command should execute the given script block in a *child* scope, at least by opt-in",
+  "updated_at": "2020-01-24T03:56:58Z"
+}

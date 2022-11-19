@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8107",
+  "author": "HumanEquivalentUnit",
+  "body": "Select-Object's hashtable syntax - even with abbreviating the key names to one character, it's a lot of code and symbols, and feels like it could be cleaner. The simple case of taking one property value unchanged, but with a new name, could be a lot cleaner.\r\n\r\nWhat if a single-key hashtable could be used, where the key is the new property name, and the value is either a string of the original property to rename, or a scriptblock calculation. e.g.\r\n\r\n```\r\n# property rename, and property calculation, shown in:\r\n# Long form\r\n# Short form - nicer, but not good for scripts because it's using abbreviations\r\n# Suggested form\r\n\r\ngci | select @{Label='ShortName'; Expression='BaseName'}, @{name='size'; expression={$_.Length / 1MB}}\r\n\r\ngci | select @{L='ShortName'; E={$_.BaseName}}, @{N='size'; E={$_.Length / 1MB}}\r\n\r\ngci | select @{ShortName='BaseName'}, @{Size={$_.Length / 1MB}}\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I would actually recommend also supporting collapsing of the syntax into a single hashtable as well. Your last example could look like this instead:\r\n\r\n```powershell\r\ngci | select @{ShortName='BaseName'; Size={$_.Length / 1MB}}\r\n# or\r\nGet-ChildItem | Select-Object -Property @{\r\n    ShortName = 'BaseName'\r\n    Size      = { $_.Length / 1MB }\r\n}\r\n```",
+      "created_at": "2018-10-23T18:57:50Z",
+      "updated_at": "2018-10-23T18:58:13Z"
+    },
+    {
+      "author": "romero126",
+      "author_association": "CONTRIBUTOR",
+      "body": "Wouldn't it be just as wise to change the Expression from a statically Calculated property, To a more fluid property such as a ScriptProperty. \r\n`$x = Get-Date | Add-Member -MemberType ScriptProperty -Name \"TicksCalculated\" -Value { $this.Ticks + 40 }\r\n`\r\nAnd you can change values fluidly and reflect the object's most current values.\r\n```\r\n$x.Ticks = 20\r\n$x.TicksCalculated would display as 60 next time it is viewed.\r\n```",
+      "created_at": "2018-10-23T19:12:59Z",
+      "updated_at": "2018-10-23T19:12:59Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If that is done then there becomes no way to actually use a static calculated property when you might want that, though. And I think in most cases a static noteproperty is all most folks want.\r\n\r\n---\r\n\r\nI'd think it would be more effective to implement that as a separate `-DynamicProperty` parameter if we did something like that.",
+      "created_at": "2018-10-23T19:15:44Z",
+      "updated_at": "2018-10-23T19:25:31Z"
+    },
+    {
+      "author": "RichardSiddaway",
+      "author_association": "NONE",
+      "body": "Using Add-Member seems to be a step into the past. Using a calculated field is a simpler operation.\r\n\r\nsimplifying the syntax of calculated fields (this affects format-table and sort-object as well) is a good idea as long as the original syntax is still available otherwise you're going to break a ton of code.  ",
+      "created_at": "2018-10-24T09:24:41Z",
+      "updated_at": "2018-10-24T09:24:41Z"
+    },
+    {
+      "author": "RichardSiddaway",
+      "author_association": "NONE",
+      "body": "I'd also want to retain the ability to mix the properties from the object with the calculated fields so something like \r\n\r\ngci | select Mode, @{ShortName='BaseName'}, LastwriteTime, @{Size={$_.Length / 1MB}}, CreationTime",
+      "created_at": "2018-10-24T10:03:49Z",
+      "updated_at": "2018-10-24T10:03:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This is useful for Format-* cmdlets too. Can/should we this in the same time?",
+      "created_at": "2018-10-25T05:50:29Z",
+      "updated_at": "2018-10-25T05:50:29Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "I implemented this feature as a proof-of-concept for myself a few months ago, but haven't polished it or added tests. (Happy to contribute the changes, but they're definitely not PR-ready.)\r\n\r\nObservations:\r\n\r\n* The most straightforward way to implement this request is to modify VerifyHashTable in MshParameter.cs, which affects Select-Object, Format-Table, Format-List, Format-Custom, Form. (\"Yes\" to @iSazonov re: Format-*, but needs some design decisions)\r\n* It feels much nicer to use than the current syntax, especially Select-Object and Sort-Object. (e.g. `gci | sort [ordered]@{Extension='d'; Length='a'; {$_.Name[-1]}='d'}`)\r\n* Even more convenient would be syntax for KeyValuePair literals. (Almost certainly a breaking change though, and abbreviated hashtable syntax is better than what exists today.)\r\n\r\nComplications:\r\n\r\n* It's necessary to use `[ordered]@{...}` instead of just `@{...}`. Otherwise the properties don't appear in the expected order, or even worse, sorting works unexpectedly.\r\n* The Format-* cmdlets have more than two useful parameters, and it's unclear how best to express more than Name & Expression in an abbreviated form. Some potential options:\r\n\r\n  1. `gci | ft @{SizeInBytes='Length', '#,0', 'right'; SecondsOld = {([datetime]::UtcNow-$_.LastWriteTimeUtc).TotalSeconds}, '#,0', 'right'; LastModified='LastWriteTime', 'yyyy-mm-dd'}`\r\n  2. Allow Name=Value and apply the other parameters across: `gci | ft @{SizeInBytes='Length'; SecondsOld={([datetime]::UtcNow-$_.LastWriteTimeUtc).TotalSeconds}; f='#,0'; a='right'}, @{LastModified='LastWriteTime'; f='yyyy-mm-dd'}`\r\n  3. Only allow Name=Value: `gci | ft @{SizeInBytes='Length'; SecondsOld={([datetime]::UtcNow-$_.LastWriteTimeUtc).TotalSeconds}}, @{LastModified='LastWriteTime'}`\r\n\r\n* Error reporting is more difficult, because it's ambiguous which format was the user attempting to use. (My implementation doesn't try to analyze what went wrong with the short-form parameters, and just throws the error raised by the long-form interpretation.)\r\n\r\nRelated, helpful potential changes:\r\n\r\n* Implicitly parse hashtable arguments as ordered hashtables. (Otherwise `sort` will be unpredictable, and the others will have out-of-order properties)\r\n* Format-Html should use ExpressionEntryDefinition, AlignmentEntryDefinition, and WidthEntryDefinition instead of defining its own HashtableEntryDefinition.\r\n* Enhance CommandParameterDefinition and/or HashtableEntryDefinition to indicate mutually exclusive parameters and (optional) parameter validation. Otherwise the modifications to VerifyHashTable will be brittle / hard-coded / hackish, e.g. relying on the subclass of `HashtableEntryDefinition`. (Currently `CommandParameterDefinition` is just a light helper wrapper around list of parameters and their accepted types.)\r\n* Make the `MshParameter` mechanism public, to allow functions to use the functionality.",
+      "created_at": "2018-11-14T02:30:36Z",
+      "updated_at": "2018-11-14T02:30:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr @BrucePay Could you please look the Issue? Have you thoughts what is a best design and how we can better implement this? ",
+      "created_at": "2018-11-14T05:12:18Z",
+      "updated_at": "2018-11-14T05:12:18Z"
+    },
+    {
+      "author": "HumanEquivalentUnit",
+      "author_association": "CONTRIBUTOR",
+      "body": "It seems that propertly supporting the Format* cmdlets and having it collapse down to one hashtable with multiple properties makes it much harder. Those are things I don't really want, as much as the change to Select-Object. Would it be possible to handle select-object in one change and those later?\r\n\r\n> Implicitly parse hashtable arguments as ordered hashtables. (Otherwise sort will be unpredictable, and the others will have out-of-order properties)\r\n\r\nIt would be a breaking change if `@{}` became an *ordered* hashtable literal, the return type would change to `OrderedDictionary`; using `[ordered]@{...}` is probably less confusing than adding a new hashtable syntax for ordered literals, or parsing it differently in special cases.\r\n\r\n\r\n",
+      "created_at": "2019-03-21T09:10:12Z",
+      "updated_at": "2019-03-21T09:10:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Would it be possible to handle select-object in one change and those later?\r\n\r\nYes, of cause. I meant that there may be a common code.",
+      "created_at": "2019-03-21T11:46:48Z",
+      "updated_at": "2019-03-21T11:46:48Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "Special-casing Select-Object would require that it abandons the common code that all the hashtable-parameter-using cmdlets share. Plus, the collapsed-hashtable-argument style is great for the other cmdlets too - but there are some corner cases.\r\n\r\n> > Implicitly parse hashtable arguments as ordered hashtables. (Otherwise sort will be unpredictable, and the others will have out-of-order properties)\r\n>\r\n> It would be a breaking change if @{} became an ordered hashtable literal, the return type would change to OrderedDictionary; using [ordered]@{...} is probably less confusing than adding a new hashtable syntax for ordered literals, or parsing it differently in special cases.\r\n\r\nRequiring [ordered] to get proper results when using the short-form syntax will cause people to make mistakes, forever.  KeyValuePair literals are probably the only clean-ish solution to this problem; all the other opitons involve introducing some quirky behavior.",
+      "created_at": "2019-04-08T15:10:59Z",
+      "updated_at": "2019-04-08T15:10:59Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@HumanEquivalentUnit, thanks for linking my issue.\r\n(Although, I searched for an already similar request, I didn't came across this one.)\r\nThe idea is indeed almost the same, it slightly differs in a sense that it isn't relying on the order of the property attributes but on the (implicit) property attribute type. Meaning that e.g. a the calculated expression should be an explicit `[Expression]` type, or an implicit `[ScriptBlock]` (based constructor of the expression class):\r\n\r\nTaking @bstrautin example:  \r\n<sub>(using the powershell wrappers from #11866)</sub>\r\n\r\n**Implicit syntax:**\r\n```PowerShell\r\ngci | ft2 @{\r\n\tSizeInBytes = {$_.Length}, '#,0', 'right'\r\n\tSecondsOld = {([datetime]::UtcNow-$_.LastWriteTimeUtc).TotalSeconds}, '#,0', 'right'\r\n\tLastModified = {$_.LastWriteTime}, 'yyyy-mm-dd'\r\n}\r\n```\r\n\r\n**Explicit syntax:**\r\n```PowerShell\r\ngci | ft2 @{\r\n\tSizeInBytes = [Expression]'Length', [FormatString]'#,0', [Alignment]'right'\r\n\tSecondsOld = [Expression]{([datetime]::UtcNow-$_.LastWriteTimeUtc).TotalSeconds}, [FormatString]'#,0', [Alignment]'right'\r\n\tLastModified = [Expression]'LastWriteTime', [FormatString]'yyyy-mm-dd'\r\n}\r\n```\r\n\r\nThe disadvantage is that the concerned property attribute classes need to be predefined. At the other hand, this could also be turned into an advantage if the properties attributes could be attached to the concerned object properties to be used as a default behavior for the related cmdlet as `Format-Table ` and `Sort-Object`.\r\n\r\nI am not sure what I should do with my request #11866, close it?\r\n",
+      "created_at": "2020-02-20T09:41:21Z",
+      "updated_at": "2020-02-20T10:16:38Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iRon7 if your request is effectively a duplicate, probably best to close it and summarise any extra points you feel aren't covered in this issue already (a bit like you already did, but feel free to add on any extra points that haven't been covered yet) \ud83d\ude42 ",
+      "created_at": "2020-02-20T16:00:20Z",
+      "updated_at": "2020-02-20T16:00:20Z"
+    }
+  ],
+  "created_at": "2018-10-23T18:43:53Z",
+  "number": 8107,
+  "state": "open",
+  "title": "Select-Object hashtable syntax is long-winded, support a shorter version?",
+  "updated_at": "2020-02-20T16:00:21Z"
+}

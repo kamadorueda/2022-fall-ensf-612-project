@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12181",
+  "author": "Smino97",
+  "body": "Hi,\r\n\r\nI am trying to run powershell core on a live booted CentOS 7. The NFS of the System is running on a dedicated Server and is read-only that multiple clients can access the NFS at the same time.\r\nI tried the newest versions stable, lts and preview. None of them seem to work on read-only filesystems.\r\n\r\nQuestion is: Is there a way to run Powershell Core on read-only FS, e.g. by manually setting up the environment properly?\r\n\r\n# Steps to reproduce\r\n\r\n```\r\n1. Setup PXE Server using https://github.com/bertvv/ansible-role-pxeserver\r\n2. Setup NFS using https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/storage_administration_guide/diskless-nfs-config\r\n3. Install Powershell on the exported NFS with\r\n`sudo yum install powershell --installroot=_exported-root-directory_ --releasever=/`\r\n4. Connect to Live booted client and run `pwsh`\r\n\r\n```\r\n\r\n# Expected behavior\r\n\r\n```\r\nPowershell starts\r\n\r\n```\r\n\r\n# Actual behavior\r\n\r\n![image](https://user-images.githubusercontent.com/62539851/77311661-d3db1780-6d00-11ea-9d55-a0d5b8731e6a.png)\r\n\r\nExtract of `strace -f pwsh-preview`\r\n\r\n![image](https://user-images.githubusercontent.com/62539851/77311764-07b63d00-6d01-11ea-8a68-3e190a5590b8.png)\r\n\r\n# Environment data\r\n\r\n```\r\nPackage installed: powershell-preview-7.0.0_rc.3-1.rhel.7.x86_64.rpm\r\nCentOS 7\r\n\r\n```\r\n",
+  "closed_at": "2020-03-26T00:00:09Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "\r\n**First**, .NET Core runtime creates pipes for managed debugging, when the runtime starts up.\r\n> ... pipes for managed debugging in /tmp. They are named something like \u201cclr-debug-pipe-17206-65823754-out\u201d, \u201cclr-debug-pipe-17206-65823754-in\u201d where 17206 is the process id and 65823754 is the process creation time.\r\n\r\nYour screenshot shows the failure of creating the pipes. For details, see https://github.com/dotnet/runtime/issues/7204\r\n\r\n![image](https://user-images.githubusercontent.com/127450/77346070-dafb2900-6cf2-11ea-9323-9456538ab9a3.png)\r\n\r\nThis step can be disabled by executing `export COMPlus_EnableDiagnostics=0` before start the .NET Core program. See https://github.com/dotnet/coreclr/pull/15878 for details.\r\n\r\n**Second**, the update notification feature added in pwsh 7 requires writing to the disk. But you can disable it by executing `export POWERSHELL_UPDATECHECK=Off` before starting pwsh.\r\n\r\n**Third**, the `PSReadLine` saves command line history to a file. This can be disabled by running `Set-PSReadLineOption -HistorySaveStyle SaveNothing` right after starting pwsh I guess.\r\n\r\n**Fourth**, the module analysis in PowerShell saves the analysis results to a cache file. This cannot be disabled, but the failure of writing to the cache file will be tolerated by pwsh.\r\n\r\n**Fifth, ~this one might be a hard blocker.~** pwsh also creates a pipe for debugging purpose when starting (attach to a running pwsh process), and obviously, this will fail on a read-only file system. ~It's very possible this failure will terminate the process.~ Just got @PaulHigin's response on this: `PowerShell still runs if the named pipe cannot be created.  It just won't be able to use IPC.`\r\n\r\n### Given above, it's possible to run pwsh on a read-only file system, and you can try it out and share your observations.",
+      "created_at": "2020-03-23T17:59:36Z",
+      "updated_at": "2020-03-23T18:10:24Z"
+    },
+    {
+      "author": "Smino97",
+      "author_association": "NONE",
+      "body": "Hi,\r\n\r\nthanks for your fast and detailed answer!\r\n\r\nI tried to get this done step by step, but still unfortunately pwsh will prompt me another error.\r\nNevertheless it seems like the Issue with the .NET Core runtime and it's pipes is solved.\r\nI setup everything again and installed pwsh stable version this time to be sure it has nothing to do with the environment.\r\n\r\nHere's the output: \r\n![image](https://user-images.githubusercontent.com/62539851/77414056-ae154780-6dc0-11ea-9972-bb89a42d4043.png)\r\n\r\nThe only solution I could find for this is something out of the visual studio context I guess, see here: https://stackoverflow.com/questions/34388394/the-type-initializer-for-system-management-automation-runspaces-initialsessions\r\n\r\nComments/Help highly appreciated!\r\n\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/34388394/the-type-initializer-for-system-management-automation-runspaces-initialsessions\">The type initializer for 'System.Management.Automation.Runspaces.InitialSessionState' threw an exception</a></strong></div><div>I was working on a simple record management web app in ASP.NET MVC. The build was successful. However, when I go to Package Manager Console, I always get this error.\n\nThe type initializer for 'System.</div></blockquote>",
+      "created_at": "2020-03-24T10:23:56Z",
+      "updated_at": "2020-03-24T10:23:58Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The exception happens here, when trying to create the data directory.\r\nhttps://github.com/PowerShell/PowerShell/blob/68442a33e5f775c80526b2f64475c795f6bb085b/src/System.Management.Automation/CoreCLR/CorePsPlatform.cs#L278-L301\r\n\r\nIt turns out this method attempts to create directories at multiple code paths ...\r\nThere could be code like this elsewhere. It was never a target for pwsh to work on read-only file system.\r\n\r\nTo work around this particular issue, you will have to pre-create those default directories:\r\nhttps://github.com/PowerShell/PowerShell/blob/68442a33e5f775c80526b2f64475c795f6bb085b/src/System.Management.Automation/CoreCLR/CorePsPlatform.cs#L258-L261 \r\nbut I doubt if it's worth to try, because you may run into other similar issues after working around this one.",
+      "created_at": "2020-03-24T17:33:15Z",
+      "updated_at": "2020-03-24T17:33:15Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-03-26T00:00:08Z",
+      "updated_at": "2020-03-26T00:00:08Z"
+    }
+  ],
+  "created_at": "2020-03-23T11:24:55Z",
+  "number": 12181,
+  "state": "closed",
+  "title": "Powershell Core not running in read-only NFS",
+  "updated_at": "2020-03-26T00:00:09Z"
+}

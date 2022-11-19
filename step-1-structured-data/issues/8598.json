@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8598",
+  "author": "mklement0",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nWhile the precedence rules that apply when incompatible / repeated options are passed to the `switch` statements are [documented (partially incorrectly)](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_switch?view=powershell-6), a user-friendlier option would be to _prevent_ such combinations to begin with.\r\n\r\nNotably, the following combinations are currently permitted, with the last option winning:\r\n\r\n* Any combination of conceptually mutually exclusive options `-exact`, `-wildcard`, and `-regex`\r\n\r\n* Multiple `-file <file>` options.\r\n\r\n* Repeated use of the same option.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nReport a parse-time error when such pointless combinations are found.\r\n\r\nTechnically, that would be a breaking change, but, I hope, of type [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This should be relatively straightforward, I should think. Probably have to pick it up in the tokenizer, or potentially the parser if that turns out to be a simpler point to detect it at (as it well might, it having been already neatly chopped into tokens by that point).\r\n\r\nAre there any other keywords that take parameters like this? I can't think of any off the top of my head, but if there _are_ we probably ought to check we don't have a similar error there.",
+      "created_at": "2019-01-07T15:40:20Z",
+      "updated_at": "2019-01-07T15:40:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm glad to hear it, @vexx32.\r\n\r\nFrom what I can glean from [`about_language_keywords`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_language_keywords?view=powershell-6), the only other statement that supports options with the same type of syntax is [`DATA`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_data_sections?view=powershell-6), which supports only the `-SupportedCommand` option, which, however, is already parsed as expected: it should and does  permit only _one_ instance of `-SupportedCommand` (to which  an _array_ of command names may be passed).\r\n",
+      "created_at": "2019-01-07T16:36:10Z",
+      "updated_at": "2019-01-07T16:37:29Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I have never even heard that mentioned in passing. Ever. Didn't even know that was a language keyword, and I've read that help doc several times.... wow. Must have just skimmed over it a good many times.\r\n\r\nThat needs a thorough write up... guess I know what I'm doing for next week's blog, haha! That is really nice to know about, thank you!",
+      "created_at": "2019-01-07T16:41:34Z",
+      "updated_at": "2019-01-07T16:41:34Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0\r\n> Any combination of conceptually mutually exclusive options -exact, -wildcard, and -regex\r\n\r\nBut they are not _actually_ mutually exclusive. You can specify multiple options and  the last one wins (i.e. order matters). So this is definitely a breaking change. What benefit would we accrue from taking this breaking change?\r\n\r\nFrom a historical perspective, IIRC, in V1, there might have been some thought that these would be switch parameters but because they are language elements instead of parameters, that doesn't work. @JamesWTruher @khansen00  - do you guys remember any more details about this? \r\n\r\n@vexx32 The code is here:\r\n\r\n[Parser.cs:2559](https://github.com/PowerShell/PowerShell/blob/d51b5fdc3087b6eaee1107f76e480027eb4545b4/src/System.Management.Automation/engine/parser/Parser.cs#L2559)\r\n\r\n@mklement0 \r\n> From what I can glean from about_language_keywords, the only other statement that supports options with the same type of syntax is DATA, \r\n\r\nThe DSC `configuration` keyword also takes 'parameters' however as a general rule, we tried to avoid parameters on language elements because they don't behave like proper cmdlet parameters.\r\n",
+      "created_at": "2019-01-07T22:11:55Z",
+      "updated_at": "2019-01-07T22:11:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "They're *functionally* mutually exclusive, though. You can only use one functionality at a time, which makes the suggestions in the current documentation confusing at best, in my opinion.\r\n\r\nWould be interesting to hear any further background on this!",
+      "created_at": "2019-01-07T22:30:18Z",
+      "updated_at": "2019-01-07T22:30:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To add to @vexx32's comment:\r\n\r\nThat they're not _actually_ mutually exclusive is the very reason for creating this issue: they _should_ be, which brings us to **why this change is worth making:**\r\n\r\nIf we prevent nonsensical / pointless use to begin with, we reduce complexity in several respects:\r\n\r\n  * Users are spared from accidentally creating self-contradictory / confusing `switch` statements.\r\n  * Similarly, users reading existing code won't be faced with such statements.\r\n  * There is no need to establish and document precedence rules, whose sole raison d'\u00eatre is to resolve ambiguity due to self-contradictory / repeated-options use.\r\n  * Users therefore need not be aware of and need not learn these precedence rules.\r\n\r\nAs for **what could break**:\r\n\r\n* Contradictory use: Statements such as `switch -wildcard -regex ...`\r\n  * Clearly, no one should ever have written such a statement, as it betrays a lack of understanding. (Note that programmatic construction of the options (via splatting) doesn't apply to `switch`, leaving `Invoke-Expression` aside, which I don't think we need to worry about). \r\n\r\n* Pointless repetition: Statements such as `switch -wildcard -wildcard ...` and `switch -file 1.txt -file 2.txt ...`\r\n  * Such repetition is benign with the parameterless options, but problematic with `-file` (again, the last one wins) - if there really is concern about breaking such usage, we could limit the change to preventing contradictory use.\r\n\r\n\r\n",
+      "created_at": "2019-01-08T12:11:38Z",
+      "updated_at": "2019-01-08T12:11:38Z"
+    }
+  ],
+  "created_at": "2019-01-07T15:29:51Z",
+  "number": 8598,
+  "state": "open",
+  "title": "`switch` statement: prevent nonsensical / repeated options ",
+  "updated_at": "2019-01-08T12:11:38Z"
+}

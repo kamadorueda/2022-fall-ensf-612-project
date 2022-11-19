@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7005",
+  "author": "huffstler",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```powershell\r\n# make sure that $a exists as a directory.\r\n$a = \"C:\\tmp\\src\"\r\n$b = \"C:\\tmp\\dest\"\r\n\r\n# $a has the following structure\r\n# C:\\tmp\\src\r\n#    |_ foo.txt\r\n#    |_ a\r\n#      \\_ doom.txt\r\n#    |_ b\r\n#      \\_ bar.txt\r\n\r\nGet-ChildItem -Path $a | ForEach-Object { Copy-Item -Path $_.FullName -Destination $b -Recurse }\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nC:\\tmp\\dest should look like this:\r\n\r\nC:\\tmp\\dest\r\n   |_ foo.txt\r\n   |_ a\r\n     \\_ doom.txt\r\n   |_ b\r\n     \\_ bar.txt\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nIt ends up looking like this:\r\n\r\nC:\\tmp\\dest\r\n   |_ foo.txt\r\n   |_ doom.txt\r\n   |_ b\r\n     \\_ bar.txt\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.2\r\nOS                             Microsoft Windows 10.0.14393\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "huffstler",
+      "author_association": "NONE",
+      "body": "Other (hopefully) useful info:\r\n\r\n- This happens in Powershell 5.1 as well.\r\n\r\n- Found a bug report [here](https://windowsserver.uservoice.com/forums/301869-powershell/suggestions/15447528-bug-copy-item-tosession-does-not-copy-the-first) from July 2016 which seems to describe the same issue.\r\n\r\n- Happens with the `-Recurse`, `-Container`, and `-Force` parameters provided as well.\r\n\r\n- Also happens with the `Move-Item` command",
+      "created_at": "2018-06-05T20:48:35Z",
+      "updated_at": "2018-06-06T12:47:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The SO answer you link to links back to #2934, but the latter is about inconsistent behavior, because the behavior depends on whether the target directory already exists or not.\r\n\r\nThe question comes down to this: If you do\r\n\r\n```powershell\r\nCopy-Item -Recurse <source-dir-path> <dest-dir-path>\r\n```\r\n\r\nshould you end up with (a) `<dest-dir-path>/<contents-of-source-dir>` or (b) `<dest-dir-path>/<source-dir-name>/<contents-of-source-dir>`?\r\n\r\nCurrently, you get (a) if `<dest-dir-path>` didn't previously exist, and (b) if it did, and that inconsistency is problematic.\r\n\r\nIt sounds like you're saying that (b) is the behavior you expect - and at this point I'm unclear on what the right answer is:\r\n\r\n* `xcopy /S` on Windows seemingly always does (a)\r\n* `cp -R` on Unix actually exhibits the same inconsistency as `Copy-Item -Recurse` ",
+      "created_at": "2018-06-06T02:58:53Z",
+      "updated_at": "2019-10-04T20:27:34Z"
+    },
+    {
+      "author": "huffstler",
+      "author_association": "NONE",
+      "body": "My mistake on the SO link, you're correct that isn't relevant to this bug report. I've removed it from the second comment.\r\n\r\nMy problem is: assuming `<dest-dir-path>` *doesn't* already exist; if there are multiple sub directories in `<source-dir-path>` (lets assume `foo` and `bar`) both `Copy-Item` and `Move-Item` will take the contents of `bar` and put them in the root of `<dest-dir-path>` *without* copying the `bar` folder as well.\r\n\r\nYou should be able to see a \"graphical\" representation of what I described in the example at the top as well I think. I expect `doom.txt` to be copied to the folder `a` but instead it is dropped into the root (`C:\\tmp\\dest`) and the folder `a` is never copied over.",
+      "created_at": "2018-06-06T12:45:08Z",
+      "updated_at": "2018-06-06T12:45:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@huffstler: \r\n\r\nYes, but that is the same problem as #2934, just in the context of a larger command:\r\n\r\n* When subdir. `a` is being copied, `$b` doesn't exist yet, so `a`'s content is being copied _directly_ into `$b` (behavior (a) above).\r\n\r\n* By the time subdir. `b` is copied, `$b` already exists, and that's when the inconsistency kicks in: `b`'s content is copied to `$b/b` (behavior (b) above).\r\n\r\nTherefore, if you run the command again, you do get the desired behavior.\r\n\r\nGiven the current behavior, you can work around the problem as follows:\r\n\r\n```powershell\r\nGet-ChildItem -Path $a |\r\n  ForEach-Object { New-Item -Force -Type Directory $b } { \r\n   Copy-Item -Recurse -Path $_.FullName -Destination $b\r\n  }\r\n```\r\n\r\nBut the larger question is whether this inconsistency should be resolved toward behavior (a) or behavior (b).\r\n\r\nYou clearly expected (a), but others may have different expectations, based on `xcopy`.\r\n\r\nFrankly, I was baffled to find the same inconsistency as with `Copy-Item -Recurse` in the Unix world (`cp -R`).\r\n\r\nThe only way **to currently get predictable behavior** is to:\r\n\r\n* Ensure that the target dir. already exists.\r\n\r\n* Then, depending on whether you want behavior (a) or (b):\r\n\r\n  * To get behavior (a): Explicitly target the *content* of the source directory:\r\n\r\n     * `Copy-Item -Recurse -Force $a/* $b`\r\n\r\n     * Note the need for `-Force`, which is needed to ensure that _hidden_ items are copied too.\r\n\r\n        * With `cp` on Unix, you can more simply just `$a/.`, but that doesn't work in PowerShell.\r\n\r\n  * To get behavior (b): No further action needed.\r\n\r\n---\r\n\r\nIf a change is made, it will be a _breaking_ one.\r\n\r\nThe alternative is to merely _document_ the behavior and live with it, but I personally find that unsatisfactory.\r\n\r\n---\r\n\r\nUnless you disagree with my analysis, I suggest closing this issue as a duplicate of #2934; I'll migrate my findings there.",
+      "created_at": "2018-06-06T15:30:28Z",
+      "updated_at": "2019-10-04T20:27:56Z"
+    },
+    {
+      "author": "huffstler",
+      "author_association": "NONE",
+      "body": "I experimented a little and found that \"Unix\" (I'm using cygwin) `cp -R` achieves *almost* the same result as `Copy-Item.`\r\n\r\nExample:\r\n``` bash\r\n$ pwd\r\n~/tmp\r\n\r\n# Contents\r\n# a\r\n# a\\boo\r\n# a\\boo\\c.d\r\n# a\\doom.txt\r\n# a\\foo\r\n# a\\foo\\a.b\r\n\r\n# z is a directory and doesn't exist yet.\r\ncp -R a z\r\n\r\n# contents of z\r\n# z\r\n# z\\boo\r\n# z\\boo\\c.d\r\n# z\\doom\r\n# z\\foo\r\n# z\\foo\\a.b\r\n\r\n```\r\nIf another `cp` command is given, you will see directory `a` appear inside of `z`, but that's not the point of this comment.\r\n\r\nIn this scenario, you'll see that although the directory did not exist before the copy, the contents of `boo` and the structure of the directory are persisted. I still agree with your analysis, I only wanted to point out the slight differences between the two scenarios. (That `cp` is \"less-wrong\" than `Copy-Item`)",
+      "created_at": "2018-06-06T17:26:27Z",
+      "updated_at": "2018-06-06T17:49:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@huffstler: Good point; yes, there is an additional bug, which I've only a couple of hours ago recorded in #7010 - and which I now realize is a variation of yours. ",
+      "created_at": "2018-06-06T17:30:44Z",
+      "updated_at": "2018-06-06T17:30:44Z"
+    },
+    {
+      "author": "chucklu",
+      "author_association": "CONTRIBUTOR",
+      "body": "I encounter the same problem when I want to copy the subfolder structure of a source folder to an existing target folder",
+      "created_at": "2018-09-12T10:24:30Z",
+      "updated_at": "2018-09-12T10:24:30Z"
+    },
+    {
+      "author": "army1349",
+      "author_association": "NONE",
+      "body": "> \r\n> \r\n> I experimented a little and found that \"Unix\" (I'm using cygwin) `cp -R` achieves _almost_ the same result as `Copy-Item.`\r\n> \r\n> Example:\r\n> \r\n> ```shell\r\n> $ pwd\r\n> ~/tmp\r\n> \r\n> # Contents\r\n> # a\r\n> # a\\boo\r\n> # a\\boo\\c.d\r\n> # a\\doom.txt\r\n> # a\\foo\r\n> # a\\foo\\a.b\r\n> \r\n> # z is a directory and doesn't exist yet.\r\n> cp -R a z\r\n> \r\n> # contents of z\r\n> # z\r\n> # z\\boo\r\n> # z\\boo\\c.d\r\n> # z\\doom\r\n> # z\\foo\r\n> # z\\foo\\a.b\r\n> ```\r\n> \r\n> If another `cp` command is given, you will see directory `a` appear inside of `z`, but that's not the point of this comment.\r\n> \r\n> In this scenario, you'll see that although the directory did not exist before the copy, the contents of `boo` and the structure of the directory are persisted. I still agree with your analysis, I only wanted to point out the slight differences between the two scenarios. (That `cp` is \"less-wrong\" than `Copy-Item`)\r\n\r\nWell, in UNIX world you can always do `cp -R a/ z`.\r\nTrailing slashes are important.",
+      "created_at": "2019-10-01T14:07:01Z",
+      "updated_at": "2019-10-01T14:07:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@army1349: \r\n\r\nUnfortunately, it's too late to introduce such semantics to PowerShell, because it would be a breaking change.\r\n\r\nAside from that:\r\n\r\nWhile `cp -R a/ b` indeed consistently copies the _contents_ of directory `a` to directory `b`, whether or not `b` previously existed:\r\n\r\n* it is only _BSD_ `cp` (as also used on macOS) that behaves this way, _not_ the (more common, on all Linux platforms) _GNU_ `cp`.\r\n\r\n* Even BSD `cp`, however, does _not_ apply the same logic to the _destination_ directory argument: `cp -R a b/` is effectively the same as `cp -R a b`, with the ambiguity discussed; that is, you cannot force a copy of `a` to be placed _inside_ `b` if `b` doesn't exist yet.\r\n",
+      "created_at": "2019-10-04T20:36:03Z",
+      "updated_at": "2019-10-04T20:39:10Z"
+    }
+  ],
+  "created_at": "2018-06-05T20:45:33Z",
+  "number": 7005,
+  "state": "open",
+  "title": "Copy-Item puts contents of 1st directory in root of target folder.",
+  "updated_at": "2021-11-29T17:46:54Z"
+}

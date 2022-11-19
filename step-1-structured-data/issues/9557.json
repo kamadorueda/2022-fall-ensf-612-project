@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9557",
+  "author": "chriskuech",
+  "body": "# Steps to reproduce\r\nI am trying to recurse parsed JSON, but value types are passing type checks for `[psobject]` and `[pscustomobject]` making the recursive case impossible to detect.\r\n```powershell\r\nfunction repro($v) {\r\n    $v.GetType()\r\n    $v -is [psobject]\r\n}\r\nrepro ([int64]4)\r\nrepro (\"4\" | ConvertFrom-Json)\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nIsPublic IsSerial Name                                     BaseType\r\n-------- -------- ----                                     --------\r\nTrue     True     Int64                                    System.ValueType\r\nFalse\r\nTrue     True     Int64                                    System.ValueType\r\nFalse\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nIsPublic IsSerial Name                                     BaseType\r\n-------- -------- ----                                     --------\r\nTrue     True     Int64                                    System.ValueType\r\nFalse\r\nTrue     True     Int64                                    System.ValueType\r\nTrue\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.0\r\nPSEdition                      Core\r\nGitCommitId                    6.2.0\r\nOS                             Darwin 18.5.0 Darwin Kernel Version 18.5.0: Mon Mar 11 20:40:32 PDT 2019; root:xnu-4903.251.3~3/RELEASE_X86_64\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\nAlso observed on Windows",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah. _Every_ type you can find in PowerShell is wrapped in a `[psobject]`, by design. PSObject is a wrapper type that enables the Extended Type System functions used pretty extensively in PS.\r\n\r\nFor that matter, `-is [PSObject]` and `-is [PSCustomObject]` are identical; if you check either type's fullname you'll see they point to the same class. The difference there is how the parser handles the `[pscustomobject]` version differently, specifically in the `[pscustomobject]@{}` situation where it's followed by a hashtable.\r\n\r\nIf you need to find a PSCustomObject type specifically, you'll need to do your checks differently.\r\n\r\n```powershell\r\nfunction Test-PSCustomObject {\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(Mandatory, ValueFromPipeline)]\r\n        [psobject]\r\n        $InputObject\r\n    )\r\n    process {\r\n        $InputObject.PSTypeNames -contains 'System.Management.Automation.PSCustomObject'\r\n    }\r\n}\r\n\r\nTest-PSCustomObject ([int64]4) # gives False\r\nTest-PSCustomObject (\"4\" | ConvertFrom-Json) # gives False\r\nTest-PSCustomObject ('{\"property\":\"value\"}'| ConvertFrom-Json) # gives True\r\n```",
+      "created_at": "2019-05-08T04:30:18Z",
+      "updated_at": "2019-05-08T04:31:19Z"
+    },
+    {
+      "author": "chriskuech",
+      "author_association": "NONE",
+      "body": "For my use case, I ended up using `-isnot [ValueType]`.  It's pretty common for interpreted languages to have wrapper types and I'm OK with that.  In that case, I would expect `([int64]4) -is [psobject]` to be `$true`.  My bug is that the wrapper type is inconsistently applied (as evident with `-is [psobject]`) and not clearly exposed to the user (`.GetType()` outputs are identical)",
+      "created_at": "2019-05-08T07:33:19Z",
+      "updated_at": "2019-05-08T07:33:19Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Can you check again with 6.2? I checked that case briefly and I'm pretty sure it was giving back what you expect there. I'll check again, just to be sure.\r\n\r\nAlso, I don't think `[string]` will register as a value type, from memory, so mind that. :)",
+      "created_at": "2019-05-08T10:41:25Z",
+      "updated_at": "2019-05-08T10:41:25Z"
+    },
+    {
+      "author": "chriskuech",
+      "author_association": "NONE",
+      "body": "I just updated to 6.2 and I'm still observing the same output.  Also confirmed you are right about `-isnot [ValueType]`",
+      "created_at": "2019-05-08T15:52:42Z",
+      "updated_at": "2019-05-08T15:52:42Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm, you are correct. @SteveL-MSFT is there a provision for basic value types where they aren't usually wrapped in PSObject wrappers for some reason?",
+      "created_at": "2019-05-08T15:54:54Z",
+      "updated_at": "2019-05-08T15:54:54Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@chriskuech I'd probably recommend using a switch in this instance for processing the items in your json, something along the lines of:\r\n\r\n```powershell\r\nswitch ($Item) {\r\n    {$_ -is [string]} {\r\n        # process $_ as string\r\n    }\r\n    {$_ -is [ValueType]} {\r\n        # process $_ as value type\r\n    }\r\n    default {\r\n        # process $_ as object / custom object (JSON only generates custom objects anyway)\r\n    }\r\n}\r\n```",
+      "created_at": "2019-05-08T15:57:15Z",
+      "updated_at": "2019-05-08T15:58:18Z"
+    },
+    {
+      "author": "chriskuech",
+      "author_association": "NONE",
+      "body": "Thanks, I did not know scriptblocks are acceptable switch cases.  In this case I have to use `if`s because it's a merge function on two objects, not just a traverse function on a single object.",
+      "created_at": "2019-05-08T16:00:03Z",
+      "updated_at": "2019-05-08T16:04:44Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, switch does some fun things. More on that from Kevin Marquette's lovely comprehensive blog post here: https://powershellexplained.com/2018-01-12-Powershell-switch-statement/\r\n\r\nIf you need more help with this, feel free to jump into the PS [Discord](https://aka.ms/psdiscord) / [Slack](https://aka.ms/psslack) channels as well. \ud83d\ude04 ",
+      "created_at": "2019-05-08T16:05:22Z",
+      "updated_at": "2019-05-08T16:06:42Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 unfortunately, I'm not familiar with the history of this",
+      "created_at": "2019-05-08T20:55:51Z",
+      "updated_at": "2019-05-08T20:55:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> My bug is that the wrapper type is inconsistently applied\r\n\r\nIndeed - see #5579 and #4343.\r\n\r\nHowever, `-is [System.Management.Automation.PSCustomObject]` works consistently:\r\n\r\n```powershell\r\n([int64] 4), \r\n(\"4\" | ConvertFrom-Json), \r\n([pscustomobject] @{ val = 4 }), \r\n([pscustomobject] @{ val = 4 } | Select-Object val) | \r\n  & {\r\n       param([Parameter(ValueFromPipeline)] $obj) \r\n\r\n      process { \r\n         $obj -is [System.Management.Automation.PSCustomObject]\r\n      } \r\n  }\r\n```\r\n\r\n-> `$false, $false, $true, $true`\r\n\r\n",
+      "created_at": "2019-05-09T18:13:21Z",
+      "updated_at": "2019-05-09T18:13:21Z"
+    }
+  ],
+  "created_at": "2019-05-08T04:07:10Z",
+  "number": 9557,
+  "state": "open",
+  "title": "Non-deterministic behavior with `$value -is [psobject]`",
+  "updated_at": "2021-01-15T10:22:11Z"
+}

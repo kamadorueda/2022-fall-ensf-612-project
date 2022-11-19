@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12865",
+  "author": "bergmeister",
+  "body": "# PR Summary\r\n\r\nFixes https://github.com/PowerShell/PSScriptAnalyzer/issues/1516\r\n\r\n## PR Context\r\n\r\nPSSA is multi-threaded and keeps a cache of `CommandInfo` objects. Those objects might be accessed concurrently and PowerShell threw exceptions, see my issue comment for more details. I attached the debugger to `PowerShell`, I looked deeper and it seems the culprit is the `BindableParameters` property of `MergedCommandParameterMetadata`. Therfore the easy (but wrong) fix is to make it use a thread safe dictionary. I am aware that Jason @lzybkr previously said in a similar PR (but different area - the module system) that most of the PS engine deliberately doesn't use locking. In this case, this proposed change is probably not the right change (and probably break other things as indicated by the failing tests) because the class calls `.Clear()` and `.Add()` internally for internal resetting/updating in various scenarios. This PR is rather the starting point of a discussion at which layer we can/should intervene to prevent such errors. Would a slim read lock around `_bindableParameters` be a possible and acceptable solution?\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [ ] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.\r\n- **[Breaking changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)**\r\n    - [x] None\r\n    - **OR**\r\n    - [ ] [Experimental feature(s) needed](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/6/Microsoft.PowerShell.Core/About/about_Experimental_Features.md)\r\n        - [ ] Experimental feature name(s): <!-- Experimental feature name(s) here -->\r\n- **User-facing changes**\r\n    - [x] Not Applicable\r\n    - **OR**\r\n    - [ ] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed: <!-- Number/link of that issue here -->\r\n- **Testing - New and feature**\r\n    - [x] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [ ] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n- **Tooling**\r\n    - [x] I have considered the user experience from a tooling perspective and don't believe tooling will be impacted.\r\n    - **OR**\r\n    - [ ] I have considered the user experience from a tooling perspective and enumerated concerns in the summary. This may include:\r\n        - Impact on [PowerShell Editor Services](https://github.com/PowerShell/PowerShellEditorServices) which is used in the [PowerShell extension](https://github.com/PowerShell/vscode-powershell) for VSCode (which runs in a different PS Host).\r\n        - Impact on Completions (both in the console and in editors) - one of PowerShell's most powerful features.\r\n        - Impact on [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) (which provides linting & formatting in the editor extensions).\r\n        - Impact on [EditorSyntax](https://github.com/PowerShell/EditorSyntax) (which provides syntax highlighting with in VSCode, GitHub, and many other editors).\r\n",
+  "closed_at": "2020-07-01T22:12:07Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Part of the problem is that `GetMergedCommandParameterMetadataSafely` isn't actually safe due to #4003.  Since getting parameter metadata can cause PowerShell code to be invoked (dynamic params), if you just make the dictionary itself thread safe you're more than likely going to see a lot more harder to track state corruption.\r\n\r\nA simplish fix would be for PSSA to maintain it's own `ConcurrentDictionary<CommandInfo, Dictionary<string, ParameterMetadata>>`.  Though iirc that API doesn't actually ensure that two \"create\" delegates won't run concurrently, just that the actual dictionary add won't.  If that's correct then you'd probably have to roll your own version with a lock.\r\n\r\nAs for fixing the problem in PowerShell itself, I think fixing #4003 is the only option.  That said, there's a reason it's sat open for almost three years, it's difficult to solve without a probably sizable (but sort of unknowable) break.",
+      "created_at": "2020-06-08T17:06:34Z",
+      "updated_at": "2020-06-08T17:06:34Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience Thanks for the valuable input and specific references. :-)\r\nI remember talking to @daxian-dbw about this issue in a general way where it happened in a different scenario (`Test-ModuleManifest` was not thread safe and could be fixed in PSSA by limiting its concurrency in https://github.com/PowerShell/PSScriptAnalyzer/pull/1258). In this scenario the parameters property comes from the CommandInfo cache of PSSA where limiting concurrency is not only hard from a consumers point of view but also comes with performance implications (a lot of the perf improvements in recent version were done by getting rid of fat locks and using .Net's built in and thread safe `ConcurrentDictionary`)...\r\nA suggestion was also to try to force evaluation of the property in the runspace that originally created it. I tried to call the `.Parameters` property right after `Get-Command` gets queried the first time and do something with so that the compiler doesn't optimize the call away and this did not help. All I can think of now is to add the parameters to the cache as well (bad in terms of memory usage) or not use the cache in this instance.",
+      "created_at": "2020-06-12T23:18:43Z",
+      "updated_at": "2020-06-13T11:34:31Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as stale because it has been marked as requiring author feedback but has not had any activity for **15 days**. It will be closed if no further activity occurs **within 10 days of this comment**.",
+      "created_at": "2020-07-01T20:00:12Z",
+      "updated_at": "2020-07-01T20:00:12Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Closing as PSSA implemented the workarouns to catch the exception when it happens for a command from the cache and just ask for a fresh new object.\r\nSince the other referenced PowerShell issue where the root cause lies, is still open, I'll close the PR then",
+      "created_at": "2020-07-01T22:12:07Z",
+      "updated_at": "2020-07-01T22:12:07Z"
+    }
+  ],
+  "created_at": "2020-06-01T22:18:08Z",
+  "number": 12865,
+  "state": "closed",
+  "title": "Make Parameters property of CommandInfo thread safe",
+  "updated_at": "2020-07-01T22:12:10Z"
+}

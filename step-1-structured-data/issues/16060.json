@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16060",
+  "author": "mklement0",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\nRelated: #16059\r\n\r\nNote: While setting the `NO_COLOR` environment variable is the best choice for disabling VT (ANSI) escape sequence use by PowerShell's output-formatting system. without affecting terminal functionality, there's no reason why setting `TERM` to  `xtermm` or `xterm-mono` or unknown values should break command-line editing on Unix-like platforms.\r\n\r\n```powershell\r\n# On Unix\r\nsh -c 'TERM=xterm-mono pwsh -nop -noexit -c ''Get-Item /'''\r\n```\r\n\r\nNote: \r\n\r\n* `xtermm` is less ill-behaved with respect typing commands on the command line, but still broken with respect to command recall, for instance.\r\n\r\n* an _unknown_ value, such as `nosuch`, produces yet different symptoms.\r\n\r\n\r\n### Expected behavior\r\n\r\n* The `Get-Item /` command's output should print without colors.\r\n\r\n* Command-line editing should function normally.\r\n\r\n\r\n### Actual behavior\r\n\r\n* Command-line editing is broken.\r\n\r\n\r\n### Error details\r\n\r\n_No response_\r\n\r\n### Environment data\r\n\r\n```powershell\r\nPowerShell Core 7.2.0-preview.9, on Unix.\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n_No response_",
+  "closed_at": "2021-11-12T01:00:40Z",
+  "comments": [
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "As with the other issue, I don't see this with rc.1 if I use `pwsh-preview` and `TERM=xterm-mono`.  But I do see the editing issue with `TERM=xyzzy`:\r\n\r\n![image](https://user-images.githubusercontent.com/5177512/139194656-23ab471b-c736-428b-a495-992ae9f721fc.png)\r\n\r\n\r\n",
+      "created_at": "2021-10-28T05:46:55Z",
+      "updated_at": "2021-10-28T05:46:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It was fixed in Preview.5 as experimental feature.",
+      "created_at": "2021-10-28T06:49:56Z",
+      "updated_at": "2021-10-28T17:23:33Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov The editing issue with an unexpected TERM value is not fixed.  Try:\r\n```powershell\r\nsh -c 'TERM=xyzzy pwsh-preview -nop -noexit -c ''Get-Item /'''\r\n```\r\nAfter PowerShell starts with the above command, try typing in a new command and observe the chaos.  Interesting, with every new char typed, the entire typed text is output e.g.:\r\n```\r\n<e>e<x>ex<i>exi<t>exit\r\n```\r\nSo you see on screen after typing `exit`:\r\n```\r\neexexiexit\r\n```",
+      "created_at": "2021-10-28T16:38:50Z",
+      "updated_at": "2021-10-28T16:47:36Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "I debugged this in PowerShell - make sure to launch with `-noni` so PowerShell is handling user input.  The problems lies in this code:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/154feabadfb6ea400caf54a4eab78ec0e9f56dbc/src/Microsoft.PowerShell.ConsoleHost/host/msh/ConsoleHostUserInterface.cs#L1855-L1861\r\n\r\nSpecifically what I think is happening is that this line:\r\n```csharp\r\nConsole.CursorLeft = cursorLeft;\r\n```\r\nIs attempting to move the cursor back to the beginning of where the user started typing the command. Then this next line outputs the accumulated user text entered so far:\r\n```csharp\r\nConsole.Out.Write(s);\r\n```\r\nBut is obvious, even though the value of `Console.CursorLeft` after setting it would indicate the cursor has moved to the desired position, it really hasn't.  From what I can tell, the cursor moves only one position to the left. So the resulting display of entered text comes out looking like a mess.\r\n\r\nBTW I was able to repro this in `6.2.7` so it's not a new issue in v7.   Here is a simple C# repro I compiled with `net6.0 rc.2`:\r\n\r\n```csharp\r\n\ufeffusing System.Text;\r\n\r\n// See https://aka.ms/new-console-template for more information\r\nConsole.WriteLine($\"TERM set to: {Environment.GetEnvironmentVariable(\"TERM\")}\");\r\n\r\nvar sb = new StringBuilder();\r\n\r\nwhile (true)\r\n{\r\n    ConsoleKeyInfo keyInfo = Console.ReadKey(true);\r\n\r\n    if (keyInfo.Key == ConsoleKey.Enter) break;\r\n\r\n    sb.Append(keyInfo.KeyChar);\r\n\r\n    var currentCursor = Console.CursorLeft;\r\n    Console.CursorLeft = 0;\r\n    Console.Out.Write(sb.ToString());\r\n    Console.CursorLeft = currentCursor + 1;\r\n}\r\n\r\nConsole.WriteLine($\"\\nYou typed: '{sb.ToString()}'\");\r\n```\r\n\r\nThis outputs:\r\n\r\n![image](https://user-images.githubusercontent.com/5177512/139557050-9b27d7ef-83b5-43ab-aaaa-b8afc2c61a70.png)\r\n\r\nWhile it would be nice to figure out a way to fix this since `bash` doesn't exhibit this problem with a bogus `TERM` value, I don't think the problem lies in PowerShell. This seems to be a .NET issue with how `Console.CursorLeft` works (or doesn't work) with a bogus `TERM` value.\r\n\r\n<blockquote><img src=\"https://repository-images.githubusercontent.com/49609581/aad0ad80-cdec-11ea-8248-a37bc0571bfd\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShell\">PowerShell/ConsoleHostUserInterface.cs at master \u00b7 PowerShell/PowerShell</a></strong></div><div>PowerShell for every system! Contribute to PowerShell/PowerShell development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2021-10-30T20:11:00Z",
+      "updated_at": "2021-10-31T07:02:12Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0  If you concur, I'll mark this `resolution-external` unless you have an idea of how this could be fixed in PowerShell.  That said, any such fix is likely to be marked \"up-for-grabs\" since this issue appears to be corner-case with a trivial workaround.",
+      "created_at": "2021-10-30T20:13:47Z",
+      "updated_at": "2021-10-31T18:24:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> This seems to be a .NET issue with how `Console.CursorLeft` works (or doesn't work) with a bogus `TERM` value.\r\n\r\nhttps://github.com/dotnet/runtime/blob/46a3bfeffec2fb6b33bfd152d33f33b544e401c9/src/libraries/System.Console/src/System/ConsolePal.Unix.cs#L234\n\n<blockquote><img src=\"https://opengraph.githubassets.com/ef237dde5803532b22c371b5b78aafbfcc6d35779b25b8483fa3a6be05e935bd/dotnet/runtime\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dotnet/runtime\">runtime/ConsolePal.Unix.cs at 46a3bfeffec2fb6b33bfd152d33f33b544e401c9 \u00b7 dotnet/runtime</a></strong></div><div>.NET is a cross-platform runtime for cloud, mobile, desktop, and IoT apps. - runtime/ConsolePal.Unix.cs at 46a3bfeffec2fb6b33bfd152d33f33b544e401c9 \u00b7 dotnet/runtime</div></blockquote>",
+      "created_at": "2021-10-31T07:11:02Z",
+      "updated_at": "2021-10-31T07:11:04Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Digging a layer or two deep into that seems to indicate that .NET needs to know the terminal type to be able to manipulate the cursor position. I doubt there's a good way to fix that, except maybe defaulting to \"the most common\" way of setting the cursor position when the term value is unknown... and even then, it's not really a good solution.",
+      "created_at": "2021-11-01T12:38:34Z",
+      "updated_at": "2021-11-01T12:38:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Digging a layer or two deep into that seems to indicate that .NET needs to know the terminal type to be able to manipulate the cursor position. I\r\n\r\n.Net loads TermInfo database from underlying OS. So question is - has the TermInfo the terminal description? is the description correct?",
+      "created_at": "2021-11-01T17:57:51Z",
+      "updated_at": "2021-11-01T17:57:51Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "In a scenario where the TERM value is nonsensical? No, it won't have anything of use. `infocmp` on Mac reports:\r\n\r\n```\r\ninfocmp: couldn't open terminfo file (null)\r\n```",
+      "created_at": "2021-11-01T18:27:34Z",
+      "updated_at": "2021-11-01T18:28:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If I understand correctly 'xtermm' or 'xterm-mono' are not in TermInfo database?",
+      "created_at": "2021-11-02T04:02:15Z",
+      "updated_at": "2021-11-02T04:02:15Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I believe those are, yeah. As @rkeithhill mentioned (https://github.com/PowerShell/PowerShell/issues/16060#issuecomment-953521523) it currently works as expected for those, but the issue persists if the TERM value is missing/corrupt/nonsensical/etc. -- any situation where .NET can't get TermInfo it seems to arise.\r\n\r\nI don't think it's something PowerShell can fix, though.",
+      "created_at": "2021-11-02T15:35:53Z",
+      "updated_at": "2021-11-02T15:36:24Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as external and has not had any activity for **1 day**. It has been be closed for housekeeping purposes.",
+      "created_at": "2021-11-12T01:00:39Z",
+      "updated_at": "2021-11-12T01:00:39Z"
+    }
+  ],
+  "created_at": "2021-09-07T01:37:53Z",
+  "number": 16060,
+  "state": "closed",
+  "title": "Setting the TERM environment variable to 'xtermm' or 'xterm-mono' breaks command-line editing on Unix-like platforms",
+  "updated_at": "2021-11-12T01:00:40Z"
+}

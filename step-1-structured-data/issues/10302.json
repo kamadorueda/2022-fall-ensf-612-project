@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10302",
+  "author": "KirkMunro",
+  "body": "When using the `Rename-Item` cmdlet on an existing provider item, I reasonably expect that cmdlet to rename the item that I am referencing. In the variable provider, if the variable that you are referencing is not defined in the current scope (e.g. if it is a global variable and you are in a child scope), renaming that variable via `Rename-Item` doesn't actually rename the variable in the scope it is in. The variable gets renamed, but it is moved to the child scope instead of remaining in the scope in which it was defined.\r\n\r\nThis behavior is akin to renaming a file from a location other than the folder where it is stored, and having the file moved to your current folder as part of the rename operation. It is unexpected and should be fixed.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n# Show the global ErrorActionPreference variable\r\nGet-Variable -Name ErrorActionPreference -Scope Global\r\n\r\n# In a child scope, rename that variable to 'foo'\r\n& {\r\n    Rename-Item variable:ErrorActionPreference -NewName foo\r\n}\r\n\r\n# Show the value of the global foo variable (this should exist)\r\nGet-Variable -Name foo -Scope Global\r\n\r\n# Show the value of the global ErrorActionPreference variable (this should not exist)\r\nGet-Variable -Name ErrorActionPreference -Scope Global\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nErrorActionPreference          Continue\r\nfoo                            Continue\r\n\r\nGet-Variable : Cannot find a variable with the name 'ErrorActionPreference'.\r\nAt line:13 char:1\r\n+ Get-Variable -Name ErrorActionPreference -Scope Global\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (ErrorActionPreference:String) [Get-Variable], ItemNotFoundException\r\n+ FullyQualifiedErrorId : VariableNotFound,Microsoft.PowerShell.Commands.GetVariableCommand\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nErrorActionPreference          Continue\r\n\r\nGet-Variable : Cannot find a variable with the name 'foo'.\r\nAt line:10 char:1\r\n+ Get-Variable -Name foo -Scope Global\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (foo:String) [Get-Variable], ItemNotFoundException\r\n+ FullyQualifiedErrorId : VariableNotFound,Microsoft.PowerShell.Commands.GetVariableCommand\r\n\r\nGet-Variable : Cannot find a variable with the name 'ErrorActionPreference'.\r\nAt line:13 char:1\r\n+ Get-Variable -Name ErrorActionPreference -Scope Global\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (ErrorActionPreference:String) [Get-Variable], ItemNotFoundException\r\n+ FullyQualifiedErrorId : VariableNotFound,Microsoft.PowerShell.Commands.GetVariableCommand\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.1\r\nPSEdition                      Core\r\nGitCommitId                    6.2.1\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Is it specific for `ErrorActionPreference` name?",
+      "created_at": "2019-08-06T10:36:14Z",
+      "updated_at": "2019-08-06T10:36:14Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "No, not at all. That was just what I was using when I encountered the error. Here's a screenshot showing it with an arbitrary variable that I create:\r\n\r\n![image](https://user-images.githubusercontent.com/3515485/62545039-4ad9a380-b837-11e9-8526-92bebbef3e52.png)\r\n",
+      "created_at": "2019-08-06T13:45:36Z",
+      "updated_at": "2019-08-06T13:45:36Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "For reference, without debugging (just reading the code), [this block of code](https://github.com/PowerShell/PowerShell/blob/1be3f4cc0e465ae11ad8e59e9060f5a59e4762eb/src/System.Management.Automation/namespaces/SessionStateProviderBase.cs#L941-L944) seems to be why this happens. Other than the `FileSystem` and `Registry` providers, all other providers that ship with PowerShell seem to take the same create-new-item-and-then-remove-old-item approach to renaming.\r\n\r\nSure enough, here's the Alias provider showing the same issue:\r\n\r\n```none\r\nPS C:\\> New-Alias test Get-Date -Force\r\n>> Get-Alias test\r\n>> & {\r\n>> Rename-Item Alias:test -NewName date\r\n>> }\r\n>> Get-Alias date\r\n>> Get-Alias test\r\n\r\nCommandType     Name                                               Version    Source\r\n-----------     ----                                               -------    ------\r\nAlias           test -> Get-Date\r\n\r\nGet-Alias : This command cannot find a matching alias because an alias with the name 'date' does not exist.\r\nAt line:6 char:1\r\n+ Get-Alias date\r\n+ ~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (date:String) [Get-Alias], ItemNotFoundException\r\n+ FullyQualifiedErrorId : ItemNotFoundException,Microsoft.PowerShell.Commands.GetAliasCommand\r\n\r\nGet-Alias : This command cannot find a matching alias because an alias with the name 'test' does not exist.\r\nAt line:7 char:1\r\n+ Get-Alias test\r\n+ ~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (test:String) [Get-Alias], ItemNotFoundException\r\n+ FullyQualifiedErrorId : ItemNotFoundException,Microsoft.PowerShell.Commands.GetAliasCommand\r\n```\r\n\r\nIf we're to fix this, there should probably be a `ScopedProviderBase` intermediate class that derives from `SessionStateProviderBase` and that we consider deriving `AliasProvider`, `FunctionProvider`, and `VariableProvider` from that intermediate class to ensure that scope is persisted for any update operations that demonstrate buggy/unexpected behavior like this.\r\n\r\nIf `Rename-Item`, `Set-Item`, or other item update commands are only supported in the current scope (probably the only thing we can support at this point while maintaining backwards compatibility where it makes sense to do so), then:\r\n\r\n1. Those operations should create the new item in the current scope and leave the original item in the parent scope.\r\n1. Documentation should clearly indicate how these commands work with respect to scope.\r\n",
+      "created_at": "2019-08-06T14:11:54Z",
+      "updated_at": "2019-08-06T14:12:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I'd expect too that for PowerShell it would be more \"native\" doesn't remove the global/high-level-scope variable and create variable in local scope, using explicit scope prefix is more safe. It seems we do such things when we create a new scope with copying variables into it.",
+      "created_at": "2019-08-06T14:24:49Z",
+      "updated_at": "2019-08-06T14:24:49Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also for context, I discovered this issue while working on some Pester tests that remove global variables only to then re-create them afterward. When they re-create, they weren't setting the attributes on those variables properly. Instead, they were just assigning a value. That risks impacting other tests, so I thought a better approach would be to rename the variable in the global scope, define a new global variable that I want for my test, and then afterward remove the global variable I defined and then rename the original variable back in the global scope. That way the state of the original variable is preserved beyond the test where it is changed or hidden. I would like that to be possible with `Rename-Item`, but today it is not.\r\n\r\nI'm hoping we can address this without being so conservative that it still isn't possible. If I rename a variable, I would like it to be renamed in the scope in which it resides -- that should be possible given that I can manipulate variables in any scope using PowerShell already. The main concern is doing so without breaking something unintentionally (although I think we should at least break compatibility with the broken way this works now since it is just a source of bugs/unexpected behavior).",
+      "created_at": "2019-08-06T14:44:05Z",
+      "updated_at": "2019-08-06T14:44:05Z"
+    }
+  ],
+  "created_at": "2019-08-05T16:56:59Z",
+  "number": 10302,
+  "state": "open",
+  "title": "If you rename a global variable in a child scope, the global variable is removed",
+  "updated_at": "2019-08-06T14:44:05Z"
+}

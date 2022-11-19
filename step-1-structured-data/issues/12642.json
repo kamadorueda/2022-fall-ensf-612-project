@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12642",
+  "author": "he852100",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\nIt can only query one record at a time\r\n\r\nAssuming there are 10,000 results, then its time will be:0.0693924*1000=69.3924\r\n```powershell\r\n$xmlQuery = @'\r\n<QueryList>\r\n  <Query Id=\"0\" Path=\"Security\">\r\n    <Select Path=\"Security\">*[System[(EventID=4625)]]</Select>\r\n  </Query>\r\n</QueryList>\r\n'@\r\nMeasure-Command{ Get-WinEvent -FilterXML $xmlQuery -max 10}\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nMeasure-Command{ Get-WinEvent -FilterXML $xmlQuery -max 10000}\r\nTotalSeconds      < 10\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nMeasure-Command{ Get-WinEvent -FilterXML $xmlQuery -max 10}\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 0\r\nSeconds           : 0\r\nMilliseconds      : 69\r\nTicks             : 693924\r\nTotalDays         : 8.03152777777778E-07\r\nTotalHours        : 1.92756666666667E-05\r\nTotalMinutes      : 0.00115654\r\nTotalSeconds      : 0.0693924\r\nTotalMilliseconds : 69.3924\r\nMeasure-Command{ Get-WinEvent -FilterXML $xmlQuery -max 10000}\r\nDays              : 0\r\nHours             : 0                                                 \r\nMinutes           : 1                                                 \r\nSeconds           : 12                                                \r\nMilliseconds      : 368                                               \r\nTicks             : 723689937                                         \r\nTotalDays         : 0.00083760409375                                  \r\nTotalHours        : 0.02010249825\r\nTotalMinutes      : 1.206149895                                       \r\nTotalSeconds      : 72.3689937                                        \r\nTotalMilliseconds : 72368.9937\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nPs7.1\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "he852100",
+      "author_association": "NONE",
+      "body": "https://github.com/PowerShell/PowerShell/issues/10649",
+      "created_at": "2020-05-13T06:17:59Z",
+      "updated_at": "2020-05-13T06:17:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Assuming there are 10,000 results, then its time will be:0.0693924*1000=69.3924\r\n\r\nMaybe 0.0693924***10000**=693.924",
+      "created_at": "2020-05-13T07:34:01Z",
+      "updated_at": "2020-05-13T07:34:01Z"
+    },
+    {
+      "author": "Robo210",
+      "author_association": "CONTRIBUTOR",
+      "body": "When testing this myself, without delving into the code:\r\n- Events are retrieved from the service in batches\r\n  - Events in each batch could be operated on in parallel, but that would likely not improve anything.\r\n  - You wouldn't like it if every time you asked for a single event, pwsh ate all of your CPU time pre-computing the next thousand or more events in the background, even if it could possibly improve this specific calling pattern.\r\n- There are multiple calls to EvtFormatMessage per event\r\n  - In my test, almost 8000 calls per batch of events, or **over 100 per event**\r\n  - The overhead for all those RPC calls is tremendous. Fully 50% of the total time is spent setting up RPC call data structures and marshalling data between the service and pwsh.\r\n- Of the remaining 50% of the time, 25% is spent in FormatMessageW (as expected), and 25% is spent doing misc. work in the service around the FormatMessageW call.\r\n\r\nEliminate the excessive calls to EvtFormatMessage, and get-winevent should be about as fast as can reasonably be expected. Unfortunately, these calls appear to be coming from .Net's System.Diagnostics.Eventing.Reader class, rather than the cmdlet itself.\r\n\r\n_To truly improve the performance of this cmdlet, it should be re-written to call the native Evt APIs directly rather than bumble through the .Net wrapper classes. Doing so would not only bypass many of the design flaws in the wrapper classes, but also would allow the event properties (and their corresponding RPC calls) to be retrieved on-demand. I'm sure such a rewrite would be a breaking change, however, since the cmdlet currently returns System.Diagnostics.Eventing.Reader.EventLogRecord objects._",
+      "created_at": "2020-05-19T10:21:05Z",
+      "updated_at": "2020-05-19T10:21:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@Robo210 Thanks for your investigations!\r\n\r\nThe code is here:\r\nhttps://github.com/PowerShell/PowerShell/blob/a7ce7883ceb2e4251babdcd8ec372eb283f31948/src/Microsoft.PowerShell.Commands.Diagnostics/GetEventCommand.cs#L903-L915\r\n\r\nWe do three slow action:\r\n1. Wrapping in PSObject\r\n2. Formatting (it is slow).\r\n3. Adding new noteproperty\r\n\r\nWe could add new switch parameter to suppress these actions.",
+      "created_at": "2020-05-19T10:52:56Z",
+      "updated_at": "2020-05-19T10:52:56Z"
+    }
+  ],
+  "created_at": "2020-05-13T05:41:31Z",
+  "number": 12642,
+  "state": "open",
+  "title": "Get-WinEvent Not capable of traversal",
+  "updated_at": "2020-05-19T10:52:57Z"
+}

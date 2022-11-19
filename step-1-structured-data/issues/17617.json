@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17617",
+  "author": "MatejKafka",
+  "body": "I'm writing a C# cmdlet, lets call it `Invoke-InRunspace`, which invokes a command in a new runspace, to get a clean session state with no custom modules, variables,... However, I'd like to\r\n 1) support pipelining, so `1,2,3 | Invoke-InRunspace | ...` works as if the command inside the new runspace was called directly,\r\n 2) run in the original thread (without creating a new thread just for the runspace invocation).\r\n\r\nI believed I could do the following (just a PoC, there's missing error handling, disposal,...):\r\n```c#\r\n[Cmdlet(VerbsLifecycle.Invoke, \"InRunspace\")]\r\npublic class InvokeInRunspaceCommand : PSCmdlet {\r\n    private readonly PowerShell _ps = PowerShell.Create();\r\n    private readonly PSDataCollection<PSObject> _inputCollection = new();\r\n    private readonly PSDataCollection<PSObject> _outputCollection = new();\r\n\r\n    [Parameter(Mandatory = true, ValueFromPipeline = true)]\r\n    public PSObject? InputObject;\r\n\r\n    protected override void BeginProcessing() {\r\n        base.BeginProcessing();\r\n\r\n        var iss = InitialSessionState.CreateDefault2();\r\n        iss.ThreadOptions = PSThreadOptions.UseCurrentThread;\r\n        var runspace = RunspaceFactory.CreateRunspace(Host, iss);\r\n        runspace.Open();\r\n\r\n        _outputCollection.DataAdded += delegate {\r\n            foreach (var o in _outputCollection.ReadAll()) {\r\n                WriteObject(o);\r\n            }\r\n        };\r\n\r\n        _ps.Runspace = runspace;\r\n        // example command\r\n        _ps.AddCommand(\"Where-Object\").AddArgument(ScriptBlock.Create(\"$_ -ge 2\"));\r\n        _ps.Invoke(_inputCollection, _outputCollection, new PSInvocationSettings());\r\n    }\r\n\r\n    protected override void ProcessRecord() {\r\n        base.ProcessRecord();\r\n        _inputCollection.Add(InputObject!);\r\n    }\r\n\r\n    protected override void EndProcessing() {\r\n        base.EndProcessing();\r\n        _inputCollection.Complete();\r\n    }\r\n\r\n    protected override void StopProcessing() {\r\n        base.StopProcessing();\r\n        _ps.Stop();\r\n    }\r\n}\r\n```\r\n\r\nI expected this to work \u2013 the runspace would initialize the `Where-Object` command, add event for items added to `_inputCollection`, return control back to the main runspace, which would call `ProcessRecord`, which would cause the command inside to process the input,...\r\n\r\nHowever, this deadlocks, because apparently implementation of Invoke instead starts a blocking wait on the collection, thus never returning control back to the main instance. The output works correctly without deadlocking, it's just the input that's causing the deadlock.\r\n\r\nIs there a way to implement this, or do I have to pick between accepting pipeline input and running in a single thread?\r\n\r\nNote: this is not necessarily a feature request, more of a question, but no one seems to read discussions (#17590). :)",
+  "closed_at": "2022-07-06T10:38:54Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think there's a way to create a separate runspace without also creating a new thread, at least as far as I understand PowerShell's threading model... I would expect some kind of deadlock to happen here regardless, it seems like you'd end up trying to run two parts of code at once on a single thread?\r\n\r\n@SeeminglyScience and @daxian-dbw would probably be able to give you more practical advice here. \ud83d\ude42 ",
+      "created_at": "2022-07-02T14:56:01Z",
+      "updated_at": "2022-07-02T14:56:51Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": "May I ask a question by the way?\r\nIs there a one-to-one correspondence between threads in the runspace and ThrottleLimit?\r\n1..1000 | foreach-object -ThrottleLimit 100 -Parallel {\r\n}\r\nHow many threads will be created?",
+      "created_at": "2022-07-03T03:51:41Z",
+      "updated_at": "2022-07-03T03:51:41Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That may be a question better posed to @PaulHigin as I think he wrote much of that implementation. My understanding is that runspaces (and threads) are spun up as needed unless the throttle limit is hit, and if a runspace completes the task it can be reused. So as long as an individual task being run can complete before the full 100 threads/runspaces are created, it will attempt to reuse the runspaces/threads of previously completed tasks.",
+      "created_at": "2022-07-03T16:01:37Z",
+      "updated_at": "2022-07-03T16:01:37Z"
+    },
+    {
+      "author": "MatejKafka",
+      "author_association": "NONE",
+      "body": "(still not sure where exactly I'm going with this post, mostly just summarizing my thoughts and trying to figure out if there's a fundamental reason why this shouldn't work)\r\n\r\n@vexx32\r\n>  I would expect some kind of deadlock to happen here regardless, it seems like you'd end up trying to run two parts of code at once on a single thread?\r\n\r\nAs long as the communication between the runspaces is event-driven, I don't see why a deadlock would be necessary. For the output, when the invoked runspace outputs an object, the configured event on `_outputCollection` is called, and it just calls `WriteObject`, which is more or less equivalent to the cmdlet doing some CPU-intensive computation and periodically outputing results (it doesn't matter if the computation is running a PowerShell script or something else).\r\n\r\nI think the issue here is that the the runspace reads the passed `_inputCollection` by waiting on a synchronization object, and thus blocking the whole thread, instead of adding an event handler for new input, handling the input (by calling `ProcessRecord` in the first cmdlet in a pipeline) and giving control back to the event loop. This makes sense as a design choice for the top-level runspace, where blocking while waiting for user input is a natural choice, but breaks down for a nested runspace.\r\n\r\nAnother (related) view is that it a runspace is structurally quite similar to a cmdlet \u2013 it is instantiated, reads inputs, creates output and then ends. Cmdlets run in the same thread and it works as expected, so I'd assume that it should be possible to have a runspace work the same.",
+      "created_at": "2022-07-03T17:32:50Z",
+      "updated_at": "2022-07-03T17:32:50Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I would say that running two runspaces in the same thread would result in undefined behavior. The \"current\" runspace is defined by a thread static field. When you call `WriteObject`, you're also calling the downstream command's `ProcessRecord` which may or may not have the correct runspace assigned at this point.\r\n\r\n`UseCurrentThread` is mainly for when you want to create and manage your own pipeline thread.",
+      "created_at": "2022-07-03T20:53:59Z",
+      "updated_at": "2022-07-03T20:53:59Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I am a bit confused by this.  Why create a new runspace just to run script/commands on the same execution thread of the current runspace?  Runspaces were created in part to support concurrency, and it doesn't make sense to use it this way.  The `PSThreadOptions.UseCurrentThread` is generally used for nested calls.  Runspaces don't have thread affinity, but scriptblocks running in a runspace do.  If you want to create a cmdlet wrapper that wraps existing cmdlets and passes pipeline input, then you should look at PowerShell proxy commands and the steppable pipeline API.\r\n\r\nRegarding the other question about `ForEach-Object -Parallel`, yes the `ThrottleLimit` does limit the number of runspaces and threads running at a time.  Pipeline input waiting to run in the script block is blocked until a runspace is available.  By default runspaces are reused, but this can cause problems in some cases (with left over state) and there is an option to always run in a newly created runspace (`-UseNewRunspace`).",
+      "created_at": "2022-07-05T23:18:35Z",
+      "updated_at": "2022-07-05T23:18:35Z"
+    },
+    {
+      "author": "MatejKafka",
+      "author_association": "NONE",
+      "body": "@PaulHigin\r\n> Why create a new runspace just to run script/commands on the same execution thread of the current runspace?\r\n\r\nI'm using the runspace to isolate the executed script from the main runspace, so that it does not share variables, loaded modules, custom globals defined by the user,... The aim is to get a consistent environment that's reproducible on different machines \u2013 the scripts executed in the runspace are authored by a 3rd party (neither me, nor the end user) and I don't necessarily have control over the script.\r\n\r\nThe end result should be more or less equivalent to running a script with `pwsh -noprofile <script-path>` and module auto-loading disabled, but faster and more integrated (live objects) than running another `pwsh` instance.",
+      "created_at": "2022-07-05T23:37:35Z",
+      "updated_at": "2022-07-05T23:38:21Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "That (isolation) is a good reason to use a new runspace.  Just don't use the `UseCurrentThread` option, it will run script in a new thread by default.  Note that you can also configure the runspace to allow/disallow some things.  Letting 3rd parties run arbitrary script on your machine is a security worry and you might want to limit what they can do (see PowerShell language modes).",
+      "created_at": "2022-07-06T01:12:12Z",
+      "updated_at": "2022-07-06T01:12:12Z"
+    },
+    {
+      "author": "MatejKafka",
+      "author_association": "NONE",
+      "body": "Thanks for all the insightful answers.\r\n\r\nTo summarize:\r\n1. `UseCurrentThread` should not be used, unless you're manually creating a new thread just for the runspace.\r\n2. Calling `WriteOutput` from the context of another runspace is not a good idea (but that's basically covered by point 1.).\r\n3. The only thread that can accept pipeline input (`ProcessRecord`) and produce pipeline output (`WriteObject`) is the main thread. Therefore, it is not possible to asynchronously write output while accepting input at the same time, because to write output, the main thread must be executing one of the cmdlet methods, and therefore cannot receive new input.\r\n   - This is an interesting limitation of having a single-threaded shell that never occurred to me before.\r\n   - It is visible even in the built-in `ForEach-Object -Parallel` cmdlet, which only writes pipeline output as a result of receiving input, or after all iterations are finished (e.g. `& {0.5; 1; 1.5; sleep 1; 2} | % -Parallel {$_}`).",
+      "created_at": "2022-07-06T10:38:54Z",
+      "updated_at": "2022-07-06T10:44:30Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Therefore, it is not possible to asynchronously write output while accepting input at the same time, because to write output, the main thread must be executing one of the cmdlet methods, and therefore cannot receive new input.\r\n\r\nJust to clarify this point, you can do this if the runspace is in a different thread. If you call `BeginInvoke` in your `BeginProcessing` and `_inputCollection.Complete()` in your `EndProcessing` then you should get the behavior you want (just with an extra thread).",
+      "created_at": "2022-07-06T15:02:35Z",
+      "updated_at": "2022-07-06T15:02:35Z"
+    },
+    {
+      "author": "MatejKafka",
+      "author_association": "NONE",
+      "body": "> > Therefore, it is not possible to asynchronously write output while accepting input at the same time, because to write output, the main thread must be executing one of the cmdlet methods, and therefore cannot receive new input.\r\n> \r\n> Just to clarify this point, you can do this if the runspace is in a different thread. If you call `BeginInvoke` in your `BeginProcessing` and `_inputCollection.Complete()` in your `EndProcessing` then you should get the behavior you want (just with an extra thread).\r\n\r\nI'm not sure I understand your point, but I believe that the issue lies somewhere else:\r\n- To have live output immediately when an object is outputted in the child runspace, the main runspace thread must be waiting on the shared collection/stream and write the objects to the pipeline using `WriteObject`.\r\n- This means that the cmdlet is blocking the main runspace, therefore no cmdlet earlier in the pipeline can run and call `WriteObject`, and therefore the cmdlet cannot receive any input.\r\n- The only possible solution I see, which seems to be the same approach `ForEach-Object -Parallel` took, is that the output stream of the child runspace is only checked when new input is received in `ProcessRecord`, which means that if no input is passed, there won't be any output.\r\n\r\nHopefully my point is clearer now.",
+      "created_at": "2022-07-06T15:12:52Z",
+      "updated_at": "2022-07-06T15:12:52Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Ah right, yeah I see your point. You gotta block somewhere if you want real time output from the proxy, which makes you unable to send real time input. Yeah I don't know if that's doable with the current architecture.",
+      "created_at": "2022-07-06T15:16:47Z",
+      "updated_at": "2022-07-06T15:16:55Z"
+    }
+  ],
+  "created_at": "2022-07-02T08:55:39Z",
+  "number": 17617,
+  "state": "closed",
+  "title": "Invoke a pipelined command in a new runspace using the same thread",
+  "updated_at": "2022-07-06T15:16:55Z"
+}

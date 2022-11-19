@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4145",
+  "author": "daxian-dbw",
+  "body": "In `2.0.0-preview1` .NET Core, `filesystemInfo.Attributes` raises an `FileNotFoundException` exception when the file is deleted or renamed during the enumration.\r\nIn `2.0.0-preview2/3` .NET Core, `filesystemInfo.Attributes` returns -1 without raising any exception.\r\nThis behavior change was by design -- to align with the current behavior on Full .NET. For detailed information, please see https://github.com/dotnet/corefx/issues/20456.\r\n\r\nThis behavior change causes the following tests to fail in test/powershell/Modules/Microsoft.PowerShell.Management/Get-ChildItem.Tests.ps1 (they will be marked as pending for now):\r\n- \"Should continue enumerating a directory when a contained item is deleted\"\r\n- \"Should continue enumerating a directory when a contained item is renamed\"\r\n\r\nThese 2 tests were added in PR #3806, which assumes that the `FileNotFoundException` will be thrown in case the file is deleted or renamed during enumeration. Since the behavior has changed in .NET Core, the fix needs to be revisited.\r\n\r\n/cc @jeffbi ",
+  "closed_at": "2017-08-01T15:56:12Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Since PR #3806 was to fix #2856, I set the properties of this issue similar to 2856.",
+      "created_at": "2017-06-30T17:13:53Z",
+      "updated_at": "2017-06-30T17:13:53Z"
+    },
+    {
+      "author": "jeffbi",
+      "author_association": "CONTRIBUTOR",
+      "body": "What I'm seeing on both platforms is that the exception is no longer thrown, but `FilesystemInfo.Attributes` is _not_ returning -1. Instead it returns the attributes the file had before it was deleted, so there is no real indication that the file was deleted.\r\n\r\nAfter the item is written to the pipeline, when it is displayed, the `Mode` property is null. `Mode` is not one of the regular properties of `FileSystemInfo` and is added after the provider writes the object.\r\n\r\nI think it might be worth keeping the provider code as is (I don't think the `try/catch` is doing us any harm) and change the test so that it ensures that the deleted file is included in the result of `Get-ChildItem`.",
+      "created_at": "2017-07-04T01:02:42Z",
+      "updated_at": "2017-07-04T01:10:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems we should refresh to get -1 https://github.com/dotnet/corefx/blob/801dde95a5eac06140d0ac633ac3f9bfdd25aca5/src/System.IO.FileSystem/src/System/IO/FileSystemInfo.Unix.cs#L264",
+      "created_at": "2017-07-04T06:31:26Z",
+      "updated_at": "2017-07-04T06:31:26Z"
+    },
+    {
+      "author": "jeffbi",
+      "author_association": "CONTRIBUTOR",
+      "body": "I had fetched the latest source (commit ece27ff68798f508c755ccb84be5ae78b386ac82), done a new `Start-PSBootStrap` and `Start-PSBuild -clean`. Is there something else I need to do?",
+      "created_at": "2017-07-04T20:21:41Z",
+      "updated_at": "2017-07-04T20:21:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I meant that we should call Refresh() or Exists() to get fresh FileAttributes.",
+      "created_at": "2017-07-05T02:59:46Z",
+      "updated_at": "2017-07-05T03:01:19Z"
+    },
+    {
+      "author": "jeffbi",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov You were exactly right. I hadn't realized there was a `Refresh()` method on `FilesystemInfo`.\r\n\r\nAssuming we want to continue with the current behavior, i.e. writing an error message and continuing the enumeration, I'm preparing a PR to do that.",
+      "created_at": "2017-07-05T19:52:37Z",
+      "updated_at": "2017-07-05T19:52:37Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "That means calling `Refresh()` or `Exists()` on every file system item. How expensive is that?",
+      "created_at": "2017-07-05T22:40:52Z",
+      "updated_at": "2017-07-05T22:40:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, it is expensive. I think we should avoid this. Now we haven't exception so maybe silently ignore this?\r\n",
+      "created_at": "2017-07-06T03:24:01Z",
+      "updated_at": "2017-07-06T03:24:01Z"
+    },
+    {
+      "author": "jeffbi",
+      "author_association": "CONTRIBUTOR",
+      "body": "If we don't refresh and check for -1, we should end up displaying the file as if it had not (yet) been deleted. Whether that's the right thing may depend on how the cmdlet is being used.",
+      "created_at": "2017-07-06T03:50:04Z",
+      "updated_at": "2017-07-06T03:50:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The file system is _constantly_ changing, so perhaps this is the expected behavior. We can also skip new files or changing their size if it happens later we read first the list.",
+      "created_at": "2017-07-06T04:04:44Z",
+      "updated_at": "2017-07-06T04:04:44Z"
+    },
+    {
+      "author": "jeffbi",
+      "author_association": "CONTRIBUTOR",
+      "body": "I quite agree. So long as our users understand that the file system _is_ this dynamic, then this should be the expected behavior.\r\n\r\nSo my take is that we leave the cmdlet code as is, with no additional call to `Refresh()`, and modify the tests to verify that the cmdlet does _not_ show an error but instead retrieves the file information it can.",
+      "created_at": "2017-07-06T04:58:37Z",
+      "updated_at": "2017-07-06T04:58:37Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> I don't think the try/catch is doing us any harm\r\n\r\nI quite agree that we should keep the `try/catch`. However, (btw I could be totally wrong) should we keep the test hooks? Here are my thoughts:\r\n1. the root cause of the original issue is gone (no exception now),\r\n2. the test hooks won't give us code coverage for the `catch` blocks\r\n3. we pay a tax of doing two checks for every file system item.\r\n\r\n@jeffbi @iSazonov what are your thoughts?",
+      "created_at": "2017-07-06T18:25:41Z",
+      "updated_at": "2017-07-06T18:25:41Z"
+    },
+    {
+      "author": "jeffbi",
+      "author_association": "CONTRIBUTOR",
+      "body": "If we remove the test hooks, the tests themselves don't make much sense. That being said, I'm in favor of removing the test hooks and the tests.",
+      "created_at": "2017-07-06T23:00:06Z",
+      "updated_at": "2017-07-06T23:00:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I agree to remove the test hooks and tests:\r\n1. CoreFX wants to be compatible with .Net Framework so no exception will be in future (but we have still try/catch). Maybe we should just add a comment about it.\r\n2. \"Race conditions\" for file system is normal (multiple processes add, remove and change files, permissions and attributes) and we don't need to test and to worry about this.\r\n",
+      "created_at": "2017-07-07T04:28:09Z",
+      "updated_at": "2017-07-07T04:28:09Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Thanks @jeffbi and @iSazonov, then let's remove the test hooks and the corresponding tests.",
+      "created_at": "2017-07-07T06:16:24Z",
+      "updated_at": "2017-07-07T06:16:24Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@daxian-dbw is there anything more to do with this one?  ",
+      "created_at": "2017-08-01T15:42:29Z",
+      "updated_at": "2017-08-01T15:42:29Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Nothing needs to be done. This issue was not closed when merging #4200",
+      "created_at": "2017-08-01T15:56:12Z",
+      "updated_at": "2017-08-01T15:56:12Z"
+    }
+  ],
+  "created_at": "2017-06-30T17:11:42Z",
+  "number": 4145,
+  "state": "closed",
+  "title": "Behavior changed about `filesystemInfo.Attributes` in .NET Core preview2/3 causes 2 tests to fail in `Get-ChildItem.Tests.ps1`",
+  "updated_at": "2017-08-01T15:56:29Z"
+}

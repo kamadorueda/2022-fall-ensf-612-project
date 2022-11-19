@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16555",
+  "author": "kganjam",
+  "body": "### Summary of the new feature / enhancement\r\n\r\nIt seems very unintuitive and obscure to have a 1022 character input limit for **Read-Host.** There should at least be an option for removing the limit and/or specifying an explicit limit in newer versions of PowerShell if the reason for keeping it is for backwards-compatibility. Get-Content has no such limit and it feels like Read-Host should behave analogously.  The theoretical max length of a String is 2147483647. There are many legitimate reasons for wanting to allow input of more than 1022 characters (e.g., user pasting large clipboard text, but script author not wanting to use Get-Clipboard to also allow users to manually type input). \r\n\r\n**Repro:**\r\n```\r\n'x'*5000 | set-clipboard\r\nread-host\r\n# press CTRL-V and the contents are truncated to 1022 characters\r\n```\r\n\r\nNote that this seems to also apply to: `$host.UI.ReadLine()` and `$z = [system.console]::ReadLine()`\r\n\r\nA related issue was discussed here, but with no resolution: \r\n[Read-Host max imput length cap in pwsh 7](https://github.com/PowerShell/PowerShell/issues/12354)\r\n\r\n\r\n**Workarounds:**\r\nI finally managed to find a couple workarounds, but reading input shouldn't be this difficult. Workaround 1 has the advantage that it will work with PowerShell background jobs that require keyboard input.\r\n\r\n**Workaround 1:**\r\n```\r\n<#\r\n.SYNOPSIS\r\nRead a line of input from the host.\r\n\r\n.DESCRIPTION\r\nRead a line of input from the host. \r\n\r\n.EXAMPLE\r\n$s = Read-HostLine -prompt \"Enter something\"\r\n\r\n.NOTES\r\nRead-Host has a limitation of 1022 characters.\r\nThis approach is safe to use with background jobs that require input.\r\nIf pasting content with embedded newlines, only the first line will be read.\r\nA downside to the ReadKey approach is that it is not possible to easily edit the input string before pressing Enter as with Read-Host.\r\n#>\r\nfunction Read-HostLine ($prompt = $null) {\r\n    if ($prompt) {\r\n        \"${prompt}: \" | Write-Host\r\n    }\r\n\r\n    $str = \"\"\r\n    while ($true) { \r\n        $key = $host.UI.RawUI.ReadKey(\"NoEcho, IncludeKeyDown\"); \r\n\r\n        # Paste the clipboard on CTRL-V        \r\n        if (($key.VirtualKeyCode -eq 0x56) -and  # 0x56 is V\r\n            (([int]$key.ControlKeyState -band [System.Management.Automation.Host.ControlKeyStates]::LeftCtrlPressed) -or \r\n                ([int]$key.ControlKeyState -band [System.Management.Automation.Host.ControlKeyStates]::RightCtrlPressed))) { \r\n            $clipboard = Get-Clipboard\r\n            $str += $clipboard\r\n            Write-Host $clipboard -NoNewline\r\n            continue\r\n        }\r\n        elseif ($key.VirtualKeyCode -eq 0x08) {  # 0x08 is Backspace\r\n            if ($str.Length -gt 0) {\r\n                $str = $str.Substring(0, $str.Length - 1)\r\n                Write-Host \"`b `b\" -NoNewline    \r\n            }\r\n        }        \r\n        elseif ($key.VirtualKeyCode -eq 13) {  # 13 is Enter\r\n            Write-Host\r\n            break \r\n        }\r\n        elseif ($key.Character -ne 0) {\r\n            $str += $key.Character\r\n            Write-Host $key.Character -NoNewline\r\n        }\r\n    }\r\n\r\n    return $str\r\n}\r\n```\r\n**Workaround 2:**\r\n```\r\n$maxLength = 65536\r\n[System.Console]::SetIn([System.IO.StreamReader]::new([System.Console]::OpenStandardInput($maxLength), [System.Console]::InputEncoding, $false, $maxLength))\r\n\r\n$s = [System.Console]::ReadLine()\r\n```\r\n\r\n**Workaround 3:**\r\n```\r\nfunction Read-String ($maxLength = 65536) {\r\n    $str = \"\"\r\n    $inputStream = [System.Console]::OpenStandardInput($maxLength);\r\n    $bytes = [byte[]]::new($maxLength);\r\n    while ($true) {\r\n        $len = $inputStream.Read($bytes, 0, $maxLength);\r\n        $str += [string]::new($bytes, 0, $len)\r\n        if ($str.EndsWith(\"`r`n\")) {\r\n            $str = $str.Substring(0, $str.Length - 2)\r\n            return $str\r\n        }\r\n    }\r\n}\r\n\r\n$s = Read-String\r\n```\r\n\r\n**Some issues involving background jobs with Workaround 2 and 3 that use Console directly (hence a Read-Host fix would be much better):**\r\n```\r\n# This works\r\n$j = start-job -ScriptBlock {  \"Got '$($Host.UI.RawUI.ReadKey())'.\" }\r\n$j|rcjb -wait  # Can successfully send a key to the job\r\n\r\n# This does NOT work\r\n$j = start-job -ScriptBlock {  \"Got '$([system.console]::readkey())'.\" }\r\n$j|rcjb -wait   # Job remains stuck waiting for input\r\n\r\n$j = start-job -ScriptBlock {\r\n   $maxLength = 65536\r\n   [System.Console]::SetIn([System.IO.StreamReader]::new([System.Console]::OpenStandardInput($maxLength), [System.Console]::InputEncoding, $false, $maxLength))\r\n   $token = [System.Console]::ReadLine()\r\n}\r\n$j | stop-job # This blocks forever! with no ability to CTRL-C! The outer shell is completely locked.\r\n```\r\n\r\n**See Also:**\r\nhttps://stackoverflow.com/questions/60045306/powershell-read-host-only-accept-maximum-around-8000-characters/70231674#70231674",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "ArmaanMcleod",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looks like this is code where the input truncated: https://github.com/PowerShell/PowerShell/blob/c5955a5c0de50295e509dbc10928147b33d5cbea/src/Microsoft.PowerShell.ConsoleHost/host/msh/ConsoleHostUserInterface.cs#L1999-L2002",
+      "created_at": "2021-12-27T17:32:06Z",
+      "updated_at": "2021-12-27T17:32:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It would be more productive consider real scenarios so that we learn the issue in depth and find right solution.",
+      "created_at": "2021-12-28T03:30:11Z",
+      "updated_at": "2021-12-28T03:30:11Z"
+    },
+    {
+      "author": "ben-page",
+      "author_association": "NONE",
+      "body": "> It would be more productive consider real scenarios so that we learn the issue in depth and find right solution.\r\n\r\nI have a script that prompts the user enter an API token before making a call, but it doesn't work because the token is truncated.",
+      "created_at": "2022-02-09T03:26:38Z",
+      "updated_at": "2022-02-09T03:26:38Z"
+    },
+    {
+      "author": "Tyf0x",
+      "author_association": "NONE",
+      "body": "> It would be more productive consider real scenarios so that we learn the issue in depth and find right solution.\r\n\r\nOur dev environment secrets are stored in a JSON blob in a vault.\r\n\r\nWhen a new environment needs to be configured (or updated), we call a powershell script responsible to set environment variables and pass the JSON as an input (pasted from the clipboard).\r\n\r\nThe JSON contains API keys, JWTs, tokens, ... which far exceeds the current 1022 char limit.",
+      "created_at": "2022-05-09T01:07:32Z",
+      "updated_at": "2022-05-09T01:07:32Z"
+    }
+  ],
+  "created_at": "2021-12-05T04:34:08Z",
+  "number": 16555,
+  "state": "open",
+  "title": "Remove character limit from Read-Host",
+  "updated_at": "2022-05-09T01:07:32Z"
+}

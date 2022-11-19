@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15466",
+  "author": "rjmholt",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\nFrom https://github.com/PowerShell/PowerShell/pull/15260#issuecomment-849160511.\r\n\r\n`Rename-Item` and `Set-Location` are also affected by this issue.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n$testdrive = \"$env:TEMP/test\"\r\n$longDir = 'a' * 250\r\n$longSubDir = 'b' * 250\r\n$fileName = \"file1.txt\"\r\n$topPath = Join-Path $TestDrive $longDir\r\n$longDirPath = Join-Path $topPath $longSubDir\r\n$longFilePath = Join-Path $longDirPath $fileName\r\nnew-item -itemtype file -path $longFilePath -force\r\nremove-item -Path $longFilePath\r\n```\r\n\r\n## Expected behavior\r\n\r\n*file is removed successfully*\r\n\r\n## Actual behavior\r\n\r\n```none\r\n> remove-item -Path $longFilePath\r\nRemove-Item: The system cannot find the path specified.\r\nC:\\Users\\rjmho\r\n> get-error\r\n\r\nException             :\r\n    Type            : System.ComponentModel.Win32Exception\r\n    NativeErrorCode : 3\r\n    ErrorCode       : -2147467259\r\n    TargetSite      :\r\n        Name          : IsReparsePointLikeSymlink\r\n        DeclaringType : Microsoft.PowerShell.Commands.InternalSymbolicLinkLinkCodeMethods\r\n        MemberType    : Method\r\n        Module        : System.Management.Automation.dll\r\n    StackTrace      :\r\n   at Microsoft.PowerShell.Commands.InternalSymbolicLinkLinkCodeMethods.IsReparsePointLikeSymlink(FileSystemInfo\r\nfileInfo) in System.Management.Automation.dll:token 0x60016f5+0x57\r\n   at Microsoft.PowerShell.Commands.RemoveItemCommand.ProcessRecord() in\r\nMicrosoft.PowerShell.Commands.Management.dll:token 0x60004dd+0x2e2\r\n   at System.Management.Automation.CommandProcessor.ProcessRecord() in System.Management.Automation.dll:token\r\n0x60020f6+0x1ae\r\n    Message         : The system cannot find the path specified.\r\n    Source          : System.Management.Automation\r\n    HResult         : -2147467259\r\nCategoryInfo          : NotSpecified: (:) [Remove-Item], Win32Exception\r\nFullyQualifiedErrorId : System.ComponentModel.Win32Exception,Microsoft.PowerShell.Commands.RemoveItemCommand\r\nInvocationInfo        :\r\n    MyCommand        : Remove-Item\r\n    ScriptLineNumber : 1\r\n    OffsetInLine     : 1\r\n    HistoryId        : 4\r\n    Line             : remove-item -Path $longFilePath\r\n    PositionMessage  : At line:1 char:1\r\n                       + remove-item -Path $longFilePath\r\n                       + ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    InvocationName   : remove-item\r\n    CommandOrigin    : Internal\r\nScriptStackTrace      : at <ScriptBlock>, <No file>: line 1\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0-preview.6\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0-preview.6\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n\r\n## Proposed solution\r\n\r\nImplement long paths:\r\n\r\n```diff\r\ndiff --git a/src/System.Management.Automation/namespaces/FileSystemProvider.cs b/src/System.Management.Automation/namespaces/FileSystemProvider.cs\r\nindex b37b4d10c..da0e4cb2d 100644\r\n--- a/src/System.Management.Automation/namespaces/FileSystemProvider.cs\r\n+++ b/src/System.Management.Automation/namespaces/FileSystemProvider.cs\r\n@@ -8243,6 +8243,12 @@ namespace Microsoft.PowerShell.Commands\r\n\r\n             WIN32_FIND_DATA data = default;\r\n             string fullPath = Path.TrimEndingDirectorySeparator(fileInfo.FullName);\r\n+\r\n+            if (fullPath.Length > MAX_PATH)\r\n+            {\r\n+                fullPath = \"\\\\\\\\?\\\\\" + fullPath;\r\n+            }\r\n+\r\n             using (var handle = FindFirstFileEx(fullPath, FINDEX_INFO_LEVELS.FindExInfoBasic, ref data, FINDEX_SEARCH_OPS.FindExSearchNameMatch, IntPtr.Zero, 0))\r\n             {\r\n```\r\n\r\nAlso ensure that the actual file exists before calling the Windows API on it so that the proper error can be thrown if not:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/dd5cf8670a49dec25ce5763814efaf2092e321f8/src/Microsoft.PowerShell.Commands.Management/commands/management/Navigation.cs#L2701-L2702\r\n",
+  "closed_at": "2021-08-05T18:41:55Z",
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Why conditionally add `\\\\?\\` if it exceeds max path, if we control what APIs are called then we should always add that prefix. The benefit there is you are always running the same code even for short paths rather than sometimes testing this edge case.\r\n\r\nYou also need to be careful when dealing with UNC paths, the prefix is `\\\\?\\UNC\\$server\\$share` so just prefixing isn\u2019t enough here.",
+      "created_at": "2021-05-26T23:11:13Z",
+      "updated_at": "2021-05-26T23:11:13Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Also while PowerShell\u2019s location can probably be fine with paths that exceed MAX_PATH I\u2019ve encountered problems in the past with trying to set a long path to the process\u2019 working dir. I don\u2019t think that\u2019s something powershell can change and might cause unknown problems down the line when spawning new processes from powershell that inherit from the file system location (not 100% sure if it actually does today).",
+      "created_at": "2021-05-26T23:14:26Z",
+      "updated_at": "2021-05-26T23:38:43Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Sounds like we could use your review on the next PR to fix this @jborean93. (It's still in draft for a reason though)\r\n\r\n> You also need to be careful when dealing with UNC paths, the prefix is \\\\?\\UNC\\$server\\$share so just prefixing isn\u2019t enough here.\r\n\r\nGood to know\r\n\r\n> Why conditionally add \\\\?\\ if it exceeds max path, if we control what APIs are called then we should always add that prefix\r\n\r\nThat suggestion was just based on a principle of minimal perturbation. But if `FindFirstFileExW` is always going to succeed there, then that seems reasonable.\r\n\r\n> Also while PowerShell\u2019s location can probably be fine with paths that exceed MAX_PATH I\u2019ve encountered problems in the past with trying to set a long path to the process\u2019 working dir\r\n\r\nYeah, in this case I think the issue is due to us calling the Windows API directly in an attempt to work around OneDrive weirdness. In the process case, I think .NET does a lot more under the hood (as it does in the `Path` APIs).\r\n\r\nIt may also be that the right fix for us here is to abandon the efficiency that the original change was trying to get and simply look at the file twice, once to determine whether it's OneDrive and the second time to call through .NET and take advantage of its robustness.",
+      "created_at": "2021-05-27T00:01:05Z",
+      "updated_at": "2021-05-27T00:01:30Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I\u2019ll have to add some comments when I\u2019m next on a laptop. It\u2019s hard to review actual code changes when looking from your phone :)",
+      "created_at": "2021-05-27T00:11:37Z",
+      "updated_at": "2021-05-27T00:11:37Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> It\u2019s hard to review actual code changes when looking from your phone :)\r\n\r\nDw I was also on a phone today \ud83d\ude42 ",
+      "created_at": "2021-05-27T05:09:57Z",
+      "updated_at": "2021-05-27T05:09:57Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #15571, which has now been successfully released as `v7.2.0-preview.9`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.9)\n",
+      "created_at": "2021-08-23T18:36:11Z",
+      "updated_at": "2021-08-23T18:36:11Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #15571, which has now been successfully released as `v7.2.0-preview.10`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.10)\n",
+      "created_at": "2021-09-28T23:18:02Z",
+      "updated_at": "2021-09-28T23:18:02Z"
+    },
+    {
+      "author": "svermaak",
+      "author_association": "NONE",
+      "body": "Still getting it in 7.2.5\r\n![image](https://user-images.githubusercontent.com/12259728/186280605-56ec0f92-7ebb-4011-9ccd-5dbe02a7e846.png)\r\n",
+      "created_at": "2022-08-23T23:00:07Z",
+      "updated_at": "2022-08-23T23:00:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@svermaak Please open new issue with exact repro steps.",
+      "created_at": "2022-08-24T04:37:05Z",
+      "updated_at": "2022-08-24T04:37:05Z"
+    }
+  ],
+  "created_at": "2021-05-26T22:33:14Z",
+  "number": 15466,
+  "state": "closed",
+  "title": "Remove-Item does not work correctly with long paths",
+  "updated_at": "2022-08-24T04:37:05Z"
+}

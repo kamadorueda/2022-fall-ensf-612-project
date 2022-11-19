@@ -1,0 +1,34 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8702",
+  "author": "GeeLaw",
+  "body": "\r\n# Steps to reproduce\r\n\r\nCreate a file `a.cpp` with the following content:\r\n\r\n```cpp\r\n#include<cstdio>\r\nint main()\r\n{\r\n    char buffer[1024];\r\n    size_t rc;\r\n    while ((rc = fread(buffer, 1, 1024, stdin)) != 0)\r\n    {\r\n        fwrite(buffer, 1, rc, stdout);\r\n    }\r\n    // There is a blank line on purpose!\r\n\r\n    return 0;\r\n}\r\n// The file does not end with \"\\n\" on purpose!\r\n```\r\n\r\nThen, in bash, compile it with `g++` (or any C++ compiler you find on macOS) and test redirection in bash and PowerShell:\r\n\r\n```bash\r\ng++ a.cpp\r\n./a.out < a.cpp > bash_redir.cpp\r\nexec pwsh\r\n```\r\n\r\nThen in PowerShell:\r\n\r\n```powershell\r\nStart-Process a.out -RedirectStandardInput a.cpp -RedirectStandardOutput pwsh_redir.cpp -Wait\r\nGet-FileHash *.cpp\r\n```\r\n\r\n# Expected behavior\r\n\r\nAll the three `.cpp` files have the same hash (are the same).\r\n\r\n# Actual behavior\r\n\r\nThe file `pwsh_redir.cpp` is different from the other two. The on-purpose blank line is eaten, and the on-purpose no-\"\\n\" is broken. Specifically, `pwsh_redir.cpp` is the following:\r\n\r\n```cpp\r\n#include<cstdio>\r\nint main()\r\n{\r\n    char buffer[1024];\r\n    size_t rc;\r\n    while ((rc = fread(buffer, 1, 1024, stdin)) != 0)\r\n    {\r\n        fwrite(buffer, 1, rc, stdout);\r\n    }\r\n    // There is a blank line on purpose!\r\n    return 0;\r\n}\r\n// The file does not end with \"\\n\" on purpose!\r\n\r\n\r\n```\r\n\r\nNote that an extra \"\\n\" has been appended at the end.\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.2\r\nPSEdition                      Core\r\nGitCommitId                    6.1.2\r\nOS                             Darwin 18.2.0 Darwin Kernel Version 18.2.0: Mo...\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nThe full value of `OS` property is `Darwin 18.2.0 Darwin Kernel Version 18.2.0: Mon Nov 12 20:24:46 PST 2018; root:xnu-4903.231.4~2/RELEASE_X86_64`. The full table of `PSCompatibleVersions` is\r\n\r\n```none\r\nMajor  Minor  Build  Revision\r\n-----  -----  -----  --------\r\n1      0      -1     -1\r\n2      0      -1     -1\r\n3      0      -1     -1\r\n4      0      -1     -1\r\n5      0      -1     -1\r\n5      1      10032  0\r\n6      1      2      -1\r\n```\r\n\r\n# Comments\r\n\r\nThe standard stream might not be textual and they are binary in many cases. E.g., the `curl` might write the response stream to `stdout`.\r\n\r\nPowerShell for macOS does the redirection by using [`ForkAndExecProcess`](https://github.com/dotnet/corefx/blob/de33b6edaa9b9167b16323a9104af4003aad6235/src/Common/src/Interop/Unix/System.Native/Interop.ForkAndExecProcess.cs), which creates pipes connecting the parent and the child. The parent, which is PowerShell, will then [copy the stream from the pipe to file](https://github.com/PowerShell/PowerShell/blob/196c9b49b866bb76260198b76a4fc02c623c1f8c/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs#L2095) in a faulty way -- it assumes textual stream (as it's using `StreamReader` and `StreamWriter`).\r\n\r\nThere are **TWO** faults:\r\n\r\n1. Assuming the streams are textual.\r\n2. Copying text streams with `ReadLine` and `WriteLine` carelessly, which might create extraneous or missing line breaks.\r\n\r\n**The fix is to access the underlying pipe/file stream when doing the copy, and do a binary copy (resembling the C++ example code above).**\r\n\r\nThis problem does not reproduce on Windows PowerShell, because Windows PowerShell implements `Start-Process` stream redirection by opening the actual files, inheriting the handles and setting the correct handles in `STARTUPINFO`.\r\n\r\nThis problem is **not** related to the long-discussed broken native-piping in PowerShell.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "This shouldn't be labeled `Area-Engine`. It's a cmdlet issue. The problem lies in how `Start-Process` copies the streams. I would recommend `Area-Cmdlets` or one of its sublabel.",
+      "created_at": "2019-01-22T12:13:54Z",
+      "updated_at": "2019-01-22T12:13:54Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "The solution mentioned in the body of this issue is the one involving minimal change to the current code. The better, complete solution is to start the subprocess with P/Invoke. Just like on Windows, `Start-Process` uses `CreateProcess`, on *nix, it should call (something similar to) `ForkAndExecProcess`.\r\n\r\nThe job is to add functionality of standard stream redirection to file to `ForkAndExecProcess` shim function so that `Start-Process` can avoid doing the copy. In addition to being error-prone as already proven and inefficient, the current code for stream copying involves some [`Thread.Sleep` hacks](https://github.com/PowerShell/PowerShell/blob/196c9b49b866bb76260198b76a4fc02c623c1f8c/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs#L2144), which are also bad. Getting rid of stream copying can be done by creating a new `ForkAndFreopenAndExecProcess` shim function, which, unsurprisingly, forks the pal process, calls `freopen` in the subprocess to redirect standard stream to the files, and calls `execve` to replace the forked process with the desired one.\r\n\r\nThe second solution (here) requires a bit of overhaul of the code. Specifically, .NET Core had better include this shim function.",
+      "created_at": "2019-01-22T17:26:35Z",
+      "updated_at": "2019-01-24T04:19:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Great sleuthing.\r\n\r\nA corollary of your Unix-only findings (it seems that Windows is unaffected) is that `-RedirectStandarInput /dev/null` doesn't work as expected because instead of sending _no_ stdin input, ``\"`n\"`` is sent.",
+      "created_at": "2021-12-28T18:09:25Z",
+      "updated_at": "2021-12-28T18:09:25Z"
+    }
+  ],
+  "created_at": "2019-01-21T02:32:23Z",
+  "number": 8702,
+  "state": "open",
+  "title": "`Start-Process` stream redirection is not faithful (it eats blank lines or adds blank lines)",
+  "updated_at": "2021-12-28T18:09:25Z"
+}

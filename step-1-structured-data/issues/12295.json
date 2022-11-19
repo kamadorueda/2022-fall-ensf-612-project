@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12295",
+  "author": "SeeminglyScience",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nCurrently `PowerShell` has a method that allows this, `AddCommand(CommandInfo)`. However, there's no supported way to add a `CommandInfo` to a `PSCommand` instance directly. PowerShellEditorServices (and likely other projects) construct a `PSCommand` instance well before actually getting to the internal `PowerShell` object, so working with `CommandInfo` directly can only be done with reflection.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\n```csharp\r\nusing System.Management.Automation.Runspaces;\r\n\r\nnamespace System.Management.Automation\r\n{\r\n    public partial sealed class PSCommand\r\n    {\r\n        public PSCommand AddCommand(CommandInfo commandInfo)\r\n        {\r\n            return AddCommand(new Command(commandInfo));\r\n        }\r\n    }\r\n}\r\n```\r\n\r\n```diff\r\nnamespace System.Management.Automation.Runspaces\r\n{\r\n    public sealed class Command\r\n    {\r\n-       internal Command(CommandInfo commandInfo) : this(commandInfo, false)\r\n+       public Command(CommandInfo commandInfo) : this(commandInfo, false)\r\n        {\r\n        }\r\n    }\r\n}\r\n```\r\n\r\n/cc @TylerLeonhardt @rjmholt",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "Yes, we have to use reflection to achieve this in PowerShell Editor Services:\r\n\r\nhttps://github.com/TylerLeonhardt/PowerShellEditorServices/commit/cc241624f419bd81d86cac6b903b778a700b8ac2#diff-fa9220ea78f2263973eaab89e4e26572\r\n\r\nThere should be better API surface area here for us to take advantage of.",
+      "created_at": "2020-04-10T19:53:16Z",
+      "updated_at": "2020-04-10T19:53:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The new public API should be approved by PowerShell Committee.\r\n/cc @SteveL-MSFT @daxian-dbw \r\n\r\nAlso question - should it be in 7.0 Servicing and SDK?",
+      "created_at": "2020-04-11T07:42:59Z",
+      "updated_at": "2020-04-11T07:44:13Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, the `PowerShell` class already exposes a method `AddCommand()` that takes a `CommandInfo` so some concerns regarding passing in a `CommandInfo` from one runspace into another that may be out of date is already an issue, so from that perspective, it seems there is no concern about making this public since it's already public via the `PowerShell` class.",
+      "created_at": "2020-04-15T23:02:15Z",
+      "updated_at": "2020-04-15T23:02:15Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TylerLeonhardt `InvocationIntrinsics` has a bunch of methods for creating `CommandInfo`  objects: `GetCmdlet()`, `GetCmdletByTypename() `, `GetCommand()`, etc. and the `PowerShell` object has an `AddCommand()` overload that takes `CommandInfo`. So there's  really no need to explicitly create `PSCommand' objects.\r\n\r\n@SeeminglyScience \r\n> construct a PSCommand instance well before actually getting to the internal PowerShell object, \r\n\r\nThat seems kind of backwards. Why don't you create the `PowerShell` object first, then pass *it* around instead of the command objects? A `PowerShell` API object is really just a future computation that's reified when you call `Invoke()`. The intent of the `PowerShell` class was to hold all of the metadata for that computation.\r\n",
+      "created_at": "2020-04-16T22:33:49Z",
+      "updated_at": "2020-04-16T22:33:49Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @TylerLeonhardt `InvocationIntrinsics` has a bunch of methods for creating `CommandInfo` objects: `GetCmdlet()`, `GetCmdletByTypename() `, `GetCommand()`, etc. and the `PowerShell` object has an `AddCommand()` overload that takes `CommandInfo`. So there's really no need to explicitly create `PSCommand' objects.\r\n\r\nCan't make a `CommandInfo` of just a generic script though.  Also can't add parameters, multiple statements, or multiple pipeline elements.\r\n\r\n> @SeeminglyScience\r\n> \r\n> > construct a PSCommand instance well before actually getting to the internal PowerShell object,\r\n> \r\n> That seems kind of backwards. Why don't you create the `PowerShell` object first, then pass _it_ around instead of the command objects?\r\n\r\nOne so that we can cache instances, two so that state details like nested vs remote vs local type state can be determined way later in the code path.\r\n\r\n> A `PowerShell` API object is really just a future computation that's reified when you call `Invoke()`. \r\n The intent of the `PowerShell` class was to hold all of the metadata for that computation.\r\n\r\nTrue but it's got a lot more metadata than just the command that needs to be invoked.  It's got all the streams, whether it's nested, what runspace it's going on, current invocation state.\r\n\r\n",
+      "created_at": "2020-04-16T23:36:54Z",
+      "updated_at": "2020-04-16T23:36:54Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "I don't want to derail this discussion - but for context, in PSES we have this helper method to get `CommandInfo`'s for use in Intellisense help:\r\nhttps://github.com/PowerShell/PowerShellEditorServices/blob/765c76c930ffcc7f4727a2d1f1dd7ee3ac71e4ee/src/PowerShellEditorServices/Services/PowerShellContext/Utilities/CommandHelpers.cs#L64-L105\r\n\r\nbecause it's:\r\n* thread safe (ish)\r\n* the only public way of retrieving `CommandInfo`'s\r\n\r\nI stumbled upon this internal API [`CommandDiscovery.LookupCommandInfo`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/CommandDiscovery.cs#L728-L731) and was wondering if this could be leveraged instead since it:\r\n\r\n* doesn't involve invoking PowerShell\r\n* will be much faster\r\n\r\nhowever... I have concerns about thread safety with that API...\r\n\r\n@bpayette any thoughts?\r\n\r\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/11524380?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShellEditorServices\">PowerShell/PowerShellEditorServices</a></strong></div><div>A common platform for PowerShell development support in any editor or application! - PowerShell/PowerShellEditorServices</div></blockquote>",
+      "created_at": "2020-04-18T17:40:44Z",
+      "updated_at": "2020-04-18T17:41:06Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@TylerLeonhardt We'd still need to be on the pipeline thread or we'd hit some pretty nasty race conditions.  Most of the slowness problems we have are around managing execution on that thread, I don't think skipping the command execution specifically would save us much.",
+      "created_at": "2020-04-18T18:04:22Z",
+      "updated_at": "2020-04-18T18:04:41Z"
+    }
+  ],
+  "created_at": "2020-04-10T15:17:15Z",
+  "number": 12295,
+  "state": "open",
+  "title": "Add more methods to directly add a `CommandInfo` to a `PSCommand`",
+  "updated_at": "2020-04-18T18:04:41Z"
+}

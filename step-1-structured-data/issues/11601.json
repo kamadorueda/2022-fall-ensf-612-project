@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11601",
+  "author": "MikeHillberg",
+  "body": "\r\n# Steps to reproduce\r\n\r\n* Write a custom NavigationCmdletProvider (Powershell Provider)\r\n* In the GetChildItems override, call WriteItemObject with two different types of objects\r\n* Create a ps1xml file with two View definitions, one for each type\r\n\r\n# Expected behavior\r\n\r\nThe two objects to get displayed with their custom views\r\n\r\n# Actual behavior\r\n\r\nThe first object, whichever type, gets the correct custom formatting. For the second object the custom formatting is ignored.\r\n\r\n# Cause\r\n\r\nI think the issue is in `Microsoft.PowerShell.Commands.Internal.Format.InnerFormatShapeCommand.ProcessObject()`\r\n\r\nThis method is called for each object. The first time, `ctx` is `FormattingContextState.none`, and so `_viewManager.Initialize` is called with the first object (`so`), and based on that object type the custom view is selected.\r\n\r\nOn the second call, `ctx` is now `FormattingContextState.group`, so `_viewManager.Initialize` isn't called, and so there's never an opportunity to set the select object's custom view.\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.6\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.6-119-g0dfeeb52034faf2696dc8844b5cbf39faba566cb\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-01-31T14:51:29Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps it is the same #4594",
+      "created_at": "2020-01-16T13:40:24Z",
+      "updated_at": "2020-01-16T13:40:24Z"
+    },
+    {
+      "author": "MikeHillberg",
+      "author_association": "NONE",
+      "body": "The \"related problem\" in that one looks similar but different. But I've just read the issue, not investigated deeply. The one here just looks like a bug though; InnerFormatShapeCommand should be getting a custom view for each, not just the first in the list.",
+      "created_at": "2020-01-16T16:43:12Z",
+      "updated_at": "2020-01-16T16:43:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Is default output in your code Format-Table? Try to change to Format-List.",
+      "created_at": "2020-01-17T05:00:27Z",
+      "updated_at": "2020-01-17T05:00:27Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "If I understand the issue correctly, this is sort of by design. For heterogeneous collections, the format to use is selected based on the first object (what properties to show etc.) Subsequent objects just get converted to strings (?). Doing otherwise would slow everything down and produce hard to read output because the headers would be reprinted for each change in object type. The solution is to have a common base class for the objects being emitted and write your formats against that.",
+      "created_at": "2020-01-17T06:22:38Z",
+      "updated_at": "2020-01-17T06:22:38Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It might have been part of the original design, but I think it's worth trying to do it better. \ud83d\ude42 \r\n\r\nI'm sure there are some concerns that would need to be addressed to make it work as we'd want, but simply refusing to format objects from a heterogenous collection is an undesirable solution for most folx, I would think.",
+      "created_at": "2020-01-17T13:30:09Z",
+      "updated_at": "2020-01-17T13:30:09Z"
+    },
+    {
+      "author": "MikeHillberg",
+      "author_association": "NONE",
+      "body": "The default output is pretty ugly, so what I was trying to do was format it. My Provider writes out containers and items, and I was just trying to make the container display with brackets (\"[...]\") in the output.\r\n\r\nFor example, I created a trivial custom provider to debug with, with this ps1xml file (notice that the first view has a <FormatString>):\r\n\r\n```\r\n<Configuration>\r\n  <ViewDefinitions>\r\n    <View>\r\n      <Name>Class1</Name>\r\n      <ViewSelectedBy>\r\n        <TypeName>TestPSPCore.TestClass1</TypeName>\r\n      </ViewSelectedBy>\r\n      <WideControl>\r\n        <ColumnNumber>1</ColumnNumber>\r\n        <WideEntries>\r\n          <WideEntry>\r\n            <WideItem>\r\n              <PropertyName>Name</PropertyName>\r\n              <FormatString>[{0}]</FormatString> <!- <<<<<<<<<< -->\r\n            </WideItem>\r\n          </WideEntry>\r\n        </WideEntries>\r\n      </WideControl>\r\n    </View>\r\n\r\n    <View>\r\n      <Name>Class2</Name>\r\n      <ViewSelectedBy>\r\n        <TypeName>TestPSPCore.TestClass2</TypeName>\r\n      </ViewSelectedBy>\r\n      <WideControl>\r\n        <ColumnNumber>1</ColumnNumber>\r\n        <WideEntries>\r\n          <WideEntry>\r\n            <WideItem>\r\n              <PropertyName>Name</PropertyName>\r\n            </WideItem>\r\n          </WideEntry>\r\n        </WideEntries>\r\n      </WideControl>\r\n    </View>\r\n  </ViewDefinitions>\r\n</Configuration>\r\n```\r\nNow I do a gci, which returns one of each type (named \"1\" and \"2\"), and expect to get\r\n\r\n```\r\n[1]\r\n2\r\n```\r\n\r\nInstead I get:\r\n\r\n```\r\n1\r\n\r\nPSPath        : TestPSPCore\\TestPSPCore::\\2\r\nPSParentPath  : TestPSPCore\\TestPSPCore::\\\r\nPSChildName   : 2\r\nPSDrive       : tpsp\r\nPSProvider    : TestPSPCore\\TestPSPCore\r\nPSIsContainer : False\r\nName          : 2\r\n```\r\n\r\nI did work around it with a common base class. That means that you have to modify the objects to have a custom formatter though. If it's necessary for the object to be designed to be formatted, then what I'd really like is to be able to set a [PSOutput] attribute or some such on a property, and then that's what's used by default to output the object. Or is there a way to cause the ToString() to be used to format the object?\r\n",
+      "created_at": "2020-01-17T14:36:34Z",
+      "updated_at": "2020-01-17T14:36:34Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> It might have been part of the original design, but I think it's worth trying to do it better. \ud83d\ude42\r\n\r\nPersonally I'd really rather not see this.  There aren't many good reasons to return multiple completely separate object types outside of interactively.  This being a sort of hard stop has kind of cemented the best practice of only returning one thing in the community.\r\n\r\n@MikeHillberg Instead of a `WideControl`, could you use a `CustomControl`?  Custom controls and lists can be marked as \"OutOfBand\" which forces this separation.\r\n\r\n```xml\r\n<Configuration>\r\n    <ViewDefinitions>\r\n        <View>\r\n            <Name>Thing</Name>\r\n            <OutOfBand>true</OutOfBand>\r\n            <ViewSelectedBy>\r\n                <TypeName>Thing</TypeName>\r\n            </ViewSelectedBy>\r\n            <CustomControl>\r\n                <CustomEntries>\r\n                    <CustomEntry>\r\n                        <CustomItem>\r\n                            <Text>[</Text>\r\n                            <ExpressionBinding>\r\n                                <PropertyName>Name</PropertyName>\r\n                            </ExpressionBinding>\r\n                            <Text>]</Text>\r\n                        </CustomItem>\r\n                    </CustomEntry>\r\n                </CustomEntries>\r\n            </CustomControl>\r\n        </View>\r\n        <View>\r\n            <Name>Thing2</Name>\r\n            <OutOfBand>true</OutOfBand>\r\n            <ViewSelectedBy>\r\n                <TypeName>Thing2</TypeName>\r\n            </ViewSelectedBy>\r\n            <CustomControl>\r\n                <CustomEntries>\r\n                    <CustomEntry>\r\n                        <CustomItem>\r\n                            <ExpressionBinding>\r\n                                <PropertyName>Name</PropertyName>\r\n                            </ExpressionBinding>\r\n                        </CustomItem>\r\n                    </CustomEntry>\r\n                </CustomEntries>\r\n            </CustomControl>\r\n        </View>\r\n    </ViewDefinitions>\r\n</Configuration>\r\n```\r\n\r\n```powershell\r\n([PSCustomObject]@{\r\n    PSTypeName = 'Thing'\r\n    Name = 'Thing'\r\n},\r\n[PSCustomObject]@{\r\n    PSTypeName = 'Thing2'\r\n    Name = 'Thing2'\r\n})\r\n\r\n# [Thing]\r\n# Thing2\r\n```",
+      "created_at": "2020-01-17T15:11:03Z",
+      "updated_at": "2020-01-17T15:11:03Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "> Personally I'd really rather not see this. There aren't many good reasons to return multiple completely separate object types outside of interactively. This being a sort of hard stop has kind of cemented the best practice of only returning one thing in the community.\r\n\r\nThat's a good point. True enough. \ud83d\ude42 ",
+      "created_at": "2020-01-17T16:13:36Z",
+      "updated_at": "2020-01-17T16:13:36Z"
+    },
+    {
+      "author": "MikeHillberg",
+      "author_association": "NONE",
+      "body": "Sorry, I'm not parsing that. You're saying that heterogeneous collections are bad practice?\r\n\r\nI was thinking of it like the file system, like directories and files. But now I see that the file system provider returns both files and directories as a FileInfo, so it is homogeneous.\r\n\r\nMy solution actually was to make everything homogeneous with a common base class by which subclasses and customize their output in the provider:\r\n\r\n```\r\n    abstract public class PSFormatting\r\n    {\r\n        public abstract string PSName { get; }\r\n    }\r\n```\r\n\r\n\r\n```\r\n<Configuration>\r\n  <ViewDefinitions>\r\n    <View>\r\n      <Name>MyView</Name>\r\n      <ViewSelectedBy>\r\n        <TypeName>NS.PSFormatting</TypeName> <!-- <<<<<<<< -->\r\n      </ViewSelectedBy>\r\n      <WideControl>\r\n        <ColumnNumber>1</ColumnNumber>\r\n        <WideEntries>\r\n          <WideEntry>\r\n            <WideItem>\r\n              <PropertyName>PSName</PropertyName>  <!-- <<<<<<<< -->\r\n            </WideItem>\r\n          </WideEntry>\r\n        </WideEntries>\r\n      </WideControl>\r\n    </View>\r\n  </ViewDefinitions>\r\n</Configuration>\r\n```\r\n",
+      "created_at": "2020-01-17T17:08:15Z",
+      "updated_at": "2020-01-17T17:08:15Z"
+    },
+    {
+      "author": "MikeHillberg",
+      "author_association": "NONE",
+      "body": "I think part of what got me down this path is that I don't like the default output I see in the FileSystem driver; the little 'd' as a directory indicator isn't obvious enough for me when I'm doing a quick look. \r\n\r\nThe issue of column headings with heterogeneous objects makes sense, but you can have objects with properties in common that don't have a common base class.\r\n",
+      "created_at": "2020-01-17T17:14:11Z",
+      "updated_at": "2020-01-17T17:14:11Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yep that's the idea!  Another thing you can do without modifying the actual original object is:\r\n\r\n```xml\r\n<Configuration>\r\n    <ViewDefinitions>\r\n        <View>\r\n            <Name>MyView</Name>\r\n            <ViewSelectedBy>\r\n                <TypeName>NS.PSFormattingItemBase</TypeName>\r\n            </ViewSelectedBy>\r\n            <WideControl>\r\n                <ColumnNumber>1</ColumnNumber>\r\n                <WideEntries>\r\n                    <WideEntry>\r\n                        <EntrySelectedBy>\r\n                            <TypeName>NS.PSFormattingContainer</TypeName>\r\n                        </EntrySelectedBy>\r\n                        <WideItem>\r\n                            <PropertyName>Name</PropertyName>\r\n                            <FormatString>[{0}]</FormatString>\r\n                        </WideItem>\r\n                    </WideEntry>\r\n                    <WideEntry>\r\n                        <EntrySelectedBy>\r\n                            <TypeName>NS.PSFormattingLeaf</TypeName>\r\n                        </EntrySelectedBy>\r\n                        <WideItem>\r\n                            <PropertyName>Name</PropertyName>\r\n                        </WideItem>\r\n                    </WideEntry>\r\n                </WideEntries>\r\n            </WideControl>\r\n        </View>\r\n    </ViewDefinitions>\r\n</Configuration>\r\n```\r\n\r\nThat assumes something like:\r\n\r\n```csharp\r\npublic abstract class PSFormattingBase\r\n{\r\n    public virtual string Name { get; }\r\n}\r\n\r\npublic class PSFormattingContainer : PSFormattingBase\r\n{\r\n}\r\n\r\npublic class PSFormattingLeaf : PSFormattingBase\r\n{\r\n}\r\n```",
+      "created_at": "2020-01-17T17:16:54Z",
+      "updated_at": "2020-01-17T17:16:54Z"
+    },
+    {
+      "author": "MikeHillberg",
+      "author_association": "NONE",
+      "body": "Nice, I hadn't found the EntrySelectedBy. That still requires you modify the original objects to give them a common base though. Otoh, in my case, using System.Object as a common base works, and then your solution works purely with the ps1xml.\r\n\r\nIt'd be great to call out the homogeneous guideline in the [documentation](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.provider.containercmdletprovider.getchilditems?view=pscore-6.2.0#System_Management_Automation_Provider_ContainerCmdletProvider_GetChildItems_System_String_System_Boolean_) and [sample](https://docs.microsoft.com/en-us/powershell/scripting/developer/provider/accessdbprovidersample05?view=powershell-7).\r\n",
+      "created_at": "2020-01-17T17:28:05Z",
+      "updated_at": "2020-01-17T17:28:05Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Nice, I hadn't found the EntrySelectedBy. That still requires you modify the original objects to give them a common base though. Otoh, in my case, using System.Object as a common base works, and then your solution works purely with the ps1xml.\r\n\r\nYou can also just do this:\r\n\r\n```xml\r\n<Configuration>\r\n    <ViewDefinitions>\r\n        <View>\r\n            <Name>MyView</Name>\r\n            <ViewSelectedBy>\r\n                <TypeName>NS.PSFormattingItemBase</TypeName>\r\n            </ViewSelectedBy>\r\n            <WideControl>\r\n                <ColumnNumber>1</ColumnNumber>\r\n                <WideEntries>\r\n                    <WideEntry>\r\n                        <WideItem>\r\n                            <ScriptBlock>\r\n                                if ($_.PSIsContainer) {\r\n                                    return '[{0}]' -f $_.Name\r\n                                }\r\n\r\n                                return $_.Name\r\n                            </ScriptBlock>\r\n                        </WideItem>\r\n                    </WideEntry>\r\n                </WideEntries>\r\n            </WideControl>\r\n        </View>\r\n    </ViewDefinitions>\r\n</Configuration>\r\n```\r\n\r\nA little less clean but totally fine.\r\n\r\n> It'd be great to call out the homogeneous guideline in the [documentation](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.provider.containercmdletprovider.getchilditems?view=pscore-6.2.0#System_Management_Automation_Provider_ContainerCmdletProvider_GetChildItems_System_String_System_Boolean_) and [sample](https://docs.microsoft.com/en-us/powershell/scripting/developer/provider/accessdbprovidersample05?view=powershell-7).\r\n\r\nIt's more a general rule for anything that returns objects.  C# methods, functions, scripts, cmdlets, anything.  Definitely agree that it should be spelled out in a help doc somewhere though, assuming it hasn't already.",
+      "created_at": "2020-01-17T17:37:36Z",
+      "updated_at": "2020-01-17T17:37:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Please open new issue in PowerShell Docs repo if needed.",
+      "created_at": "2020-01-31T14:51:28Z",
+      "updated_at": "2020-01-31T14:51:28Z"
+    }
+  ],
+  "created_at": "2020-01-16T05:46:04Z",
+  "number": 11601,
+  "state": "closed",
+  "title": "NavigationCmdletProvider.WriteItemObject with multiple types can't be custom formatted",
+  "updated_at": "2020-01-31T14:51:36Z"
+}

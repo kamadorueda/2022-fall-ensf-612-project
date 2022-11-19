@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7761",
+  "author": "dantraMSFT",
+  "body": "On a clean installation of Ubuntu 18.04 from Azure, creating a hashtable in script results in a hashtable with case-sensitive keys.\r\n\r\nThe LANG environment variable is set to 'C.UTF-8' and both CultureInfo.CurrentCulture and CultureInfo.CurrentUICulture report  en-US-POSIX.\r\n\r\nThe result is scripts that are not case-strict when using hashtable keys will break.\r\n\r\n\r\nSteps to reproduce\r\n------------------\r\n```powershell\r\n$h = @{HostName = 'host'}\r\n$h.hostname\r\n$h.HostName\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nThe value 'host' is returned for both $h.HostName and $h.hostname\r\n\r\nActual behavior\r\n---------------\r\nNo value is returned for $h.HostName is 'host' while $h.hostname returns $null.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n Name                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0-rc.1\r\nOS                             Linux 4.15.0-1022-azure #23-Ubuntu SMP Thu Aug 16 15:19:42 UTC 2018\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-01-10T04:11:44Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "How odd. The code that constructs a hashtable is hard-coded to be case-insensitive:\r\n```c#\r\n            yield return Expression.Assign(temp,\r\n                Expression.New(ordered ? CachedReflectionInfo.OrderedDictionary_ctor : CachedReflectionInfo.Hashtable_ctor,\r\n                                ExpressionCache.Constant(keyValuePairs.Count),\r\n                                ExpressionCache.CurrentCultureIgnoreCaseComparer.Cast(typeof(IEqualityComparer))));\r\n```\r\nWhat happens when you manually create the hashtable?\r\n```powershell\r\n$h = [hashtable]::new([StringComparer]::CurrentCultureIgnoreCase)\r\n$h.hostname = 123\r\n$h.HostName\r\n$h.hostname\r\n```",
+      "created_at": "2018-09-12T00:01:52Z",
+      "updated_at": "2018-09-12T00:01:52Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@JamesWTruher found that this is due to Ubuntu 18.04's default [`LANG=C.UTF-8`](https://manpages.debian.org/unstable/open-infrastructure-locales-c.utf-8/locales-c.utf-8.7.en.html) (compare to 16.04's `LANG=en-us.UTF-8` for our installs).\r\n\r\n@TravisEz13 made the point that this behaviour may be by design: the if the `C.UTF-8` locale is supposed to be something along the lines of \"culture invariant\", then case-sensitivity may not mean anything and it just performs a strict codepoint-to-codepoint comparison.\r\n\r\nHowever, from the Debian manpage linked above, it sounds like the standard C locale should obey the casing rules of en_US, meaning C.UTF-8 should obey the casing rules of en_US.UTF-8. So this is a bug, probably in .NET Core.\r\n\r\nAlso worth mentioning @TravisEz13's note of .NET's culture invariant mode: https://github.com/dotnet/announcements/issues/20",
+      "created_at": "2018-09-12T01:51:50Z",
+      "updated_at": "2018-09-12T01:53:30Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I've managed a simple repro that doesn't depend on PowerShell and have opened an issue in corefx",
+      "created_at": "2018-09-12T06:52:15Z",
+      "updated_at": "2018-09-13T18:22:12Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "CoreFX have designated the behaviour with that locale as by design as @TravisEz13 suggested, see https://github.com/dotnet/corefx/issues/32250#issuecomment-420749205.\r\n\r\nThe options I see for our handling of it are:\r\n- This behaviour is by design for us too\r\n- We special-case handling of this locale\r\n- We change handling of hashtable keys to use `CultureInvariantIgnoreCase` or `OrdinalIgnoreCase` as I think @BrucePay suggested",
+      "created_at": "2018-09-12T19:55:34Z",
+      "updated_at": "2018-09-12T19:55:34Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": ".NET team's suggested workaround: https://github.com/dotnet/corefx/issues/28611#issuecomment-386120096\r\n\r\nOfficial POSIX locale documentation from the Open Group: http://pubs.opengroup.org/onlinepubs/009695399/basedefs/xbd_chap07.html#tag_07_02",
+      "created_at": "2018-09-13T01:22:26Z",
+      "updated_at": "2018-09-13T01:22:26Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Apparently there are issues with `CultureInfo.InvariantCulture`: https://github.com/dotnet/roslyn/issues/29938#issuecomment-428270244",
+      "created_at": "2018-11-06T19:34:10Z",
+      "updated_at": "2018-11-06T19:34:10Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "I suggest to use OrdinalIgnoreCase for the hashtable comparison please. It would be great if a fix for this gets shipped in the next patch of 6.1.",
+      "created_at": "2018-12-29T21:35:17Z",
+      "updated_at": "2018-12-29T21:35:17Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@bergmeister Setting LANG before starting pwsh is a viable workaround.  I don't think this will be in next 6.1 patch.",
+      "created_at": "2018-12-31T02:23:22Z",
+      "updated_at": "2018-12-31T02:23:22Z"
+    },
+    {
+      "author": "ffeldhaus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I just checked that the issue also affects Mac OS if `LANG` is set to `C.utf8`.\r\n\r\n```\r\nFlorians-MacBook-Pro-3:~ florianfeldhaus$ export LANG=C.utf8\r\nFlorians-MacBook-Pro-3:~ florianfeldhaus$ pwsh\r\nPowerShell 6.1.1\r\nCopyright (c) Microsoft Corporation. All rights reserved.\r\n\r\nhttps://aka.ms/pscore6-docs\r\nType 'help' to get help.\r\n\r\nPS /Users/florianfeldhaus> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.1\r\nPSEdition                      Core\r\nGitCommitId                    6.1.1\r\nOS                             Darwin 18.2.0 Darwin Kernel Version 18.2.0: Mon Nov 12 20:24:46 PST 2018; root:xnu-4903.231.4~2/RELEASE_X86_64\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nPS /Users/florianfeldhaus> Get-Culture\r\n\r\nLCID             Name             DisplayName\r\n----             ----             -----------\r\n4096             en-US-POSIX      English (United States, Computer)\r\n\r\nPS /Users/florianfeldhaus> $h=@{H=1}\r\nPS /Users/florianfeldhaus> $h.h\r\nPS /Users/florianfeldhaus> $h.H\r\n1\r\n```",
+      "created_at": "2018-12-31T17:58:23Z",
+      "updated_at": "2018-12-31T18:14:24Z"
+    }
+  ],
+  "created_at": "2018-09-11T19:52:43Z",
+  "number": 7761,
+  "state": "closed",
+  "title": "Powershell Hashtable Keys are case-sensitive on Ubuntu 18.04",
+  "updated_at": "2019-01-19T07:58:06Z"
+}

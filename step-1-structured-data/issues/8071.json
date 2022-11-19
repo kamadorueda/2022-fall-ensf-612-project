@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8071",
+  "author": "KirkMunro",
+  "body": "## PR Summary\r\n\r\n$ExecutionContext is very useful for PowerShell command authors, and it is easily accessible in PowerShell, but it has never been made available publicly available via the SDK. This PR corrects that oversight so that developers working with PowerShell  in .NET can access the ExecutionContext functionality without having to use reflection to get it.\r\n\r\n## PR Checklist\r\n\r\n- [X] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [X] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [X] [Change is not breaking](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)\r\n- [X] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [X] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` to the beginning of the title and remove the prefix when the PR is ready.\r\n- **User-facing changes**\r\n    - [ ] Not Applicable\r\n    - **OR**\r\n    - [X] User-facing [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [X] Issue filed - Issue link: https://github.com/PowerShell/PowerShell-Docs/issues/3141\r\n- **Testing - New and feature**\r\n    - [ ] Not Applicable or can only be tested interactively\r\n    - **OR**\r\n    - [X] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n        - [ ] [Add `[feature]` if the change is significant or affects feature tests](https://github.com/PowerShell/PowerShell/blob/master/docs/testing-guidelines/testing-guidelines.md#requesting-additional-tests-for-a-pr)\r\n",
+  "closed_at": "2019-02-18T01:41:14Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Sorry for the delay on reviewing this PR. `EngineIntrinsics` exposes methods for invoking script/scriptblock, however, the invocation happens in the default Runspace of the current invoking thread, so unless you are calling `$rs.EngineIntrinsics.InvokeCommand.InvokeScript` from script that is running within `$rs`, it will be using a different Runspace -- the default Runspace associated with the current thread, which is often `null` in a C# application that hosts powershell.\r\n\r\nHere is an example to demonstrate this:\r\n```\r\n$rs = [runspacefactory]::CreateRunspace()\r\n$rs.Open()\r\n$ps = [powershell]::Create()\r\n$ps.Runspace = $rs\r\n\r\n## Host name of the default powershell console host\r\n$host.Name\r\n> ConsoleHost\r\n\r\n## Host name of the Runspace host\r\n$ps.AddScript('$host.Name').Invoke()\r\n> Default Host\r\n\r\n## Run start-sleep to block $rs\r\n$ps.Commands.Clear()\r\n$ps.AddScript(\"Sleep -s 100\") > $null\r\n$cb = $ps.BeginInvoke()\r\n\r\n## Invoke a script using $rs.EngineIntrinsics returns 'ConsoleHost'\r\n## because it run the script using the default Runspace of the current thread\r\n$rs.EngineIntrinsics.InvokeCommand.InvokeScript('$host.Name')\r\n> ConsoleHost\r\n```\r\n`$ExecutionContext` works fine in a PowerShell session because the current running thread (pipeline thread) always has the right default Runspace where `InvokeCommand.InvokeScript` should execute the script in. But in a C# application, there is no such guarantee, and because of this confusing semantics, I don't think we should introduce this public API.",
+      "created_at": "2018-11-15T21:16:30Z",
+      "updated_at": "2018-11-15T21:16:30Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Even if that is the case, you're talking about guarantees in a C# application. What about in cmdlets written in C#? They have the right default Runspace. I have code today where I use reflection to pull out this property, but I shouldn't have to use reflection to get it. This is in use in HistoryPx, FormatPx, SnippetPx, and other modules that have been in use for a while. I understand your concerns, but reflection shouldn't be necessary here, and I still think it's worth making this public so that .NET developers can access it directly when they need to. Maybe there's a better way to expose it though, so that the semantics always make sense. What if it was exposed off of PSCmdlet instead, so that it can be used in cmdlets, which should always have the right context? Or other ideas?",
+      "created_at": "2018-11-16T03:09:00Z",
+      "updated_at": "2018-11-19T15:10:41Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Actually after digging in deeper, what I suggested won't cover all of the use cases where I'm using this, so my point stands: if this is needed/useful for C# developers who are authoring binary modules, to the point where they are using reflection to pull it out, something should be considered rather than simply not doing anything and forcing them to use reflection. If the semantics are confusing, documentation should help.\r\n\r\nHere is where I have this in use in modules today:\r\n\r\n### HistoryPx\r\n\r\n* In the OnImport method of a class derived from IModuleAssemblyInitializer, I use EngineIntrinsics to get the SessionState so that I can get the value of a variable from the PSVariable collection.\r\n* In the OnRemove method of a class derived from IModuleAssemblyCleanup, I use EngineIntrinsics to get the SessionState to remove a variable from the PSVariable collection.\r\n\r\n### FormatPx\r\n\r\n* I retrieve EngineIntrinsics from the default runspace in a helper class to try to retrieve the buffersize from Host.UI.RawUI.\r\n\r\n### SnippetPx\r\n\r\n* I retrieve EngineIntrinsics from the default runspace to then call InvokeCommand.GetCommand on it to see if I am able to find a command within a file.\r\n\r\nThose are examples in use today where I have used reflection to get at what I need within binary modules. It would be better if reflection was not needed in those scenarios, which is where this PR came from.",
+      "created_at": "2018-11-16T15:38:48Z",
+      "updated_at": "2018-11-16T15:38:48Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I agree with @daxian-dbw. I think adding this as a property to `Runspace` implies the wrong use cases.\r\n\r\nWhat about a static method similar to the internal `LocalPipeline.GetExecutionContextFromTLS`? That would at least send the message that you need to be on the right thread.",
+      "created_at": "2018-11-19T12:28:11Z",
+      "updated_at": "2018-11-19T12:28:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, we agree with the intent to expose $ExecutionContext, however also agree with @daxian-dbw that the current PR implementation is not the right way to do this.  Also, if we expose this, we request a thorough security review (cc @PaulHigin)",
+      "created_at": "2018-12-05T23:51:29Z",
+      "updated_at": "2018-12-05T23:51:29Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks @SteveL-MSFT, I will give this more thought and see if I can come up with a better way to expose $ExecutionContext. If anyone more familiar with the code has suggestions they'd like to share, to add to the suggestion from @SeeminglyScience, that would be great as well.",
+      "created_at": "2018-12-06T18:18:58Z",
+      "updated_at": "2018-12-06T18:18:58Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Since we already expose EngineIntrinsics (should not be confused with ExecutionContext) as a public class, I don't see a security issue here.  However, I feel the public EngineIntrinsics class should be sealed.\r\n\r\nIt seems like EngineIntrinsics is only useful in a cmdlet or shell contexts, based on existing and Kirk's use cases.  Given that and the inherent thread/context affinity, I feel it should only be exposed via PSCmdlet, as Kirk suggested above.",
+      "created_at": "2018-12-06T18:21:15Z",
+      "updated_at": "2018-12-06T18:21:15Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> ### HistoryPx\r\n>\r\n> * In the OnImport method of a class derived from IModuleAssemblyInitializer, I use EngineIntrinsics to get the SessionState so that I can get the value of a variable from the PSVariable collection.\r\n> * In the OnRemove method of a class derived from IModuleAssemblyCleanup, I use EngineIntrinsics to get the SessionState to remove a variable from the PSVariable collection.\r\n\r\nYou can create a PowerShell instance via `PowerShell.Create(RunspaceMode.CurrentRunspace)` and then query for the variable using the PowerShell instance.\r\n\r\n> ### FormatPx\r\n> \r\n> * I retrieve EngineIntrinsics from the default runspace in a helper class to try to retrieve the buffersize from Host.UI.RawUI.\r\n\r\nIf possible, the buffersize can be passed in to the helper class from a cmdlet, which can easily get the buffer size info from `this.Host`.\r\nIf that's not possible, then again, you can use `PowerShell.Create(RunspaceMode.CurrentRunspace)` and query for the host using it.\r\n\r\n> ### SnippetPx\r\n>\r\n> * I retrieve EngineIntrinsics from the default runspace to then call InvokeCommand.GetCommand on it to see if I am able to find a command within a file.\r\n\r\nSame here, `PowerShell.Create(RunspaceMode.CurrentRunspace)` can be used reliably for this purpose.\r\n\r\n-------------------------------------------------------------------------------\r\n\r\nIn fact, all APIs other than `Host` that are exposed by `$ExecutionContext` are already available from `Runspace`:\r\n```\r\nPS:48> [runspace]::DefaultRunspace.SessionStateProxy\r\n\r\nApplications   :\r\nScripts        :\r\nDrive          :\r\nLanguageMode   : FullLanguage\r\nModule         :\r\nPath           :\r\nProvider       :\r\nPSVariable     :\r\nInvokeCommand  :\r\nInvokeProvider :\r\n```\r\nHowever,\r\n1. their values are set to `null` when the `Runspace` is busy (running). The reason I guess is to prevent two threads acting on the same Runspace, but the implementation didn't take into account that this may happen in the same thread too -- query for information while running in pipeline.\r\n2. not sure about others, but `InvokeCommand` is somewhat broken in two folds\r\n    - The methods `GetCmdlet`, `GetCommand` might trigger module auto-loading for command discovery, while module auto-loading depends on `PowerShell.Create(RunspaceMode.CurrentRunspace)`. So in case auto-loading is needed, those API will either fail because there is no default `Runspace` associate with the current thread (think about calling in C#), or will load the module in the default `Runspace` and return a `CommandInfo` object associated with the wrong `ExecutionContext`.\r\n    - The method `InvokeScript` broken in the same way as I described above in https://github.com/PowerShell/PowerShell/pull/8071#issuecomment-439192986\r\n",
+      "created_at": "2018-12-21T00:12:26Z",
+      "updated_at": "2019-01-09T00:59:00Z"
+    },
+    {
+      "author": "stale[bot]",
+      "author_association": "NONE",
+      "body": "This PR has been automatically marked as stale because it has not had activity in the last 30 days. It will be closed if no further activity occurs within 10 days.\nThank you for your contributions.\nCommunity members are welcome to grab these works.\n",
+      "created_at": "2019-02-08T01:09:22Z",
+      "updated_at": "2019-02-08T01:09:22Z"
+    },
+    {
+      "author": "stale[bot]",
+      "author_association": "NONE",
+      "body": "This PR has been automatically closed because it is stale. If you wish to continue working on the PR, please first update the PR, then reopen it.\nThanks again for your contribution.\nCommunity members are welcome to grab these works.\n",
+      "created_at": "2019-02-18T01:41:12Z",
+      "updated_at": "2019-02-18T01:41:12Z"
+    }
+  ],
+  "created_at": "2018-10-18T17:58:05Z",
+  "number": 8071,
+  "state": "closed",
+  "title": "Make $executioncontext accessible via the PowerShell SDK",
+  "updated_at": "2019-02-18T01:41:14Z"
+}

@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3813",
+  "author": "vors",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\nRun some executable that outputs a long line to stderr and redirect it.\r\nFor example\r\n\r\n```\r\npython -c \"from __future__ import print_function`nimport sys`nprint(range(100), file=sys.stderr)\" *> 1\r\n```\r\n\r\nReal-life scenario that's highly impacted by that problem is searching in the logs.\r\nWhen log file can be arbitrary split on the search tokens, you cannot reliable find anything in the logs.\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nOne line in the file `1`\r\n\r\nActual behavior\r\n---------------\r\n\r\nSeveral lines in the output file.\r\nCompare it with the redirection of `stdout` which works as expected.\r\n\r\n```\r\nPS /Users/svorobev/junk> python -c \"from __future__ import print_function`nimport sys`nprint(range(100), file=sys.stdout)\" *> 1                           \r\nPS /Users/svorobev/junk> cat 1 | measure                                                                                                                  \r\n\r\n\r\nCount    : 1\r\nAverage  : \r\nSum      : \r\nMaximum  : \r\nMinimum  : \r\nProperty : \r\n\r\n\r\n\r\nPS /Users/svorobev/junk> python -c \"from __future__ import print_function`nimport sys`nprint(range(100), file=sys.stderr)\" *> 1                           \r\nPS /Users/svorobev/junk> cat 1 | measure                                                                                                                  \r\n\r\n\r\nCount    : 3\r\nAverage  : \r\nSum      : \r\nMaximum  : \r\nMinimum  : \r\nProperty : \r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value                                                                                                                     \r\n----                           -----                                                                                                                     \r\nPSVersion                      6.0.0-beta                                                                                                                \r\nPSEdition                      Core                                                                                                                      \r\nBuildVersion                   3.0.0.0                                                                                                                   \r\nCLRVersion                                                                                                                                               \r\nGitCommitId                    v6.0.0-beta.1                                                                                                             \r\nOS                             Darwin 16.6.0 Darwin Kernel Version 16.6.0: Fri Apr 14 16:21:16 PDT 2017; root:xnu-3789.60.24~6/RELEASE_X86_64            \r\nPlatform                       Unix                                                                                                                      \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                                                                                                   \r\nPSRemotingProtocolVersion      2.3                                                                                                                       \r\nSerializationVersion           1.1.0.1                                                                                                                   \r\nWSManStackVersion              3.0 \r\n```\r\n",
+  "closed_at": "2017-11-29T00:10:32Z",
+  "comments": [
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "I looked into that, the gist of the problem is the following\r\n\r\nIn [GenerateOutOfBandData](https://github.com/PowerShell/PowerShell/blob/ef33c30219770986cbb365e7f7ca7a082fe7f7ca/src/System.Management.Automation/commands/utility/FormatAndOutput/common/FormatViewManager.cs#L521) we are receiving [View](https://github.com/PowerShell/PowerShell/blob/ef33c30219770986cbb365e7f7ca7a082fe7f7ca/src/System.Management.Automation/commands/utility/FormatAndOutput/common/FormatViewManager.cs#L527) for error record, which is registered [here](https://github.com/PowerShell/PowerShell/blob/ef33c30219770986cbb365e7f7ca7a082fe7f7ca/src/System.Management.Automation/commands/utility/FormatAndOutput/common/DefaultFormatters/PowerShellCore_format_ps1xml.cs#L156).\r\nIf we receive a View, it's automatically will be passed thru out format system, either as a complex object or as a list. That would force the screen width formatting on it.\r\n\r\nThere are few ways we can go about it that come to my mind:\r\n- Put a special case hack \ud83d\udc4e  - easy, but ugly\r\n- Consider to take away the formatting break logic from ComplexViewEntry maybe?\r\n- Subclass the NativeErrorRecord from ErrorRecord so we can have more granular control and put less ugly special case hack.\r\n\r\nLooking for opinions\r\n",
+      "created_at": "2017-06-03T20:16:38Z",
+      "updated_at": "2017-06-03T20:16:38Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Seems like option 3 is best.  Whenever PowerShell works with native cmds we should keep the data raw for perf and compat reasons.",
+      "created_at": "2017-06-03T22:11:27Z",
+      "updated_at": "2017-06-03T22:11:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can the problem be in other streams?\r\nCan the problem will be resolved by native pipes #1908?",
+      "created_at": "2017-06-04T07:44:59Z",
+      "updated_at": "2017-06-04T07:44:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I can't reproduce the bug with cmd.exe instead of python \ud83d\ude15 ",
+      "created_at": "2017-06-05T06:01:42Z",
+      "updated_at": "2017-06-05T06:02:05Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov you may need to make your window smaller or output larger to observe it (essentially larger then 1 width of your window)\r\n\r\nHere is another repro with just powershell\r\n\r\n```\r\nPS C:\\dev\\platyPS> powershell -Command '1..1000 | % { [System.Console]::Error.Write(\"1\") }' *> 1\r\nPS C:\\dev\\platyPS> cat 1 | measure\r\n\r\n\r\nCount    : 12\r\nAverage  :\r\nSum      :\r\nMaximum  :\r\nMinimum  :\r\nProperty :\r\n\r\n\r\n```",
+      "created_at": "2017-06-05T06:23:16Z",
+      "updated_at": "2017-06-05T06:23:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks for the repo! \r\n\r\nI see that the formatting work well - we hit that [line](https://github.com/PowerShell/PowerShell/blob/ef33c30219770986cbb365e7f7ca7a082fe7f7ca/src/System.Management.Automation/commands/utility/FormatAndOutput/common/DefaultFormatters/PowerShellCore_format_ps1xml.cs#L771).\r\nIf we remove the view the problem persists.\r\nSo the problem is somewhere else.",
+      "created_at": "2017-06-05T07:55:50Z",
+      "updated_at": "2017-06-05T07:56:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Maybe be the same problem #1491 ",
+      "created_at": "2017-06-05T08:03:42Z",
+      "updated_at": "2017-06-05T09:32:10Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "> I see that the formatting work well \r\n\r\nLet me elaborate the problem.\r\n\r\nIf `view != null` [here](https://github.com/PowerShell/PowerShell/blob/ef33c30219770986cbb365e7f7ca7a082fe7f7ca/src/System.Management.Automation/commands/utility/FormatAndOutput/common/FormatViewManager.cs#L530)\r\n\r\nWe are using ViewGenerator and it will apply logic for the window width.\r\n\r\nWhat we want is something like [GenerateOutOfBandObjectAsToString(so)](https://github.com/PowerShell/PowerShell/blob/ef33c30219770986cbb365e7f7ca7a082fe7f7ca/src/System.Management.Automation/commands/utility/FormatAndOutput/common/FormatViewManager.cs#L549)",
+      "created_at": "2017-06-05T16:43:58Z",
+      "updated_at": "2017-06-05T16:43:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks for clarify!\r\n\r\nCan we add new parameter in [the view](https://github.com/PowerShell/PowerShell/blob/ef33c30219770986cbb365e7f7ca7a082fe7f7ca/src/System.Management.Automation/commands/utility/FormatAndOutput/common/DefaultFormatters/PowerShellCore_format_ps1xml.cs#L720)?\r\n```powershell\r\nCustomControl.Create(outOfBand: true, MaxWidth: Int.MaxValue)\r\n```",
+      "created_at": "2017-06-06T15:31:35Z",
+      "updated_at": "2017-06-06T15:31:35Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@SteveL-MSFT Is this issue already fixed? The PR #5190 hasn't been merged, but I cannot repro with @vors's [windows repro step](https://github.com/PowerShell/PowerShell/issues/3813#issuecomment-306112883) on RC build:\r\n```powershell\r\nPS:1> pwsh -Command '1..1000 | % { [System.Console]::Error.Write(\"1\") }' *> 1\r\nPS:2> cat 1 | measure\r\n\r\n\r\nCount    : 1\r\nAverage  :\r\nSum      :\r\nMaximum  :\r\nMinimum  :\r\nProperty :\r\n```\r\n",
+      "created_at": "2017-11-28T23:34:23Z",
+      "updated_at": "2017-11-28T23:34:23Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@daxian-dbw the original issue where line breaks were added at window width has been fixed.  stderr is still being wrapped as error record, but it gets unwrapped I believe so it's just an optimization.  I think we can close this since the original user facing issue is resolved.",
+      "created_at": "2017-11-29T00:10:32Z",
+      "updated_at": "2017-11-29T00:10:32Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "Oh nice, didn't see that coming \ud83d\udc83 ",
+      "created_at": "2017-11-30T03:16:00Z",
+      "updated_at": "2017-11-30T03:16:16Z"
+    }
+  ],
+  "created_at": "2017-05-18T19:02:19Z",
+  "number": 3813,
+  "state": "closed",
+  "title": "StdErr is wrapped as ErrorRecord producing undesired effects",
+  "updated_at": "2017-11-30T03:16:16Z"
+}

@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12801",
+  "author": "mklement0",
+  "body": "Note: I can only reproduce this _reliably_ on macOS 10.15.4.\r\nI see it _occasionally_ on Ubuntu 18.04, and can never reproduce it on Windows.\r\n\r\nIt may be connected to using `Start-Sleep` inside the script block; not sure if the fact that a _custom class_ is used across thread boundaries is relevant [_update_: [it is](https://github.com/PowerShell/PowerShell/issues/12801#issuecomment-634344380)]\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nclass Foo { static [object] Echo($val) { return $val } }\r\n$cls = [Foo]\r\nwhile ($true) { \r\n  $res = 1..10 | ForEach-Object -Parallel {\r\n    Start-Sleep -ms 100; ($using:cls)::echo($_) \r\n  }  |  Sort-Object\r\n  Compare-Object $res (1..10) | Should -BeNullOrEmpty\r\n  Write-Host -NoNewline . \r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe loop should run indefinitely, because the test should alway succeed.\r\n\r\n# Actual behavior\r\n\r\nThe loop eventually - after a varying number of iterations - breaks due to intermittent test failures, stemming from a missing output; e.g.:\r\n\r\n```none\r\nExpected $null or empty, but got @(@{InputObject=5; SideIndicator==>})\r\n```\r\n\r\nThat is, not all input objects were echoed.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.3  on macOS 10.15.4\r\n```\r\n",
+  "closed_at": "2022-09-22T17:49:09Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> not sure if the fact that a _custom class_ is used across thread boundaries is relevant.\r\n\r\nYeah.  It tries to marshal back to the original pipeline execution thread, but since a pipeline is already running it just runs in the current thread while *pretending* it's the pipeline thread.  As a result a whole bunch of state corruption and other weird side effects are possible.",
+      "created_at": "2020-05-27T00:05:23Z",
+      "updated_at": "2020-05-27T00:05:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "You can see it by doing this:\r\n\r\n```powershell\r\n\r\nclass Foo {\r\n    static [object] Echo($val) {\r\n        return [PSCustomObject]@{\r\n            ThreadId = [Threading.Thread]::CurrentThread.ManagedThreadId\r\n            RunspaceId = [runspace]::DefaultRunspace.Id\r\n        }\r\n    }\r\n}\r\n\r\n$cls = [Foo]\r\nwhile ($true) { \r\n    1..10 | ForEach-Object -Parallel {\r\n        Start-Sleep -ms 100\r\n        ($using:cls)::echo($_) \r\n    }\r\n}\r\n```\r\n\r\nYou'll get a whole bunch of different thread ID's with the same runspace.  Also occasionally some other evidence of state corruption like \"Global scope cannot be removed\" errors (note this is on Windows too, I'm guessing your Windows machine just has hardware that makes the race conditions less frequently hit).",
+      "created_at": "2020-05-27T00:10:31Z",
+      "updated_at": "2020-05-27T13:02:38Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "That's a long winded way of saying it's basically a dupe of #4003.  Though a significantly more likely to happen in the wild repro.",
+      "created_at": "2020-05-27T00:12:44Z",
+      "updated_at": "2020-05-27T00:14:07Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @PaulHigin @daxian-dbw \r\n\r\nA possible \"solution\" is to try to block PowerShell classes from being carried over.  Sort of like how script blocks currently work.\r\n\r\nIf #4003 was *fixed*, this would just dead lock.  Personally I'd prefer if runspace affinity was just removed from classes but I understand it's next to impossible to know the impact of a change like that.  Something should probably be done though, many folks are going to turn to classes as a way to \"get around\" the script block problem.  It might even appear to work for awhile.",
+      "created_at": "2020-05-27T13:01:12Z",
+      "updated_at": "2020-05-27T13:01:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the detailed analysis, @SeeminglyScience.\r\n\r\nIf removing runspace affinity is too risky, perhaps another option is to simply _recreate_ classes in the target runspace, similar to what is already being discussed for script blocks - #12378 - and in line with making the planned opt-in for transferring runspace state comprehensive - #12240.",
+      "created_at": "2020-05-27T13:19:54Z",
+      "updated_at": "2020-05-27T13:19:54Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I mean doing that would already be effectively removing runspace affinity anyway -- you'd just be binding their affinity to the new runspace. It would be largely indistinguishable from always having the code execute in whichever thread it's called and just looking for the default runspace for that thread. More or less about the same there, I'd guess.",
+      "created_at": "2020-05-27T13:25:26Z",
+      "updated_at": "2020-05-27T13:25:26Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Just straight up recreating it is a little sketchy though because you'd lose state from static properties.  Property accessors don't (currently) invoke any PowerShell so they aren't subject to the same problems necessarily.  Not that you should use them for state sharing in all your threads, but more that it would be confusing if it \"appeared\" to be gone randomly.  Also recreating the classes would create a lot of confusion around type identity.",
+      "created_at": "2020-05-27T13:51:50Z",
+      "updated_at": "2020-05-27T13:51:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "While disallowing cross-thread class use is definitely the safest option, it also takes away potentially useful functionality.\r\n\r\nGiven the \"less solid\" nature of PowerShell classes my guess is that loss of type identity would be less of an issue - it's a case where documenting the issue may suffice (just as users will have to understand that script blocks that are recreated in a different thread no longer form closures around the original runspace's variables, if any); the `.FullName` properties will be identical, but `-is` and `-as` won't work (perhaps a little white lie could fix that)?\r\n\r\nGood point about static properties, however - that sounds more problematic.\r\nBut couldn't we special-case this to copy any static property values after recreating (just like script blocks will be special-cased, as discussed in https://github.com/PowerShell/PowerShell/issues/12378#issuecomment-616660763)?\r\n\r\n\r\n>  I'd prefer if runspace affinity was just removed from classes but I understand it's next to impossible to know the impact of a change like that.\r\n\r\nHas anyone ever looked into this?\r\nIsn't the current behavior _never_ useful, or are there legitimate scenarios where existing code relies on it?\r\n\r\n\r\n\r\n",
+      "created_at": "2020-05-28T13:25:28Z",
+      "updated_at": "2020-05-28T13:25:28Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "**NOTE**: The examples below should never be purposefully relied on, they are incredibly dangerous and can corrupt state in unexpected ways and/or cause general instability.\r\n\r\n> Isn't the current behavior _never_ useful, or are there legitimate scenarios where existing code relies on it?\r\n\r\nIt's probably accidently relied on.  Apparently a class method converted to a delegate can run on any thread, even one without a runspace.  I was having trouble coming up with a scenario where this would appear useful because I assumed you needed a thread with a default runspace other than the one it was originally bound to. Knowing this, it makes a lot of .NET interop *appear* to work as expected.\r\n\r\n```powershell\r\nclass Test {\r\n    static [psobject] GetInfo() {\r\n        return [PSCustomObject]@{\r\n            ThreadId = [Threading.Thread]::CurrentThread.ManagedThreadId\r\n            RunspaceId = [runspace]::DefaultRunspace.Id\r\n        }\r\n    }\r\n}\r\n\r\n[Threading.Tasks.Task[psobject]]::\r\n    Run([Func[psobject]][Test]::GetInfo).\r\n    GetAwaiter().\r\n    GetResult()\r\n\r\n[Test]::GetInfo()\r\n```\r\n\r\nGives some variant of:\r\n\r\n```raw\r\nThreadId RunspaceId\r\n-------- ----------\r\n      19          1\r\n      15          1\r\n```\r\n\r\nHere's something that really surprised me, if you don't block until completion, it'll actually properly marshal it to the right thread:\r\n\r\n```powershell\r\nclass Test {\r\n    static [psobject] GetInfo() {\r\n        return [PSCustomObject]@{\r\n            ThreadId = [Threading.Thread]::CurrentThread.ManagedThreadId\r\n            RunspaceId = [runspace]::DefaultRunspace.Id\r\n        }\r\n    }\r\n}\r\n\r\n$task = [Threading.Tasks.Task[psobject]]::Run([Func[psobject]][Test]::GetInfo)\r\nwhile (-not $task.AsyncWaitHandle.WaitOne(200)) { }\r\n$task.GetAwaiter().GetResult()\r\n\r\n[Test]::GetInfo()\r\n```\r\n\r\n```raw\r\nThreadId RunspaceId\r\n-------- ----------\r\n      15          1\r\n      15          1\r\n```\r\n\r\n---\r\n\r\nSo the answer is yes, it probably accidently makes a lot of complicated .NET interop work where it would otherwise throw. Any API where you pass a delegate and that delegate gets called on another thread.",
+      "created_at": "2020-06-05T13:38:47Z",
+      "updated_at": "2020-06-05T13:45:02Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Personally I think these behaviors would be the most ideal for method invocations.\r\n\r\nIf called on:\r\n\r\n1. The origin runspace thread - run with `SessionState` affinity like normal\r\n1. A thread with a default runspace but one where the class or instance was not defined - run in the current thread's runspace without `SessionState` affinity.  Maybe with `TopLevelSessionState` affinity\r\n1. A thread with no default runspace - throw `ScriptBlockDelegateInvokedFromWrongThread` like `ScriptBlock.Invoke` currently does\r\n\r\nThough <kbd>2</kbd> and <kbd>3</kbd> would be breaking changes, I think they're worth it considering how dangerous they can be.\r\n\r\ncc @rjmholt @PaulHigin @daxian-dbw if any of y'all want to weigh in.",
+      "created_at": "2020-06-05T14:03:13Z",
+      "updated_at": "2020-06-05T14:04:06Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "With #3, is it more desirable to throw there, or take the time to spin up a runspace to execute in anyway, so as to \"make\" it work without corrupting the state of another runspace?",
+      "created_at": "2020-06-05T14:05:09Z",
+      "updated_at": "2020-06-05T14:05:09Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> With #3, is it more desirable to throw there, or take the time to spin up a runspace to execute in anyway, so as to \"make\" it work without corrupting the state of another runspace?\r\n\r\nI've thought about that a lot but there's a lot of questions\r\n\r\n1. What kind of state should it have? `InitialSessionState.CreateDefault()`?\r\n1. Is it better to do that transparently? There's a potential for a significant amount of extra overhead in a way that isn't super visible to the user.\r\n1. If you throw instead, you know exactly what happened.  If you create a new runspace, it's next to impossible for even the above average user to know their delegate was invoked in a different thread.\r\n1. When would the runspace be disposed? Directly after invocation?\r\n\r\nAs much as the error has been frustrating for me in the past, it's also been pretty helpful in informing me that I basically just shouldn't use that API.  It's a hard call.  I'd like the *option*, but I'm also not super sure how you'd go about surfacing that option.  Or if it'd be worth the development time.",
+      "created_at": "2020-06-05T14:16:30Z",
+      "updated_at": "2020-06-05T14:43:38Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Another consequence of this is that if you call a second method from the first one, you get a dead lock.\r\n\r\n```powershell\r\nclass Test {\r\n    static [void] FirstMethod() {\r\n        [Console]::WriteLine('First method starting')\r\n        [Test]::SecondMethod()\r\n        [Console]::WriteLine('First method finishing')\r\n    }\r\n\r\n    static [void] SecondMethod() {\r\n        [Console]::WriteLine('Second method starting')\r\n        [Console]::WriteLine('Second method finishing')\r\n    }\r\n}\r\n\r\n[System.Threading.Tasks.Task]::Run([action][Test]::FirstMethod).GetAwaiter().GetResult()\r\n```\r\n\r\nThe first method isn't *actually* running on the pipeline thread, so the second method call *also* tries to use PowerShell eventing to retake the pipeline thread.  The first method will never complete, because it's waiting on the second method, which is waiting on the first method.\r\n\r\nI accidently ran into this trying to use the `PSDataCollection<>.DataAdding` event with PowerShell class methods as event handlers.",
+      "created_at": "2020-06-15T13:39:37Z",
+      "updated_at": "2020-06-15T13:39:37Z"
+    },
+    {
+      "author": "chrisbues",
+      "author_association": "NONE",
+      "body": "Well, just ran into this today with trying to reference a class instance created in the parent script. ",
+      "created_at": "2021-11-02T02:07:33Z",
+      "updated_at": "2021-11-02T02:07:33Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell classes are not thread safe.  This is true whether they are run in `ForEach-Object -Parallel` or any of the PowerShell threading APIs.  It would be worth looking into whether this can be detected through a `using` reference.",
+      "created_at": "2021-11-02T16:08:02Z",
+      "updated_at": "2021-11-02T16:08:02Z"
+    },
+    {
+      "author": "CanineBarbie",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience Thanks for taking the time to look at #17957 .\r\n\r\nAs someone who isn't a developer, but uses PS a lot, classes have been great. Their introduction helped me structure my work a lot better.\r\n\r\nI have two questions. It does not seem that the documentation pages for \"about_Classes\" or \"about_ThreadJob\" mention anywhere that PS classes are not thread safe. I'm not sure if this does in fact appear anywhere in the PS documentation?\r\n\r\nSecondly, is there any chance that this might change in future? Or will it be a case of PowerShell not really being the correct tool for the job, and people who might need to use classes with threading moving away from PS, to complied C# code or A.N.Other solution?\r\n\r\nCheers again.",
+      "created_at": "2022-09-16T14:13:34Z",
+      "updated_at": "2022-09-16T14:13:34Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": ">> I'd prefer if runspace affinity was just removed from classes but I understand it's next to impossible to know the impact of a change like that.\r\n\r\n>Has anyone ever looked into this?\r\n>Isn't the current behavior never useful, or are there legitimate scenarios where existing code relies on it?\r\n\r\nMore precisely, it's affinity to session state. A runspace could have multiple session states.\r\nThe current behavior is useful for classes or class instances exposed from modules. The implementation of static/instance methods of a powershell class may depend on states within the module scope, such as functions and variables. The affinity to session state makes sure those states is accessible when calling the static/instance methods of the powershell class.\r\n\r\nI think a cleaner and safer solution is to introduce an attribute to explicitly opt out of session state affinity for a powershell class. And for such a class definition, its instances object and static method calls simply ignores the session state affinity, which means they will run in the current default runspace, with the current session state in that runspace.\r\n```\r\n[OptOutSessionStateAffinity()]\r\nclass Foo\r\n{\r\n    static [object] Echo($val) { return $val } }\r\n}\r\n```\r\n\r\nOf course, once declaring the attribute to the class, the class implementation should not depend on any states of a particular session state, because there is no guarantee the dependencies would be available at runtime.\r\n\r\nI will work on this idea a bit more to see if there are any potential blockers.\r\n\r\n------------------------------------------\r\n\r\nAt the meanwhile, there is a way today to create a powershell class instance without any session state affinity (no such workaround for static members though). See https://github.com/PowerShell/PowerShell/issues/3651#issuecomment-306968528 for the details.\r\n\r\nNote that, we officially support this \"_workaround_\": https://github.com/PowerShell/PowerShell/pull/3871",
+      "created_at": "2022-09-16T18:41:59Z",
+      "updated_at": "2022-09-16T18:41:59Z"
+    }
+  ],
+  "created_at": "2020-05-26T22:14:44Z",
+  "number": 12801,
+  "state": "closed",
+  "title": "ForEach-Object -Parallel situationally drops pipeline input",
+  "updated_at": "2022-09-22T17:49:15Z"
+}

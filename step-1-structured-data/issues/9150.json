@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9150",
+  "author": "dmitriyse",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\nfunction Get-A {\r\n    param($a)\r\n    $a | % {Write-Host \"Bug!\"}\r\n}\r\n\r\n$emptyPipeline = (@() | % {})\r\n$emptyPipeline | % {Write-Host \"Proof of 100% empty pipeline \"}\r\n\r\nGet-A $emptyPipeline\r\n#Get-A @($emptyPipeline)  #this trick works, but very frustrating\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\n\r\n```\r\n`$a` parameter contains `AutomationNull` and nothing is printed\r\n\r\n# Actual behavior\r\n\r\n```none\r\nBug!\r\n```\r\n`$a` parameter contains $null\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.3\r\nPSEdition                      Core\r\nGitCommitId                    6.1.3\r\nOS                             Linux 4.4.0-17763-Microsoft #253-Microsoft Mon Dec 31 17:49:00 PST 2018\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Indeed, passing a \"null collection\" - `[System.Management.Automation.Internal.AutomationNull]::Value` - as an _argument_ (parameter value) currently invariably converts it to `$null`.\r\n\r\nI can't speak to why this behavior was chosen, but hopefully others can. /cc @lzybkr \r\n\r\nNote that you can more simply create this \"null collection\" value with `. {}`\r\n\r\nAs for the enumeration behavior:\r\n\r\n* `$null` _is_ passed through the _pipeline_, as you've observed.\r\n\r\n```powershell\r\nPS> $null | ForEach-Object { 'hi' }\r\nhi\r\n```\r\n\r\n* By contrast, it _isn't_ if you use a `foreach` _loop_:\r\n\r\n```powershell\r\nPS> foreach ($val in $null) { 'hi' }\r\n # (no output)\r\n```\r\n\r\nWhile you _can_ use this distinction to prevent enumeration (assuming your function doesn't truly need to distinguish between `[System.Management.Automation.Internal.AutomationNull]::Value` and `$null`, which is currently impossible via a _parameter_), I personally find it problematic - see https://github.com/PowerShell/PowerShell/issues/7049#issuecomment-399808799\r\n\r\nOf course, you could also use `$null -eq $a`  to test `$a` for `$null` and skip further processing based on that test.\r\n",
+      "created_at": "2019-03-17T22:32:33Z",
+      "updated_at": "2019-03-17T22:46:04Z"
+    },
+    {
+      "author": "dmitriyse",
+      "author_association": "NONE",
+      "body": "This is 100% abstraction leak. When you just want to write a script, you should always think about $null, [System.Management.Automation.Internal.AutomationNull]::Value and @(). Also about single element enumeration where you cannot get Count = 1.\r\nThis is horrible error-prone part of PowerShell.\r\nHope to see some cleanup here in PowerShell 7.0+",
+      "created_at": "2019-03-17T22:59:47Z",
+      "updated_at": "2019-03-17T22:59:47Z"
+    },
+    {
+      "author": "dmitriyse",
+      "author_association": "NONE",
+      "body": "The problems of this kind make PowerShell less attractive that it could be and kills many other benefits.",
+      "created_at": "2019-03-17T23:01:51Z",
+      "updated_at": "2019-03-17T23:01:51Z"
+    },
+    {
+      "author": "dmitriyse",
+      "author_association": "NONE",
+      "body": "As a current workaround, you need always put `@(<something>)` to force `<something>` behave as a collection.",
+      "created_at": "2019-03-17T23:11:56Z",
+      "updated_at": "2019-03-17T23:12:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I hear you, @dmitriyse.\r\n\r\nIf backward compatibility weren't a concern, my vote would be for the following:\r\n\r\n* Default uninitialized variables to `[System.Management.Automation.Internal.AutomationNull]::Value` rather than `$null`.\r\n\r\n* Preserve `[System.Management.Automation.Internal.AutomationNull]::Value` when passed as an _argument_.\r\n\r\n* Make `foreach` loops enumerate `$null` (and ignore `[System.Management.Automation.Internal.AutomationNull]::Value`), just as the pipeline does.\r\n\r\n* Continue to treat `[System.Management.Automation.Internal.AutomationNull]::Value` like `$null` in conditionals and .NET method calls, but provide a way to distinguish between the two, if needed (see below).\r\n\r\nThe above would make for consistent behavior, and there may then rarely be a need to _explicitly_ distinguish between `$null` and `[System.Management.Automation.Internal.AutomationNull]::Value` in conditionals, but it's still worth doing the following:\r\n\r\n  * Introduce a new automatic variable named, say, `$nullArray` to more succinctly represent `[System.Management.Automation.Internal.AutomationNull]::Value`.\r\n\r\n * Make `-eq` with a `[System.Management.Automation.Internal.AutomationNull]::Value` _LHS_ only be equal to itself, to more easily allow distinguishing it from `$null` (whereas it's fine to continue to implicitly convert the former to `$null`, notably in .NET method calls).\r\n\r\n    * Currently, you have to use the following, somewhat obscure, technique to detect `[System.Management.Automation.Internal.AutomationNull]::Value`: `@($potentialAutomationNull).Count -eq 0`\r\n\r\n\r\nI encourage you to read the discussion at #6745, which calls for a future PowerShell version not encumbered by the need to maintain backward compatibility.\r\n\r\nAs it turns out, the issue at hand is already mentioned there, at https://github.com/PowerShell/PowerShell/issues/6745#issuecomment-386912975",
+      "created_at": "2019-03-18T02:05:38Z",
+      "updated_at": "2019-03-20T15:46:42Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm not sure this was intentional, more like an oversight.\r\n\r\nI believe the following scenarios differed in V2 and I changed that in V3.\r\n\r\n```powershell\r\n# direct piping\r\nGet-EmptyPipeline | Do-Something\r\n\r\n# piping after assignment\r\n$something = Get-EmptyPipeline\r\n$something | Do-Something \r\n```\r\n\r\nIf my memory is correct, then I just missed the scenario of passing the value as an argument.",
+      "created_at": "2019-03-20T01:43:55Z",
+      "updated_at": "2019-03-20T01:43:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the insight, @lzybkr.\r\n\r\nIndeed, in v2 assigning `[System.Management.Automation.Internal.AutomationNull]::Value` to a _variable_ (such as returned from a pipeline with no output) implicitly converted it to `$null`, so sending such a variable through the pipeline later then unexpectedly resulted in `$null` getting sent as the input object to the next command in the pipeline (rather than not sending anything).\r\n\r\nFixing the _argument case_ too is a breaking change; however, if we leave the aspect of defaulting uninitialized variables to AutomationNull and fixing the `foreach` loop behavior aside, could it be considered a bucket 3 change?\r\n\r\nIn any event, these fixes are worth considering for a future version that is not beholden to backward compatibility.\r\n(I've cleaned up the proposal in my previous comment.)",
+      "created_at": "2019-03-20T14:58:53Z",
+      "updated_at": "2019-03-20T15:47:06Z"
+    }
+  ],
+  "created_at": "2019-03-16T15:14:34Z",
+  "number": 9150,
+  "state": "open",
+  "title": "No any way to pass empty pipeline (AutomationNull) to function parameter",
+  "updated_at": "2020-01-30T13:18:24Z"
+}

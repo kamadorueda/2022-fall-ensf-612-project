@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11241",
+  "author": "doctordns",
+  "body": "Attempting to use the PKI Module in Win10 using Preview 6.\r\n\r\nI kind of expect a warning when the module is first loaded, with either import-module or via module autoload. But not on every operation:\r\n\r\nSee this graphic:\r\n![2019-12-03_14-25-53](https://user-images.githubusercontent.com/3630329/70060628-d17e7180-15da-11ea-8c99-298d9d4c51e7.png)\r\n\r\nIn this session, I Set-Location (getting a warning), then did a get-ChildItem (and got a second warning message) then I did another Get-ChildItem (and got a THIRD warning. All the commands sent to the provider seem to generate a warning and I'd argue this is not a good user experience. \r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n# 1. Open a PowerShell console window then type:\r\nCD Cert:\\\r\nLS\r\nLS .\\Currentuser\r\n```\r\n\r\n# Expected behaviour\r\nI would not expect the second two (and all subsequent) uses of cmdlets in a compatibility-imported module. I can live with the first warning, but the rest are a poor user experience.\r\n\r\n# Actual behaviour\r\nSee the graphic above\r\n\r\n# Environment data\r\n\r\n```none\r\nPS Cert:\\> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.6\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.6\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-01-28T22:53:53Z",
+  "comments": [
+    {
+      "author": "theJasonHelmick",
+      "author_association": "CONTRIBUTOR",
+      "body": "@doctordns In reviewing this I also noticed that any use of tab completion for any cmdlet (not parameters) seems to produce the warning at the moment the tab key is pressed, then completion options are shown after the warning message.  \r\nGet-<Tab> produces the warning\r\nGet-Process -<Tab> Does not produce warning",
+      "created_at": "2019-12-03T15:56:05Z",
+      "updated_at": "2019-12-03T15:58:09Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Also writes warnings in VSCode's integrated console when intellisense hits the same commands.",
+      "created_at": "2019-12-03T16:44:42Z",
+      "updated_at": "2019-12-03T16:44:42Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "@theJasonHelmick and @SeeminglyScience Yes indeed. It does get worse! It messes IntelliSense as Patrick noticed. To amplify Jason's point...\r\n\r\nIf I type:\r\n```\r\nCD Cert:\r\nLS .\\Curr<tab|>\r\n```\r\nI see this:\r\n\r\n![2019-12-03_18-04-49](https://user-images.githubusercontent.com/3630329/70077080-051bc480-15f8-11ea-848d-6379a143bf57.png)\r\n\r\nThis can not be acceptable. :-(",
+      "created_at": "2019-12-03T18:09:40Z",
+      "updated_at": "2019-12-03T18:10:58Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @SteveL-MSFT @anmenaga ",
+      "created_at": "2019-12-03T18:23:25Z",
+      "updated_at": "2019-12-03T18:23:25Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "Short version: This looks like a manifestation of a bug in `CertificateProvider` - loading `pki` module on every operation with a certificate path. Wincompat's warning just made this visible.\r\n\r\nLong version: When creating new items or getting existing certificate items [CertificateProvider auto-imports `pki` module based on it's internal flag `_hasAttemptedToLoadPkiModule`](https://github.com/PowerShell/PowerShell/blob/2ee9df5a5d007167628db56454bb555b8f9932cd/src/Microsoft.PowerShell.Security/security/CertificateProvider.cs#L1099).\r\nThis `_hasAttemptedToLoadPkiModule` flag is set to `false` only once - [in CertificateProvider's constructor](https://github.com/PowerShell/PowerShell/blob/2ee9df5a5d007167628db56454bb555b8f9932cd/src/Microsoft.PowerShell.Security/security/CertificateProvider.cs#L517).\r\nHowever, `SessionStateInternal.GetProviderInstance` simply creates a new instance of the provider every time, therefore resetting `_hasAttemptedToLoadPkiModule` flag which subsequently causes `pki` module to be re-imported again.\r\n\r\nHere is the call stack that resets the `_hasAttemptedToLoadPkiModule` flag during `PS Cert:\\> ls` call:\r\n```\r\nMicrosoft.PowerShell.Commands.CertificateProvider.CertificateProvider() Line 517\r\nSystem.RuntimeType.CreateInstanceDefaultCtor(bool publicOnly, bool skipCheckThis, bool fillCache, bool wrapExceptions)\r\nSystem.Activator.CreateInstance(System.Type type, bool nonPublic, bool wrapExceptions)\r\nSystem.Management.Automation.ProviderInfo.CreateInstance() Line 571\r\nSystem.Management.Automation.SessionStateInternal.GetProviderInstance(System.Management.Automation.ProviderInfo provider) Line 284\r\nSystem.Management.Automation.SessionStateInternal.GetContainerProviderInstance(System.Management.Automation.ProviderInfo provider) Line 604\r\nSystem.Management.Automation.SessionStateInternal.GetChildItems(string path, bool recurse, uint depth, System.Management.Automation.CmdletProviderContext context) Line 1491\r\nSystem.Management.Automation.ChildItemCmdletProviderIntrinsics.Get(string path, bool recurse, uint depth, System.Management.Automation.CmdletProviderContext context) Line 278\r\nMicrosoft.PowerShell.Commands.GetChildItemCommand.ProcessRecord() Line 318\r\n```",
+      "created_at": "2019-12-03T20:14:51Z",
+      "updated_at": "2019-12-03T20:14:51Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "On a side note, a single `PS Cert:\\> Get-ChildItem` call ends up invoking [CertificateProvider constructor](https://github.com/PowerShell/PowerShell/blob/2ee9df5a5d007167628db56454bb555b8f9932cd/src/Microsoft.PowerShell.Security/security/CertificateProvider.cs#L589) 19 (!) times at various stages.",
+      "created_at": "2019-12-03T20:28:57Z",
+      "updated_at": "2019-12-03T20:28:57Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "@anmenaga - thanks for this. \r\n\r\nWhat does this mean for the PKI module? With this P/'R, will these commands work?? \r\n\r\nAnd will the CERT: provider work properly (as in act the same as in Windows PowerShell).",
+      "created_at": "2019-12-04T10:12:12Z",
+      "updated_at": "2019-12-04T10:12:12Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> @doctordns In reviewing this I also noticed that any use of tab completion for any cmdlet (not parameters) seems to produce the warning at the moment the tab key is pressed, then completion options are shown after the warning message.\r\n\r\nI've been seeing this with particular module I have been working with (or I might say has been working against _me_)  dynamic parameters seem to be expanded as part of get-command and the tab completion seems to cause the dynamicParam code to run.  I found if I set $verbosePrefernce to Continue, tab expanding a command generated hundreds of lines of verbose output because the module in question had 60+ dynamic params, each of which did significant work. \r\nI suspect something similar is going on here. \r\n\r\n ",
+      "created_at": "2019-12-04T17:35:44Z",
+      "updated_at": "2019-12-04T17:35:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> On a side note, a single PS Cert:\\> Get-ChildItem call ends up invoking CertificateProvider constructor 19 (!) times at various stages.\r\n\r\nI guess it is in LocationGlobber. It unify entry points to providers but this causes performance problems. It calls helper methods repeatedly many times. We have a tracking issue for FileSystem provider v2 and looking this I think we needs to change design and make entry points in base provider class to preserve unification and get high performance.\r\n",
+      "created_at": "2019-12-05T04:53:18Z",
+      "updated_at": "2019-12-05T04:53:18Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "@doctordns #11259 will remove excessive warnings that you're observing. Functionality-wise commands of PKI module will continue to behave like they currently are. If they support serialization - they should work fine - this is basically a general rule for any module that is loaded through WinCompat.\r\n\r\nThis issue is good for tracking a multi-import of PKI module bug in `CertificateProvider`/`LocationGlobber` boundary. This should be fixed.",
+      "created_at": "2019-12-05T20:16:45Z",
+      "updated_at": "2019-12-05T20:27:10Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "This issue appears to have gone away by RC1. IT now works as expected.",
+      "created_at": "2020-01-11T20:36:18Z",
+      "updated_at": "2020-01-11T20:36:18Z"
+    }
+  ],
+  "created_at": "2019-12-03T14:29:46Z",
+  "number": 11241,
+  "state": "closed",
+  "title": "CertificateProvider auto-imports PKI module many times",
+  "updated_at": "2020-01-28T22:53:53Z"
+}

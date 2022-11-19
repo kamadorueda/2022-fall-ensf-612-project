@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2140",
+  "author": "GeeLaw",
+  "body": "<!--\n\nIf it is a bug report:\n- make sure you are able to repro it on the latest released version. \nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\n- Search the existing issues.\n- Refer to the [FAQ](../docs/FAQ.md).\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\n- Fill out the following repro template\n\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\n-->\n## Steps to reproduce\n1. Launch Windows PowerShell.\n2. Type the following commands.\n\n``` PowerShell\nPS > $p = \"$env:TEMP\\$([System.Guid]::NewGuid().ToString('n'))\"\nPS > md $p | cd\nPS > md dir1; cd dir1;\nPS > '1' | sc file1\nPS > cd ..\nPS > Compress-Archive . zipped.zip\nPS > explorer .\n```\n1. Send the `zipped.zip` to a Mac with OS X El Capitan 10.11.3;\n2. Acquire the `zipped.zip` and decompress it with Archiver (if the Mac is brand-new, double-clicking the file should work).\n## Expected behavior\n\nThe decompression gives a folder `<the guid generated>`, in which there is a folder `dir1`, in which there is a file `file1`.\n## Actual behavior\n\nThe decompression gives a file `<the guid generated>\\dir1\\file1`.\n## Environment data\n\n<!-- provide the output of $PSVersionTable -->\n\n``` powershell\n> $PSVersionTable\nName                           Value\n----                           -----\nPSVersion                      5.1.14393.82\nPSEdition                      Desktop\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\nBuildVersion                   10.0.14393.82\nCLRVersion                     4.0.30319.42000\nWSManStackVersion              3.0\nPSRemotingProtocolVersion      2.3\nSerializationVersion           1.1.0.1\n```\n## Question / Discussion\n\nPlease identify if this is a problem with `Compress-Archive` cmdlet or OS X Archiver. If this is a problem with `Compress-Archive`, please fix the cmdlet in the next version. If this is a problem with OS X Archiver, please notify me so that I can forward the issue to Apple.\n\nAlso, I cannot test `Compress-Archive` in PowerShell Core or `Expand-Archive` in PowerShell Core at this time. If someone would like to test this, please do not hesitate to report it here.\n",
+  "closed_at": "2016-10-12T21:53:22Z",
+  "comments": [
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "Thank you for pointing it out!\n\nI verified the problem.\nI actually seen this problem before, with unpacking our [AppVeyor artifacts](https://ci.appveyor.com/project/PowerShell/powershell/build/artifacts) on OS X.\n\nI researched the problem a little bit and here is what I found\n- on FullCLR .NET 4.5.1 `[System.IO.Compression.ZipFile]::CreateFromDirectory` provides the same incompatible archive (that's what we use in our AppVeyor artifacts packaing)\n- on CoreCLR 1.0.0 `[System.IO.Compression.ZipFile]::CreateFromDirectory` creates a good, compatible archive\n- We use method `CreateEntry` in `System.IO.Compression.ZipArchive` class inside `Compress-Archive`. We may use it incorrectly or there could be a problem in [corefx](https://github.com/dotnet/corefx). Need more investigations here.\n",
+      "created_at": "2016-08-31T11:06:35Z",
+      "updated_at": "2016-08-31T11:06:35Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "https://github.com/PowerShell/Microsoft.PowerShell.Archive/issues/11\n\nWe should track Archive issues in its own repo.  The Archive module in PowerShell/PowerShell will be a submodule: https://github.com/PowerShell/PowerShell/issues/1979\n",
+      "created_at": "2016-09-06T21:29:17Z",
+      "updated_at": "2016-09-06T21:29:17Z"
+    },
+    {
+      "author": "carlossanlop",
+      "author_association": "NONE",
+      "body": "We got a similar bug report in the dotnet/corefx repo, and the issue seems to only happen with files generated using PowerShell's Compress-Archive cmdlet, (no other compression tools show this problem): https://github.com/dotnet/corefx/issues/32788\r\n\r\nWhen using PowerShell in Windows to create a zip file, it cannot be extracted in Linux/Unix using .NET Core libraries because of the directory separator enforced by PowerShell.\r\n\r\nPowerShell should either use the libraries offered for .NET Core to generate zip files (which ensure the correct directory separator is always used independently of the OS) or modify their existing code (which inserts each zip file entry individually to the zip file) to ensure the paths of the zip files use the universally accepted directory separator \"/\".\r\n\r\nNote: There used to be a bug on our side (as pointed out by @vors) but it has already been fixed both in .NET Core and in .NET Framework.\r\n\r\n\r\n## Steps to reproduce\r\n\r\nCan repro both in the latest version of PowerShell and in 1.0 (the one included with Windows 10).\r\n\r\n1. In Windows, put a text file inside a couple of subfolders, then compress them compress them using PowerShell:\r\n\r\n```powershell\r\nPS D:\\source\\repos> New-Item -Type Directory -Path Folder\r\nPS D:\\source\\repos> New-Item -Type Directory -Path Folder\\SubFolder\r\nPS D:\\source\\repos> echo \"Hello world\" > Folder\\SubFolder\\file.txt\r\nPS D:\\source\\repos> Compress-Archive Folder compressed.zip\r\n```\r\n\r\n2. Copy the file to Linux. Create a C# .NET Core program that extracts zip files using ZipFileExtensions.ExtractToDirectory. An Exception will be thrown, as it was detailed [here](https://github.com/dotnet/corefx/issues/32788#issuecomment-475803881).\r\n\r\n## Proposed fixes\r\n\r\nThe ZipFileExtensions.ExtractToDirectory function avoids making assumptions about separators, in case the user is interacting with a zip file that does not contain files and folders, but something else. But if the zip file happens to contain files and folders, the character used as separator in Linux should always be \"/\".\r\n\r\nBut because PowerShell inserted each one of the zip archive entries into the zip file manually, the directory separator used was \"\\\", which is only valid in Windows. When attempting to extract this file in Linux/Unix using .NET Core, it's not possible because the file has invalid characters that prevent ensuring the correct creation of its subfolders.\r\n\r\nThere are two places in the PowerShell code that could be modified to ensure the universally accepted directory separator is used:\r\n\r\nA) https://github.com/PowerShell/Microsoft.PowerShell.Archive/blob/master/Microsoft.PowerShell.Archive/Microsoft.PowerShell.Archive.psm1#L828\r\n```powershell\r\nif($null -ne $currentFileStream)\r\n{\r\n\t$srcStream = New-Object System.IO.BinaryReader $currentFileStream\r\n\t$entryPath = DirectorySeparatorNormalizeHelper $relativeFilePath\r\n\t$currentArchiveEntry = $zipArchive.CreateEntry($entryPath, $compression)\r\n```\r\n\r\nB) https://github.com/PowerShell/Microsoft.PowerShell.Archive/blob/master/Microsoft.PowerShell.Archive/Microsoft.PowerShell.Archive.psm1#L872\r\n```powershell\r\nelse\r\n{\r\n\t$entryPath = DirectorySeparatorNormalizeHelper $relativeFilePath\r\n\t$currentArchiveEntry = $zipArchive.CreateEntry($entryPath, $compression)\r\n\t$numberOfItemsArchived += 1\r\n\t$addItemtoArchiveFileMessage = ($LocalizedData.AddItemtoArchiveFile -f $currentFilePath)\r\n}\r\n```\r\n\r\nIn both places, the lines that generate the $entryPath string should instead be:\r\n\r\n```powershell\r\n$entryPath = DirectorySeparatorNormalizeHelper $relativeFilePath.Replace(\"\\\", \"/\")\r\n```\r\n\r\n\r\nAlternatively, PowerShell could be initialized with the ZipArchiveEntry.FullName Path Separator AppContextSwitchOverride turned off: https://docs.microsoft.com/en-us/dotnet/framework/migration-guide/mitigation-ziparchiveentry-fullname-path-separator\r\n",
+      "created_at": "2019-03-26T23:17:34Z",
+      "updated_at": "2019-03-26T23:19:23Z"
+    },
+    {
+      "author": "carlossanlop",
+      "author_association": "NONE",
+      "body": "Please let me know if we can reopen this bug or if I should create a new one.",
+      "created_at": "2019-03-26T23:20:24Z",
+      "updated_at": "2019-03-26T23:20:24Z"
+    },
+    {
+      "author": "greenorca",
+      "author_association": "NONE",
+      "body": "I just stumbled upon the same issue on Linux when opening an Zip-File that I created with Compress-Archive on a Win10 host. After uncompressing such Archives on Linux, nested subfolders and files will appear with concatenated names such as \"folder\\subfolder\\test.txt\", all cluttered in the root folder. ",
+      "created_at": "2019-04-30T06:29:01Z",
+      "updated_at": "2019-04-30T06:29:01Z"
+    },
+    {
+      "author": "carlossanlop",
+      "author_association": "NONE",
+      "body": "Mentioning @SteveL-MSFT in case the comments get buried.\r\nEdit: My bad, I added a space after the @ character.",
+      "created_at": "2019-04-30T15:06:12Z",
+      "updated_at": "2019-04-30T15:52:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT since Github apparently decided to eat that mention \ud83e\udd37\u200d\u2642 ",
+      "created_at": "2019-04-30T15:34:39Z",
+      "updated_at": "2019-04-30T15:34:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The fix was merged.  @anmenaga will publish a version to PSGallery by next week.",
+      "created_at": "2019-04-30T21:29:00Z",
+      "updated_at": "2019-04-30T21:29:00Z"
+    },
+    {
+      "author": "carlossanlop",
+      "author_association": "NONE",
+      "body": "Yay! Thank you! \ud83c\udf89 ",
+      "created_at": "2019-04-30T22:45:47Z",
+      "updated_at": "2019-04-30T22:45:47Z"
+    },
+    {
+      "author": "greenorca",
+      "author_association": "NONE",
+      "body": "Great - thanks a lot!",
+      "created_at": "2019-05-01T07:08:09Z",
+      "updated_at": "2019-05-01T07:08:09Z"
+    }
+  ],
+  "created_at": "2016-08-31T02:38:54Z",
+  "number": 2140,
+  "state": "closed",
+  "title": "`Compress-Archive` on Windows PowerShell generates an archive incompatible with OS X Archiver",
+  "updated_at": "2019-05-07T17:03:13Z"
+}

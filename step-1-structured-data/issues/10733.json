@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10733",
+  "author": "johnwc",
+  "body": "We have custom cmdlets that call other cmdlets and scripts. Sometimes these other cmdlets return errors in the Error stream(`PowerShell.Streams.Error`). Since the `PowerShell` class does not write the errors to the host/console, we write the ErrorRecords located in the stream out to WriteError. When doing so, the console shows our cmdlet name as the source instead of the original that is already in the InvocationInfo property in the ErrorRecord.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I believe this is by design? `WriteError()` and `ThrowTerminatingError()` are intended to show their parent command as the source of the error.",
+      "created_at": "2019-10-08T16:00:01Z",
+      "updated_at": "2019-10-08T16:00:01Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "@vexx32 Your statement contradicts itself, as I stated the source of the error is not my cmdlet. The source of the error, is already applied in the ErrorRecord. Our cmdlet is not the source of the error...\r\n\r\n@SteveL-MSFT this is not resolved. The current method does not allow for a cmdlet to show the error's real source.",
+      "created_at": "2019-10-08T21:13:44Z",
+      "updated_at": "2019-10-08T21:15:56Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "Also to note. If a ps1 script calls a cmdlet, and the cmdlet errors, then the error writen to the console is sourced as the cmdlet, not the ps1 script or function.",
+      "created_at": "2019-10-08T21:54:14Z",
+      "updated_at": "2019-10-08T21:54:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Correct; usually because the script does not itself call `$PSCmdlet.WriteError()`.\r\n\r\nMy understanding is: `$PSCmdlet.WriteError()` **deliberately** overwrites `InvocationInfo` so as to allow script cmdlets to more closely mimic compiled cmdlets written in C# or another .NET language. It is generally undesirable from a module author's perspective to issue to an end-user an error that exposes internal details of the command, as it can be very confusing for end users to see errors appearing from sections of code they have no control over.\r\n\r\nThus, the method informs the user that the error simply was caused by the cmdlet itself, rather than some line of code _inside_ the cmdlet.\r\n\r\nFrom memory, I think the best course of action if you _don't_ want this behaviour would be to use `Write-Error` instead?\r\n\r\nCan you confirm if my understanding is correct, @daxian-dbw and/or @SeeminglyScience?",
+      "created_at": "2019-10-08T22:18:32Z",
+      "updated_at": "2019-10-08T22:19:12Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "Correct, a script or a function would call Write-Error. Which is the equivalent to a cmdlet's WriteError().\r\n\r\nYou are missing what I am getting at, we are not calling some internal cmdlet that is throwing an error that a end-user can't understand. We are calling a AWS PowerShell cmdlet that is throwing a error, the InvocationInfo for the error is correctly pointing at the real source of the error within the AWS cmdlet, along with all the relevant info needed to know why it failed. One important aspect is the AWS cmdlet name, that gets overwritten with our cmdlet's name...\r\n\r\nAlso, Write-Error does the EXACT same thing as cmdlet.WriteError(), nor does it write out to the console/host. We tried that first.\r\n\r\nWhat is a \"script cmdlet\"?? Is this new in PS Core? I know of functions, scripts, and cmdlets, with the first two being scripts in ps files and only cmdlets being compiled code.\r\n\r\nYou can think of this like an inner exception, it contains important info that needs to be displayed in console during a WriteError() when the ErrorRecord passed in already has the InvocationInfo set.",
+      "created_at": "2019-10-09T00:15:09Z",
+      "updated_at": "2019-10-09T00:19:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\"script cmdlet\" is a name used by some folks in the community for a function that has the `[CmdletBinding()]` attribute applied, as that changes how it behaves significantly, even down to the level of how PowerShell's internals handle the code.\r\n\r\nI'm pretty sure I understand what you're saying. What I'm saying is that in most cases, module authors do not want the end user being handed an error object that surfaces internal code directly, and $PSCmdlet.WriteError() respects that, and alters the InvocationInfo so that the \"blame\" as it were falls on the command the user actually called, and not a command or method that is called by the function internally. What you appear to be asking for is for this hiding effect to be removed, because it doesn't suit your purposes.\r\n\r\nAm I missing something?",
+      "created_at": "2019-10-09T01:42:45Z",
+      "updated_at": "2019-10-09T01:42:45Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "Yes, you are very much missing it. You're confusing internal exceptions with valid PS ErrorRecords\u2026 I'm not talking about showing exceptions thrown in code... I'm referring to showing PS errors from other cmdlets/functions that surfaced up to the cmdlet. Those are **NOT** to be hidden, if they were then they would be hidden when they surfaced from within a PS1 function. Those are also not to be hidden either, because they are the source of the error, the actual cmdlet/function that threw the error. Without this, no one would be able to know where the error came from.\r\n\r\nIf the user doesn't see what the real error is, then there will be no means to know what is causing it nor where to look to fix it. A great example is with the AWS cmdlets, if your existing token has expired then the AWS cmdlet states this, and you know you need to update/refresh your token to move on. Instead... they see the error looking as if it sourced from our cmdlet, and now not sure what token has expired. This same exact code written as a PS1 function, surfaces the actual error coming from the AWS cmdlet, NOT the PS1 function... Another, calling a azure cmdlet that gives an error about policy compliance for a resource. Without seeing what the command that threw the error is, there is no idea what resource to update to fix it.",
+      "created_at": "2019-10-09T03:02:49Z",
+      "updated_at": "2019-10-09T03:02:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I assure you, I understand where you're coming from. I just have a different opinion on what's important for the end user to see. Most end users of a module don't really care if there's a command three levels deep in a script module that caused an error. \r\n\r\nUnless it's an error in the module's own code (which, to be sure, can and does happen), most of those errors will be caused by the user's own input. To that end, the fact that the actual error occurs three or four levels deep and was originally thrown from a .NET method, or a binary cmdlet, is effectively irrelevant; I would think users need to know, in most cases:\r\n\r\n1. the command _they_ called that caused the error.\r\n2. the reason for the error, which is usually encompassed in the error text\r\n3. remediation steps, which typically involve changing their input in some fashion to be acceptable\r\n\r\nI would wager that very few end users of a script module want to see the guts of the script module; they want it to work, and they want to be given a clear error when something goes wrong. Telling users that a command they've never seen (often because it's hidden within the module and not meant to be interacted with directly) is throwing an error, in a file full of code they've never seen the inside of, is nothing more than a recipe for confusion.\r\n\r\nI understand and respect that _you_ may want to see those details. I often do too. But I do not think we are in the majority in that.",
+      "created_at": "2019-10-09T03:38:08Z",
+      "updated_at": "2019-10-09T03:38:29Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "You just gave the exact reason why this is a bug... \"most of those errors will be caused by the user's own input.\" If the user does not know what caused the error or what command caused it, then they will not have any idea of where to begin to look at what to fix with THIER input. They will never be able to figure out your step 3 if they don't get to see the actual cmdlet's name that created the ErrorRecord. This is relieving confusion, by letting the user know the cmdlet's name that is reporting the error.\r\n\r\nAgain and again... I am not talking about exceptions, you are. I am referring to actual ErrorRecords from another cmdlet or function. ErrorRecords are created from the cmdlet, to be shown to the user... You can see this by example by creating a PS1 function and seeing the underlining cmdlet's name that created the ErrorRecord.\r\n\r\nYour creation of very vague scenarios does not apply to anything I am pointing out here, so please stop with the attempt to muddy the water of what I am talking about. Never did I ever say anything about showing random exceptions from code within other cmdlets, again those are exceptions and not ErrorRecords...",
+      "created_at": "2019-10-09T04:02:35Z",
+      "updated_at": "2019-10-09T04:02:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Then let's work with specifics. I'm not trying to muddy the waters, you appear to be misunderstanding what I mean. Not every ErrorRecord will necessarily be created for the purpose of the user being shown it directly, though that is a common reason to create one.\r\n\r\nCan you give **specific examples** of what you mean so as to clarify the issue?",
+      "created_at": "2019-10-09T10:42:43Z",
+      "updated_at": "2019-10-09T10:42:43Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "I already gave two examples. I'll give another for your pleasure.\r\n\r\nWe have a cmdlet that is used for removing a azure VM. This cmdlet calls a few az cmdlets to clean up all of the VMs resources; the vm itself, the os disk and any data disks, the NICs, the availability set if it's the only VM attached it to, etc... During this process the user may not have RBAC access to delete one of those resources, like disks for example. The az cmdlet comes back with an \"Access denied\"/Unauthorized ErrorRecord for the Remove-AzDisk cmdlet. When we try to write this ErrorRecord out with WriteError() it shows our cmdlet's name in the console with the message \"Access Denied\". So the user now knows they don't have access to remove something, but unable to determine what resources they don't have access. \r\n\r\nWhen this same functionality is written as a PS1 function, the ErrorRecord from Remove-AzDisk get's written as is to the console, showing that Remove-AzDisk gave a \"Access Denied\" error. Allowing the user to know it was disk access missing, and to go request access to be able to remove disks.\r\n\r\nWe stumbled upon this because the original functionality for this process was written as a PS1 advanced function, aka \"script cmdlet.\" We were under the direction to convert all functions into cmdlets. Well in the cmdlet, when you create a PowerShell class to call another cmdlet/function, any Write-Error calls from that cmdlet doesn't get written to the console, it gets written to the PowerShell.Streams.Error. So in order to show the user of the errors, we call WriteError for any ErrorRecords in the stream.",
+      "created_at": "2019-10-09T14:49:29Z",
+      "updated_at": "2019-10-09T14:49:29Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "My apologies; I should have been more clear.\r\n\r\nCan you give a minimal example written in PowerShell or C# code that illustrates the problem you're seeing and your proposed solution (example of function(s) structure, which function is surfacing the error record, which is actually calling `WriteError()`, and what your expected outcome is)?\r\n\r\nI'm fairly sure I understand what you're talking about, but your explanations seem to indicate you think I'm missing something, so I want to be sure we're on the same page. \ud83d\ude42 ",
+      "created_at": "2019-10-09T15:46:27Z",
+      "updated_at": "2019-10-09T15:46:27Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "You will have to give me some time to put together a sample project.",
+      "created_at": "2019-10-09T18:09:34Z",
+      "updated_at": "2019-10-09T18:09:34Z"
+    },
+    {
+      "author": "johnwc",
+      "author_association": "NONE",
+      "body": "I'll need to write an example resembling close to what we are calling, a cloud providers cmdlets. What do you have access to, to be able to call? AWS or Azure?",
+      "created_at": "2019-10-18T17:41:02Z",
+      "updated_at": "2019-10-18T17:41:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "A simple repro indicating the structure you're working with is fine, it doesn't need to be above and beyond. \ud83d\ude42 \r\n\r\nIf you need to tie into those things, I can work with an Azure example. ^^",
+      "created_at": "2019-10-18T17:44:07Z",
+      "updated_at": "2019-10-18T17:44:07Z"
+    }
+  ],
+  "created_at": "2019-10-08T15:52:02Z",
+  "number": 10733,
+  "state": "open",
+  "title": "WriteError overwrites InvocationInfo",
+  "updated_at": "2021-01-15T16:09:30Z"
+}

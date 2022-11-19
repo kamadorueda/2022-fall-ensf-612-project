@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9982",
+  "author": "PrzemyslawKlys",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests, please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n$Groups = Get-ADGroup -filter *\r\n$PrettierGroups = foreach ($Group in $Groups) {\r\n    [PsCustomObject] @{\r\n        'Group Name'     = $Group.Name\r\n        'Group Category' = $Group.GroupCategory\r\n        'Group Scope'    = $Group.GroupScope\r\n        'Group SID'      = $Group.SID.Value\r\n    }\r\n}\r\n$PrettierGroups[0].'Group Category'\r\n$PrettierGroups | Export-Clixml -LiteralPath $PSScriptRoot\\Test.xml\r\n\r\n$PrettierGroups = Import-Clixml -LiteralPath $PSScriptRoot\\Test.xml\r\n$PrettierGroups[0].'Group Category'\r\nif ($PrettierGroups[0].'Group Category'.Value) {\r\n    $PrettierGroups[0].'Group Category'.Value\r\n} else {\r\n    $PrettierGroups[0].'Group Category'\r\n}\r\n```\r\n\r\n```\r\nMemberType      : NoteProperty\r\nIsSettable      : True\r\nIsGettable      : True\r\nValue           : Security\r\nTypeNameOfValue : Deserialized.Microsoft.ActiveDirectory.Management.ADGroupCategory\r\nName            : Group Category\r\nIsInstance      : True\r\n```\r\n\r\nWhile I know above won't work in PS Core yet, it can be reproduced with any enum\r\n\r\n```powershell\r\n$Test = [PSCustomObject]@{ 'DayOfWeek' = [DayOfWeek]::Monday }\r\n$Test.DayOfWeek\r\n\r\n$Test | Export-Clixml $PSScriptRoot\\test1.xml\r\n$Test = Import-Clixml -LiteralPath $PSScriptRoot\\test1.xml\r\n$Test.DayOfWeek\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nMonday\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nValue \r\n----- \r\nMonday\r\n```\r\n\r\nThe XML in question has:\r\n\r\n```xml\r\n<Obj N=\"DayOfWeek\" RefId=\"1\">\r\n  <TN RefId=\"1\">\r\n    <T>System.DayOfWeek</T>\r\n    <T>System.Enum</T>\r\n    <T>System.ValueType</T>\r\n    <T>System.Object</T>\r\n  </TN>\r\n  <ToString>Monday</ToString>\r\n  <I32>1</I32>\r\n</Obj>\r\n```\r\n\r\nSo all the data is available for Import-CliXML to rebuild Enum value. Instead of picking up I32 it should pick ToString(). \r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.1\r\nPSEdition                      Core\r\nGitCommitId                    6.2.1\r\nOS                             Microsoft Windows 10.0.18362 \r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}        \r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nI did write a blog post about it: https://evotec.xyz/export-clixml-and-import-clixml-serialization-woes/ with some workarounds as I need this working on 5.1 as well. Hoping in **PowerShell 7** it could be addressed. I have no clue how hard it would be or if it's even possible. Maybe it's supposed to be that way but it did waste me long hours trying to find what I'm doing wrong.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "janegilring",
+      "author_association": "NONE",
+      "body": "I also ran into the same issue today, the last command should return all stopped services:\r\n\r\n## Works as expected\r\nGet-Service | where status -eq Stopped\r\n\r\n\r\n## Returns all objects\r\nGet-Service | Export-Clixml C:\\temp\\services.xml\r\nImport-Clixml C:\\temp\\services.xml\r\n\r\n## Returns nothing\r\nImport-Clixml C:\\temp\\services.xml | where status -eq Stopped`\r\n\r\nTested on both 5.1, 6.0 and 7.0-preview3.",
+      "created_at": "2019-09-11T12:47:51Z",
+      "updated_at": "2019-09-11T12:47:51Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I looked into this a bit.\r\n\r\nThe deserialized enum value is a `PSObject` whose `BaseObject` is the underlying value of the enum.  For instance `[DayOfWeek]::Friday` would be a `PSObject` wrapped around the `int` \"5\".  The `PSObject` wrapper has a field called `toStringFromDeserialization`, that value in this case holds the enum name \"Friday\".\r\n\r\nSince the deserialized object's `ToString()` returns 'Friday', I would expect that this would work.  However in the `PSToStringBinder`, if the target is a `PSObject` that is wrapping a real value (like `5`), then the `PSObject` is unwrapped and the binder is reran with the unwrapped value.\r\n\r\nThis is a problem not just with this specific case but any time an ETS member could affect the outcome of a binder.\r\n\r\nIdeally, ETS members would be considered in all binders.  However, one possible solution to fix this specific case would be to check for `toStringFromDeserialization` prior to `DeferToPSObject` is called.\r\n\r\nHere's the current code in `PSToStringBinder`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/096a78fbe3fa9997b1a4ab4e8f0014317ac1e3fe/src/System.Management.Automation/engine/runtime/Binding/Binders.cs#L1073-L1076\r\n\r\nThat could be changed to something like this: (untested)\r\n\r\n```csharp\r\nif (target.Value is PSObject pso && (PSObject.Base(target.Value) != target.Value))\r\n{\r\n    if (pso.ToStringFromDeserialization != null)\r\n    {\r\n        // Should be in CachedReflectionInfo instead\r\n        var toStringFromDeserialization = typeof(PSObject).GetProperty(\r\n            nameof(PSObject.ToStringFromDeserialization),\r\n            BindingFlags.Instance | BindingFlags.NonPublic);\r\n\r\n        var toStringValue = Expression.Property(target.Expression, toStringFromDeserialization);\r\n\r\n        var bindingRules = BindingRestrictions.GetExpressionRestriction(\r\n            Expression.NotEqual(\r\n                toStringValue,\r\n                Expression.Constant(null, typeof(string))));\r\n\r\n        return new DynamicMetaObject(toStringValue, bindingRules).WriteToDebugLog(this);\r\n    }\r\n\r\n    return this.DeferForPSObject(target, args[0]).WriteToDebugLog(this);\r\n}\r\n```\r\n\r\nIdeally this would be fixed for all binders and for all ETS members, but this would be the least disruptive way to fix deserialized enums",
+      "created_at": "2019-09-11T16:45:49Z",
+      "updated_at": "2019-09-11T16:45:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw can we get your thoughts on this? \r\n\r\nMore than happy to borrow that from @SeeminglyScience and submit a PR if he doesn't want to handle that at the moment, just want to get your thoughts on it first and confirm this is the way we want to go here. \ud83d\ude42 ",
+      "created_at": "2019-09-11T17:25:39Z",
+      "updated_at": "2019-09-11T17:25:39Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> This is a problem not just with this specific case but any time an ETS member could affect the outcome of a binder.\r\n> Ideally, ETS members would be considered in all binders.\r\n\r\nAgreed. I admit there are problems on how to-string conversion is handled in PowerShell -- it lacks consistency. Not just the PSObject generated by deserialization, but also the `ToString` method that overrides the default `ToString` on the base object.\r\nExample:\r\n```powershell\r\n$a = 1\r\n$a | Add-Member -MemberType ScriptMethod -Name ToString -Value { \"Can you see me?\" } -Force\r\n$a\r\n> Can you see me?\r\n'Can you see me?' -eq $a\r\n> False\r\n\"{0}\" -f $a\r\n> 1\r\n$a, $a -join \";\"\r\n> Can you see me?;Can you see me?\r\n$a -match 'can'\r\n> False\r\n```\r\nThis looks to me a bigger problem cross the board ...\r\nAs for the fix proposed by @SeeminglyScience, it's not a general fix even thought it would address some of the issues related to the PSObject created by deserialization.\r\n\r\nBesides, by looking at the code, I think the proposed fix won't address what is specifically reported in this issue, namely `where status -eq 'Stop'` or `where { $_.Status -eq 'Stop' }`.",
+      "created_at": "2019-09-11T20:49:18Z",
+      "updated_at": "2019-09-11T20:49:18Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> This looks to me a bigger problem cross the board ...\r\n\r\nYeah I didn't get into trying to explain how to fix that because I think it's even more broad than just `ToString`.  For instance, some operators don't seem to account for ETS registered conversions at all:\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition '\r\n    using System;\r\n    using System.Management.Automation;\r\n\r\n    namespace CustomThing\r\n    {\r\n        public class CustomTypeConverter : PSTypeConverter\r\n        {\r\n            public override bool CanConvertFrom(object sourceValue, Type destinationType)\r\n            {\r\n                return true;\r\n            }\r\n\r\n            public override object ConvertFrom(object sourceValue, Type destinationType, IFormatProvider formatProvider, bool ignoreCase)\r\n            {\r\n                return 10;\r\n            }\r\n\r\n            public override bool CanConvertTo(object sourceValue, Type destinationType)\r\n            {\r\n                return true;\r\n            }\r\n\r\n            public override object ConvertTo(object sourceValue, Type destinationType, IFormatProvider formatProvider, bool ignoreCase)\r\n            {\r\n                return 10;\r\n            }\r\n        }\r\n    }'\r\n\r\nUpdate-TypeData -TypeName System.Text.StringBuilder -TypeConverter CustomThing.CustomTypeConverter -Force\r\n\r\n$sb = [System.Text.StringBuilder]::new()\r\n\r\n# This actually works and returns true which I didn't expect.\r\n10 -eq $sb\r\n\r\n# These don't though.\r\n10 + $sb\r\n10 - $sb\r\n10 / $sb\r\n10 * $sb\r\n```\r\n\r\n> Besides, by looking at the code, I think the proposed fix won't address what is specifically reported in this issue, namely `where status -eq 'Stop'` or `where { $_.Status -eq 'Stop' }`.\r\n\r\nAww shoot you're right \ud83d\ude41.  I had the RHS and LHS switched in my head.  That makes this a bit more complicated...\r\n\r\n",
+      "created_at": "2019-09-11T21:38:34Z",
+      "updated_at": "2019-09-11T21:38:34Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> \\# These don't though.\r\n10 + $sb\r\n10 - $sb\r\n10 / $sb\r\n10 * $sb\r\n\r\nI'm not convinced if this even should work.\r\nFor `10 -eq $sb`, the RHS is converted to the type of the LHS in order to do the comparison. This is by design. But it's not necessary that we shall do so for all binary operations (for string type RHS, it makes sense to try converting, but I'm not sure we should do it for other types).\r\n",
+      "created_at": "2019-09-11T23:48:02Z",
+      "updated_at": "2019-09-11T23:48:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> That makes this a bit more complicated...\r\n\r\nWhat makes it even more complicated is the fact that when `PSObject` is the target for a binding operation, [it will be unwrapped](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/MshObject.cs#L2179) before sending to the real binder. So when you reach in a `FallbackBindXXXX` method, the target is not a `PSObject` anymore. This may make things tricky for some of the binding operation.",
+      "created_at": "2019-09-12T00:01:03Z",
+      "updated_at": "2019-09-12T00:01:03Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> > ```powershell\r\n>> # These don't though.\r\n> > 10 + $sb\r\n> > 10 - $sb\r\n> > 10 / $sb\r\n> > 10 * $sb\r\n> > ```\r\n> \r\n> I'm not convinced if this even should work.\r\n> For `10 -eq $sb`, the RHS is converted to the type of the LHS in order to do the comparison. This is by design. But it's not necessary that we shall do so for all binary operations (for string type RHS, it makes sense to try converting, but I'm not sure we should do it for other types).\r\n\r\nI figured it would work since `10 + '10'` returns 20.  Maybe that's an explicit exception but it feels like it should work to me \ud83e\udd37\u200d\u2642 \r\n\r\n> > That makes this a bit more complicated...\r\n> \r\n> What makes it even more complicated is the fact that when `PSObject` is the target for a binding operation, [it will be unwrapped](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/MshObject.cs#L2179) before sending to the real binder. So when you reach in a `FallbackBindXXXX` method, the target is not a `PSObject` anymore. This may make things tricky for some of the binding operation.\r\n\r\nWell... that's a... that's an oof.\r\n\r\nThe prospect of changing that method is... not very appealing. Especially since this is the first I've seen this actually brought up.  Though I will admit, I've generally steered clear of ETS because it never felt consistent.  I'm starting to think a lot of that feeling of inconsistency is related, and a fix might go a long way to making it feel more solid.\r\n\r\nI'm still confident that it's worth fixing, sure does make me nervous though.",
+      "created_at": "2019-09-12T00:45:31Z",
+      "updated_at": "2019-09-12T00:45:31Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw `PSGetEnumerableBinder` is another one.  Not a huge deal obviously, but it would be neat if we could customize/define enumeration via ETS.",
+      "created_at": "2019-10-01T13:32:05Z",
+      "updated_at": "2019-10-01T13:32:05Z"
+    }
+  ],
+  "created_at": "2019-06-23T10:25:36Z",
+  "number": 9982,
+  "state": "open",
+  "title": "Unexpected behavior on Import-CliXML for Enum values",
+  "updated_at": "2021-01-15T10:55:00Z"
+}

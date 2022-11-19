@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11951",
+  "author": "alx9r",
+  "body": "When PowerShell is executing within a module session state that is linked to the global session state it invokes only commands found in the top scope of the global session state.  ~~It's not clear to me whether that is the design intent.~~ _(Edit: [This is is indeed the design intent.](https://github.com/PowerShell/PowerShell/issues/11951#issuecomment-591044394))_  The relevant background seems to be as follows:\r\n\r\n* The behavior of the link to global session state changed somewhere between PowerShell 5.1 and 7.0.  As much can be observed by invoking the below repro in 5.1 and 7.0.\r\n* [@Izybkr provided his interpretation of design intent with respect to searching session states](https://github.com/PowerShell/PowerShell/issues/6139#issuecomment-364262570)  but not with respect to searching child scopes of the global session state.\r\n\r\n---\r\nUpdate:\r\n\r\nThe issue that remains is that when a function exists only in a non-top scope of the global session state PowerShell seems to find that function but silently _not_ invoke it.  This is demonstrated in the repro by `f` neither being invoked nor an error message begin produced.\r\n\r\n---\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nfunction e {'e'}\r\n& {\r\n    function f {'f'}\r\n    New-Module {\r\n        function a { e }\r\n        function b { f }\r\n        function c { g }\r\n    } | Import-Module\r\n    a\r\n    b\r\n    c\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\ne\r\nf\r\ng: C:\\\\test.ps1:7\r\nLine |\r\n   7 |          function c { g }\r\n     |                       ~\r\n     | The term 'g' is not recognized...\r\n```\r\n\r\n# Actual behavior PowerShell 7\r\n\r\n```none\r\ne\r\ng: C:\\test.ps1:7\r\nLine |\r\n   7 |          function c { g }\r\n     |                       ~\r\n     | The term 'g' is not recognized...\r\n```\r\n\r\n# Actual behavior PowerShell 5.1\r\n\r\n```none\r\ne : The term 'e' is not recognized as the name...\r\n...\r\nAt C:\\test.ps1:5 char:22\r\n+         function a { e }\r\n+                      ~\r\n...\r\n\r\ng : The term 'g' is not recognized as the name...\r\n...\r\nAt C:\\test.ps1:7 char:22\r\n+         function c { g }\r\n+                      ~\r\n...\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.2\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0.}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-02-25T20:46:42Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "You may want to try to write this up a little more clearly -- with single letter function names and returns, this is a bit confusing. Maybe add a mention that it's expected `g` should not be found and is (or seems to be) there for comparison's sake.\r\n\r\nBut what you seem to be saying is that the function `b` should not be able to find the function  `f` and should error out... but the error is missing (though the lack of output indicates it still can't find it).\r\n\r\nThe additional error from 5.1 looks like another bug that has since been fixed, I think.\r\n\r\nInteresting... makes me wonder how defining a module with `New-Module` is _supposed_ to work -- i.e., what are the actual design expectations of the cmdlet in terms of how it handles a module that tries to reference things that aren't available from the global session state. It seems more logical to me that it simply can't see them, since it is after all a module, but it looks like the fact that `f` is both defined and then called from the same scope (albeit via the module, which _should_ only see the global scope) is definitely an edge case that's not been accounted for properly.",
+      "created_at": "2020-02-25T18:33:29Z",
+      "updated_at": "2020-02-25T18:34:05Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@alx9r  The description @lzybkr provided is pretty complete.\r\n\r\n> it invokes only commands found in the top scope of the global session state. It's not clear to me whether that is the design intent.\r\n\r\nYes - it is definitely the design intent. The goal was that the dynamic environment of the calling function should not interfere with the module command being called. That said, modules are coupled to the global session state because to do otherwise would be prohibitively expensive. Every module would have to include it's own private copy of the cmdlet table, etc.\r\n\r\nWRT the example output, I get:\r\n```powershell\r\ne\r\nf:\r\nLine |\r\n   6 |         function b { f }\r\n     |                      ^ The term 'f' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\ng:\r\nLine |\r\n   7 |         function c { g }\r\n     |                      ^ The term 'g' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n```\r\nSo - a is executed and emits 'e' as expected, and b (f) and c (g) result in errors because they are not in scope for the module functions. Everything is as expected.",
+      "created_at": "2020-02-25T18:55:29Z",
+      "updated_at": "2020-02-25T18:55:29Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">Yes - it is definitely the design intent. The goal was that the dynamic environment of the calling function should not interfere with the module command being called. That said, modules are coupled to the global session state because to do otherwise would be prohibitively expensive. Every module would have to include it's own private copy of the cmdlet table, etc.\r\n\r\nGot it @bpayette.  Thanks for the clarification.\r\n\r\nIt looks like you and I are not seeing the same results from the repro.  I get no output or error from the call to `f`.  You get \r\n\r\n```\r\ne\r\nf:\r\nLine |\r\n   6 |         function b { f }\r\n     |                      ^ The term 'f' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\ng:\r\nLine |\r\n   7 |         function c { g }\r\n     |                      ^ The term 'g' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n```\r\n\r\nwhile I get\r\n\r\n```\r\ne\r\ng: C:\\test.ps1:7\r\nLine |\r\n   7 |          function c { g }\r\n     |                       ~\r\n     | The term 'g' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the\r\n     | spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n```\r\n\r\nCan you post your `$PSVersionTable`?",
+      "created_at": "2020-02-25T20:08:14Z",
+      "updated_at": "2020-02-25T20:08:14Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@vexx32 \r\n\r\n>Interesting... makes me wonder how defining a module with New-Module is supposed to work...\r\n\r\nI think you'll find some answers to the questions your were wondering about in [this post (beginning at \"A scriptblock...\")](https://github.com/PowerShell/PowerShell/issues/6139#issuecomment-364262570) and [this post](https://github.com/PowerShell/PowerShell/issues/11951#issuecomment-591011031).\r\n\r\nIs there any chance you could post your output from the repro and your `$PSVersionTable`?  The output that @bpayette and I are seeing differs.  I'm looking for clues about the cause of the difference.",
+      "created_at": "2020-02-25T20:16:10Z",
+      "updated_at": "2020-02-25T20:24:54Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@alx9r  I've tried it in 5.1, 6.2.4 and headrev sync'ed and built about an hour ago. All three cases produces the same results: a(e) works fine and I get errors on b(f) and c(g). The fact that you are getting a different result is very strange. Probably a stupid question but are you sure you don't have an 'f' command or script in your environment?",
+      "created_at": "2020-02-25T20:41:40Z",
+      "updated_at": "2020-02-25T20:41:40Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@bpayette \r\n> Probably a stupid question but are you sure you don't have an 'f' command or script in your environment?\r\n\r\nNot a stupid question at all.  That was indeed the culprit: A function named 'f' in a module I used for another repro.  Thanks for your help.",
+      "created_at": "2020-02-25T20:46:41Z",
+      "updated_at": "2020-02-25T20:46:41Z"
+    }
+  ],
+  "created_at": "2020-02-25T17:36:48Z",
+  "number": 11951,
+  "state": "closed",
+  "title": "Link to global session state silently fails to invoke from non-top scopes",
+  "updated_at": "2020-02-25T20:46:42Z"
+}

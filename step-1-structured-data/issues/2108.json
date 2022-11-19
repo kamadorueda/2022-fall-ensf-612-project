@@ -1,0 +1,139 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2108",
+  "author": "svick",
+  "body": "## Steps to reproduce\n1. Use Windows 10, `dotnet` CLI preview 2; don't install PowerShell Core.\n2. Create a .Net Core project that references `Microsoft.PowerShell.SDK` version 1.0.0-alpha9 from [the powershell-core MyGet feed](https://powershell.myget.org/gallery/powershell-core/).\n3. Add the following code to `Program.cs`:\n   \n   ``` c#\n   using System.Management.Automation;\n   \n   public class Program\n   {\n       public static void Main()\n       {\n           var ps = PowerShell.Create();\n   \n           ps.AddCommand(\"gci\");\n   \n           ps.Invoke();\n       }\n   }\n   ```\n   \n   [The complete project is here.](https://gist.github.com/svick/f230af474d9874c9ae7f976d12e4d405)\n4. `dotnet restore`, `dotnet run`.\n## Expected behavior\n\n`ps.Invoke()` does not throw.\n## Actual behavior\n\n`ps.Invoke()` thows:\n\n```\nSystem.Management.Automation.Runspaces.PSSnapInException: Cannot load Windows PowerShell snap-in Microsoft.PowerShell.Diagnostics because of the following error: Could not load file or assembly 'Microsoft.PowerShell.Commands'. The system cannot find the file specified.\n   at System.Management.Automation.Runspaces.RunspaceConfigForSingleShell.LoadMshSnapinAssembly(PSSnapInInfo mshsnapinInfo)\n   at System.Management.Automation.Runspaces.RunspaceConfigForSingleShell.LoadPSSnapIn(PSSnapInInfo mshsnapinInfo)\n   at System.Management.Automation.Runspaces.RunspaceConfigForSingleShell.LoadPSSnapIns(Collection`1 mshsnapinInfos, PSConsoleLoadException& warning)\n   at System.Management.Automation.Runspaces.RunspaceConfigForSingleShell.LoadConsole(PSConsoleLoadException& warning)\n   at System.Management.Automation.Runspaces.RunspaceConfigForSingleShell.CreateDefaultConfiguration()\n   at System.Management.Automation.Runspaces.RunspaceConfiguration.Create()\n   at System.Management.Automation.Runspaces.RunspaceFactory.CreateRunspace(PSHost host)\n   at System.Management.Automation.Runspaces.RunspaceFactory.CreateRunspace()\n   at System.Management.Automation.PowerShell.Worker.CreateRunspaceIfNeededAndDoWork(Runspace rsToUse, Boolean isSync)\n   at System.Management.Automation.PowerShell.CoreInvokeHelper[TInput,TOutput](PSDataCollection`1 input, PSDataCollection`1 output, PSInvocationSettings settings)\n   at System.Management.Automation.PowerShell.CoreInvoke[TInput,TOutput](PSDataCollection`1 input, PSDataCollection`1 output, PSInvocationSettings settings)\n   at System.Management.Automation.PowerShell.CoreInvoke[TOutput](IEnumerable input, PSDataCollection`1 output, PSInvocationSettings settings)\n   at System.Management.Automation.PowerShell.Invoke(IEnumerable input, PSInvocationSettings settings)\n   at System.Management.Automation.PowerShell.Invoke()\n   at Program.Main()\n```\n\nPuzzling things I found when looking into this:\n- There is no package for `Microsoft.PowerShell.Commands.Diagnostics`.\n- `PSSnapInReader.DefaultMshSnapins` [contains `Microsoft.PowerShell.Diagnostics` only when `UNIX` is not set](https://github.com/PowerShell/PowerShell/blob/d575308/src/System.Management.Automation/singleshell/config/MshSnapinInfo.cs#L1287-L1290). But there is only one `netstandard1.6` version of `System.Management.Automation.dll` in the `System.Management.Automation` 1.0.0-alpha9 package, compiled without the `UNIX` flag set.\n- `PSSnapInInfo.AbsoluteModulePath` [treats the `ModuleName` of `Microsoft.PowerShell.Commands.Diagnostics` as file name with extension](https://github.com/PowerShell/PowerShell/blob/d575308/src/System.Management.Automation/singleshell/config/MshSnapinInfo.cs#L254) and returns just `Microsoft.PowerShell.Commands` (as shown in the exception message above).\n",
+  "closed_at": "2017-09-29T16:32:45Z",
+  "comments": [
+    {
+      "author": "JanivZ",
+      "author_association": "NONE",
+      "body": "Can verify this reproduces\n",
+      "created_at": "2016-08-29T15:42:15Z",
+      "updated_at": "2016-08-29T15:42:15Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "Thank you for reporting it @svick !\n\nIndeed, the nuget package provided `Microsoft.PowerShell.SDK` for alpha9 has windows-specific implementation.\nThe scenario that you are describing (hosting PS in you own program) is not currently supported. There are mulitply issues that we need to address first to enable it. Here are few:\n- Remove need in [custom Assembly Load Context](https://github.com/PowerShell/PowerShell/blob/61255447a03730592dd55623e5a559eacdcac7ba/src/powershell/Program.cs#L27) (ALC for short). This is CoreCLR hosting model and we are blocked until CoreCLR will have an equivalent of `AppDomain.GetAssemblies()`. This is the biggest issue and external blocker for us.\n- Create nuget packages that contains both unix and windows compiled assemblies.\n- Publish `Microsoft.PowerShell.Diagnostics` nuget package (the current list is [here](https://github.com/PowerShell/PowerShell/blob/61255447a03730592dd55623e5a559eacdcac7ba/build.psm1#L1164))\n\nThe scenario that we are targeting with current `Microsoft.PowerShell.SDK` is the following:\nYou should be able to author a **binary powershell module** and use it later in the powershell session.\n",
+      "created_at": "2016-08-31T12:15:45Z",
+      "updated_at": "2016-08-31T12:16:47Z"
+    },
+    {
+      "author": "enriquelk",
+      "author_association": "NONE",
+      "body": "I am doing the following as a workaround, but it is not ideal. Anyone knows of a better way to use powershell from dotnet core linux?\n\n```\n        ProcessStartInfo psi = new ProcessStartInfo();\n        psi.FileName = \"powershell\";\n        psi.UseShellExecute = false;\n        psi.RedirectStandardOutput = true;\n\n        psi.Arguments = \"Get-Host\";\n        Process p  = Process.Start(psi);\n        string strOutput = p.StandardOutput.ReadToEnd();\n        p.WaitForExit();\n        Console.WriteLine(strOutput);\n```\n",
+      "created_at": "2016-10-14T00:33:40Z",
+      "updated_at": "2016-10-14T00:33:40Z"
+    },
+    {
+      "author": "sonphnt",
+      "author_association": "NONE",
+      "body": "Hi @svick \r\n\r\nDid you find out the way to execute PS file in .Net core?\r\nI have installed .Net core 2.0 preview but it does not seems to work.\r\n\r\n\r\n",
+      "created_at": "2017-06-08T09:03:30Z",
+      "updated_at": "2017-06-08T09:03:30Z"
+    },
+    {
+      "author": "WilliamWsyHK",
+      "author_association": "NONE",
+      "body": "How's the progress of \"hosting PS in you own program\" doing?\r\nI need this feature badly. :sweat_smile:",
+      "created_at": "2017-08-13T11:24:01Z",
+      "updated_at": "2017-08-13T11:24:17Z"
+    },
+    {
+      "author": "jherby2k",
+      "author_association": "NONE",
+      "body": "I'm encounting this issue now, trying to unit test a binary module I am writing for PowerShell core. This is a big issue! Any workaround??\r\n\r\nStill an issue with .NET core 2.0 (rtm) test project and PowerShell Core 6.0.0 beta 6.",
+      "created_at": "2017-08-15T15:42:55Z",
+      "updated_at": "2017-08-15T15:43:30Z"
+    },
+    {
+      "author": "michaelherndon",
+      "author_association": "NONE",
+      "body": "@sonphnt, @WilliamWsyHK, @jherby2k \r\n\r\nIt works, but it's not like the old way where you just reference System.Management.Automation.   I ran into the same issue and found this page.  Then I started to look in the docs in the repo and found:\r\nhttps://github.com/PowerShell/PowerShell/tree/master/docs/host-powershell\r\n\r\nThere is a sample app here: https://github.com/PowerShell/PowerShell/tree/master/docs/host-powershell/sample-dotnet2.0-powershell.beta.3\r\n\r\nyou need to copy the Nuget.config from the project. If you're using VS, target the powershell feed withing the UI. \r\n\r\nthen install the following packages\r\n```xml\r\n    <PackageReference Include=\"Microsoft.PowerShell.SDK\" Version=\"6.0.0-beta.7\" />\r\n    <PackageReference Include=\"Microsoft.WSMan.Management\" Version=\"6.0.0-beta.7\" />\r\n    <PackageReference Include=\"Microsoft.PowerShell.Commands.Diagnostics\" Version=\"6.0.0-beta.7\" />\r\n```\r\n\r\n",
+      "created_at": "2017-09-18T03:25:57Z",
+      "updated_at": "2017-09-18T03:25:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Can we close the Issue because we update nuget SDK package and docs?",
+      "created_at": "2017-09-29T09:20:31Z",
+      "updated_at": "2017-09-29T09:20:31Z"
+    },
+    {
+      "author": "ahmadalli",
+      "author_association": "NONE",
+      "body": "I'm getting the same exception in version 6.0.1",
+      "created_at": "2018-02-12T12:31:16Z",
+      "updated_at": "2018-02-12T12:31:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "A new nuget package is being published (6.0.1.1) which will include cross platform runtimes instead of being Windows specific.  Should be this week.",
+      "created_at": "2018-02-12T18:19:47Z",
+      "updated_at": "2018-02-12T18:19:47Z"
+    },
+    {
+      "author": "cosminstirbu",
+      "author_association": "NONE",
+      "body": "This is still reproducing for me with `<PackageReference Include=\"System.Management.Automation\" Version=\"6.2.2\" />` on Windows 10 with `dotnet test`\r\n\r\n",
+      "created_at": "2019-08-16T11:43:47Z",
+      "updated_at": "2019-08-16T11:43:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@cosminstirbu Please open new issue with repo steps.",
+      "created_at": "2019-08-16T13:35:07Z",
+      "updated_at": "2019-08-16T13:35:07Z"
+    },
+    {
+      "author": "steinbachio",
+      "author_association": "NONE",
+      "body": "@cosminstirbu for me it was enough to install Microsoft.PowerShell.SDK (6.2.3)",
+      "created_at": "2019-09-27T05:35:01Z",
+      "updated_at": "2019-09-27T05:35:01Z"
+    },
+    {
+      "author": "cosminstirbu",
+      "author_association": "NONE",
+      "body": "Yeap, I confirm that installing Microsoft.PowerShell.SDK (6.2.3) did the trick.",
+      "created_at": "2019-09-27T08:30:40Z",
+      "updated_at": "2019-09-27T08:30:40Z"
+    },
+    {
+      "author": "lalitzz",
+      "author_association": "NONE",
+      "body": "If I use Microsoft.PowerShell.SDK (6.2.3), I am getting the below error.\r\n\r\nThe term 'Add-MpPreference' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\n\r\nIs there any workaround to fix this?",
+      "created_at": "2021-10-18T07:30:38Z",
+      "updated_at": "2021-10-18T07:30:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Add-MpPreference\r\n\r\nI guess the module is not compatible with PowerShell Core. You can try to run the cmdlet in interactive session. Also you could try WinCompat feature of Import-Module cmdlet.",
+      "created_at": "2021-10-18T07:54:30Z",
+      "updated_at": "2021-10-18T07:54:30Z"
+    },
+    {
+      "author": "lalitzz",
+      "author_association": "NONE",
+      "body": "For anyone referring this later.\r\n\r\nI manually added the modules.\r\nTried this:\r\n```csharp\r\n  var initialState = InitialSessionState.CreateDefault2();\r\n  initialState.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Unrestricted;\r\n  if (this.options.ModulesToImport != null && this.options.ModulesToImport.Any())\r\n  {\r\n      initialState.ImportPSModule(this.options.ModulesToImport.ToArray());\r\n  }\r\n\r\n  string[] foo = { \"ConfigDefender\" };\r\n  initialState.ImportPSModule(foo);\r\n```\r\n\r\nAlso this:\r\n```csharp\r\nvar powerShell = System.Management.Automation.PowerShell.Create()\r\npowerShell.AddCommand(\"Import-Module\");\r\npowerShell.AddParameter(\"SkipEditionCheck\");\r\npowerShell.AddArgument(\"ConfigDefender\");\r\npowerShell.Invoke();\r\n```\r\n\r\nLastly got stuck with permission issue:\r\n```\r\nYou don't have enough permissions to perform the requested operation.) ---> Microsoft.Management.Infrastructure.CimException: You don't have enough permissions to perform the requested operation\r\n```\r\n\r\nI guess the only fix for the above is to open the powershell session  as an admin(Not sure if this is possible with the current library). Would really appreciate if someone can provide pointer to this?",
+      "created_at": "2021-10-18T12:04:30Z",
+      "updated_at": "2021-10-18T12:04:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I guess the only fix for the above is to open the powershell session as an admin(Not sure if this is possible with the current library). Would really appreciate if someone can provide pointer to this?\r\n\r\nYou should run elevated process - parent or child.",
+      "created_at": "2021-10-18T13:26:31Z",
+      "updated_at": "2021-10-18T13:26:31Z"
+    }
+  ],
+  "created_at": "2016-08-28T13:22:57Z",
+  "number": 2108,
+  "state": "closed",
+  "title": "Cannot load Microsoft.PowerShell.Diagnostics when using the SDK on .Net Core on Windows",
+  "updated_at": "2021-10-18T13:26:31Z"
+}

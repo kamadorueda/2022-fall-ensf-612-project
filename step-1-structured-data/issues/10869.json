@@ -1,0 +1,167 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10869",
+  "author": "iSazonov",
+  "body": "<!-- Anything that looks like this is a comment and can't be seen after the Pull Request is created. -->\r\n\r\n# PR Summary\r\n\r\nFix #9863\r\nFix #10864\r\n\r\nUsing .Net Core intrinsic type converter in custom type conversions.\r\n\r\n## PR Context\r\n\r\nPrevious .Net versions used TypeConverterAttribute to assign a type converter to the type.\r\nNow the design was changed https://github.com/dotnet/corefx/issues/38374#issuecomment-500541150 and Core team recommendation is to consider using TypeDescriptor.GetConverter() to get these converters for [some .Net Core types](https://github.com/dotnet/corefx/blob/3a879b1a861946bf04cc3278d13df63e09dbe018/src/System.ComponentModel.TypeConverter/src/System/ComponentModel/ReflectTypeDescriptionProvider.cs#L107-L140)\r\n\r\nhttps://github.com/dotnet/corefx/blob/3a879b1a861946bf04cc3278d13df63e09dbe018/src/System.ComponentModel.TypeConverter/src/System/ComponentModel/ReflectTypeDescriptionProvider.cs#L127-L134\r\n\r\nlike System.Drawing.Color, System.Drawing.Point.\r\n\r\n- TypeDescriptor.GetConverter() processes TypeConverterAttribute but only for classes derived from TypeConverter class. So that PSTypeConverter class is changed to derive from TypeConverter.\r\n\r\n- IsCustomTypeConversion doesn't throw and allow fallback. This address a scenario if we found a PowerShell converter, then a converter based on TypeConverterAttribute and the last throws at conversion time - after that now we can fallback to PowerShell converter.\r\n\r\n- Remove Linq in TypeConverterAttribute search (using CoreFX pattern).\r\n\r\n- Put PSTypeConverter before TypeConverter in IsCustomTypeConversion() because now first derived from second.\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.\r\n- **[Breaking changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)**\r\n    - [x] None\r\n    - **OR**\r\n    - [ ] [Experimental feature(s) needed](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/6/Microsoft.PowerShell.Core/About/about_Experimental_Features.md)\r\n        - [ ] Experimental feature name(s): <!-- Experimental feature name(s) here -->\r\n- **User-facing changes**\r\n    - [x] Not Applicable\r\n    - **OR**\r\n    - [ ] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed: <!-- Number/link of that issue here -->\r\n- **Testing - New and feature**\r\n    - [ ] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [x] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n- **Tooling**\r\n    - [ ] I have considered the user experience from a tooling perspective and don't believe tooling will be impacted.\r\n    - **OR**\r\n    - [ ] I have considered the user experience from a tooling perspective and enumerated concerns in the summary. This may include:\r\n        - Impact on [PowerShell Editor Services](https://github.com/PowerShell/PowerShellEditorServices) which is used in the [PowerShell extension](https://github.com/PowerShell/vscode-powershell) for VSCode (which runs in a different PS Host).\r\n        - Impact on Completions (both in the console and in editors) - one of PowerShell's most powerful features.\r\n        - Impact on [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) (which provides linting & formatting in the editor extensions).\r\n        - Impact on [EditorSyntax](https://github.com/PowerShell/EditorSyntax) (which provides syntax highlighting with in VSCode, GitHub, and many other editors).\r\n",
+  "closed_at": "2020-06-10T04:18:25Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "By looking at the [intrinsic types](https://source.dot.net/#System.ComponentModel.TypeConverter/System/ComponentModel/ReflectTypeDescriptionProvider.cs,103) covered by `TypeDescriptor.GetConverter`, except for the `System.Drawing` types, none of the intrinsic converters is useful in PowerShell -- they are all handled either by `FigureParseConversion` or `FigureConstructorConversion`, and all to-string conversions are handled by `PSObject.ToStringParser`.\r\n\r\nThis makes calling `TypeDescriptor.GetConverter` a wasted operation in most of cases. Also, this method call causes the loading of `System.Drawing.Primitive.dll` even if it's not handling a `System.Drawing` type because it needs to populate its cache. So I think we should probably just special case the `System.Drawing` types -- if `type.FullName` is one of `System.Drawing.Color`, `System.Drawing.Point`, `System.Drawing.Rectangle`, `System.Drawing.Size`, and `System.Drawing.SizeF`, then call `TypeDescriptor.GetConverter`.\r\n\r\nI know this is potentially cause a maintenance issue -- what if new intrinsic types are added to the cache? My personal take is that the intrinsic types covered in that cache won't change often, but no guarantee.\r\nIf we decide to always query `TypeDescriptor.GetConverter` for converters, then the code to directly check for `TypeConverterAttribute` should be removed, because `TypeDescriptor.GetConverter` will handle types with `TypeConverterAttribute` too.",
+      "created_at": "2019-11-01T19:57:50Z",
+      "updated_at": "2019-11-01T20:13:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> By looking at the intrinsic types covered by TypeDescriptor.GetConverter, except for the System.Drawing types, none of the intrinsic converters is useful in PowerShell\r\n\r\nI saw this too and my thought was that Core team already made a breaking change for some types by moving from attribute to converter and they could add other types in the TypeDescriptor.GetConverter so I am trying to use this in an universal way.",
+      "created_at": "2019-11-01T20:12:43Z",
+      "updated_at": "2019-11-01T20:12:43Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Please see my updated comment: https://github.com/PowerShell/PowerShell/pull/10869#issuecomment-548929814\r\n\r\n> I know this is potentially cause a maintenance issue -- what if new intrinsic types are added to the cache? My personal take is that the intrinsic types covered in that cache won't change often, but no guarantee.\r\nIf we decide to always query `TypeDescriptor.GetConverter` for converters, then the code to directly check for `TypeConverterAttribute` should be removed, because `TypeDescriptor.GetConverter` will handle types with `TypeConverterAttribute` too.",
+      "created_at": "2019-11-01T20:14:54Z",
+      "updated_at": "2019-11-01T20:14:54Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I still think we should just special case the `System.Drawing` types as I mentioned in https://github.com/PowerShell/PowerShell/pull/10869#issuecomment-548929814, that's a much more safer change to meet the gap.",
+      "created_at": "2019-11-01T20:32:37Z",
+      "updated_at": "2019-11-01T20:32:37Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That's not entirely unreasonable, but it does prevent us from utilising the newer converters as they are added. Also, it seems feasible to me that library authors will echo the .net core team's pattern here and register their converters in a similar way.\r\n\r\nImo, we should aim to fit in here as much with the .net core ecosystem type conversions as we can, and any special casing should be only as strictly needed outside the provisions already made in .net core. The more we try to play favourites and do completely our own thing, the harder it's going to be to maintain long term, I think.",
+      "created_at": "2019-11-02T05:53:33Z",
+      "updated_at": "2019-11-02T05:53:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I agree with @vexx32. I am based on Core team recommendation to consider switching from TypeConverterAttribute to TypeDescriptor.GetConverter.\r\nThe PR is not security or critical issue fix so we can move forward without haste.\r\nCurrently I an thinking how create reliable tests for type conversions because huge \"sporadic\" test failures in CIs don't help and annoying.",
+      "created_at": "2019-11-02T07:42:35Z",
+      "updated_at": "2019-11-02T07:42:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Thanks for clarification! \r\n\r\nHave you any ideas what is the best way to test this code?",
+      "created_at": "2019-11-05T13:31:01Z",
+      "updated_at": "2019-11-05T13:31:01Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I haven't reviewed the code very closely, it's been a very long time since I wrote the code I think you're asking about and I think it's a pretty obscure feature.\r\n\r\nThat said, I think you'll need multiple viable overloads, e.g.:\r\n```powershell\r\nclass Foo {\r\n    static [void] func([int]$i) { }\r\n    static [void] func([object]$i) { }\r\n}\r\n[Foo]::func(\"1\")\r\n```\r\n\r\nThis should trigger the algorithm that decides which overload is best, and I think the code you're modifying is called from `Adapter.GetArgumentConversionRank`.",
+      "created_at": "2019-11-05T18:11:08Z",
+      "updated_at": "2019-11-05T18:11:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "While I learn how the API works Core team remove type converters from IntrinsicTypeConverters and directly assign them to classes :-) but for Core 5.0 https://github.com/dotnet/corefx/pull/42300\r\nIf MSFT team support we could get this in 3.1.  I think it is very desirable since we get WinForm and graphical tools back.\r\n\r\n/cc @daxian-dbw @SteveL-MSFT ",
+      "created_at": "2019-11-13T09:08:51Z",
+      "updated_at": "2019-11-13T09:08:51Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I left a comment in that PR thread. In case that change cannot make to 3.1, we can do a bit hack for the affected `System.Drawing` types, by comparing with the full type name.\r\nIt's not perfect, but should work to delay the loading of `System.Drawing.dll`.",
+      "created_at": "2019-11-13T21:48:01Z",
+      "updated_at": "2020-03-13T01:02:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Thanks! I thought about the workaround but delayed until we get conclusion from Core team.",
+      "created_at": "2019-11-14T04:59:17Z",
+      "updated_at": "2019-11-14T04:59:17Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "@iSazonov looks like that change made it into .NET 5.",
+      "created_at": "2020-04-28T18:19:50Z",
+      "updated_at": "2020-04-28T18:19:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@TylerLeonhardt Yes, it was refactored after 3.1. I keep the PR opened only if MSFT would want to have this in 7.0 LTS servicing. If no we can close.",
+      "created_at": "2020-04-29T03:59:01Z",
+      "updated_at": "2020-04-29T03:59:01Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "@iSazonov unfortunately `[System.Drawing.Point]'10,20'` still doesn't work in PowerShell Daily.",
+      "created_at": "2020-04-29T16:18:26Z",
+      "updated_at": "2020-04-29T16:18:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Although it's fixed in .NET Core I think we'd still need this PR to make it work, because iirc they only added them into their new standard, I don't think they went back to the old standard, did they?",
+      "created_at": "2020-04-29T16:22:26Z",
+      "updated_at": "2020-04-29T16:22:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Oh. It seems again \"optimizations\" in .Net 5.0. We need to investigate again.",
+      "created_at": "2020-04-29T16:22:39Z",
+      "updated_at": "2020-04-29T16:22:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "After debugging I guess now .Net uses type forwarding to simplify dll dependencies but our TypeGen tool generate wrong reference and as result PowerShell find wrong assembly and can not create PointConverter class instance.",
+      "created_at": "2020-04-29T17:43:22Z",
+      "updated_at": "2020-04-30T05:42:01Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMainainer, Please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2020-05-27T02:02:53Z",
+      "updated_at": "2020-05-27T02:02:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw @SteveL-MSFT @TylerLeonhardt  We need a conclusion - is this needed for 7.0 LTS?\r\n\r\nFor 7.1 we have #12580 because .Net 5.0 made changes in the area.",
+      "created_at": "2020-05-28T09:35:59Z",
+      "updated_at": "2020-05-28T09:35:59Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "If it allows code from posh-gui to work, I would be in favor of it, but I don't really get to make that decision ",
+      "created_at": "2020-05-30T02:21:42Z",
+      "updated_at": "2020-05-30T02:21:42Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> > We need a conclusion - is this needed for 7.0 LTS?\r\n>\r\n>For 7.1 we have #12580 because .Net 5.0 made changes in the area.\r\n\r\nI don't see a high number of up-votes for either #9863 or #10864, so I don't think this is needed for servicing 7.0.\r\nEven if it turns out we want it to be fixed in our code for 7.0 servicing, the PR should be done directly targeting a 7.0.x release branch, not the master branch.\r\nSo my suggestion is to close this PR for now. @iSazonov thoughts?",
+      "created_at": "2020-06-09T17:49:29Z",
+      "updated_at": "2020-06-09T17:49:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> So my suggestion is to close this PR for now. @iSazonov thoughts?\r\n\r\nThanks for conclusion! Since most of the difficulties are investigated, we can always return to this. So I close.\r\n",
+      "created_at": "2020-06-10T04:18:25Z",
+      "updated_at": "2020-06-10T04:18:25Z"
+    }
+  ],
+  "created_at": "2019-10-23T06:36:53Z",
+  "number": 10869,
+  "state": "closed",
+  "title": "Using .Net Core intrinsic type converter",
+  "updated_at": "2020-06-10T04:18:26Z"
+}

@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/854",
+  "author": "andschwa",
+  "body": "**Do not merge, this is a bug repro**\n\nPer discussion with @daxian-dbw, `Assembly.Load` will fall back to the `ALC.Load` if it does not find the assembly.\n\nHowever, this highlights the problem with the PowerShell type analysis being coupled to assembly loading. Since `Assembly.Load` will successfully load the PowerShell assemblies (`System.Management.Automation` etc.) from the TPA (due to the publish layout of .NET CLI), PowerShell's custom `AssemblyLoadContext` is completely skipped, thus also leaving us without some PowerShell types, leading to very weird errors:\n\n``` powershell\n~/PowerShell |-/ & (Get-PSOutput)\nOne or more errors occurred. (One or more errors occurred. (Value cannot be null.\nParameter name: type)) (Value cannot be null.\nParameter name: type)\n~/PowerShell |-/ $Error[0]\nUnable to find type [System.Management.Automation.Language.Ast].\n```\n\n@daxian-dbw and I are working to resolve this correctly and support each PowerShell deployment scenario in #839.\n\n<!-- Reviewable:start -->\n\n---\n\nThis change is [<img src=\"https://reviewable.io/review_button.svg\" height=\"35\" align=\"absmiddle\" alt=\"Reviewable\"/>](https://reviewable.io/reviews/powershell/powershell/854)\n\n<!-- Reviewable:end -->\n",
+  "closed_at": "2016-05-06T17:03:18Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I think I understand why you added _ClrFacade.Load_ in the first place -- you try to make the assemblies loaded by CoreCLR runtime to appear in our assembly cache.\nPowerShell resolves a type by going through the loaded assemblies in the current AppDomain, and search those assemblies one by one to find the specified type. However, CoreCLR doesn't provide an API to show the list of loaded assemblies. All assemblies in the TPA list are considered to be _logically_ loaded, but only CoreCLR runtime decides when any of them will actually be loaded. This is one of the reason why we need to handle the assembly resolution and loading.\n",
+      "created_at": "2016-04-15T18:00:39Z",
+      "updated_at": "2016-04-15T18:00:39Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "@daxian-dbw Yes, that is precisely correct. I think the better solution would be to explicitly add the PowerShell assemblies to the cache (and analyze them for types), without needing to force the assemblies through the `AssemblyLoadContext`.\n\nWhat's more, _all_ of this can go away if we can get #733 resolved, which requires .NET Core moving to resolve dotnet/corefx#1784. I think the _real_ solution is for .NET Core to add `GetAssemblies` back, rather than force a lot of partners to work around it.\n\nAn additional resolution could come from .NET Core following @davidfowl's advice [here](https://github.com/dotnet/cli/issues/490#issuecomment-171720303) and make the TPA list unspecial.\n\nNote in dotnet/cli#2044 that the `corehost` is designed to place all app-local assemblies in the TPA; but then loading them by path is [blocked by design](https://github.com/dotnet/cli/issues/490#issuecomment-171484156) as well.\n",
+      "created_at": "2016-04-15T19:16:32Z",
+      "updated_at": "2016-04-15T19:16:32Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I feel it would be a long shot waiting for CoreCLR team to bring back those APIs. There are two options to fix the issue in our current design:\n1. change _PowerShellAssemblyLoadContext.cs_ so that it loads all powershell assemblies that are included in TPA list and put them in cache at its initialization time\n2. change _powershell.inc_ to make it also contain types from powershell assemblies that are included in TPA list\n\nThe first option will diverge _PowerShellAssemblyLoadContext.cs_ between _PowerShell Core from repo_ and _NanoServer PowerShell_. And also, loading assemblies on demand is alwasys better to load a bunch at the init time, which would slow down the startup.\n\nI like the second option better. It basically treats everything in the TPA list as TPA assemblies. Type resolution for powershell types will happen in the same way as resolving CoreCLR library types before.\n",
+      "created_at": "2016-04-15T20:38:23Z",
+      "updated_at": "2016-08-18T00:00:08Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "> change PowerShellAssemblyLoadContext.cs so that it loads all powershell assemblies that are included in TPA list and put them in cache at its initialization time\n\nCan this work? .NET is explicitly designed to prevent re-loading those assemblies.\n\n> change powershell.inc to make it also contain types from powershell assemblies that are included in TPA list\n\nI suggested this a while back, but you were gone and I went with \"they don't belong\" :smile:.  This is totally a reasonable approach I think. But will this affect the analysis of the assemblies for cmdlets?\n\nBy the way, please take a look at the [TypeCatalogParser](https://github.com/PowerShell/PowerShell/tree/master/src/TypeCatalogParser) I use to generate a `powershell.inc` from the project dependencies.\n",
+      "created_at": "2016-04-15T21:01:13Z",
+      "updated_at": "2016-04-15T21:01:13Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Can this work? .NET is explicitly designed to prevent re-loading those assemblies.\n\n I think this will work. You should be able to load an assembly using Assembly.Load over and over again. CoreCLR runtime probably has a cache containing all loaded TPAs, so it won't actually be a re-loading.\n\n> But will this affect the analysis of the assemblies for cmdlets?\n\nI don't think this will affect analysis of cmdlets from the powershell assemblies. We always try Assembly.Load first to load those powershell assemblies, and in this case CoreCLR runtime will handle the loading properly.\n",
+      "created_at": "2016-04-15T21:16:58Z",
+      "updated_at": "2016-04-15T21:16:58Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The _TypeCatalogParser_ is great. So we can make the change very specific to OneCore PowerShell without affecting Nano PS at all.\n",
+      "created_at": "2016-04-15T21:27:06Z",
+      "updated_at": "2016-04-15T21:27:06Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "Unfortunately a lot of discussion moved to email, I will try to summarize:\n\n> The correct approach to transition to building a .NET Core App that relies on SharedFX is to use the .NET CLI. -- Guarav\n\nThis requires moving to depend on Microsoft.NETCore.App instread of the NETStandard.Library; however, it is _only_ available for RC2, so a few things need to be done, see #862.\n",
+      "created_at": "2016-04-18T18:44:07Z",
+      "updated_at": "2016-04-18T18:44:07Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> For each assembly enumerated, perform a Assembly.Load for it. Since the assembly would be listed in the TPAbinder, but not yet loaded, Assembly.Load will load it and return the reference that you can use.\n\nThis is actually suggesting the option#1:\n\n> change PowerShellAssemblyLoadContext.cs so that it loads all powershell assemblies that are included in TPA list and put them in cache at its initialization time.\n",
+      "created_at": "2016-04-18T23:30:43Z",
+      "updated_at": "2016-04-18T23:30:43Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "@daxian-dbw Yes, that's what @gkhanna79 recommended. I have not yet received a response to our plan of action in the email thread. If you think we should go a different route, let's decide that before the work is done.\n",
+      "created_at": "2016-04-18T23:40:32Z",
+      "updated_at": "2016-04-18T23:40:32Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I'm still not sure what the \"Share Framework\" approach is and what it implies. If you have any links or docs, please share them with me :)\nBut I'm fine with the option#1 because after some more throughts, I feel it's hard to pursue option#2 as we are building powershell assemblies and we cannot feed them to TypeCatalogGen to generate the list of types before they get builit. So that leaves option#1 the only option.\nI know we are not targeting this goal for now, but the perfect solution would be we own the native host.\n",
+      "created_at": "2016-04-18T23:48:28Z",
+      "updated_at": "2016-04-18T23:48:28Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "> I'm still not sure what the \"Share Framework\" approach is and what it implies. If you have any links or docs, please share them with me :)\n\nThere are no docs! I'm working on integrating it right now based on examples and discussions across the .NET projects (welcome to .NET Core!).\n\nThe shared framework is just that: sharing the .NET Core framework with other apps. Meaning we consume the installed framework instead of shipping our own. We originally planned to do this once RTM hit, but it appears to be possible sooner.\n\n> But I'm fine with the option#1 because after some more throughts, I feel it's hard to pursue option#2 as we are building powershell assemblies and we cannot feed them to TypeCatalogGen to generate the list of types before they get builit. So that leaves option#1 the only option.\n\nI think I agree here. The latter is possible, but wonky.\n\n> I know we are not targeting this goal for now, but the perfect solution would be we own the native host.\n\nI respectfully disagree. I think owning the native host is only a work-around that incurs a high maintenance cost and completely abandons the point of the .NET Core ecosystem (with .NET CLI and shared framework). We should build on top of and utilize .NET Core's work.\n",
+      "created_at": "2016-04-18T23:53:10Z",
+      "updated_at": "2016-04-18T23:53:10Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> I respectfully disagree. I think owning the native host is only a work-around that incurs a high maintenance cost and completely abandons the point of the .NET Core ecosystem (with .NET CLI and shared framework). We should build on top of and utilize .NET Core's work.\n\nIt certainly would be great if we don't need to have our native host, but from what I know so far, there is no elegant solution to our problem -- requirement for support of advanced assembly resolution. Option#1 is a hack, loading a bunch assemblies at the startup time is just bad.\n\nBased on my understanding, we owning the native host would be the most clean solution unless .NET Core can provide one of the followings to us:\n1. Allow us to flexibly configure the native host to only contain Fx assemblies as TPAs and take&set a specified ACL implementation before calling into our entry point.\n2. Bring back all those assembly resolution APIs.\n\nI think the former is a reasonable ask to them.\n",
+      "created_at": "2016-04-19T00:13:16Z",
+      "updated_at": "2016-04-19T00:13:16Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "Closing until I have this work completed.\n",
+      "created_at": "2016-05-06T17:03:18Z",
+      "updated_at": "2016-05-06T17:03:18Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "There are [docs](https://dotnet.github.io/docs/core-concepts/app-types.html) now on the shared framework.\n",
+      "created_at": "2016-05-20T23:37:50Z",
+      "updated_at": "2016-05-20T23:37:50Z"
+    }
+  ],
+  "created_at": "2016-04-15T00:50:09Z",
+  "number": 854,
+  "state": "closed",
+  "title": "Revert ClrFacade.Load",
+  "updated_at": "2016-08-18T00:00:08Z"
+}

@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3963",
+  "author": "SteveL-MSFT",
+  "body": "Fix https://github.com/PowerShell/PowerShell/issues/1103\r\n\r\nOn Linux, when a shebang is encountered (first two bytes are #!), it looks for the interpreter to pass the pass to.  In this case, if it is powershell it calls powershell with a path to the script.  If the script doesn't\r\nhave a .ps1 extension, powershell treats it like a native command and executes it as such.  The OS\r\nsees the shebang and again calls powershell with the script.  This causes a hang (and will eventually consume all the OS resources as it keeps spawning new powershells).\r\n\r\nFix is to inspect the file to see if it contains the shebang magic number.  If so, we check if the running\r\npowershell is the interpreter.  If so, we treat it the same as a .ps1 script.  Otherwise, we execute it as\r\na native command and expect the OS to find the correct interpreter (could be different version of powershell, for example).",
+  "closed_at": "2017-06-14T23:11:39Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I suggest taking a step back, in the context of our discussion to align PowerShell's CLI with that of POSIX-like shells (#3743):\r\n\r\nPOSIX-like shells interpret an operand (in POSIX speak: an argument other than an option / option-argument) as a _script file to execute_ rather than an _arbitrary shell command_.\r\n\r\nTranslated into PowerShell terms that means:\r\n\r\n* A positional argument should bind to `-File`, not `-Command`.\r\n\r\nIf this change were made, no extra accommodations would have to made for shebang line - _except_ that `-File <file-without-ps1-extension>` doesn't currently work:\r\n\r\n    Processing -File '...' failed because the file does not have a '.ps1' extension.\r\n\r\n ",
+      "created_at": "2017-06-07T23:05:23Z",
+      "updated_at": "2017-06-07T23:05:23Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 that would certainly be a breaking change, although it would align semantics with POSIX (but break many of our tests that expect the positional parameter to be a command).    We'll discuss the implications at the next committee meeting (next week).",
+      "created_at": "2017-06-08T00:36:25Z",
+      "updated_at": "2017-06-08T01:14:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "the more I think about this, I agree with @mklement0.  there's really only two approaches:\r\n\r\n1. we keep command as the positional parameter and only support scripts with .ps1 extension, we would still need some code to avoid the recursion and return an error\r\n2. we make file be the positional parameter, which is a breaking change, but we treat any given file as a script.  this simplifies the shebang as it's back to just being a comment and no need to parse and we let the OS resolve the interpreter",
+      "created_at": "2017-06-08T05:57:01Z",
+      "updated_at": "2017-06-08T05:58:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can we use a shebang like:\r\n```#!/usr/bin/powershell -f```",
+      "created_at": "2017-06-08T14:34:45Z",
+      "updated_at": "2017-06-08T14:34:45Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm not sure this is the right fix.\r\n\r\nFirst, the difference between `-File` and `-Command` is significant and important here in terms of setting the exit code.\r\n\r\nSecond, I don't think we want shebang PowerShell scripts to run in process, which this change would allow.\r\n\r\nI believe the correct fix will involve detecting that we're invoked via shebang, which might mean looking at `arg[0]` in the console host entry point - it probably isn't `powershell`.",
+      "created_at": "2017-06-08T16:16:25Z",
+      "updated_at": "2017-06-08T16:16:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov `#!/usr/bin/powershell -f` is possible, but only if the script has the `.ps1` extension",
+      "created_at": "2017-06-08T16:36:54Z",
+      "updated_at": "2017-06-08T16:36:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr:\r\n\r\nFundamentally: Is aligning with the CLI of POSIX-like shells a goal in principle?\r\n\r\nIf so:\r\n\r\n* breaking changes are inevitable.\r\n\r\n* the awkward emulation of the shebang-line mechanism considered here isn't needed.\r\n\r\n* supporting scripts that do _not_ have extension (suffix)  `.ps1` is a must, given that extensions have no intrinsic meaning on Unix platforms and the executability of a file is solely governed by its permission bits relating to its ownership relative to the invoking user.\r\n\r\nPOSIX-like shells have no analog to the `-File` option, but they consistently interpret their 1st operand (POSIX speak for: positional argument, as distinct from an option or option-argument) as:\r\n\r\n* the _path to a script file_ to execute\r\n* in a non-interactive shell (session)\r\n* that exits when the script exits\r\n* with the script's exit code getting passed through.\r\n\r\n(Conversely, to pass an _arbitrary shell command line_, you _must_ use the `-c` option.)\r\n\r\nThe shebang mechanism - built into the _kernel_ of Unix platforms - relies on that very behavior:\r\n\r\nThe path to the script file (exactly as specified when the script was directly invoked) is passed as an (operand) argument to the interpreter executable specified by full name in the shebang line, [_edit_] followed by the arguments given to the script on invocation.\r\n(Platforms differ in how many fixed arguments they support as part of the shebang line; only _one_ is guaranteed to work portably.)\r\n\r\nIn terms of the command line that is invoked by the kernel, and the `argv[0]` (`$0`, in POSIX shell speak) reported in the resulting process:\r\n\r\n* _Unless explicitly changed_, `$0` reflects the path to the script file exactly as invoked.\r\n   * `argv[0]` / `$0` can be set to arbitrary values (see below).\r\n\r\n* `ps -o args= $$` tells you the _command line_ as invoked (`$$` is the current PID in POSIX-like shells; I _think_ what that `ps` command reports can't be tampered with, but I'm not sure; in any event, necessary shell quoting around the original arguments will _not_ be reflected).\r\n\r\nA simple example: Let's assume script `t`, placed in the current directory and made executable with `chmod +x t`:\r\n\r\n```sh\r\n#!/bin/sh\r\n\r\necho \"\\$0: [$0]\"\r\necho \"Originating command line: [$(ps -o args= $$)]\"\r\n```\r\n\r\nLet's invoke that script directly, letting the kernel interpret the shebang line:\r\n\r\n```none\r\n$ ./t one two\r\n$0: [./t]\r\nOriginating command line: [/bin/sh ./t one two]\r\n```\r\n\r\nNow let's see how we can change `argv[0]` / `$0` (and also demonstrate how the command line that `ps` reports doesn't reflect the original shell quoting):\r\n\r\n```none\r\n$ sh -c '. ./t' 'foo bar'\r\n$0: [foo bar]\r\nOriginating command line: [sh -c . ./t foo bar]\r\n```\r\n\r\nNote when a POSIX-like shell is explicitly invoked with a script filename operand - e.g., `sh ./t` - it:\r\n\r\n * does _not_ care whether the script file is executable - all that's needed is the ability to _read_ the file.\r\n * _ignores_ the shebang line (which may or may not specify the shell the script is being passed to), because it is a _comment_ from the shell's perspective.\r\n\r\n---\r\n\r\n>  I don't think we want shebang PowerShell scripts to run in process\r\n\r\nIt would run in-process in  the `powershell` process, and that's exactly what's expected (and what happens when you run `sh ./t`, for instance).\r\nIn-process considerations apply only when you have a parent session from which you launch _other_ commands, but here there's only 1 session here, whose sole purpose is to run the script, and - at least by default - immediately exit afterwards.\r\n\r\n",
+      "created_at": "2017-06-09T02:19:21Z",
+      "updated_at": "2017-06-09T14:08:46Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@mklement0 - if you run `./t` and `sh ./t`, you are starting a new process in both cases.\r\n\r\nWith the proposed change, running `./t` from bash would start a new PowerShell process, but it would not when running the same command line from PowerShell.\r\n\r\nThis should be a intentional design choice, not an accidental side effect of fixing the recursive hang. My inclination is that starting a new process is desirable (so perhaps more POSIX-like), but I'm open to a discussion, especially given PowerShell's slow startup cost.\r\n\r\nAs for `-File` - I mentioned that only in regards to semantics - we want shebang to behave as though `-File` was specified, in part so the exit code is set correctly.\r\n\r\nAnd as for `$0`, I was hinting at what I thought it would take to implement what I propose above - that we have a new code path that behaves as though you ran `powershell -File foo` when `argv[0] == 'foo'`.",
+      "created_at": "2017-06-09T02:50:44Z",
+      "updated_at": "2017-06-09T02:50:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> but it would not when running the same command line from PowerShell.\r\n\r\nAgain, if we're talking about aligning with POSIX-like shells:  \r\nIt certainly _should_ run in a child process, because that invocation should be treated as the invocation of an _external utility_ (delegated to a system call such as `execv` on Unix).\r\n\r\nI get that this is not how it currently works with invoking `*.ps1` files, which do run in the same process, but perhaps the extension / lack thereof could be the distinguishing factor:\r\n\r\n* Continue to run `*.ps1` files in-process from within a PowerShell session, for backward compatibility.\r\n \r\n   * User from a Unix background would certainly need to be made aware of that fact, because their expectation will be that _any_ script not explicitly invoked with `.` runs in a _child_ process.\r\n\r\n* Treat files _without_ that extension like any other external utility - invoke it via the platform's system calls (you don't even need to know / care what they are and whether their shebang line _happens_ to also target PowerShell).\r\n\r\n   * If, alternatively, in a given scenario, the explicit intent is to execute a file in-process, dot-sourcing is an option (which _already_ works with files that do _not_ have a `.ps1` extension).\r\n\r\nWhat interpreter ultimately processes a given executable file that happens to have a shebang line should really be considered an implementation detail, and there's _no_ reason to reflect that interpreter in the filename extension (even though, sadly, there's a widespread bad habit in the Unix world of naming shell scripts `*.sh`).",
+      "created_at": "2017-06-09T03:09:45Z",
+      "updated_at": "2017-06-09T04:34:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What is the behavior for other interpreters (bash, perl, python, etc.)? Run a native script in-process?",
+      "created_at": "2017-06-09T04:32:17Z",
+      "updated_at": "2017-06-09T04:32:34Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "[perl](https://linux.die.net/man/1/perl) follows the POSIX convention of having the positional parameter point to a script and using an explicit `-c` for a command\r\n[bash](https://linux.die.net/man/1/bash), of course, does the same\r\n[python](https://linux.die.net/man/1/python) accepts the first positional as the script and subsequent positional parameters passed as args to the script\r\n\r\nWe should strongly consider adopting the POSIX conventions for PowerShell (which means closing this PR):\r\n\r\n1. we've already seen that existing Linux tools that work with shells have expectations on parameter semantics and syntax and if we don't adopt them, it means there are some tools people use that aren't compatible with PowerShell\r\n2. if we stay different, this will impact our adoption on Linux\r\n3. since this is a breaking change, if we ever do this, we need to do this with the 6.0.0 release\r\n",
+      "created_at": "2017-06-09T05:21:53Z",
+      "updated_at": "2017-06-09T05:21:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "My question was how they behave internally: if we type in Bash \"bash-script-file-name\" - do Bash run it \"in-process\"?",
+      "created_at": "2017-06-09T05:27:36Z",
+      "updated_at": "2017-06-09T05:27:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: An (interfaith) amen to that.\r\n\r\n> accepts the first positional as the script and subsequent positional parameters passed as args to the script\r\n\r\nInterpreting all remaining arguments after the script filename as the arguments to pass through to the _script_ is also part of \"shebang-line compatibility\", so all POSIX-like shells and Perl support it too; Ruby are Node.js are other examples.\r\n\r\nThe ability to use `-c` (per POSIX) for passing a command _string_  (the _contents_ of a script) is less universally supported: among the interpreters mentioned, Perl, Ruby, and Node.js require `-e`, unfortunately.\r\n\r\nCombining `-c`  with positional arguments _is_ supported and [_required by POSIX_](http://pubs.opengroup.org/onlinepubs/9699919799/utilities/sh.html), but involves a _pitfall_:\r\n\r\nThe first argument after the command string binds to `$0` (the equivalent of `$myInvocation.MyCommand.Name`), not `$1`, which means that it isn't reflected in the `$@` (`$*`) array of positional parameters.\r\n\r\n\r\n```sh\r\n$ sh -c 'printf \"%s \" \"$@\"' ARG0 one two\r\none two    # !! Note how ARG0 is not listed.\r\n```\r\n\r\nPowerShell does _not_ support this, currently:\r\n\r\n```powershell\r\n# !! BROKEN\r\nPS> powershell -noprofile -command '$args' one two\r\nUnexpected token 'one' in expression or statement.\r\n\r\n# !! BROKEN\r\nPS> powershell -noprofile -command '\"`$args: $args\"' one two\r\n$args : The term '$args' is not recognized as the name of a cmdlet, function, script file, or operable program\r\n```\r\n\r\nIt looks like PowerShell simply _string-appends_ the additional arguments _directly to the command string_, which, of course, only works in limited cases, whereas `-c`  in POSIX-like shells basically allows passing an _entire script_ ad-hoc, with arguments passed as positional parameters, as to a script.\r\n\r\nThe only way to get this to work currently appears to be:\r\n\r\n```powershell\r\n$ powershell -noprofile -command '& { \"`$args: $args\" }' one two\r\n$args: one two\r\n```\r\n\r\n_From within Powershell_:\r\n\r\n* This actually BREAKS:\r\n\r\n```powershell\r\n# !! BROKEN when invoked from PowerShell\r\nPS> powershell -noprofile -command '& { \"`$args: $args\" }' one two\r\n$args: : The term '$args:' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\n```\r\n\r\n* Using an actual script block (not a string representation) breaks too, because arguments are apparently not supported:\r\n\r\n```powershell\r\n# !! DOES NOT WORK - arguments not supported.\r\nPS> powershell -noprofile -command { \"`$args: $args\" } one two\r\n(prints CLI help text)\r\n\r\n# Only works *without arguments*:\r\nPS> powershell -noprofile -command { \"`$args: [$args]\" }\r\n$args: []\r\n```\r\n\r\nOther problematic aspects of `-Command` are discussed in #3223.\r\n\r\n",
+      "created_at": "2017-06-09T13:43:35Z",
+      "updated_at": "2020-06-17T06:25:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\n> if we type in Bash \"bash-script-file-name\" - do Bash run it \"in-process\"?\r\n\r\nNo: The only way to make a POSIX-like shell run a script in-process in an existing session is to use `.` (or its nonstandard, effective alias, `source`).\r\n\r\nConversely, anything that is neither a shell _builtin_ (command) nor a shell-language statement is considered an _external utility_ to be invoked via a _system call_, which makes it inevitably _run in a child process_, and it is _irrelevant_ (a) whether the script invoked is indeed a script or a binary and (b) if the former, what shell/interpreter will process it.\r\n\r\nNote, however, that this only works with _executable_ shell scripts (whereas invocation with `.` doesn't require this, but will, of course, only work if the script \"speaks the same language\" as the invoking shell).\r\n\r\nAn otherwise well-formed script with shebang line that isn't executable [by the current user] will simply result in a `Permission denied` error.\r\n\r\nIf it is executable, a _system_ call is made to invoke it, at which point the kernel's shebang-line processing will kick in.\r\n\r\nAs a _courtesy_, if a script is executable but lacks a (valid) shebang line, POSIX-like shells will fall back to processing the script _themselves_, but - again - in a separate instance in a _child process_.\r\n\r\nOn a side note: A UTF-8 BOM would break a shebang line.",
+      "created_at": "2017-06-09T14:19:32Z",
+      "updated_at": "2020-06-17T06:33:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To more explicitly contrast the invoke-a-script-written-in-the-shell's-own-language scenarios:\r\n\r\n* In POSIX-like shells, invoking a script is an all-or-nothing choice:\r\n\r\n  * Invoked with `.` (`source`), _everything_ the script does potentially affects the current shell; (e.g., a non-local variable created in the script will linger).\r\n\r\n  * Invoked by file path only, it will run in a _child process_ that _cannot affect the calling shell's environment at all_.\r\n\r\n* In PowerShell, the distinctions are more nuanced:\r\n\r\n  * Invoked with `.` (`source`), the same applies as in POSIX-like shells: _everything_ the script does potentially affects the current session and its global state.\r\n\r\n  * Invoked by file path only, the script still runs in-process, but in a _child scope_:\r\n\r\n    * While that commendably localizes variables and function definitions,\r\n\r\n    * it still allows for explicit and - pitfall alert - implicit modification of the session's global state - _something that will catch Unix shell users by surprise_; e.g.:\r\n        * Simply changing the current location in the script (using `Set-Location`, the equivalent of `cd`) changes the location _globally_.\r\n        * By contrast, changing a global _variable_, for instance, requires a more deliberate effort.\r\n        \r\n_Personally, I think the implicit and invariably global location-changing behavior is problematic._",
+      "created_at": "2017-06-09T14:42:59Z",
+      "updated_at": "2017-06-15T01:55:12Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Another area is static members on classes.\r\nThey will also be shared implicitly.  \r\n\r\nMaybe we should have syntactic sugar for invoking scripts easily out-of-proc.\r\nlike \r\n```powershell\r\n.\\a.ps1\r\n. .\\a.ps1\r\n! .\\a.ps1 # -> powershell.exe -noprofile -file .\\a.ps1\r\n```\r\n\r\n",
+      "created_at": "2017-06-09T15:13:57Z",
+      "updated_at": "2017-06-09T15:13:57Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Or change the defaults before PowerShell v6 ships, so that you explicitly have to opt in to run in-proc.",
+      "created_at": "2017-06-09T15:15:15Z",
+      "updated_at": "2017-06-09T15:15:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Another area is static members on classes.\r\n\r\nGood point, and definitely worth documenting, though probably less of a problem in practice.\r\n\r\n> Maybe we should have syntactic sugar\r\n\r\nIntroducing another symbol-based operator may not be worth the effort (as an aside: I assume `!` was just an example, but to be clear: it's already taken), especially given that, once the CLI has been harmonized with POSIX, all you'd need to do to run out-of-process is:\r\n\r\n    powershell ./foo.ps1\r\n\r\n > so that you explicitly have to opt in to run in-proc.\r\n\r\nAs long as it doesn't come with surprises, I think that running in-process by default is a great _strength_: \r\n\r\n  * No startup cost (no child-process creation, no PowerShell startup cost)\r\n  * Integration with the calling session with respect to input/output _types_ (no need for serializing / deserializing of objects to to/from _strings_ on in-/output).\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-06-09T15:40:03Z",
+      "updated_at": "2017-06-15T01:58:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and agree that the right change is to have -File be the positional parameter instead of -Command.  Also allow scripts used with -File (or implicit) to not require a .ps1 extension.  A new PR will be submitted.",
+      "created_at": "2017-06-14T23:11:38Z",
+      "updated_at": "2017-06-14T23:11:38Z"
+    }
+  ],
+  "created_at": "2017-06-07T20:43:02Z",
+  "number": 3963,
+  "state": "closed",
+  "title": "shebang without .ps1 extension ends up in recursive loop calling powershell",
+  "updated_at": "2020-06-17T06:33:39Z"
+}

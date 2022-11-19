@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14941",
+  "author": "jborean93",
+  "body": "## Steps to reproduce\r\n\r\nRunning `chcp <codepage>`, setting `[Console]::OutputEncoding`, or using PInvoke to call [SetConsoleOutputCP](https://docs.microsoft.com/en-us/windows/console/setconsoleoutputcp) should be setting the console output codepage. In Windows PowerShell this works but in PowerShell nothing is changed.\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition @'\r\nusing Microsoft.Win32.SafeHandles;\r\nusing System;\r\nusing System.Runtime.InteropServices;\r\n\r\nnamespace RawConsole\r\n{\r\n    public class NativeMethods\r\n    {\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern uint GetConsoleCP();\r\n\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern uint GetConsoleOutputCP();\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleCP(\r\n            uint wCodePageID);\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleOutputCP(\r\n            uint wCodePageID);\r\n    }\r\n}\r\n'@\r\n\r\n# Take note of the original value\r\n[RawConsole.Nativemethods]::GetConsoleOutputCP()\r\n\r\n# Set using one of these 3 options, the value can be anything just something that isn't currently set\r\n[RawConsole.Nativemethods]::SetConsoleOutputCP(1257)\r\nchcp 1257\r\n\r\n# On 2nd testing this does actually work\r\n# [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(1257)\r\n\r\n# This should be updated with our new value\r\n[RawConsole.Nativemethods]::GetConsoleOutputCP()\r\n```\r\n\r\n_Note: You cannot use `[Console]::OutputEncoding` to get the value for this test as it caches the value on the first call. This is why I'm using the PInvoke call to ensure there isn't any caching shenanigans going on in the .NET layer._\r\n\r\n## Expected behavior\r\n\r\n`GetConsoleOutputCP()` should output 1257.\r\n\r\n## Actual behavior\r\n\r\n`GetConsoleOutputCP()` outputs the original value. This value is whatever the console output codepage was set to when `pwsh.exe` was started.\r\n\r\n## Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nUsing conhost and not Windows Terminal here. This also only affects PowerShell and not Windows PowerShell.\r\n\r\n## Other notes\r\n\r\nCalling `SetConsoleCP()` and `GetConsoleCP()` works just fine it's just the output codepage that doesn't seem to have any affect. The Win32 function returns `$true` which indicates nothing went wrong. I'm honestly unsure whether this is a conhost problem, .NET issue, or PowerShell problem. Just trying here first.\r\n\r\nI've had a brief look at the OpenConsole code in the terminal repo. Ultimately `SetConsoleOutputCP` calls [DoSrvSetConsoleOutputCodePage](https://github.com/microsoft/terminal/blob/4c53c595e79d2989ed6d126f8495b2a79edc98d2/src/host/getset.cpp#L964-L981) and there's nothing in there that jumps out to me to explain this behaviour. Of course I'm not actually using the OpenConsole.exe conhost but the one builtin to Windows and I'm 100% assuming the code is the same or at least not dramatically different. In any case it also doesn't explain why Windows PowerShell works but PowerShell does not.",
+  "closed_at": "2021-03-04T05:07:57Z",
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Just to give a trivial example of when this can be a problem, my default code page is 437 and running this in pwsh will output `?` because the character `\u01fe` isn't in that codepage.\r\n\r\n```powershell\r\n$cmd = '[Console]::WriteLine([string][char]0x01FE)'  # \u01fe\r\n\r\n$encCmd = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))\r\npwsh.exe -EncodedCommand $encCmd\r\n```\r\n\r\nNote: This is highly dependent on the child process and how it's outputting the data. In this case this replicates the behaviour when the child process would open the STDOUT stream as a file and write raw bytes based on the console cp, or even `WriteConsoleA`.\r\n\r\nAdding more confusion to the mix running `[Console]::OutputEncoding = [Text.Encoding]::UTF8` seems to actually affect the child process' .NET Console OutputEncoding but the native methods (`chcp`/PInvoke) do not.\r\n\r\n```powershell\r\n$cmd = '[Console]::WriteLine([string][char]0x01FE)'  # \u01fe\r\n\r\n# chcp 65001  # Does not work as well as the PInvoke SetConsoleOutputCP(65001) method above\r\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\r\n\r\n$encCmd = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))\r\npwsh.exe -EncodedCommand $encCmd\r\n```\r\n\r\nIt seems like there's some inheritance going on with .NET that I just don't understand yet. The raw console output CP that Win32 reports is still the original value but setting `[Console]::OutputEncoding` does affect child .NET processes.",
+      "created_at": "2021-03-04T02:02:29Z",
+      "updated_at": "2021-03-04T02:02:29Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@jborean93 I don't believe PowerShell is doing anything here.  Can you write a simple C# app w/o PowerShell and see if it repros?  At least we can determine if it's .NET doing something.",
+      "created_at": "2021-03-04T02:12:31Z",
+      "updated_at": "2021-03-04T02:12:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jborean93, I haven't looked at the details yet, but I wonder if https://stackoverflow.com/a/65986012/45375 helps; in short, running `chcp`  from _inside_ PowerShell is ineffective, due to .NET's caching of encodings in the `[Console]` class.\r\n\r\nWith respect to what `chcp` reports, it is, perhaps surprisingly, `[Console]::InputEncoding` that matters.\r\n\r\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/Img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/65982138/use-haskell-to-output-utf8-string-in-the-powershell-on-windows-10\">Use Haskell to Output Utf8 String in the PowerShell on Windows 10</a></strong></div><div>Here is the code.\r\nmodule Lib\r\n    ( someFunc\r\n    ) where\r\n\r\nsomeFunc :: IO ()\r\nsomeFunc = putStrLn &quot;\u4f60\u597d&quot;\r\n\r\nI tried to run the program in the PowerShell on Windows 10.\r\nchcp 936\r\nstack run\r\n\r\nAnd the </div></blockquote>",
+      "created_at": "2021-03-04T02:19:57Z",
+      "updated_at": "2021-03-04T02:41:29Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Although perhaps a bit counter-intuitive, it does seem that [InputEncoding](https://github.com/dotnet/runtime/blob/79ae74f5ca5c8a6fe3a48935e85bd7374959c570/src/libraries/System.Console/src/System/ConsolePal.Windows.cs#L107) does call `SetConsoleCP`.  ",
+      "created_at": "2021-03-04T02:31:38Z",
+      "updated_at": "2021-03-04T02:31:38Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT I thought it was something up with .NET but if I was to compile this code (with the 5.0.1 sdk) and run it works without any problems:\r\n\r\n```csharp\r\nusing System;\r\nusing System.Runtime.InteropServices;\r\n\r\nnamespace myApp\r\n{\r\n    public class NativeMethods\r\n    {\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern uint GetConsoleCP();\r\n\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern uint GetConsoleOutputCP();\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleCP(\r\n            uint wCodePageID);\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleOutputCP(\r\n            uint wCodePageID);\r\n    }\r\n\r\n    class Program\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            Console.WriteLine(NativeMethods.GetConsoleOutputCP().ToString());\r\n            NativeMethods.SetConsoleOutputCP(65001);\r\n            Console.WriteLine(NativeMethods.GetConsoleOutputCP().ToString());\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nIf I was to run the equivalent (below) of that in PowerShell I get the same encoding (437) in my output instead of the one I set.\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition @'\r\nusing System;\r\nusing System.Runtime.InteropServices;\r\n\r\nnamespace RawConsole\r\n{\r\n    public class NativeMethods\r\n    {\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern uint GetConsoleCP();\r\n\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern uint GetConsoleOutputCP();\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleCP(\r\n            uint wCodePageID);\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleOutputCP(\r\n            uint wCodePageID);\r\n    }\r\n}\r\n'@\r\n\r\n[RawConsole.NativeMethods]::GetConsoleOutputCP()\r\n[RawConsole.NativeMethods]::SetConsoleOutputCP(65001)\r\n[RawConsole.NativeMethods]::GetConsoleOutputCP()\r\n```\r\n\r\n> @jborean93, I haven't looked at the details yet, but I wonder if https://stackoverflow.com/a/65986012/45375 helps; in short, running chcp from inside PowerShell is ineffective, due to .NET's caching of encodings in the [Console] class.\r\n\r\nIt would be the case if I was using `[Console]::OutputEncoding` to check the value I set. In this case I'm going straight to the source with PInvoke to call `GetConsoleOutputCP()` and it's not being changed.\r\n\r\n> Although perhaps a bit counter-intuitive, it does seem that InputEncoding does call SetConsoleCP.\r\n\r\nThere are 2 cp APIs, `SetConsoleCP` which corresponds with the input code page and `SetConsoleOutputCP` which is the output codepage. `chcp` sets them both but the output it reports on is based on the value of `GetConsoleCP()`.\r\n\r\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/Img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/65982138/use-haskell-to-output-utf8-string-in-the-powershell-on-windows-10\">Use Haskell to Output Utf8 String in the PowerShell on Windows 10</a></strong></div><div>Here is the code.\r\nmodule Lib\r\n    ( someFunc\r\n    ) where\r\n\r\nsomeFunc :: IO ()\r\nsomeFunc = putStrLn &quot;\u4f60\u597d&quot;\r\n\r\nI tried to run the program in the PowerShell on Windows 10.\r\nchcp 936\r\nstack run\r\n\r\nAnd the </div></blockquote>",
+      "created_at": "2021-03-04T02:33:34Z",
+      "updated_at": "2021-03-04T02:34:47Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "PowerShell does have the `$OutputEncoding` automatic variable which is set on initial state and can be set by assigning it a value.  However, calling the Win32 API directly won't update this variable.  The PowerShell native command processor relies on this variable value.",
+      "created_at": "2021-03-04T02:37:57Z",
+      "updated_at": "2021-03-04T02:37:57Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "`$OutputEncoding` AFAIK just controls the encoding PowerShell uses when it's piping data into a native command like `\"test\" | something.exe`. It seems like the .NET code has changed quite a lot from the Framework days so it could explain the difference between Windows PowerShell and PowerShell. I'll have to look into it a bit more and see if it explains what is happening.",
+      "created_at": "2021-03-04T02:39:08Z",
+      "updated_at": "2021-03-04T02:39:08Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Trying to clear out any confusion there are 2 codepages associated with the console, the input and output codepage. For those 2 cp's I know of 3 \"native\" ways of setting them\r\n\r\n|Method|Input|Output|Notes|\r\n|-|-|-|-|\r\n|PInvoke|SetConsoleCP|SetConsoleOutputCP|I would consider this the absolute truth, it sources the data from the console itself and is how the other methods ultimately get/set the cp|\r\n|chcp|chcp <num>|chcp <num>|This sets both the input/output in 1 command. Running `chcp` by itself only reports the input value though|\r\n|.NET|`[Console]::InputEncoding`|`[Console]::OutputEncoding`|The value of these are cached, once it is retrieved once it will stay that way unless they were set in .NET itself||\r\n\r\nI could be wrong here but from observation the output code page is important here. If something is writing bytes directly to the conhost STDOUT pipe (like `[Console]::WriteLine` does) then it's the value of the output cp that decodes the bytes back to text. If the bytes sent don't match up with what encoded it then we will get back garbage text.\r\n\r\nTo illustrate this a bite more let's say we run `[Console]::WriteLine('caf\u00e9'). here is what happens in the .NET land\r\n\r\n* `Console.WriteLine` calls `Console.Out.WriteLine`\r\n* `Console.Out` is a `SyncTextWriter` stream\r\n* This stream will encode any strings using the `Console.OutputEncoding` value set\r\n  * `Console.OutputEncoding` is cached so on the first call it will source the cp from `GetConsoleOutputCP()` which happens when pwsh first starts up\r\n* The bytes are then written to a ConsoleStream which is based on a file handle for the STDOUT pipe\r\n* This \"pipe\" sends the bytes to conhost\r\n* Conhost will use the value of `GetConsoleOutputCP()` to decode those bytes back to text\r\n* Conhost will then print that text to the screen buffer\r\n\r\nIn Windows PowerShell, all 3 methods work to change the console input/output codepage. I can use all 3 to set the console output cp to UTF-8 so that my example in https://github.com/PowerShell/PowerShell/issues/14941#issuecomment-790225777 outputs the proper character.\r\n\r\nIn PowerShell the 3 methods work for getting/setting the input console codepage but the output one is complex. Setting the output cp does not work with the PInvoke or chcp way. I can do `[Console]::OutputEncoding = [Text.Encoding]::UTF8` and it does actually work. Looking at the code setting `[Console]::OutputEncoding` is just flushing the existing out/err pipes and then calling `SetConsoleCP()` so I'm confused as to why I cannot just do that in PowerShell itself.\r\n\r\nTaking out the `Console` class althogether and I can show another example that fails on PowerShell but works on Windows PowerShell.\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition @'\r\nusing Microsoft.Win32.SafeHandles;\r\nusing System;\r\nusing System.Runtime.InteropServices;\r\n\r\nnamespace RawConsole\r\n{\r\n    public class NativeMethods\r\n    {\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern SafeFileHandle GetStdHandle(\r\n            int nStdHandle);\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleOutputCP(\r\n            uint wCodePageID);\r\n    }\r\n}\r\n'@\r\n\r\n$stdoutHandle = [RawConsole.NativeMethods]::GetStdHandle(-11)\r\n$fs = [IO.FileStream]::New($stdoutHandle, 'Write')\r\n\r\n[RawConsole.NativeMethods]::SetConsoleOutputCP(65001)\r\n$data = [Text.Encoding]::UTF8.GetBytes('caf\u00e9')\r\n$fs.Write($data, 0, $data.Length)\r\n$fs.Flush()\r\n\r\n# This outputs 'caf\u251c\u2310' which is the UTF-8 bytes of my input decoded using cp 437\r\n```\r\n\r\nDoing the exact same with with PowerShell out of the picture and it works just fine\r\n\r\n```csharp\r\nusing Microsoft.Win32.SafeHandles;\r\nusing System;\r\nusing System.IO;\r\nusing System.Runtime.InteropServices;\r\nusing System.Text;\r\n\r\nnamespace myApp\r\n{\r\n    public class NativeMethods\r\n    {\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern int GetConsoleOutputCP();\r\n    \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern SafeFileHandle GetStdHandle(\r\n            int nStdHandle);\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleOutputCP(\r\n            int wCodePageID);\r\n    }\r\n\r\n    class Program\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            Console.WriteLine(NativeMethods.GetConsoleOutputCP());  // Just verifies the original was 437 in my case\r\n\r\n            using (SafeFileHandle stdoutHandle = NativeMethods.GetStdHandle(-11))\r\n            using (FileStream fs = new FileStream(stdoutHandle, FileAccess.Write))\r\n            {\r\n                NativeMethods.SetConsoleOutputCP(65001);\r\n                \r\n                byte[] data = Encoding.UTF8.GetBytes(\"caf\u00e9\");\r\n                fs.Write(data, 0, data.Length);\r\n                fs.Flush();\r\n            }\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nSo ultimately I have 2 questions:\r\n\r\n* Why does PInvoke `SetConsoleOutputCP()` not work when calling from PowerShell (Windows PowerShell is fine)\r\n* Why does `[Console]::OutputEncoding = ...` work in PowerShell but the PInvoke method does not\r\n  * It essentially does the same thing\r\n\r\nGranted these are edge cases and it looks like doing `[Console]::OutputEncoding = ...` works for the majority of scenarios. What I really want to understand is why that's the case.",
+      "created_at": "2021-03-04T03:40:15Z",
+      "updated_at": "2021-03-04T03:52:34Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Final thing to add it seems like this is only a problem if I'm calling `SetConsoleOutputCP()` directly from PowerShell.\r\n\r\nThe following does work and replicates the behaviour I'm seeing when running my pure .NET binary.\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition @'\r\nusing Microsoft.Win32.SafeHandles;\r\nusing System;\r\nusing System.IO;\r\nusing System.Runtime.InteropServices;\r\nusing System.Text;\r\n\r\nnamespace RawConsole\r\n{\r\n    public class NativeMethods\r\n    {\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern int GetConsoleOutputCP();\r\n\r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern SafeFileHandle GetStdHandle(\r\n            int nStdHandle);\r\n            \r\n        [DllImport(\"Kernel32.dll\")]\r\n        public static extern bool SetConsoleOutputCP(\r\n            int wCodePageID);\r\n    }\r\n    \r\n    public class Program\r\n    {\r\n        public static void Main(string value, Encoding encoding)\r\n        {\r\n            Console.WriteLine(NativeMethods.GetConsoleOutputCP().ToString());\r\n            NativeMethods.SetConsoleOutputCP(encoding.CodePage);\r\n            Console.WriteLine(NativeMethods.GetConsoleOutputCP().ToString());  // It actually updates here!\r\n\r\n            using (SafeFileHandle stdoutHandle = NativeMethods.GetStdHandle(-11))\r\n            using (FileStream fs = new FileStream(stdoutHandle, FileAccess.Write))\r\n            {                \r\n                byte[] data = encoding.GetBytes(value);\r\n                fs.Write(data, 0, data.Length);\r\n                fs.Flush();\r\n            }\r\n        }\r\n    }\r\n}\r\n'@\r\n\r\n[RawConsole.Program]::Main('caf\u00e9', [Text.Encoding]::UTF8)\r\n```\r\n\r\nIs my PInvoke definition wrong, am I calling it incorrectly in Powershell? Is PowerShell resetting my codepage in between statements?",
+      "created_at": "2021-03-04T03:48:19Z",
+      "updated_at": "2021-03-04T03:49:11Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks to @SeeminglyScience (once again!) the issue comes down to `PSReadLine` resetting the console codepage after every statement (maybe command I'm not 100% sure). So by setting it through `chcp` or PInvoke it is actually being sent to conhost PSReadLine is just setting it back afterwards before I go to check the value.\r\n\r\n@SteveL-MSFT I can raise this issue in the PSReadLine repository but I assume it's expected behaviour and you are just expected to use `[Console]::OutputEncoding` to set this value going forward so will hold off unless you want me to open it.",
+      "created_at": "2021-03-04T05:07:57Z",
+      "updated_at": "2021-03-04T05:08:42Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> `PSReadLine` resetting the console codepage after every statement (maybe command I'm not 100% sure).\r\n\r\nIt would be between interactive evals, if it's happening between statements then I can't explain why disabling PSRL fixes it tbh. Make sure your paste isn't being translated into multiple `ReadLine` loops (e.g. right clicking or ctrl v in some terminal apps).  Easiest way is to try it all on one line with semi colons or wrap in `& { }`.",
+      "created_at": "2021-03-04T05:23:29Z",
+      "updated_at": "2021-03-04T05:23:29Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Yea I am just copy and pasting my examples so that would explain it even more.",
+      "created_at": "2021-03-04T05:27:48Z",
+      "updated_at": "2021-03-04T05:27:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Great sleuthing, but do we know _why_ PSReadLine does that? Just to guard against external programs changing the code page?\r\n",
+      "created_at": "2021-03-04T13:29:34Z",
+      "updated_at": "2021-03-04T13:29:34Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "It saves the [initial output encoding on first `ReadLine`](https://github.com/PowerShell/PSReadLine/blob/f8fb650774a0c0e9421d9389f4a6dee5b8718b07/PSReadLine/ReadLine.cs#L710) call, and then resets it back to that [after every `ReadLine` finishes](https://github.com/PowerShell/PSReadLine/blob/f8fb650774a0c0e9421d9389f4a6dee5b8718b07/PSReadLine/ReadLine.cs#L441).\r\n\r\nIt can probably be updated to allow for mid-process encoding customizations.\r\n\r\nI think the why is that it forces UTF8 for prompt rendering? Can't remember, but something like that.",
+      "created_at": "2021-03-04T13:42:58Z",
+      "updated_at": "2021-03-04T13:44:32Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Looking at git blame, it seems https://github.com/PowerShell/PSReadLine/commit/c3868e125069d87adbc5ee8f0274762a99510957 to address an issue with CJK chars coming from native commands",
+      "created_at": "2021-03-05T00:12:36Z",
+      "updated_at": "2021-03-05T00:12:36Z"
+    }
+  ],
+  "created_at": "2021-03-04T01:14:21Z",
+  "number": 14941,
+  "state": "closed",
+  "title": "Cannot set output codepage",
+  "updated_at": "2021-03-05T00:12:36Z"
+}

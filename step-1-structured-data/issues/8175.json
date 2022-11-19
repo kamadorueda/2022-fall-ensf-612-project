@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8175",
+  "author": "andrewducker",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```powershell\r\nClass MyClass {\r\n\tDoThing() {\r\n\t\t$variable1 = \"\"\r\n\t\ttry {\r\n\t\t\t$variable2 = Get-OtherThing\r\n\t\t} finally {\r\n\t\t\tWrite-Host \"Tidying\"\r\n\t\t}\r\n\t\t\r\n\t\tWrite-Host $variable1\r\n\t\tWrite-Host $variable2\r\n\t}\r\n}\r\n\r\nfunction Get-MyClass{\r\n\treturn [MyClass]::new()\r\n}\r\n\r\nexport-modulemember -function Get-MyClass\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nModule can be imported just fine.\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n+         Write-Host $variable2\r\n+                    ~~~~~~~~~~\r\nVariable is not assigned in the method.\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 6.1.7601 S\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Note that this seems to be a problem of `PowerShell`'s parser on `Import-Module` of a file with the content above (not PSSA) as commented on the linked issue above",
+      "created_at": "2018-11-02T14:57:49Z",
+      "updated_at": "2018-11-02T16:19:20Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "There are similar behaviours in C#. *Should* it change?",
+      "created_at": "2018-11-02T14:59:12Z",
+      "updated_at": "2018-11-02T14:59:12Z"
+    },
+    {
+      "author": "andrewducker",
+      "author_association": "NONE",
+      "body": "There is no way that $variable2 _isn't_ set by the time it's used, so the error is incorrect. (The same code within a script works perfectly well.)\r\n\r\nAnd it makes using a standard pattern (freeing a resource after you're finished using it) more complicated.\r\n\r\nEdit: Also - in C# a set of braces creates a new variable scope.  In PowerShell this isn't the case.",
+      "created_at": "2018-11-02T15:05:37Z",
+      "updated_at": "2018-11-02T15:08:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "In that specific case, yes, but there's not necessarily a (good) way to ensure that it is in the general case. If you have a command that throws an error before setting the variable, the variable can remain unset.\r\n\r\nAnd PS classes and class methods have all sorts of funky restrictions at the moment, so I'm sure there's some stricter parser mandates there too.\r\n\r\n/cc @rjmholt as I believe he is currently looking at improvements to classes, if I recall correctly. \ud83d\ude04 ",
+      "created_at": "2018-11-02T15:10:29Z",
+      "updated_at": "2018-11-02T15:10:29Z"
+    },
+    {
+      "author": "andrewducker",
+      "author_association": "NONE",
+      "body": "If the command throws an error before the variable is set then it will never get to the place where it's used, as there's no \"catch\" there.  I absolutely agree that if there was a \"catch\" then you could end up in that situation.\r\n\r\nAm I missing a situation where the variable might be otherwise unset when the usage point is reached?",
+      "created_at": "2018-11-02T15:14:29Z",
+      "updated_at": "2018-11-02T15:14:29Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "The reason why the C# compiler has to be super strict and follow the rules [here](https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/variables#precise-rules-for-determining-definite-assignment) to prove by a particular static flow analysis that the variable is `definitely assigned` is because C# allows the `goto` statement where one could jump ahead in scope. PowerShell does not have a `goto` statement directly but allows to break out of loops. But given that the following works correctly (i.e. the result is `2`), we could allow the try-finally scenario. WDYT @lzybkr @BrucePay \r\n```powershell\r\n$a = 0\r\n:loop while ($true)\r\n{\r\n    try {\r\n        break loop\r\n        $a = 1\r\n    }\r\n    finally {\r\n        $a = 2\r\n    }\r\n}\r\n$a\r\n```",
+      "created_at": "2018-11-02T16:42:20Z",
+      "updated_at": "2018-11-02T16:45:56Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It's far more complicated than that. You need to prove a command or expression can't throw. Consider:\r\n\r\n```powershell\r\ntry {\r\n   $x = $(throw 1; \"hello\")\r\n} catch {}\r\n$x\r\n```\r\n\r\nIt is, for practical purposes, impossible to prove an expression or command doesn't throw, so PowerShell takes the conservative approach and doesn't even try, it assumes anything can throw.",
+      "created_at": "2018-11-02T18:07:38Z",
+      "updated_at": "2018-11-02T18:07:38Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hmm, OK, you are right on that.\r\nBut looking at PowerShell from a high level, a lot of the language and cmdlets were designed to cope with variables being null, on every object one call e.g. `Count`:\r\n```powershell\r\n$foo.Count\r\n$null.Count\r\n```\r\nShould this compilation error only occur in strict mode then?",
+      "created_at": "2018-11-02T19:29:43Z",
+      "updated_at": "2018-11-02T19:31:34Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "PowerShell is forgiving until it isn't. One of the design principles behind classes was to help (via parse time errors) when the forgiving nature of PowerShell can't help.",
+      "created_at": "2018-11-02T20:21:24Z",
+      "updated_at": "2018-11-02T20:21:24Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Ok, makes sense, I agree it is by design then",
+      "created_at": "2018-11-02T21:13:54Z",
+      "updated_at": "2018-11-02T21:13:54Z"
+    },
+    {
+      "author": "andrewducker",
+      "author_association": "NONE",
+      "body": "Once again, there is no Catch statement there.  Which means that it is impossible to hit the statement using $variable2 unless it is set.\r\n\r\nThere is no need to worry about it being $null unless the function it calls returns $null, in which case the try/finally makes no difference.\r\n\r\nIf there was a catch there then, obviously, yes, it would be possible to reach the \"write-host $variable2\" if Get-OtherThing threw an exception.  But as there isn't, $variable2 will be set.\r\n\r\nOr am I missing something?  @lzybkr ",
+      "created_at": "2018-11-02T21:38:41Z",
+      "updated_at": "2018-11-02T21:38:41Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@andrewducker - you are correct, but PowerShell is making a simplifying assumption for better performance.\r\n\r\nWithin the finally, we can't assume the variable is set.  Properly modeling this control flow is more expensive and was deemed not worth the effort.",
+      "created_at": "2018-11-02T21:52:52Z",
+      "updated_at": "2018-11-02T21:52:52Z"
+    },
+    {
+      "author": "andrewducker",
+      "author_association": "NONE",
+      "body": "That makes sense. Thank you! ",
+      "created_at": "2018-11-02T21:58:23Z",
+      "updated_at": "2018-11-02T21:58:23Z"
+    }
+  ],
+  "created_at": "2018-11-02T14:31:15Z",
+  "number": 8175,
+  "state": "open",
+  "title": "Code analysis inside of a try block in a class thinks a variable isn't assigned when it is.",
+  "updated_at": "2018-11-02T21:58:23Z"
+}

@@ -1,0 +1,461 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6768",
+  "author": "NJ-Dude",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\n- Windows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://github.com/PowerShell/PowerShell/blob/master/docs/KNOWNISSUES.md).\r\n- Fill out the following repro template:\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nThe Test-Connection cmdlet is displaying unwanted data as part of the result.\r\n\r\nCode:\r\n\r\nTest-Connection www.microsoft.com -Count 1 -Quiet\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nIt should display just the word: True\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nPinging www.microsoft.com [23.204.153.19] with 32 bytes of data:\r\nReply from 23.204.153.19: bytes=32 time=17ms TTL=58\r\nPing complete.\r\nTrue\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.1.0-preview.2\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": "2019-10-03T19:04:55Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "This works properly in 5.1 but not in 6 so I've reclassified the issue as a bug.",
+      "created_at": "2018-04-30T17:07:30Z",
+      "updated_at": "2018-04-30T17:07:30Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "The reason is that current code calls `WriteInformation` (blindly?).\r\n\r\nSee [line 751 of TestConnectionCommand.cs](https://github.com/PowerShell/PowerShell/blob/9ca059dcf8e21db106e82827dc492c611a7c55b6/src/Microsoft.PowerShell.Commands.Management/commands/management/TestConnectionCommand.cs#L751), also line 775 and line 783.\r\n\r\nTemporary workaround to stop the information from being displayed to the host is to use `InformationAction` common parameter. Example:\r\n\r\n```powershell\r\nTest-Connection www.microsoft.com -Count 1 -Quiet -InformationAction Continue\r\n```\r\n\r\nFrom **scripting** perspective, this **wouldn't be an issue**, as the textual information is **never written** to the pipeline, and no, the textual output is **not** part of result data, which are defined as things sent to the pipeline. Also, `Quiet` switch is defined to return simpler results (`int` or `bool`, instead of record objects). I have to admit that one might not expect `InformationRecord` with `Quiet`. However, knowing the reason, I say we'd better keep `InformationAction` and `Quiet` decoupled.\r\n\r\nIn PowerShell 5.1, `Test-Connection` does not seem to call `WriteInformation` at all. By the way, the default value for `$InformationPreference` in PowerShell 5.1 and PowerShell Core 6.0.2 is `SilentlyContinue`. The author of the issue might have a different effective value when he reproduced the issue. (Perhaps PS 6.1 Core changed the default value for `$InformationPreference`? I'm not sure.)\r\n\r\nIf PS 6.1 Core had `$InformationPreference` defaulted to `SilentlyContinue`, the textual information wouldn't be there unless the user explicitly asks for it.",
+      "created_at": "2018-05-01T02:52:01Z",
+      "updated_at": "2018-05-01T02:52:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I need more feedback.\r\nThe problem is that in the script mode and in interactive mode it should work in different ways. In interactive mode the user will probably prefer to see the progress (bar) as it happens with the ping.exe command. This applies to other parameters too.\r\n\r\n@mklement0 If you have time then your help would be useful.",
+      "created_at": "2018-05-19T19:28:31Z",
+      "updated_at": "2018-05-19T19:28:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@GeeLaw: \r\n\r\nGood find, but it is `-InformationAction Ignore` that is needed in this case to work around the bug.\r\n\r\n`$InformationActionPreference` still defaults to `SilentlyContinue`, and that shouldn't change.\r\n\r\nThe bug is that the `WriteInformation()` calls you link to mistakenly use the `PSHOST` tag, which effectively _bypasses_ the `$InformationActionPreference` value and also `-InformationAction SilentlyContinue` (but, as stated, `-InformationAction Ignore` _is_ effective in suppressing the output).\r\n\r\nWhat said `WriteInformation()` calls do is effectively what `Write-Host` does in order to _unconditionally_ display its output (by design).\r\n\r\n@iSazonov: I haven't really looked at the behavior of other cmdlets with progress bars, but with `-Quiet` I would _not_ expect a progress bar, even when calling interactively.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-05-19T22:42:19Z",
+      "updated_at": "2018-05-19T22:42:19Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@mklement0 Thanks for the reply and the correction on `PSHostTag`. It seems to me that `InformationPreference` (`InformationAction`) won't accept `Ignore`? This is true in 5.1 and 6.0.2. Perhaps in 6.1 it's changed. (Is `InformationActionPreference` a new alias for `InformationPreference`?)\r\n\r\nAlso, my first comment was mistaken, for that it sets `InformationAction` to `Continue`. The correct workaround is to discard stream 6 (information stream) by redirecting it to `$null`, i.e.,\r\n\r\n```PowerShell\r\nTest-Connection www.microsoft.com -Count 1 -Quiet 6> $null\r\n```\r\n\r\nCheck the correctness by the following:\r\n\r\n```PowerShell\r\nWrite-Host 'Hello, world' 6> $null\r\n```\r\n\r\nIt should write nothing to the host.",
+      "created_at": "2018-05-20T09:51:20Z",
+      "updated_at": "2018-05-20T09:51:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@GeeLaw:\r\n\r\n>  It seems to me that InformationPreference (InformationAction) won't accept Ignore?\r\n\r\nYes, the _preference variable_ doesn't accept `Ignore`, but the _common parameter_ does.\r\n\r\nThat is, you can suppress the information stream (number `6`) _for a given invocation_, but not _categorically_ for the whole scope - by design.\r\n\r\nTherefore, the following two statements are equivalent:\r\n\r\n```powershell\r\nTest-Connection www.microsoft.com -Count 1 -Quiet 6> $null\r\nTest-Connection www.microsoft.com -Count 1 -Quiet -InformationAction Ignore\r\n```\r\n\r\nIn other words: both `6> $null` and `-InformationAction Ignore` are effective workarounds.\r\n\r\n> Is `InformationActionPreference` a new alias for `InformationPreference`?\r\n\r\nNo, the name has always been `$InformationPreference`, following the pattern of `$VerbosePreference`, `$WarningPreference`, and `$DebugPreference`.\r\n\r\nFrom what I can tell it's only the `-ErrorAction` / `$ErrorActionPreference` pair where the preference variable name retains the `Action` part.\r\n\r\n----\r\n\r\nAs an aside regarding the prohibition of `Ignore` as the value of action _preference variables_:\r\n\r\n* There's a fundamental design problem with this restriction, because automatically defined local preference variables are used to propagate common-parameter values inside advanced functions - see #1759\r\n\r\n* The restriction is not enforced at _assignment time_, which means you won't see the problem until the preference is (possibly implicitly) applied the next time - see #4348\r\n    * More generally, in any scope but the global one, no validation is performed at all; compare `$ErrorActionPreference = 'bogus'` to `& { $ErrorActionPreference = 'bogus' }` - see \r\n#3483.\r\n\r\n",
+      "created_at": "2018-05-20T12:38:12Z",
+      "updated_at": "2018-05-20T12:41:46Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@mklement0 I was asking about the alias because you mentioned it as `InformationActionPreference`.\r\n\r\nTo my best knowledge, `-XxxAction` (and `-Verbose` and `-Debug`) simply sets the corresponding preference variable inside the invoked cmdlet. As documented in `about_` help topics, specifically we have the following:\r\n\r\n```text\r\nThe value of the -InformationAction parameter, if used, overrides the current value of the $InformationPreference variable.\r\n\r\nWithin the command or script in which it is used, the InformationAction common parameter overrides the value of the $InformationPreference preference variable, which by default is set to SilentlyContinue.\r\n```\r\n\r\nI interpret this as setting a local preference variable, as can be validated by the following demonstration:\r\n\r\n```powershell\r\nfunction test-func { [cmdletbinding()]param() process { $InformationPreference } }\r\ntest-func # gives SilentlyContinue\r\ntest-func -InformationAction Continue # gives Continue\r\ntest-func -InformationAction Ignore # gives Ignore\r\n```\r\n\r\nIn 5.1 and 6.0.2, `InformationAction` does **not** accept `Ignore`, as can be demonstrated by the following snippet:\r\n\r\n```powershell\r\nfunction test-func { [cmdletbinding()]param() process { write-information 'writing' } }\r\ntest-func -InformationAction Ignore\r\n```\r\n\r\nproduces\r\n\r\n```text\r\nWrite-Information : The value Ignore is not supported for an ActionPreference variable. The provided value should be used only as a value for a preference\r\nparameter, and has been replaced by the default value. For more information, see the Help topic, \"about_Preference_Variables.\"\r\nAt line:1 char:57\r\n+ ...  { [cmdletbinding()]param() process { Write-Information 'writing' } }\r\n+                                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Write-Information], NotSupportedException\r\n    + FullyQualifiedErrorId : System.NotSupportedException,Microsoft.PowerShell.Commands.WriteInformationCommand\r\n```\r\n\r\nI wonder if that changed in 6.1.\r\n\r\n---\r\n\r\nThere's another interesting thing: `$VerbosePreference` and `$DebugPreference` actually accepts a wider range than that can be set by the corresponding common parameter. E.g., it is possible to set `$VerbosePreference` to `Inquire` by explicit assignment, but not possible by using `-Verbose` switch because, after all, it is a switch and maps `$True`/`$False` to `Continue`/`SilentlyContinue`.\r\n\r\nAs far as I know, except for those two switches, the preference-related common parameters map exactly to the corresponding preference variables in the local scope.",
+      "created_at": "2018-05-20T12:57:17Z",
+      "updated_at": "2018-05-20T12:57:17Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "Another round of playing around shows the following code works:\r\n\r\n```powershell\r\nWrite-Information 'writing' -InformationAction Ignore\r\n```\r\n\r\nBut that would be cumbersome to developers, as we have to guard `Write-Information` with the check `$InformationAction -eq 'Ignore'`, and avoid calling it in the first place, e.g.,\r\n\r\n```PowerShell\r\nFunction Test-Inf1\r\n{\r\n    [CmdletBinding()] Param ( )\r\n    Process { Write-Information 'Hello, world!' }\r\n}\r\nFunction Test-Inf2\r\n{\r\n    [CmdletBinding()] Param ( )\r\n    Process { If ($InformationPreference -ne 'Ignore') { Write-Information 'Hello, world!' } }\r\n}\r\nTest-Inf1 -InformationAction Ignore # writes an error\r\nTest-Inf2 -InformationAction Ignore # okay\r\n```\r\n\r\nIt seems that the same applies to authors writing cmdlets with C#.\r\n",
+      "created_at": "2018-05-20T13:30:56Z",
+      "updated_at": "2018-05-20T13:30:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@GeeLaw \r\n\r\n> I was asking about the alias because you mentioned it as InformationActionPreference.\r\n\r\nOops! Sorry - hadn't noticed my own typo.\r\n\r\n> simply sets the corresponding preference variable inside the invoked cmdlet.\r\n\r\nYes, and the rest of what you demonstrate is the subject of the aforementioned #1759.\r\n\r\nIn short: The design flaw is that disallowing `Ignore` as a preference-variable value clashes with using automatically set local preference-variable instances  in order to propagate common-parameter values.\r\n\r\nMore specifically:\r\n\r\n> In 5.1 and 6.0.2, InformationAction does not accept Ignore, as can be demonstrated by the following snippet:\r\n\r\nSince it matters with respect to resolving the problem, let me point out that `-InformationAction` _does_ accept `Ignore`, and it's only said design flaw that causes the problem _if and when the preference is applied_ in the context of _advanced functions_, which in your case is the `Write-Information` call _inside_ the function .  \r\nThis problem persists as of PowerShell Core v6.1.0-preview.2.\r\n\r\n_Compiled cmdlets_, by contrast, do not have this problem, which is why `Write-Host foo -InformationAction Ignore` works as intended, for instance, as you've since discovered.\r\n\r\n\r\n",
+      "created_at": "2018-05-20T21:27:06Z",
+      "updated_at": "2018-05-20T21:29:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To summarize, we've been discussing two unrelated problems here:\r\n\r\n* The design flaw with respect to `Ignore` as an action-preference variable value, which is already being tracked in #1759.\r\n\r\n* This issue's original topic, the misbehaving `Test-Connection` cmdlet, which mistakenly uses the `PSHOST` tag in its calls to `.WriteInformation`.\r\n\r\nThe solution to the latter is to simply _omit_ the tag, as the following example demonstrates:\r\n\r\n```powershell\r\n# With $InformationAction at its default, 'SilentlyContinue', this invocation is silent.\r\n# If you set it to 'Continue', 'foo' prints.\r\n& { [CmdletBinding()]param() $PSCmdlet.WriteInformation('foo', [string[]] @()) } \r\n```",
+      "created_at": "2018-05-20T21:35:34Z",
+      "updated_at": "2018-05-20T21:35:34Z"
+    },
+    {
+      "author": "tibmeister",
+      "author_association": "NONE",
+      "body": "So I came across this because I am experiencing the same issue where -Quiet is not being respected.  I looked at the code and it's a little difficult to follow and very over-complicated for what it\u2019s doing, but I didn't see anywhere that is actually looking for this as a matter of suppressing output, nor am I seeing where it's switching from outputting a string to a boolean, which is what should be outputted when the -Quiet parameter is passed.\r\n\r\nI did submit a PR last year (#2537) to add Test-Connection to the code and that was rejected at the time because \u201c@PowerShell/powershell-committee would not accept this PR as it would introduce compatibility problems in the future\u201d, so I was surprised to see the inclusion of this cmdlet now but not with the code of the original PR but rather brand new code that doesn\u2019t provide all the expected functionality.\r\n\r\nThe biggest issue I come across is in my scripts I perform checks like this, \u201cif(Test-Connection 8.8.8.8 -Quiet)\u201d to branch into my logic, but with the -Quiet parameter not being respected, the branch always returns True because there\u2019s not a False or Null.  So this makes the command still completely unusable to me, and also since it\u2019s been included in new releases of PowerShell, that makes upgrading very touchy for me.  Please, fix this as it looks like it\u2019s been several months since the issue was first reported.  Either that, or re-instate the original PR, doesn\u2019t matter as long as the functionality is returned.\r\n\r\nI did submit a PR last year to add Test-Connection to the code and that was rejected at the time because they didn't want to add legacy cmdlets, so I was surprised to see the inclusion of this cmdlet now but not with the code of the original PR that was complete and functioned exactly as the \"legacy\" version did.",
+      "created_at": "2018-09-19T01:32:28Z",
+      "updated_at": "2018-09-19T01:32:28Z"
+    },
+    {
+      "author": "alexandair",
+      "author_association": "CONTRIBUTOR",
+      "body": "If we have Test-Connection in 5.1 and 6.x, I would expect them to have the same output. I know that implementation is different, but users should not care about that. The current Test-Connection in 6.1 behaves differently giving us a different output then in 5.1. Besides that, -Quiet parameter is practically useless.",
+      "created_at": "2018-09-19T02:19:38Z",
+      "updated_at": "2018-09-19T02:19:38Z"
+    },
+    {
+      "author": "NJ-Dude",
+      "author_association": "NONE",
+      "body": "It seems this problem still stands, as of right now (PSVersion = 6.2.0) the cmdlet continues to display the \"ping\" information even if QUIET is present (adding \"-InformationAction Ignore\" does the trick but it means modules/scripts using the Test-Connection cmdlet will have to be updated, not cool)",
+      "created_at": "2019-04-28T15:18:52Z",
+      "updated_at": "2019-04-28T15:19:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Would be really nice if we could get this fixed for 7.0. I'm more than happy to contribute the code, but we need an implementation spec to follow as there was very little agreement on earlier attempts to improve this.\r\n\r\ncc @SteveL-MSFT @iSazonov ",
+      "created_at": "2019-04-28T15:28:37Z",
+      "updated_at": "2019-04-28T15:28:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I come back to this from time to time. Now I believe that we could solve this by using an explicit separation interactive and non-interactive scenarios with `-Intercative` switch. With the parameter we could implement rich user-friendly console output. It seems it is not too inconvenient for the user to type this parameter (as \"-i\"). Without the switch we'd do strong typed output without verbous console output that is good for script scenarios.",
+      "created_at": "2019-04-29T06:25:39Z",
+      "updated_at": "2019-04-29T06:25:39Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Given that no other cmdlet uses such a parameter, I don't think it makes sense to have such duality. A cmdlet should do it's task and behave consistently; Interactive behaviour should not be separated from how it otherwise behaves.\r\n\r\nFor example, look at Get-ChildItem. Interactively, it in very useful thanks to the default formatter display. No changes are needed to also make it useful for automation purposes; the same command that works interactively also works in a script.\r\n\r\nThat's unnecessary complexity, I feel.",
+      "created_at": "2019-04-29T10:09:01Z",
+      "updated_at": "2019-04-29T10:09:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could do the interactive output by default and enhance `Quiet` parameter to suppress the output in scripts.",
+      "created_at": "2019-04-29T12:18:23Z",
+      "updated_at": "2019-04-29T12:18:23Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Again... I don't see the need to have a different output interactively vs in scripts.\r\n\r\nIf the cmdlet simply behaves like other cmdlets and outputs unusable data instead of being completely unique and outputting all its data in a difficult to capture or parse text stream (this is _PowerShell_, not Bash), there is absolutely no need for a change in behaviour.\r\n\r\n-Quiet is a switch used by the original cmdlet in Windows PowerShell to give a pure True/False response, instead of outputting objects. Breaking that convention is a bad idea, in my opinion.\r\n\r\nThis cmdlet should behave in a manner consistent with existing cmdlets. There is no reason to have it alone use the current behaviour. In its current iteration it behaves more as one would expect a Unix utility to operate, very different to how other PowerShell cmdlets operate.",
+      "created_at": "2019-04-29T12:43:41Z",
+      "updated_at": "2019-04-29T12:43:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Again... I don't see the need to have a different output interactively vs in scripts.\r\n\r\nCan you demo desired output in all supported scenarios? Note that meta information that the cmdlet outputs is very important.\r\n\r\n> outputting all its data in a difficult to capture or parse text stream\r\n\r\nThe cmdlet does strong typed object output.  (The problem is that it is impossible to build these objects and display simultaneously because there is \"meta\" information.)\r\n\r\n> -Quiet is a switch used by the original cmdlet in Windows PowerShell to give a pure True/False response, instead of outputting objects. Breaking that convention is a bad idea, in my opinion.\r\n\r\nThat Windows PowerShell cmdlet only supports ping for which the concept of connection does not exist. This was initially controversial design. Right name for them would be `Test-Ping` ot `Test-ICMP`. \r\nCurrent cmdlet supports ip \"connections\". Although I would prefer something like \"Test-Connectivity\".\r\n\r\n> In its current iteration it behaves more as one would expect a Unix utility to operate, very different to how other PowerShell cmdlets operate.\r\n\r\nNo, the cmdlet does strong typed object output. And the console output was made to look like utilities. But at the same time, you may see that in fact it is richer and more useful. \r\nThe problem is that this output cannot be obtained using the capabilities of the formatting subsystem and it is necessary to make a direct output to the console. (Note that this does not get mixed up with output objects in the output stream)\r\n\r\n",
+      "created_at": "2019-04-29T13:56:05Z",
+      "updated_at": "2019-04-29T13:56:05Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The output can be obtained with the formatting system, if we structure the data objects in a more robust manner. I submitted a PR with a prototype already. A cmdlet that displays data in a form that doesn't properly reflect the underlying object data (e.g., by displaying data from subproperties instead of properly structuring the object class) is generally misleading and in my mind to be avoided wherever possible.\r\n\r\nI will examine this further and put together a more complete example of what I perceive to be desired output. Test-Connection in Windows PowerShell may have been a controversial design, but I think it was a step in the right direction, if a very incomplete one.",
+      "created_at": "2019-04-29T14:55:38Z",
+      "updated_at": "2019-04-29T14:56:12Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "@iSazonov I wasn't agree with you after the first read BUT after testing, I understand your point of View\r\n\r\n```\r\n$a=Test-Connection www.microsoft.com \r\n$b=Test-Connection www.microsoft.com -Quiet\r\n```\r\nThe $a and $b values are what I expect BUT I don't want the extra output.\r\n\r\n[Select-String](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/select-string?view=powershell-6) has also a Quiet Parameter and it has nothing to do with \"interactive\" behavior\r\n\r\nI'm agree that this command need an additional parameter to change the behaviour (Quiet or not).\r\n\r\nI prefer the parameter 'Interactive' not by default but maybe a switch parameter \"NoInteractive\" is a better adjustment to let priority on interactive usage.\r\n\r\n",
+      "created_at": "2019-04-29T15:11:32Z",
+      "updated_at": "2019-04-29T15:11:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Alright, here's what I would consider to be a somewhat more useful implementation.\r\n\r\n# General Points\r\n\r\n1. All current host/information output is relegated to the `-Verbose` stream. Currently that isn't used _at all_, and this is a perfect use case for it.\r\n2. No progress bar unless specified with a `-ShowProgress` switch.\r\n3. Remove the `-Ping` switch (it is the default behaviour).\r\n\r\n# Primary Output\r\n\r\n## `Test-Connection www.google.com`\r\n\r\n- Information from the `Replies` property of the output object should be included in the main output object, and primary output mode should be _multiple_ objects, each representing a single ping attempt/reply object.\r\n- Buffer _data_ is generally irrelevant, as it cannot be specified, and only a `BufferSize` property should be exposed. `Replies.Buffer` property should remain `private`.\r\n- `Replies.Options` property should be hidden from default formatting.\r\n- Results output as a table, grouped by Destination address (in the case that multiple destinations are specified).\r\n\r\n### Output visual mockup\r\n\r\n**Command used:**\r\n```powershell\r\n$Result = Test-Connection www.google.com\r\n$Data = foreach ($Reply in $Result.Replies) {\r\n    [PSCustomObject]@{\r\n        Source = $Result.Source\r\n        Destination = $Result.Destination\r\n        Address = $Reply.Address\r\n        RoundtripTime = $Reply.RoundtripTime\r\n        BufferSize = $Reply.Buffer.Length\r\n        Options = $Reply.Options\r\n    }\r\n}\r\n$Data | Format-Table -GroupBy Destination -Property Source, Address, RoundtripTime, BufferSize\r\n```\r\n\r\n**Resulting output:**\r\n```code\r\n   Destination: www.google.com\r\nSource  Address       RoundtripTime BufferSize\r\n------  -------       ------------- ----------\r\nWS-JOEL 172.217.2.132            36         32\r\nWS-JOEL 172.217.2.132            21         32\r\nWS-JOEL 172.217.2.132            25         32\r\nWS-JOEL 172.217.2.132            25         32\r\n```\r\n\r\n## `Test-Connection www.google.com -TraceRoute`\r\n\r\n- Each hop should be output as a separate object, each containing the `PingReply` objects as a property accessible by hidden from formatting.\r\n- Main `TraceRouteResult` object should contain either ETS or class properties that calculate summary data from their four PingReplies.\r\n- **Note:** This object type we're using is currently **bugged**, and all `PingReply` objects report `TtlExpired` as their status. Recommend investigating progress of fix for .NET Core 3, or designing custom solution for TraceRoute backing to resolve the issue.\r\n- Output as a table, grouped by `DestinationHost` (Why is this property name different to that of the other object type used for standard pings?)\r\n\r\n### Output visual mockup\r\n\r\n**Command used:**\r\n```powershell\r\n$Result = Test-Connection www.google.com -TraceRoute\r\n$Data = foreach ($Reply in $a.Replies) {\r\n    [PSCustomObject]@{\r\n        Hop = $Reply.Hop\r\n        Source = $a.Source\r\n        Destination = $a.DestinationHost\r\n        DestinationAddress = $a.DestinationAddress\r\n        Replies = $Reply.PingReplies\r\n        RoundtripTimes = $Reply.PingReplies.RoundtripTime\r\n        HopAddress = $Reply.PingReplies[0].Address\r\n        BufferSize = $Reply.PingReplies.ForEach{$_.Buffer.Length}\r\n        Options = $Reply.PingReplies[0].Options\r\n    }\r\n}\r\n\r\n$Data | Format-Table -GroupBy Destination -Property Hop, RoundtripTimes, DestinationAddress, HopAddress, BufferSize\r\n```\r\n\r\n**Resulting output:**\r\n```code\r\n   Destination: www.google.com\r\nHop RoundtripTimes DestinationAddress HopAddress     BufferSize\r\n--- -------------- ------------------ ----------     ----------\r\n  1 {0, 0, 0}      172.217.2.132      192.168.22.254\r\n  2 {0, 0, 0}      172.217.2.132      75.144.219.238\r\n  3 {0, 0, 0}      172.217.2.132      96.120.37.17\r\n  4 {0, 0, 0}      172.217.2.132      96.110.136.65\r\n  5 {0, 0, 0}      172.217.2.132      69.139.180.170\r\n  6 {0, 0, 0}      172.217.2.132      68.85.127.121\r\n  7 {0, 0, 0}      172.217.2.132      68.86.165.161\r\n  8 {0, 0, 0}      172.217.2.132      68.86.90.205\r\n  9 {0, 0, 0}      172.217.2.132      68.86.82.154\r\n 10 {0, 0, 0}      172.217.2.132      66.208.233.242\r\n 11 {0, 0, 0}      172.217.2.132      0.0.0.0\r\n 12 {0, 0, 0}      172.217.2.132      216.239.59.124\r\n 13 {0, 0, 0}      172.217.2.132      216.239.59.61\r\n 14 {32, 28, 20}   172.217.2.132      172.217.2.132\r\n```\r\n\r\nI am firmly of the belief that if we're presenting data to the user, it should be **readily accessible** in a programmatic fashion, with similar surface structure to what is being displayed onscreen. Renaming of properties or burying data one or two levels deep in a property of the output object only invites confusion, bug reports, frustration, and a significant decrease in overall usability.",
+      "created_at": "2019-04-29T16:55:46Z",
+      "updated_at": "2019-04-29T16:55:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Oh, @vexx32 I see  you never diagnosed a network. Your proposal was implemented by me in the first step and then rejected as not suitable for use in an interactive session. For example, we can look at a blank screen for a very long time after running a command `Test-Connection www.google.com -TraceRoute`. So implementation was changed to show an output (string or progress bar) for every response.\r\n\r\n> All current host/information output is relegated to the -Verbose stream. Currently that isn't used at all, and this is a perfect use case for it.\r\n\r\nMy suggetion above was to introduce `Interactive` switch to split interactive and script scenarious. You suggest do the same with `Verbose` switch which is even more unnatural practice.\r\n\r\n> No progress bar unless specified with a -ShowProgress switch.\r\n\r\nString output and progress bar is in current implementation as two alternatives. We need only one. Progress bar is used in Windows PowerShell cmdlet. My preference is string output in interactive session. It is much more convenient.\r\nAnd we never suppress a progress bar with a switch. We have $ProgressPreference for script scenarios. Some cmdlets shows a progress bar only for long operations by timer.\r\n\r\n> Remove the -Ping switch (it is the default behaviour).\r\n\r\nBest practice is to use explicit parameters in scripts. It makes code more readable. It was not necessary in Windows PowerShell cmdlet where only ping was implemented. New cmdlet implements more functionalities and we need new explicit parameter for every ones.",
+      "created_at": "2019-04-29T18:23:11Z",
+      "updated_at": "2019-04-29T18:23:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": ">Your proposal was implemented by me in the first step and then rejected as not suitable for use in an interactive session. For example, we can look at a blank screen for a very long time after running a command Test-Connection www.google.com -TraceRoute. So implementation was changed to show an output (string or progress bar) for every response.\r\n\r\nThe progress display isn't necessary with the split object format, as we can quite easily see progress as each object is submitted to output. The only reason it's needed here is because we don't output data to the pipeline as it is retrieved like every other PowerShell cmdlet does. If we output on every `PingReply` or trace hop for `-TraceRoute` we _have_ progress display built into the output display.\r\n\r\n> My suggestion above was to introduce Interactive switch to split interactive and script scenarious. You suggest do the same with Verbose switch which is even more unnatural practice.\r\n\r\n`-Verbose` is a common parameter and thus a far more natural choice for a cmdlet than a completely new switch. We needn't reinvent the wheel here.\r\n\r\n> Best practice is to use explicit parameters in scripts. It makes code more readable. It was not necessary in Windows PowerShell cmdlet where only ping was implemented. New cmdlet implements more functionalities and we need new explicit parameter for every ones.\r\n\r\nI'm neither here nor there on this, but typically a cmdlet's default behaviour does not have a switch. For example, we don't have a `-Loud` switch as the reverse of `-Quiet`.\r\n\r\n",
+      "created_at": "2019-04-29T18:36:28Z",
+      "updated_at": "2019-04-29T18:37:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The progress display isn't necessary with the split object format, as we can quite easily see progress as each object is submitted to output.\r\n\r\nWith your proposal above we collect \"ping\" objects in \"meta\" object and it is impossible output the \"ping\" objects in real time - we can output in pipeline only the \"meta\" object - user will see blank display in all time.\r\n\r\n> -Verbose is a common parameter and thus a far more natural choice for a cmdlet than a completely new switch. \r\n\r\nI am not aware of any cmdlet that was outputting significant information to the verbose stream. We always use this stream to display additional diagnostic information so that we understand the process of running a cmdlet.\r\n\r\n> typically a cmdlet's default behaviour does not have a switch.\r\n\r\nIt is right for single parameter set. Now we have many parameter set and we need to explicitly designate each.",
+      "created_at": "2019-04-30T03:19:14Z",
+      "updated_at": "2019-04-30T03:19:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "> With your proposal above we collect \"ping\" objects in \"meta\" object and it is impossible output the \"ping\" objects in real time - we can output in pipeline only the \"meta\" object - user will see blank display in all time.\r\n\r\nThe meta object is unnecessary. As mentioned in the above proposal, objects would be created and output for _each_ PingReply or trace hop. The mock up is **not** the final code, merely an easy to duplicate format to illustrate the idea. Each entry in the table would be output one by one. Please read the full proposal.\r\n\r\n> I am not aware of any cmdlet that was outputting significant information to the verbose stream. We always use this stream to display additional diagnostic information so that we understand the process of running a cmdlet.\r\n\r\nI'm also not aware of _any_ cmdlet that is routinely outputting \"significant\" information to the information/host and not to output except buried several levels deep in another object.\r\n\r\n> It is right for single parameter set. Now we have many parameter set and we need to explicitly designate each.\r\n\r\nI don't think there is much usefulness in doing so, but it doesn't create a significant amount of harm I suppose. I simply think it a waste of time; I'm not sure that many people will see much use in specifying a switch for the default behaviour.",
+      "created_at": "2019-04-30T03:43:46Z",
+      "updated_at": "2019-04-30T03:43:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The meta object is unnecessary. \r\n\r\n_It is critical necessary._ \r\nThis approach makes the cmdlet a useless thing. If you have a network where there are problems then try to run a diagnostic using that cmdlet. You cannot do this. You will throw it and take ping and traceroute utilities. But now you can do the same diagnostics with the new cmdlet both in the console and, for example, in the monitoring system with a script. I understand that it is difficult to understand if you do not do regular network diagnostics. See how many parameters these native utilities have, especially in Unix versions. All of them are important for diagnosis. The art of diagnosis consists in using their combinations and magical meanings. I tried to add all this to the new cmdlet.\r\n\r\n> I simply think it a waste of time\r\n\r\nUsing positional parameters help you :-)",
+      "created_at": "2019-04-30T04:21:25Z",
+      "updated_at": "2019-04-30T04:21:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The short summary for PowerShell Committee.\r\n\r\nCurrent cmdlet was designed \r\n- to get portable cmdlet for all supported platforms. Really we have still some issues in .Net Core so not all features works on Unix planforms\r\n- to get features of popular tools like ping, traceroute, pathping, Portqry.exe and etc\r\n- to get useful output objects in __scripts__ suitable for both simple and in-depth network accessibility analysis\r\n- to get useful console output with _header_ and _footer_. Notice that the cmdlet displays even more useful information in some scenarios than native prototope utility.\r\n- to allow future inhancements like remote testing \"Test-Connection -Source ... -Destination ...\"\r\n\r\nThe main problem is how to combine interactive console output (interactive scenario) and output of objects in pipeline (script scenario). My current suggestion is to make a splitting either with a parameter (-Interactive) or with new cmdlet (Show-Connectivity for interactive scenario and Test-Connectivity for script scenario).\r\nAlso I'd suggest change name of the cmdlet to Test-__Connectivity__ which is more accurate. It will also allow free use of the old Windows cmdlet through proxying (WCM) without name conflict.\r\n\r\n",
+      "created_at": "2019-04-30T04:21:42Z",
+      "updated_at": "2019-04-30T04:21:42Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov can you provide an example of such a diagnostic that requires there to be a meta object that hides all the data away? My proposal is to move the information from the meta object into each PingReply object; I do not see how that would decrease the utility of the cmdlet.",
+      "created_at": "2019-04-30T12:12:01Z",
+      "updated_at": "2019-04-30T12:12:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "How do you put statistics from footer to first \"ping\" object if you output the object immediately after creation?",
+      "created_at": "2019-04-30T14:39:03Z",
+      "updated_at": "2019-04-30T14:39:03Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "What footer information? The only footer information from a ping is `Ping complete.`\r\n\r\nThere are no statistics in the current meta objects that I can see anywhere; they just contain all of the objects with the same information that are being rendered as string data on the information stream, just in a less usable format.\r\n",
+      "created_at": "2019-04-30T14:47:05Z",
+      "updated_at": "2019-04-30T14:47:05Z"
+    },
+    {
+      "author": "NJ-Dude",
+      "author_association": "NONE",
+      "body": "The point here is to keep the cmdlets (in this case Test-Connection) the same way on both versions (WinPS and Pwsh) adding a switch to the cmdlet to in this case to 'disable' that output would be wrong since like I stated before it will mean every script/module using this cmdlet will have to be updated, the solution is making it the same way on both versions",
+      "created_at": "2019-04-30T17:19:26Z",
+      "updated_at": "2019-04-30T17:19:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@NJ-Dude Windows cmdlet is based on WMI and it is impossible to port it with backward compatibility. Also 5.1 was frozen - no additions will be in future.",
+      "created_at": "2019-05-01T09:56:58Z",
+      "updated_at": "2019-05-01T09:56:58Z"
+    },
+    {
+      "author": "NJ-Dude",
+      "author_association": "NONE",
+      "body": "> @NJ-Dude Windows cmdlet is based on WMI and it is impossible to port it with backward compatibility. Also 5.1 was frozen - no additions will be in future.\r\n\r\nI understand and know that, I'm just saying the SYNTAX and functionality should be the same, meaning, if using QUIET doesn't display any output then it shouldn't display any output regardless of the flavor of PS being used.",
+      "created_at": "2019-05-01T12:46:39Z",
+      "updated_at": "2019-05-01T12:46:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  I'm just saying the SYNTAX and functionality should be the same\r\n\r\nIt is impossible. Windows Compatibility module is single way to get the old functionality.",
+      "created_at": "2019-05-01T17:57:19Z",
+      "updated_at": "2019-05-01T17:57:19Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "A cmdlet's output should be able to be stored and used without having to also manually suppress unwanted display to the console that is somehow separate to the main output.\r\n\r\nThere are _no other cmdlets_ that behave this way, where the most useful data is in string form on the information stream. There is no reason for it to behave this way. All data should be on the output stream, **period**. Additional data is on the verbose or debug streams as needed. Use of the information stream in this manner is quite literally unprecedented for a cmdlet that ships with PowerShell itself.\r\n\r\nAnd as mentioned, there is no data in the footer you mention that needs to be specifically in a footer; it's all available from the beginning or as each response is processed.\r\n",
+      "created_at": "2019-05-01T19:47:09Z",
+      "updated_at": "2019-05-01T19:47:09Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "Queuing this up for a Committee discussion\r\n\r\nSoooo I've lost track of the thread a little here, having trouble down in the weeds, but my basic take without regards to implementation is this:\r\n\r\n* Data should be output line-by-line. I think that that's the current case with both `Test-Connection`s and `ping.exe` et al\r\n* Data should be returned as a structured object. The formatting should be agnostic of this fact. (As horrible as this is, I've seen a formatter that emits a JSON string to the console despite the fact that it's a PSObject under the hood. My point is simply that it can be done.) Formatting is also a place where we're allowed to change whatever we want without breaking changes. (Also strongly agree with @vexx32 that we should be careful about column headers that don't match the property names. It's occasionally necessary for readability, but it also drives me crazy.)\r\n* `-Quiet` should emit nothing except True/False as a Boolean, just like Windows PowerShell. \r\n* If there's more information we need to emit than the default case (which should be more than the minimal boolean `-Quiet` case), `-Verbose` sounds reasonable, but I haven't thought about it enough. (This is also where I lose the thread, hard to tell what more folks want up above).\r\n* Imitating the exact same object (`cimv2\\Win32_PingStatus`) with all the same properties as Windows PowerShell is impossible (because .NET Core, WMI, etc.), but we should try to get it as close as possible. \r\n* I don't know about progress. My high-level take is that progress still drives everyone crazy because it's slow (despite our optimizations), but also that it doesn't matter so much in non-interactive because everyone is setting`$ProgressPreference` anyway. ",
+      "created_at": "2019-05-08T21:24:20Z",
+      "updated_at": "2019-05-08T21:24:20Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sounds good to me!\r\n\r\nProgress mainly annoys the heck out of me because it can't be handled in the command call; you have to set $ProgressPreference. I really wish that were a common parameter.... But I have another issue griping about that, so let's not get into that here! :smile:",
+      "created_at": "2019-05-08T21:33:12Z",
+      "updated_at": "2019-05-08T21:33:12Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  We agreed that `Test-Connection` should emulate the behavior as was in Windows PowerShell 5.1 as closely as possible (including `-Quiet`).  This means that a `PingStatus` output object (dropping the `win32_`) should be emitted for each reply having the properties in the default format and any additional ones that are available.  Progress should not be used.\r\n\r\nWould someone be willing to author a short RFC that shows the cmdlet syntax along with proposed output format for review? ",
+      "created_at": "2019-05-08T22:42:30Z",
+      "updated_at": "2019-05-08T22:42:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@stevel-msft I'd be happy to. :)",
+      "created_at": "2019-05-09T06:45:27Z",
+      "updated_at": "2019-05-09T06:45:27Z"
+    },
+    {
+      "author": "NJ-Dude",
+      "author_association": "NONE",
+      "body": "I love the sound of that.\r\nThanks",
+      "created_at": "2019-05-09T12:49:21Z",
+      "updated_at": "2019-05-09T12:49:21Z"
+    },
+    {
+      "author": "tibmeister",
+      "author_association": "NONE",
+      "body": "Kinda interesting that PR 3125 covered all of this but the use of Test-Connection was rejected, but now we\u2019ve come full circle. What about looking back at 3125?",
+      "created_at": "2019-05-09T12:57:50Z",
+      "updated_at": "2019-05-09T12:57:50Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Looking at it briefly, it looks like it essentially replaced Test-Connection with a differently-implemented command on Unix platforms to try to emulate the Windows command? Am I reading that right?\r\n\r\nI don't think that's the best option available to us; consistency across both platforms in the implementation of the command as a whole is more valuable. It may have some interesting ideas we can utilise though, I'm sure!\r\n\r\nI'll drop a link to the draft RFC when I'm done writing it & feel free to comment, adjust, etc... I'd love to hear some more viewpoints on this. \ud83d\ude42 \r\n\r\nEDIT: https://github.com/PowerShell/PowerShell-RFC/pull/172",
+      "created_at": "2019-05-09T13:17:09Z",
+      "updated_at": "2019-05-09T15:23:22Z"
+    },
+    {
+      "author": "tibmeister",
+      "author_association": "NONE",
+      "body": "My specific use case for prompting this was based on the desire to use PowerShell Core on Linux, but the implementation was fully tested across both Windows and Linux.  It was meant to replace the missing command in it's entirety.",
+      "created_at": "2019-05-09T17:52:52Z",
+      "updated_at": "2019-05-09T17:52:52Z"
+    },
+    {
+      "author": "poundy",
+      "author_association": "NONE",
+      "body": "When will we see this?  In 6.2.2? When will that likely land?  \r\n(was funny to see this thread raged from April 2018 to now over _-quiet_ being noisy. Seems such a no-brainer breaking change)",
+      "created_at": "2019-06-18T07:43:20Z",
+      "updated_at": "2019-06-18T07:43:20Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I can get this code written pretty easily I think, I'm just waiting on the RFC to be accepted. Soon as that happens I'll get it done and submit a PR for this. :smile:",
+      "created_at": "2019-06-18T10:06:44Z",
+      "updated_at": "2019-06-18T10:06:44Z"
+    },
+    {
+      "author": "poundy",
+      "author_association": "NONE",
+      "body": "Oh I thought the status was that it was approved (not knowing exactly what states there are or what the full process is). But thanks for the update. Still a pity that it's taken over 12 months to make it quiet :) ",
+      "created_at": "2019-06-18T21:40:41Z",
+      "updated_at": "2019-06-18T21:40:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> over 12 months to make it quiet\r\n\r\nI expected more feedback",
+      "created_at": "2019-06-19T03:44:59Z",
+      "updated_at": "2019-06-19T03:44:59Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 you can start coding this and put it behind an Experimental flag in case any feedback comes in that changes the current proposal",
+      "created_at": "2019-06-20T15:52:28Z",
+      "updated_at": "2019-06-20T15:52:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT I've already got a mostly-working implementation. I'll look to submit a PR w/ some Experimental flags soon so we can talk about the code more concretely. \ud83d\udc96 ",
+      "created_at": "2019-06-20T16:47:22Z",
+      "updated_at": "2019-06-20T16:47:22Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "After thinking in last days about the desired behavior, I would prefer to have interactive behavior with a minimum of parameters by default (fast typing and user friendly display), which would be convenient in an interactive session. And converting to script style with additional parameters (this implies different types in output).",
+      "created_at": "2019-06-20T16:59:02Z",
+      "updated_at": "2019-06-20T16:59:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Could you elaborate a bit more on how you think that could work @isazonov?",
+      "created_at": "2019-06-20T17:50:57Z",
+      "updated_at": "2019-06-20T17:50:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Do you ask about implementation or UX design?",
+      "created_at": "2019-06-21T08:53:02Z",
+      "updated_at": "2019-06-21T08:53:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Mainly what you think the UX would be like for that, I think. :)",
+      "created_at": "2019-06-21T10:17:14Z",
+      "updated_at": "2019-06-21T10:17:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "In interactive session best UX is\r\n1. minimal typing\r\nIt means:\r\n- ping is default\r\n- switching to another mode (traceroute and etc.) with one parameter\r\n2. user friendly output\r\nIt means:\r\n- emulate ping.exe (tracert.exe and others) output _on console host_ like I tried in the demo code - with headers, footers and informative lines well formatted. No need to think about output types - they is not used, only displayed.\r\n- add parameters to switch to script mode - that is to suppress output of user-friendly text on console host and emit strong typed objects. No need to format this output. We discussed Quiet which returns True/False but we need a parameter(s) to emit other raw strong typed objects (like -RawOutput). It is acceptable UX to use additional parameters in scripts.",
+      "created_at": "2019-06-21T11:17:59Z",
+      "updated_at": "2019-06-21T11:17:59Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks, I think I understand what you're getting at a bit better now.\r\n\r\nI don't really see the need for a dual mode like this, though? No other cmdlets in PowerShell have this split between interactive and \"script mode\" parameters.\r\n\r\nIf you wanted the exact output of ping / tracert, why wouldn't you just use those utilities directly? \r\n\r\nPowerShell has never made a significant effort to completely mimic an existing command; I think Get-ChildItem is probably the closest, but it's almost the only one to do so. \r\n\r\nIf we wanted to thoroughly emulate ping / tracert display like you say, I would suggest we instead have that as a separate cmdlet or function, e.g., `Show-Connection`, rather than clutter Show-Command with extra parameters that have no existing precedent or need within PowerShell.",
+      "created_at": "2019-06-21T12:27:11Z",
+      "updated_at": "2019-06-21T12:27:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I don't really see the need for a dual mode like this, though? No other cmdlets in PowerShell have this split between interactive and \"script mode\" parameters.\r\n\r\nWe have gaps in out formatting system. For example, we have an issue with request to have header/footer dir. There are other scenarios where it would be convenient.\r\n\r\n> If you wanted the exact output of ping / tracert, why wouldn't you just use those utilities directly?\r\n\r\nI do :-). These native utilities are very powerful because they are low-level but they are frozen. We can do _smarter_ things than they do - this is the essence of the appearance of this cmdlet (and not just to make a ping) - if you take a deep look at how the addresses and names in the cmdlet are now formed and how they are output, you will see that there are much more useful than in the native ping. It looks like tricks but it is really very useful.\r\n",
+      "created_at": "2019-06-21T12:38:47Z",
+      "updated_at": "2019-06-21T12:38:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Of course we have gaps in the formatting system. But I don't think the answer is to implement a custom solution _every single time_. That just creates more problems and makes it even more difficult to improve or rewrite the formatting system to be more effective across the board.\r\n\r\nYeah, you've done some great work with it! I very much appreciate that. The current mode of output is not useful for anything _but_ interactive use. We could simply remove the output step and call it `Show-Connection` and then utilise what you've written in a more PowerShell-focused solution for `Test-Connection` itself as I outline in the RFC.",
+      "created_at": "2019-06-21T14:16:18Z",
+      "updated_at": "2019-06-21T14:16:18Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 I just tried your PR and it improves it quite a bit, but I noticed that in Windows PowerShell, it emits PingReply individually to the pipeline so you get something that looks like:\r\n\r\n```output\r\nPS C:\\Users\\slee> Test-Connection localhost\r\n\r\nSource        Destination     IPV4Address      IPV6Address                              Bytes    Time(ms)\r\n------        -----------     -----------      -----------                              -----    --------\r\nSLEE-DESKTOP  localhost       127.0.0.1        ::1                                      32       0\r\nSLEE-DESKTOP  localhost       127.0.0.1        ::1                                      32       0\r\nSLEE-DESKTOP  localhost       127.0.0.1        ::1                                      32       0\r\nSLEE-DESKTOP  localhost       127.0.0.1        ::1                                      32       0\r\n```\r\n\r\nHowever, with your change, all the ping replies are members of a single object:\r\n\r\n```output\r\nPS> Test-Connection localhost\r\n\r\nSource       Destination Replies\r\n------       ----------- -------\r\nslee-desktop localhost   {System.Net.NetworkInformation.PingReply, System.Net.NetworkInformation.PingReply, System.Net.NetworkInformation.PingReply, System.Net.N\u2026\r\n```\r\n\r\nAre we not able to get back the Windows PowerShell behavior?",
+      "created_at": "2019-10-03T20:12:55Z",
+      "updated_at": "2019-10-03T20:12:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT That object output has not changed from the initial implementation in PS Core; the success output has always had the single object. \ud83d\ude42 \r\n\r\nAs mentioned in the closing comments of the PR, that is only a partway implementation of the RFC to help simplify reviews. I will be submitting a follow-up PR shortly. Just have to rebase that branch to remove the now-duplicate commits and submit the rest of it to get much closer to true parity with Windows PowerShell's implementation. It will still differ somewhat (as can be seen from the RFC we reviewed a handful of weeks back) but will be hopefully much more versatile. \ud83d\ude0a ",
+      "created_at": "2019-10-03T20:22:01Z",
+      "updated_at": "2019-10-03T20:22:10Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT see #10697 for the next chapter in this adventure! \ud83d\ude0a ",
+      "created_at": "2019-10-03T21:28:01Z",
+      "updated_at": "2019-10-03T21:28:01Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #10478, which has now been successfully released as `v7.0.0-preview.5`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.5)\n",
+      "created_at": "2019-10-23T19:07:30Z",
+      "updated_at": "2019-10-23T19:07:30Z"
+    },
+    {
+      "author": "chvol",
+      "author_association": "NONE",
+      "body": "In release 7.0.0 Test-Connection -Quiet still gives\r\nTest-Connection: Testing connection to computer 'scrubbed' failed: Cannot resolve the target name.\r\ninstead of\r\nFalse",
+      "created_at": "2020-03-18T11:00:17Z",
+      "updated_at": "2020-03-18T11:00:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@chvol could you please open a new issue for that with as much detail as possible?\r\n\r\nThanks! \ud83d\ude42 ",
+      "created_at": "2020-03-18T12:39:40Z",
+      "updated_at": "2020-03-18T12:39:40Z"
+    }
+  ],
+  "created_at": "2018-04-28T16:33:09Z",
+  "number": 6768,
+  "state": "closed",
+  "title": "Test-Connection cmdlet displaying unwanted data.",
+  "updated_at": "2020-03-18T12:39:40Z"
+}

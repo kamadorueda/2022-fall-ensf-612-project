@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13012",
+  "author": "BrianCatlin",
+  "body": "Get-ScheduledTask returns task trigger info, but Get-Service does not return service trigger info. How are we supposed to get this information in Powershell?\r\n\r\nIt appears that WMI's Win32_Service object needs to have the trigger info added",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We use [QueryServiceConfig2W ](https://docs.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfig2w) in https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Management/commands/management/Service.cs#L657. \r\nThe function can be used to get the trigger info.\n\n<blockquote><img src=\"https://repository-images.githubusercontent.com/49609581/96590180-07d7-11ea-89b1-2f719dc4bb9c\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShell\">PowerShell/PowerShell</a></strong></div><div>PowerShell for every system! Contribute to PowerShell/PowerShell development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2020-06-23T03:24:25Z",
+      "updated_at": "2020-06-23T03:24:28Z"
+    },
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov  thanks for the tip, I'm in for this.",
+      "created_at": "2020-07-02T21:07:06Z",
+      "updated_at": "2020-07-02T21:07:06Z"
+    },
+    {
+      "author": "BlakeWills",
+      "author_association": "NONE",
+      "body": "@kvprasoon it's been a while since you commented so hopefully it was safe to assume you aren't looking at this? If you are then I'm sorry for treading on your toes, but hopefully the questions below are useful. :)\r\nIf not @iSazonov could I be assigned to this please?\r\n\r\nI've got a working implementation that retrieves the triggers, but before I submit a PR I'd like some guidance on how we should add them to the output, please.\r\n\r\nFirstly, any outputs that aren't already properties on the ServiceController object are added as NoteProperties to the PSObject. So far, all additional outputs are just single values, triggers would need to be an array of PSObjects. Is this acceptable? I did have a look at `Get-ScheduledTask` which returns the triggers as an array of CimInstance objects, but I don't think that helps us here.\r\n\r\nEach trigger has four properties: TriggerType, Subtype, Action and SpecificDataItems. (https://docs.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_trigger)\r\n\r\nQuestions:\r\n\r\n1. Should we return the TriggerType as an integer or its string representation? I'm currently using the enum below to map to the string value. Another question is if we return the string value, should we trim the \"SERVICE_TRIGGER_TYPE\" prefix? My preference would be to return the string as defined in the docs, but I'm not sure if there is a precedent already set elsewhere.\r\n\r\n```\r\ninternal enum ServiceTriggerType : byte\r\n{\r\n\tSERVICE_TRIGGER_TYPE_CUSTOM = 20,\r\n\tSERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL = 1,\r\n\tSERVICE_TRIGGER_TYPE_DOMAIN_JOIN = 3,\r\n\tSERVICE_TRIGGER_TYPE_FIREWALL_PORT_EVENT = 4,\r\n\tSERVICE_TRIGGER_TYPE_GROUP_POLICY = 5,\r\n\tSERVICE_TRIGGER_TYPE_IP_ADDRESS_AVAILABILITY = 2,\r\n\tSERVICE_TRIGGER_TYPE_NETWORK_ENDPOINT = 6\r\n}\r\n```\r\n\r\n2. Not so much of a question, but I think we can just return the guid for the subtype.\r\n\r\n3. Same question as Q1 but for the action, should we return the integer value or string representation? Again, mapping enum below:\r\n```\r\ninternal enum ServiceTriggerAction : byte\r\n{\r\n    SERVICE_TRIGGER_ACTION_SERVICE_START = 1,\r\n    SERVICE_TRIGGER_ACTION_SERVICE_STOP = 2\r\n}\r\n```\r\n4. Some triggers also have an array of SERVICE_TRIGGER_SPECIFIC_DATA_ITEM, however the type of data that is returned varies depending on the TriggerType. (https://docs.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_trigger_specific_data_item)\r\n\r\n- If the TriggerType is SERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL or SERVICE_TRIGGER_TYPE_NETWORK_ENDPOINT this is a string.\r\n- If the TriggerType is SERVICE_TRIGGER_TYPE_FIREWALL_PORT_EVENT this is a multi-string containing the port, protocol and potentially the executable path and service name.\r\n- Finally, if the TriggerType is SERVICE_TRIGGER_TYPE_CUSTOM then the data is defined by the ETW provider.\r\n   \r\nExcluding the CUSTOM TriggerType (I'm not sure what to do with this yet and I don't have a service to test), one approach is to return a custom PSObject whose properties depend on the TriggerType, for example:\r\n\r\n- SERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL would have a single property called \"DeviceId\"\r\n- SERVICE_TRIGGER_TYPE_FIREWALL_PORT_EVENT would have \"Port\", \"Protocol\", \"ExecutablePath\" and \"ServiceName\" properties.\r\n- SERVICE_TRIGGER_TYPE_NETWORK_ENDPOINT could have a \"NetworkEndpoint\" property.\r\n\r\nTo be honest, I don't really like this as it isn't user-friendly, especially if you're trying to script something and the output changes constantly. However I can't think of a way to standardise it. I'm open to suggestions.\r\n\r\nAlso, should we support returning the data items for TriggerType SERVICE_TRIGGER_TYPE_CUSTOM? I think the answer to this may depend on what we do with the others.\r\n\r\nThank You\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_trigger\">SERVICE_TRIGGER (winsvc.h) - Win32 apps</a></strong></div><div>Represents a service trigger event. This structure is used by the SERVICE_TRIGGER_INFO structure.</div></blockquote>\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_trigger_specific_data_item\">SERVICE_TRIGGER_SPECIFIC_DATA_ITEM (winsvc.h) - Win32 apps</a></strong></div><div>Contains trigger-specific data for a service trigger event.</div></blockquote>",
+      "created_at": "2020-07-26T17:36:27Z",
+      "updated_at": "2020-07-26T17:39:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'm not fully acquainted with the finer details of what you're working with there @BlakeWills but regarding the enum naming specifically, I think it'd be much more usable for PowerShell folks if you drew up the enum without the prefix and in PascalCase to match the majority of property/enum naming in .NET; `$trigger.ServiceTriggerType.Custom` where the `ServiceTriggerType` just becomes the property name, and the individual trigger types have a PascalCased name. Same for the Action ones.\r\n\r\nThe disparity in naming between that and the interop naming can be laid out in docs if it's important, but it feels more on the level of an implementation detail to me at least on the surface. (Definitely at least until folks can use this information to actually set service triggers in future, if that ever happens.)",
+      "created_at": "2020-07-26T17:53:48Z",
+      "updated_at": "2020-07-26T17:53:48Z"
+    },
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BlakeWills I started working on this, looks like I'm not gonna finish this soon. It's your now :-) and AFAIK, it need not to be assigned to you to work on this.",
+      "created_at": "2020-07-26T18:00:32Z",
+      "updated_at": "2020-07-26T18:01:22Z"
+    },
+    {
+      "author": "BrianCatlin",
+      "author_association": "NONE",
+      "body": "For #1 & #3, I think it would be helpful to return both the enum and the string, or a method to return a string given the enum; otherwise, most implementations will be required to implement an conversion, which is pointless.\n\nFor #4, it seems to me that a different object for each trigger type is needed. Please ensure it is easy to determine the object\u2019s type.\n",
+      "created_at": "2020-07-26T18:22:36Z",
+      "updated_at": "2020-07-26T18:22:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "You could look `sc.exe qtriggerinfo` output to get more experience.\r\n\r\nBecause we want only information (not full trigger management) I'd start only with top level.",
+      "created_at": "2020-07-27T06:36:06Z",
+      "updated_at": "2020-07-27T06:36:06Z"
+    }
+  ],
+  "created_at": "2020-06-23T00:37:31Z",
+  "number": 13012,
+  "state": "open",
+  "title": "Return service trigger info in Get-Service",
+  "updated_at": "2020-07-27T06:36:07Z"
+}

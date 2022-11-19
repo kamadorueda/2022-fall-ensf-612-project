@@ -1,0 +1,160 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2145",
+  "author": "kumarharsh",
+  "body": "Right now, powershell in Windows writes CRLF when using `Out-File`. A simple use-case where this fails is when I use\n\n```\ngit format-patch HEAD~3 | Out-File patch.patch -Encoding utf8\n```\n\nThis outputs files which _look_ ok, but the `git apply` command can't accept this file, as it as CRLF line endings. So, I'd like Out-File to output files with LF line endings.\n\nThis feature _might_ also be useful in linux maybe?\n",
+  "closed_at": "2018-08-30T16:32:45Z",
+  "comments": [
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "Native utilities shouldn't be used with PowerShell pipelines -- there are not only line-ending issues, but also encoding issues. PowerShell \"smartly\" converts the output into an array of string (with encoding guessed and line-breaks broken). It's worse when your command outputs true \"binary\" stream.\n\nTo use native utilities properly, use `Start-Process` with `RedirectStandard(Input/Output/Error)`.\n\nTo avoid setting an array to a file with CRLF, use `-join` to join them with LF before sending it to `Set-Content` or `Out-File`.\n\nAh, did I mention that you shouldn't use `Set-Content` or `Out-File` if you want to get rid of BOM? Use `[IO.File]::WriteAll(Lines/Text)`.\n",
+      "created_at": "2016-08-31T15:33:54Z",
+      "updated_at": "2016-08-31T15:33:54Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "@GeeLaw If a Linux user can't execute `git format-patch HEAD~3 > patch.patch` then I view that as a major FAIL for PowerShell on Linux.  There needs to be preference variables or some other mechanism to define the default encoding for Out-File (which `>` uses) and in 5.1 and higher you can set `$PSDefaultParameterValues[\"Out-File:Encoding\"] = \"Ascii\"` and Out-File will honor that.  However, that should be set perhaps by default on Linux?  There also needs to be a EOL preference/setting that defaults to just on LF on Linux.  It  would also be nice to see Out-File/Set-Content also get a `-NewLine` parameter that takes CRLF or LF.\n",
+      "created_at": "2016-08-31T15:50:43Z",
+      "updated_at": "2016-08-31T15:50:43Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@rkeithhill No... I don't think you got me... Even you get that option, native utilities are still subject to be broken secretly. I'm not against the proposed `-NewLine` parameter. I'm against using PowerShell's OO pipes with native utilities. PowerShell **has done bad things** to the output of `git` before you do anything more -- it guesses its encoding, interprets it as string and breaks them by line. If the output is originally mixed, or CRLF, you get broken when you re-output it with LF.\n\nThere should be, and will be a binary pipe, I think. And with binary pipe, native utilities will be happy to work with PowerShell.\n",
+      "created_at": "2016-08-31T16:00:02Z",
+      "updated_at": "2016-08-31T16:00:02Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Binary pipes is part of #559.\nFile redirection using Windows style newlines on *nix is just a bug - it should just work w/o any extra options/settings.\n",
+      "created_at": "2016-08-31T16:32:38Z",
+      "updated_at": "2016-08-31T16:32:38Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@lzybkr I don't think there is \"file redirection\" in PowerShell. The redirection for different object streams (output, verbose, warning etc.) are equivalent to storing them and then `Set-Content`. File redirection is about saving the content of a binary stream to a file, while the PS redirection is to serialize objects into files.\n\nAgain, before you \"redirect\" the output of `git` to a file, the `stdout` has been reinterpreted by PS.\n",
+      "created_at": "2016-08-31T18:51:49Z",
+      "updated_at": "2016-08-31T18:51:49Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "File redirection is absolutely a language feature of PowerShell. The implementation may rely on piping to `Set-Content` today, but that's an implementation detail that could change if necessary, e.g. to write binary data or whatever.\n",
+      "created_at": "2016-08-31T18:55:29Z",
+      "updated_at": "2016-08-31T18:55:29Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@lzybkr that'll be breaking... It's the best to have the binary pipe and users should use that for native utilities. Mind you, that writing to a file with `>` is equivalent to piping the object to `Set-Content` (or perhaps `Out-File`, I don't remember which) is **NOT an implementation detail**, it's documented. And again, the corruption of output of a native utility happens *\\* BEFORE*\\* \"redirecting\" to a file.\n\nCould you do the following experiment? I guess you'll understand the idea why current syntax/standard (documentation specified behaviours) won't allow the real \"file redirection\".\n\n``` PowerShell\n# suppose that git command will output more than 2 lines.\n$output = git format-patch HEAD~3\n$output.GetType()\n$output | % { $_.GetType() }\n```\n\nThe second command should give `System.Object[]`. That is, before PowerShell ever writes the file, the stream output by `git` is already lost. As @kumarharsh has shown to us, you have to use `-Encoding UTF8`, why? The reason is again simple. Though `git` outputs in a specific encoding, PowerShell engine reads its `stdout` as string (with encoding guessing), splits it by line, then gives the runtime an `Object[]`. The encoding, the line-ending styles and other possible information have been lost. There is no correct way to recover the encoding, the line-ending character sequence, from that object (array of objects). That's why you have to again specify the encoding.\n\nYou already know one half (encoding), and line-ending character sequence is just the second half, of the OO nature of PS.\n\nI suggest you use `Start-Process` as a workaround and wait for the binary pipe.\n",
+      "created_at": "2016-08-31T19:26:17Z",
+      "updated_at": "2016-08-31T19:26:17Z"
+    },
+    {
+      "author": "kumarharsh",
+      "author_association": "NONE",
+      "body": "Thank you for the detailed explaination @GeeLaw. I didn't even know half of it. Although I must point out that if powershell is _guessing_ the encoding, it's wrong&thinsp;&mdash;&thinsp;using `Out-File` or the sugared `>` writes files in UTF16LE, which is very far from the UTF8 / ASCII it should be deducting from the output of git commands, or is it using it's default encoding always?\n",
+      "created_at": "2016-08-31T19:48:32Z",
+      "updated_at": "2016-08-31T19:52:44Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@kumarharsh \n\n#### Short Explanation\n\nPS guesses the encoding to transform the output into objects, and then uses the default encoding to output. After the transformation, no guessing is needed and no encoding information is stored.\n\n#### Long Explanation\n\nThe guessing happens when PowerShell transforms the `stdout` of `git`, it seems PS got this one correct (you have valid strings in memory now). After the transformation, there is no \"encoding\" anywhere -- it's stored as string objects (internally it'll be UTF16 on Windows, I guess CoreCLR uses the same internal encoding). At this point PS has \"forgotten\" the encoding. The default encoding for `Set-Content` or `Out-File` (the one used for \"redirection\") is UTF16LE. You can change this by supplying entries in `$PSDefaultParameterValues`.\n\nThe whole process is:\n1. PS executes `git format-patch HEAD~3`;\n2. PS reads its output stream (`stdout`) as a string;\n3. PS splits the string by line and returns the split result as the value of that invocation.\n\nIf this is still too abstract, let's say that line of `git` outputs\n\n```\nHello\nWorld\nThis is surely not outputed by git.\n```\n\nThen the line is equivalent to\n\n``` PowerShell\n# no encoding information can be seen by Out-File\n@('Hello', 'World', 'This is surely not outputed by git.') |\n    Out-File patch.patch -Encoding utf8\n```\n\nIf you didn't supply `-Encoding utf8`, the encoding defaults to UTF16LE.\n",
+      "created_at": "2016-09-01T01:34:36Z",
+      "updated_at": "2016-09-01T01:34:36Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "@GeeLaw One minor correction.  `Set-Content` encoding defaults to `ASCII`.   Also, I believe `>` is syntax sugar for `Out-File` which brings up another issue.  `Out-File` _always_ appends a newline seq to the last string it writes to the file e.g.:\n\n```\n38> 'hello' > foo.txt\n39> fhex foo.txt\n\nAddress:  0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F ASCII\n-------- ----------------------------------------------- ----------------\n00000000 FF FE 68 00 65 00 6C 00 6C 00 6F 00 0D 00 0A 00 ..h.e.l.l.o.....\n```\n\nIf you use `Out-File` directly, you can avoid that final newline with the `NoNewline` parameter.  No such luck with `>`.\n\n> the corruption of output of a native utility happens *\\* BEFORE*\\* \"redirecting\" to a file.\n\nYes.  However, I would like to be able to operate on that output **as strings** so it is very useful to have the output of a utility like git converted to string objects (instead of having to deal with a raw byte array - sans encoding info).  Perhaps with PowerShell's ETS magic, strings could carry along their origin encoding info??\n",
+      "created_at": "2016-09-01T01:56:06Z",
+      "updated_at": "2016-09-01T02:12:33Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@rkeithhill (edited 11:18 AM UTC+8, was ating wrong person) yeah, you're right. Didn't check docs, sorry. You can avoid the newline for `>` by setting `$PSDefaultParameterValues['Out-File:NoNewline'] = $true`. (Just tested on Windows PowerShell 5)\n\nThe idea of operating the output as a string is absolutely great! However, if we change the returning of `git` invocation directly, that'll be a breaking change. With binary pipes, we can receive a `byte[]`, and we can have cmdlets like `Convert-ByteArrayToString [-Encoding ...]`. This will give us full control on interpreting the output of a native utility. Also, the idea of using ETS to record the encoding information on `System.String` is innovative! I'm with you on these.\n",
+      "created_at": "2016-09-01T02:01:34Z",
+      "updated_at": "2016-09-01T03:21:15Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "I just wrote a workaround for this. Didn't test it out on Mac though, but it should work for @kumarharsh as he uses Windows PowerShell. Check out `Save-Module -Name 'Use-RawPipeline'`.\n",
+      "created_at": "2016-09-03T07:44:46Z",
+      "updated_at": "2016-09-03T07:44:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rkeithhill:\r\n\r\nGood points, and great idea to carry the input encoding info forward. \r\n\r\nNote that `Set-Content` - despite what the help topic states - uses `Default` encoding by default, which in Windows PowerShell is the active \"ANSI\" code page (a culture-specific, 8-bit  superset of ASCII, as implied by the legacy system locale).\r\n\r\nAs of this writing, the plan is for PowerShell Core on Windows to default to the same, and on Unix to default to UTF-8 (without BOM).",
+      "created_at": "2017-04-04T22:31:35Z",
+      "updated_at": "2017-04-04T22:37:40Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Isn't it time for windows to start defaulting to UTF8 too? \r\n\r\nEnough of this nonsense! :) We are in a hole, but we can at least stop digging!",
+      "created_at": "2017-04-22T18:05:49Z",
+      "updated_at": "2017-04-22T18:05:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@powercode We are discussing this in https://github.com/PowerShell/PowerShell-RFC/issues/71",
+      "created_at": "2017-04-22T19:49:12Z",
+      "updated_at": "2017-04-22T19:49:12Z"
+    },
+    {
+      "author": "be5invis",
+      "author_association": "NONE",
+      "body": "@iSazonov Could we **customize** the behavior of `(>)`? i.e, replace this operator with another cmdlet?",
+      "created_at": "2017-05-07T19:36:15Z",
+      "updated_at": "2017-05-07T19:36:15Z"
+    },
+    {
+      "author": "be5invis",
+      "author_association": "NONE",
+      "body": "@GeeLaw Do not quibble for the past stupidity. **WRONG IS WRONG.**",
+      "created_at": "2017-05-07T19:38:42Z",
+      "updated_at": "2017-05-07T19:38:42Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "In reply to @be5invis \r\n\r\n> @GeeLaw Do not quibble for the past stupidity. WRONG IS WRONG.\r\n\r\nCould you please attach part of the post you're replying to? I had several posts in this thread and couldn't find out which part you are criticising.\r\n\r\nIf I get it correctly, you meant the thing about guessing the encoding? It's already stupid enough to mix two worlds without control over what happens in between -- in the past, the programmer just hopes PowerShell deals the byte stream from/to `string[]` in the way they hoped. Even if you can specify EOL, there are more problems, for example, \"all people speak ASCII\".\r\n\r\nThe cure is the long awaited binary pipe + conversion cmdlets.",
+      "created_at": "2017-05-08T13:21:18Z",
+      "updated_at": "2017-05-08T13:21:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for explicitly specifying a newline sequence with `Out-File` / `Set-Content`:  I've created #3855, which more generically asks for a `-Delimiter` parameter (to parallel the existing `Get-Content -Delimiter`) that would also cover this use case.",
+      "created_at": "2017-05-24T19:13:17Z",
+      "updated_at": "2017-05-24T19:22:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think we should close this and continue in #3855\r\n\r\n/cc @SteveL-MSFT @mklement0 ",
+      "created_at": "2018-08-27T14:48:24Z",
+      "updated_at": "2018-08-27T14:48:24Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov agree",
+      "created_at": "2018-08-30T16:32:45Z",
+      "updated_at": "2018-08-30T16:32:45Z"
+    }
+  ],
+  "created_at": "2016-08-31T13:51:59Z",
+  "number": 2145,
+  "state": "closed",
+  "title": "Let us specify EOL when using out-file",
+  "updated_at": "2018-08-30T16:32:45Z"
+}

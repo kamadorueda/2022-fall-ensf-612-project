@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15004",
+  "author": "rjmholt",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nSay I have a scriptblock like this:\r\n\r\n```powershell\r\n{\r\n    param(\r\n        $a,\r\n        $b\r\n    )\r\n\r\n    \"a: $a\"\r\n    \"b: $b\"\r\n}\r\n```\r\n\r\nAnd I want to invoke it from C#:\r\n\r\n```csharp\r\nvar sb = ScriptBlock.Create(\"...\");\r\nvar parameters = new Hashtable\r\n{\r\n    { \"a\", \"A\" },\r\n    { \"b\", \"B\" },\r\n};\r\n\r\nsb.Invoke(?);\r\nInvokeCommand.InvokeScript(sb, ?);\r\n\r\nusing (var pwsh = PowerShell.Create())\r\n{\r\n    pwsh.<?>.AddParameters(parameters).Invoke();\r\n}\r\n```\r\n\r\nIs there a way to do this currently in PowerShell, and if not can we have one?\r\n\r\nThe best way I've found to do this so far is to use reflection to create a `FunctionInfo` object around the scriptblock for invocation:\r\n\r\n```csharp\r\nvar sb = ScriptBlock.Create(\"param($a, $b) \\\"a: $a\\\",\\\"b: $b\\\"\");\r\nvar runspace = RunspaceFactory.CreateRunspace();\r\nrunspace.Open();\r\n\r\nPropertyInfo runspaceExecutionContextProperty = typeof(Runspace).GetProperty(\"ExecutionContext\", BindingFlags.Instance | BindingFlags.NonPublic);\r\nType ecType = runspaceExecutionContextProperty.PropertyType;\r\n\r\nConstructorInfo funcInfoCtor = typeof(FunctionInfo).GetConstructor(\r\n    BindingFlags.NonPublic | BindingFlags.Instance,\r\n    binder: null,\r\n    new[] { typeof(string), typeof(ScriptBlock), ecType },\r\n    modifiers: null);\r\n\r\nobject executionContext = runspaceExecutionContextProperty.GetValue(runspace);\r\nvar sbFuncInfo = (FunctionInfo)funcInfoCtor.Invoke(new object[] { string.Empty, sb, executionContext });\r\n\r\nusing (var pwsh = PowerShell.Create())\r\n{\r\n    pwsh.AddCommand(sbFuncInfo).AddParameters(new Dictionary<string, object>{ {\"a\", \"A\"}, {\"b\", \"B\"} });\r\n\r\n    foreach (PSObject result in pwsh.Invoke())\r\n    {\r\n        Console.WriteLine(result);\r\n    }\r\n}\r\n```\r\n\r\nBut this is very involved, messy, requires overhead and isn't public/officially supported.\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nSome considerations:\r\n\r\n- While the `PowerShell` API is a good place for this, it doesn't currently have good support for scriptblocks (something which could be improved)\r\n- Other APIs do support scriptblocks well, such as `CommandInvocationIntrinsics.InvokeScript` and `ScriptBlock.Invoke[WithContext]` and it would be nice to extend those to enable named parameter passing since they allow simpler control of the execution context than the `PowerShell` API\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let me know if I'm telling you that you already know, but just to clarify:\r\n\r\n* The `.AddScript()` method of the `PowerShell` class accepts a _string_ that becomes a _script block_, which, as usual, can declare parameters and/or receive arguments. Note that since the script block's _content_ is being passed, there must _not_ be enclosing `{ ... }`\r\n\r\n* While there is currently no support for passing a _dictionary_ of arguments - i.e. no support for _splatting_ via the `PowerShell` class - a chain of `.AddParameter()` calls is akin to that, if more verbose. [_update_: `.AddParameters()` supports splatting]\r\n\r\nA simple example written in PowerShell:\r\n\r\n```powershell\r\n# Note the absence of enclosing { ... }\r\n[powershell]::Create().AddScript(\r\n@'\r\n  param(\r\n    $a,\r\n    $b\r\n    )\r\n    \r\n    \"a: $a\"\r\n    \"b: $b\"\r\n\r\n'@\r\n).\r\n  AddParameter('a', 'A').\r\n  AddParameter('b', 'B').\r\n  Invoke()\r\n```\r\n\r\nThis yields:\r\n\r\n```\r\na: A\r\nb: B\r\n```",
+      "created_at": "2021-03-12T14:56:34Z",
+      "updated_at": "2021-03-12T20:08:17Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I've found myself wanting this a lot as well, but every time I go to request it I have a hard time justifying it.  The only real reason you'd want to do this is to invoke a scriptblock in the current runspace while retaining original AST information for debugging.\r\n\r\nIf you don't need the AST information, you can just `ToString()` it.  If you aren't invoking in the current runspace, then runspace affinity is going to be a bit confusing for a public API.\r\n\r\nSide note, `ScriptInfo` is the command info equivalent for an anonymous script. Maybe just a public constructor that pulled execution context from TLS would be enough.  Or from the scriptblock's affinity. ",
+      "created_at": "2021-03-12T15:16:22Z",
+      "updated_at": "2021-03-12T15:16:22Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> While there is currently no support for passing a dictionary of arguments - i.e. no support for splatting via the PowerShell class - a chain of .AddParameter() calls is akin to that, if more verbose.\r\n\r\nI believe [`AddParameters()`](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.powershell.addparameters?view=powershellsdk-7.0.0) does that.\r\n\r\n> The only real reason you'd want to do this is to invoke a scriptblock in the current runspace while retaining original AST information for debugging.\r\n\r\nMy primary reason is not wanting to rebuild a scriptblock. In my scenario, I'm taking in a user-provided scriptblock in a cmdlet and I want to execute it providing a set of parameters to choose from. I'd like that scriptblock to keep all of its context and metadata and not have the overhead of stringifying it just for PowerShell to construct a new one. That way, if something goes wrong in the execution, the error message makes sense to users.",
+      "created_at": "2021-03-12T20:06:22Z",
+      "updated_at": "2021-03-12T20:06:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @rjmholt, now I understand, and thanks for the `.AddParameters()` hint; TIL.\r\n\r\n> I'm taking in a user-provided scriptblock in a cmdlet and I want to execute it providing a set of parameters to choose from. \r\n\r\nEven in the case where a _string_ is passed to `.AddScript()` (potentially incurring the cost of compilation again), as is currently the only option, it would indeed be nice to be able to pass (named) _arguments_ to the script block, in a _repeatable_ manner, so that a compiled-once script block in a cached `PowerShell` instance can be invoked repeatedly, with different arguments each time (this is somewhat related to your proposal #15008).\r\n\r\nSo a potential API surface I see is:\r\n\r\n* Add an `.AddScript(ScriptBlock sb)` overload (don't know if there be dragons).\r\n\r\n* Add new `.InvokeWithParameters()` and `.InvokeWithArguments()` methods that supports passing named arguments / positional arguments to the script block in a given invocation.\r\n\r\nCurrently, the only way to provide _per-invocation_ input is to use the `.Invoke()` overloads that accept objects that act _as pipeline input_ - there's no _argument_ counterpart (only the \"baking in\" of arguments with `.AddParameter()`, ... that cannot later be replaced).\r\n\r\nTo illustrate this based on your example:\r\n\r\nInstead of the following _emulation_ of the described behavior:\r\n\r\n```powershell\r\n$ps = [powershell]::Create()\r\n\r\n$sb = { param($a, $b)  \"a: $a\", \"b: $b\" }\r\n\r\n# As a workaround, wrap the script block in another one that \r\n# passes pipeline input to the original one via splatting.\r\n$sbWrapped = '$dictArgs=$($input); . {{ {0} }} @dictArgs' -f $sb.ToString()\r\n\r\n# Currently invariably stringifies the script block and rebuilds it.\r\n# As a workaround, pass the arguments dictionary via the *pipeline* to\r\n# enable repeated invocations.\r\n$ps.AddScript($sbWrapped).\r\n    Invoke([array] @{ a = 'A'; b = 'B' })  # -> \"a: A\", \"b: B\"\r\n\r\n# Repeat invocation with different arguments:\r\n$ps.Invoke([array] @{ a = 'C'; b = 'D' })  # -> \"a: C\", \"b: D\"\r\n```\r\n\r\nwe would then be able to simplify to:\r\n\r\n```powershell\r\n$ps = [powershell]::Create()\r\n\r\n$sb = { param($a, $b)  \"a: $a\", \"b: $b\" }\r\n\r\n# [scriptblock] instance $sb is now passed as-is\r\n$ps.AddScript($sb).\r\n    InvokeWithParameters(@{ a = 'A'; b = 'B' })\r\n\r\n# Repeat invocation with different arguments:\r\n$ps.InvokeWithParameters(@{ a = 'C'; b = 'D' })\r\n```\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-13T15:33:52Z",
+      "updated_at": "2021-03-13T15:33:52Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rjmholt  `ScriptBlock.Invoke()` doesn't go through the parameter binder which is where named parameter binding is handled.   It would be best/easiest/most consistent to allow you to add a scriptblock using the `PowerShell` API which would look like: \r\n```powershell\r\n[powershell]::Create().AddScript({param ($x, $y) \"x is $x y is $y\"}, $true).AddParameter(\"x\", 10).AddParameter(\"y\", 20).Invoke()\r\n```\r\nNote that this actually works today from PowerShell because the ScriptBlock gets turned into a string and then back into a ScriptBlock. Given that the scriptblocks are cached there might not even be much of a performance penalty for the double-conversion.",
+      "created_at": "2021-03-15T02:00:13Z",
+      "updated_at": "2021-03-15T02:00:13Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> It would be best/easiest/most consistent to allow you to add a scriptblock using the `PowerShell` API which would look like:\r\n\r\nI worry that adding a `ScriptBlock` overload would result in a lot of confusion. Supporting `ScriptBlock` directly would imply to me that `SessionState`, extent data, runspace affinity, etc would be honored. In out of process runspaces, this overload would probably just `ToString`, for in-process-but-not-current-thread runspaces, affinity would likely result in dead locks or state corruption.\r\n\r\nAlso as you mentioned, it's common in PowerShell to rely on argument coercion here.  So if a new overload were added it would most likely need to be the same as `ToString()` to avoid changing behavior of existing scripts (which doesn't solve the use case in the OP).\r\n\r\nPersonally I'd like to see either:\r\n\r\n1. A public constructor on `ScriptInfo`. This is round about enough that you will likely already understand the caveats if you reach for this\r\n2. A static class following a similar pattern as the BCL's `Unsafe` and `MemoryMarshal` classes. This would make it abundantly clear that safety is the consumer's responsibility.  Something like: \r\n\r\n\t  ```csharp\r\n\t  namespace System.Management.Automation\r\n\t  {\r\n\t      public static class PSUnsafe // or CommandMarshal\r\n\t      {\r\n\t          public static ScriptInfo AsScriptInfo(ScriptBlock scriptBlock);\r\n\t          public static ScriptInfo AsScriptInfo(ScriptBlock scriptBlock, Runspace affinity);\r\n\t      }\r\n\t  }\r\n\t  ```",
+      "created_at": "2021-03-15T17:02:33Z",
+      "updated_at": "2021-03-15T17:02:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Returning to something @rjmholt said in the OP:\r\n\r\n> Other APIs do support scriptblocks well, such as `CommandInvocationIntrinsics.InvokeScript` and `ScriptBlock.Invoke[WithContext]`\r\n\r\n@rjmholt, wouldn't introducing the following new  `ScriptBlock.InvokeWithContext()` overload address your use case?\r\n\r\n```csharp\r\npublic Collection<PSObject> InvokeWithContext (\r\n  Dictionary<string, ScriptBlock> functionsToDefine, \r\n  List<System.Management.Automation.PSVariable> variablesToDefine, \r\n  IDictionary parameters // analogous to PowerShell.AddParameters()\r\n);\r\n```\r\n\r\nThat is, it would be the (extended) analog of `PowerShell.AddParameters()`, just like the existing overloads with their `params object[] args` parameter are the analog of multiple `PowerShell.AddArgument()` calls.\r\n\r\nThen perhaps there is no need to pass `ScriptBlock` instances as-is to a `PowerShell` instance, which would avoid the headaches that @SeeminglyScience describes.\r\n\r\n---\r\n\r\nHowever, _independently_ - for the case where it's fine to pass a _string_ to `PowerShell.AddScript()` and have that build the script block with the proper runspace affinity internally - there is still also an as-yet-unmet need to allow _repeatable_ invocations to such a behind-the-scenes script block with _new parameters_ on every invocation.\r\n\r\nTherefore, _also_ introducing `PowerShell.InvokeWithParameters(IEnumerable input, IDictionary parameters)` and `PowerShell.InvokeWithArguments(IEnumerable input, params object[] args)` overloads makes sense to me - or perhaps even make do with new `PowerShell.Invoke()` overloads with additional parameters.\r\n\r\n\r\n",
+      "created_at": "2021-03-15T17:45:07Z",
+      "updated_at": "2021-03-15T18:09:22Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Side note, there is sort of a way to do this without reflection.  This is the pattern I usually end up with:\r\n\r\n```csharp\r\n// From cmdlet parameters or similar\r\nScriptBlock userScript;\r\nIDictionary parameters;\r\n\r\nusing var pwsh = PowerShell.Create(RunspaceMode.CurrentRunspace);\r\nconst string proxyScript = @\"\r\n      # I don't remember which of these are actually respected\r\n\t  [System.Diagnostics.DebuggerHidden()]\r\n\t  [System.Diagnostics.DebuggerStepThrough()]\r\n\t  [System.Diagnostics.DebuggerNonUserCode()]\r\n\t  param()\r\n\t  end {\r\n\t      $private:__p = $args[1]\r\n\t      & $args[0] @__p\r\n\t  }\"@;\r\n\r\npwsh.AddScript(proxyScript)\r\n\t.AddArgument(userScript)\r\n\t.AddArgument(parameters)\r\n\t.Invoke();\r\n```\r\n\r\nNot always applicable, but useful to have as a possible work around.",
+      "created_at": "2021-03-15T17:53:26Z",
+      "updated_at": "2021-03-15T17:53:26Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @rjmholt, wouldn't introducing the following new `ScriptBlock.InvokeWithContext()` overload address your use case?\r\n\r\nIt may not matter in every use case, but it's worth noting that the `Invoke*` methods have a lot of limitations (like end block only, very limited `$MyInvocation`, no error stream) and aren't very performant.",
+      "created_at": "2021-03-15T17:58:56Z",
+      "updated_at": "2021-03-15T17:58:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good to know, @SeeminglyScience - still, it seems like it would make sense to have such an overload.\r\n\r\nSo it looks like we have the following problems and potential solutions:\r\n\r\n* Inability to use _named_ arguments with `ScriptBlock.InvokeWithContext()` and `CommandInvocationIntrinsics.InvokeScript()` (only _positional_ ones are currently supported):\r\n\r\n  * New overloads with a `IDictionary parameters` parameter could solve that problem.\r\n\r\n* Inability to pass a script block _as-is_ to `PowerShell.AddScript()`\r\n\r\n  * However, perhaps your [workaround](https://github.com/PowerShell/PowerShell/issues/15004#issuecomment-799622394) (which improves on my wrapper script-block technique by not stringifying the wrapped block but passing it as an _argument_ instead) is sufficient for this particular use case - and its non-obviousness can implicitly serve as a signal that there be dragons.\r\n\r\n* Inability to pass _per-invocation_ arguments via `PowerShell.Invoke()` - that currently only works for _pipeline_ input.\r\n\r\n  * For instance, two consecutive calls to `ScriptBlock.Invoke()` on a given, reusable script block with different parameters works just fine -  `$sb = { \"[$args]\" }; $sb.Invoke(1, 2); $sb.Invoke(3, 4)` - but there's no way to do that via `PowerShell.Invoke()`, from what I understand (the`.AddArgument/Parameter(s)()` irrevocably bake the given arguments into the command).\r\n\r\n   * Adding `PowerShell.Invoke()` overloads that accept _per-invocation_ arguments via `IDictionary parameters` and `params object[] args` parameters could solve that problem.\r\n\r\n",
+      "created_at": "2021-03-15T18:32:49Z",
+      "updated_at": "2021-03-15T18:32:49Z"
+    },
+    {
+      "author": "Keerthi-anusha",
+      "author_association": "NONE",
+      "body": "Hi...\nI'm trying to invoke powershell script which was asking input parameters in powershell in c# how can pass input parameters from c# ",
+      "created_at": "2022-01-02T04:18:52Z",
+      "updated_at": "2022-01-02T04:18:52Z"
+    }
+  ],
+  "created_at": "2021-03-12T01:51:38Z",
+  "number": 15004,
+  "state": "open",
+  "title": "Way to invoke a scriptblock with named parameters from C#",
+  "updated_at": "2022-05-16T18:13:14Z"
+}

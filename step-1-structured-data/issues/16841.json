@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16841",
+  "author": "huoyaoyuan",
+  "body": "### Summary of the new feature / enhancement\n\nSee more detail at https://github.com/dotnet/runtime/issues/62943\r\n\r\nIn short words: PowerShell can list the existence of such file, but not manipulating it.\r\nSuch file is unsupported in many cases (including Windows explorer and notepad). Supporting in PowerShell makes manipulating it easier.\n\n### Proposed technical implementation details (optional)\n\nThe linked .NET issue gives a solution, and explained why they don't want to enable it at their side.",
+  "closed_at": "2022-02-05T21:00:41Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Historically PowerShell explicitly exclude DOS name from manipulations\r\nhttps://github.com/PowerShell/PowerShell/blob/434b238d1a81590185f899545f0ffb2223743147/src/System.Management.Automation/engine/Utils.cs#L1256-L1261\r\n\r\nI created the nul file by an utility and run `dir` in PowerShell:\r\n```\r\nException             :\r\n    Type       : System.IO.IOException\r\n    TargetSite :\r\n        Name          : EnsureDataInitialized\r\n        DeclaringType : System.IO.FileSystemInfo\r\n        MemberType    : Method\r\n        Module        : System.Private.CoreLib.dll\r\n    Message    : The parameter is incorrect. : '\\\\.\\nul'\r\n    Source     : System.Private.CoreLib\r\n    HResult    : -2147024809\r\n    StackTrace :\r\n   at System.IO.FileSystemInfo.EnsureDataInitialized()\r\n   at System.IO.FileSystemInfo.get_Attributes()\r\n   at Microsoft.PowerShell.Commands.FileSystemProvider.GetFileSystemItem(String path, Boolean& isContainer, Boolean showHidden) in C:\\Users\\1\\Documents\\GitHub\\iSazonov\\PowerShell\\src\\System.Management.Automation\\namespaces\\FileSystemProvi\r\nder.cs:line 1376\r\n   at Microsoft.PowerShell.Commands.FileSystemProvider.GetItem(String path) in C:\\Users\\1\\Documents\\GitHub\\iSazonov\\Pow\r\nerShell\\src\\System.Management.Automation\\namespaces\\FileSystemProvider.cs:line 1300\r\nTargetObject          : C:\\tmp\\nul\r\nCategoryInfo          : ReadError: (C:\\tmp\\nul:String) [Get-ChildItem], IOException\r\nFullyQualifiedErrorId : GetItemIOError,Microsoft.PowerShell.Commands.GetChildItemCommand\r\nInvocationInfo        :\r\n    MyCommand        : Get-ChildItem\r\n    ScriptLineNumber : 1\r\n    OffsetInLine     : 1\r\n    HistoryId        : 3\r\n    Line             : dir c:\\tmp\\n*\r\n    PositionMessage  : At line:1 char:1\r\n                       + dir c:\\tmp\\n*\r\n                       + ~~~~~~~~~~~~~\r\n    InvocationName   : dir\r\n    CommandOrigin    : Internal\r\nScriptStackTrace      : at <ScriptBlock>, <No file>: line 1\r\nPipelineIterationInfo :\r\n```\r\n\r\nAs you see .Net return an error. Since PowerShell based on .Net API we can not do more then .Net does.\r\n\r\n@adamsitnik Have you (.Net team) an interest in fixing the issue I accidentally found? I could open new issue in .Net repo if your want.",
+      "created_at": "2022-02-04T10:32:54Z",
+      "updated_at": "2022-02-04T10:35:30Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "I think the correct answer has been given on  https://github.com/dotnet/runtime/issues/62943 \r\n\r\n>I don't believe that expanding all paths by default just to make special DOS file names work is worth it. It increases the code complexity, chances for bugs, and perf regressions (it's extra work). Those who for some reason want to use such names need to do the research and provide the right prefix. If that is too much, they should give up on this idea.\r\n\r\nIt's not obvious how one uses the prefix in PowerShell or if it is even possible. \r\n```\r\nps> dir \\ > \"\\\\?\\$pwd\\Nul\"\r\nOut-File: Cannot perform operation because the wildcard path \\\\?\\C:\\Users\\xxxxx\\Nul did not resolve to a file.\r\n```\r\n? is treated as a wild card, unless it is escaped but escaping causes a different error. \r\n```\r\nps> dir \\ > \"\\\\``?\\$pwd\\Nul\"\r\nOut-File: The filename, directory name, or volume label syntax is incorrect. : '\\\\`?\\C:\\Users\\xxxxx\\Nul'\r\n```\r\n\r\nThis maybe because escaping wildcards isn't well handled. \r\n```\r\nps> dir >  \"[stuff]\"\r\nOut-File: Cannot perform operation because the wildcard path [stuff] did not resolve to a file.\r\nps> dir \\ > \"``[stuff``]\"\r\nps> dir\r\n\r\n   Mode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a---          04/02/2022    12:06            761 `[stuff`]\r\n``` \r\nSo it creates a file with back-ticks in the file name.  **BUG?**\r\n\r\n```\r\nps> del \"``[stuff``]\"\r\nRemove-Item: Cannot find path 'C:\\Users\\xxxx\\[stuff]' because it does not exist.\r\n```\r\nBut when it tries to delete the back ticks are removed _Correct?_\r\n\r\n\r\n\r\n**In addition** behaviour changed between 5.x and 7.2 \r\n\r\nIn 5.x \r\n```\r\n>  dir \\ > nul\r\nout-file : FileStream was asked to open a device that was not a file. ....\r\n> dir | export-csv -Path con\r\nexport-csv : FileStream was asked to open a device that was not a file. ....\r\n```\r\nIn 7.2 \r\n```\r\n>dir \\ > nul\r\n>\r\n```\r\nNo output\r\n```\r\ndir | export-csv -path con\r\n```\r\nWrites to the console.  Using `PRN` or `LPT1` in place of `con`/`nul` gives `Could not find file '\\\\.\\prn'.`\r\n\r\nNow that `nul` and `con` are trapped, at least in some cases, it would be a **breaking change** to treat them as filenames. There are two conflicting requirements  `> nul` discards output as it does in the Unix and cmd.exe worlds  Vs `> nul` creates a file named nul.  The latter has never been the case AFAIK, \r\n",
+      "created_at": "2022-02-04T12:18:41Z",
+      "updated_at": "2022-02-04T12:18:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> ```\r\n> ps> dir \\ > \"\\\\?\\$pwd\\Nul\"\r\n> Out-File: Cannot perform operation because the wildcard path \\\\?\\C:\\Users\\xxxxx\\Nul did not resolve to a file.\r\n> ```\r\n>   \r\n>   \r\n> ? is treated as a wild card, unless it is escaped but escaping causes a different error.\r\n\r\nIt is not correct. If path starts with `\\\\` it is _Provider Direct Path_ and design intention is to pass it to low API as-is but really it is not fully implemented.",
+      "created_at": "2022-02-04T12:24:51Z",
+      "updated_at": "2022-02-04T12:24:51Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as by-design and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-02-05T21:00:40Z",
+      "updated_at": "2022-02-05T21:00:40Z"
+    }
+  ],
+  "created_at": "2022-02-04T09:41:07Z",
+  "number": 16841,
+  "state": "closed",
+  "title": "PowerShell should support file named `NUL` or other DOS reserved name",
+  "updated_at": "2022-02-05T21:00:41Z"
+}

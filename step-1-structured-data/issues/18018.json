@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/18018",
+  "author": "ovdeathiam",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\nWhenever trying to list alternate data stream names and filenames with ``Get-Item`` the stream name is removed from FileName property value.\r\n\r\n1. Create a file named test.txt with stream name t\r\n``Set-Content -Path C:\\test.txt -Stream t -Value testvalue``\r\n2. List available data stream using Get-Item\r\n``Get-Item -Path C:\\test.txt -stream t``\r\n3. Notice that whenever the stream name is in FileName it gets truncated\r\n```console\r\nGet-Item test.txt -Stream t | Format-List PSChildName, FileName, Stream\r\n\r\nPSChildName : test.txt:t\r\nFileName    : C:\\es.x\r\nStream      : t\r\n```\r\n\r\nBoth Windows PowerShell and Powershell Core are affected. Tested on Windows 11 as well as Windows Server 2022.\r\n\r\n### Expected behavior\r\n\r\n```console\r\nPS C:\\> Set-Content -Path test.txt -Stream t -Value testvalue\r\nPS C:\\> Get-Item -Path test.txt -Stream t | Format-List PSChildName, FileName, Stream\r\n\r\nPSChildName : test.txt:t\r\nFileName    : C:\\test.txt\r\nStream      : t\r\n```\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\nPS C:\\> Set-Content test.txt -Stream t -Value testvalue\r\nPS C:\\> Get-Item test.txt -Stream t | Format-List PSChildName, FileName, Stream\r\n\r\nPSChildName : test.txt:t\r\nFileName    : C:\\es.x\r\nStream      : t\r\n```\r\n\r\n\r\n### Error details\r\n\r\n_No response_\r\n\r\n### Environment data\r\n\r\n```powershell\r\nPS> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.6\r\nPSEdition                      Core\r\nGitCommitId                    7.2.6\r\nOS                             Microsoft Windows 10.0.22000\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nPS> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.22000.832\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.22000.832\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n\r\nPS> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.20348.859\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.20348.859\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n_No response_",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "ovdeathiam",
+      "author_association": "NONE",
+      "body": "I've managed to find the reason for this behavior.\r\n\r\nFile\r\n``PowerShell/src/System.Management.Automation/namespaces/FileSystemProvider.cs``\r\n\r\nClass\r\n``AlternateDataStreamUtilities``\r\n\r\nMethod\r\n``GetStreams``\r\n\r\nLine\r\n``data.FileName = path.Replace(data.Stream, string.Empty);``\r\n\r\nDescription\r\nThe path variable holds a path to the alternate data stream i.e. ``C:\\path\\to\\file.ext:streamname``. Running a replace obviously replaces all instances of stream name from the path.\r\n\r\nProbably the following change would fix the issue. That's how its handled elsewhere in ``FileSystemProvider.cs``.\r\n```\r\n-- data.FileName = path.Replace(data.Stream, string.Empty);\r\n-- data.FileName = data.FileName.Trim(Utils.Separators.Colon);\r\n++ int firstColon = path.IndexOf(':');\r\n++ data.FileName = path.Substring(0, firstColon);\r\n```",
+      "created_at": "2022-09-03T01:25:29Z",
+      "updated_at": "2022-09-03T01:25:29Z"
+    },
+    {
+      "author": "dkaszews",
+      "author_association": "CONTRIBUTOR",
+      "body": "@ovdeathiam Won't `firstColon` return the colon in `C:`? You should use `LastIndexOf` instead. Alternatively, more precise solution would be `data.FileName = path.EndsWith(data.Stream) ? path.Substring(0, path.Length - data.Stream.Length) : path;`. ",
+      "created_at": "2022-09-03T05:54:52Z",
+      "updated_at": "2022-09-03T05:54:52Z"
+    },
+    {
+      "author": "kilasuit",
+      "author_association": "COLLABORATOR",
+      "body": "Having tested both suggestions, the first did as @dkaszews suggested, however @dkaszews suggestion is oddly a single character off as shown below\r\n![image](https://user-images.githubusercontent.com/6355225/188259189-1942a802-34d3-4a53-9373-224af7e4d66f.png)\r\n\r\nHowever the actual fix is much simpler \r\n`data.FileName = path`\r\n\r\nWhich I will be submitting a PR for shortly",
+      "created_at": "2022-09-03T07:12:46Z",
+      "updated_at": "2022-09-03T07:12:46Z"
+    },
+    {
+      "author": "dkaszews",
+      "author_association": "CONTRIBUTOR",
+      "body": "@kilasuit Hah, gotta love off-by-one errors \ud83d\ude04 . Should be -1 there because `Substring` is exclusive I guess? That's why you always have to test index arithmetic.",
+      "created_at": "2022-09-03T08:50:17Z",
+      "updated_at": "2022-09-03T08:50:17Z"
+    }
+  ],
+  "created_at": "2022-09-02T23:53:07Z",
+  "number": 18018,
+  "state": "open",
+  "title": "Get-Item returns invalid FileName when listing alternate data streams",
+  "updated_at": "2022-11-02T17:17:05Z"
+}

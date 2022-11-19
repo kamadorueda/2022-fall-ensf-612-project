@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11077",
+  "author": "smartpcr",
+  "body": "I know the behavior exists from the beginning and there is a way to cast it as array. \r\n\r\nHowever, this is unexpected behavior and no other languages are doing it, making it very hard to read/write other formats (json/yaml).\r\n\r\nis there a plan to correct this? \r\n\r\n",
+  "closed_at": "2019-11-27T12:00:25Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I speak in no official capacity, but the behavior is at the heart of PowerShell and very unlikely to change.\r\n\r\nI understand that it may be unexpected if you're not familiar with PowerShell, but once you understand it, it is manageable - and you may see the benefits.\r\n\r\nIn the context of creating JSON, you now have `-AsArray` to ensure that even a single input object received through the pipeline is treated as an array (there is no official YAML support yet, but see #3607):\r\n\r\n```powershell\r\nPS> @(1) | ConvertTo-Json -AsArray  # pipeline enumerates the input array, -AsArray treats the input as array\r\n[\r\n  1\r\n]\r\n```\r\n\r\nAn alternative is to pass the array as an _argument_:\r\n\r\n```powershell\r\nPS>  ConvertTo-Json @(1)\r\n[\r\n  1\r\n]\r\n```\r\n\r\n_From_-JSON conversion with `Convert-FromJson` actually _is_ array-preserving at the moment, but the behavior so runs counter to PowerShell's usual behavior that it will be changed - see #3424\r\n\r\nOnce the change has been made, you'll be able to use `-NoEnumerate` to preserve the array status of the input:\r\n\r\n```powershell\r\n# After 3424 is fixed.\r\nPS> ('[ 1 ]' | ConvertFrom-Json -NoEnumerate).GetType().Name\r\nObject[]\r\n```\r\n",
+      "created_at": "2019-11-14T23:19:04Z",
+      "updated_at": "2019-11-14T23:28:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> no other languages are doing it\r\n\r\nPowerShell is designed as interactive shell and as script engine. As result it has some \"strange\" compromises to address so different scenarios.",
+      "created_at": "2019-11-15T12:08:20Z",
+      "updated_at": "2019-11-15T12:08:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also note that the distinction between arrays and scalar is often unproblematic in PowerShell, because it allows you to treat scalars _as if they were_ arrays; e.g.:\r\n\r\n```powershell\r\n$var = 42 # scalar\r\n\r\n$var.Count  # -> 1 - a scalar is a \"collection of 1\"\r\n\r\n$var[0] # -> 42 - a scalar's \"first collection element\" is the scalar itself\r\n\r\n$var[-1] # -> 42 - a scalar's \"last collection element\" is the scalar itself\r\n```\r\n\r\nPitfalls:\r\n\r\n* Indexing a scalar `[string]` instance indexes into its _character array_ instead; e.g., `'foo'[0]` is `'f'`\r\n\r\n* Calling `.Count` on lazy `IEnumerable`s (which don't have a `.Count` property) forces enumeration and then reports `1` _for each enumerated (scalar) object_ (unless  they happen to have a `.Count` property themselves); e.g., `([IO.File]::ReadLines(\"$pwd/file.txt\")).Count` reports `1` for each line of the input file.\r\n\r\n----\r\n\r\nConversely, you can use the \"array guarantor\" operator (array-subexpression operator), `@(...)`, to ensure that a scalar becomes an array:\r\n\r\n```powershell\r\n$var = 42 # scalar\r\n\r\n# @(...) ensures that $var is treated as an array.\r\n# If $var already *is* an array, @(...) is - loosely speaking - a no-op (see pitfall below).\r\n@($var).GetType().FullName  # -> System.Object[]\r\n```\r\n\r\nAlternatively, if you're capturing output from a command or expression in a variable,  a simpler alternative is to type-constrain the variable with `[array]` (effectively the same as `System.Object[]`):\r\n\r\n```powershell\r\n[array] $arr = 42   # $arr is now a single-element array of type System.Object[]\r\n```\r\n\r\nPitfall:\r\n\r\n* `@(...)` technically _always_<sup>[1]</sup> creates a _new_ array of type `System.Object[]`.\r\n\r\n  * With _command_ output (e.g., `Get-ChildItem`), this makes no difference (`System.Object[]` is the array type PowerShell uses anyway when it collects _multiple_ outputs from the pipeline for you, such as when assigning command output to a variable.\r\n\r\n  * However, if you wrap something that _already is an array in memory_ in `@(...)`, you not only needlessly create a new array, but its specific typing may be lost; e.g., `@([int[]] (1..3)).GetType().FullName` yields `System.Object[]`, despite the `[int[]]`-typed input array.\r\n\r\n---\r\n\r\n<sup>[1] There is one exception: Array _literals_: Because needlessly constructing array literals as `@( 1, 2 )` - instead of just `1 , 2` (the use of array-construction operator `,`  is enough) - was such a widespread practice, starting in v5.1 the `@( ... )` is optimized away, so as to avoid constructing an array _twice_.</sup>\r\n\r\n\r\n",
+      "created_at": "2019-11-15T13:11:30Z",
+      "updated_at": "2019-11-15T13:21:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "In addition to the above comments, you might find the [PSKoans ](https://aka.ms/pskoans)topics concerning arrays to be a useful resource to familiarise yourself with the behaviours in practice. \ud83d\ude42 \r\n\r\n",
+      "created_at": "2019-11-15T13:42:48Z",
+      "updated_at": "2019-11-15T13:42:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Nice, @vexx32  - that looks like a labor of love.\r\n\r\n@smartpcr, let me also attempt to describe the _design rationale_ for the current pipeline behavior (it's fine if no one is listening anymore, I'm also writing this up for myself).\r\n\r\n---\r\n\r\nPowerShell is built around _pipelines_: data conduits through which objects stream, one object at a time<sup>[1]</sup>.\r\n\r\nPowerShell commands output to the pipeline by default, and any command can write _any number of objects_, including none - and _that number isn't known in advance_, because it can vary depending on arguments and external state.\r\n\r\nE.g., `Get-ChildItem *.txt` can situationally emit none, 1, or multiple objects. \r\n\r\nSince the pipeline is just a stream of objects of unspecified count, there is no concept of an _array_ in the pipeline itself, both on input and on output:\r\n\r\n* On input, arrays (and most enumerables) are _enumerated_, i.e. the elements are sent one by one to the pipeline. Therefore, there is no difference between sending a _scalar_ (single object) and sending a _single-element array_ through the pipeline.\r\n\r\n* On output, multiple objects are simply output one at a time (though it is possible, but rare, to send an array _as a whole_, but it is then itself just another, single output object in the pipeline).\r\n\r\nIt is only when you _collect_ a pipeline's output that arrays come into play, of necessity:\r\n\r\n* A single output object needs no container, and can just be received as itself.\r\n\r\n\r\n* Multiple objects need a container, and PowerShell automatically creates a `System.Object[]` array to collect the output objects in.\r\n\r\n\r\n\r\n---\r\n\r\n<sup>[1] You can introduce _buffering_ of multiple objects with the common `-OutBuffer` parameter, but the next command in a pipeline still receives the buffered objects one by one.</sup>",
+      "created_at": "2019-11-15T19:51:48Z",
+      "updated_at": "2019-11-15T19:51:48Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2019-11-27T12:00:24Z",
+      "updated_at": "2019-11-27T12:00:24Z"
+    },
+    {
+      "author": "hrimhari",
+      "author_association": "NONE",
+      "body": "I'd like to add that when doing dynamic manipulation it's mind blowing to have to wrap the result of a `where` clause over an array to account for the cases where it may result in an array (multiple matches) or a single item.",
+      "created_at": "2020-11-19T22:11:32Z",
+      "updated_at": "2020-11-19T22:11:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@hrimhari: For collections already in memory / ones that can be, you can use the `.Where()` array _method_, which _always_ returns a collection; e.g.:\r\n\r\n```powershell\r\nPS> (1..10).Where({ $_ -eq 5 }).GetType().Name\r\nCollection`1\r\n```\r\n\r\n",
+      "created_at": "2020-11-19T22:19:16Z",
+      "updated_at": "2020-11-19T22:19:16Z"
+    },
+    {
+      "author": "hrimhari",
+      "author_association": "NONE",
+      "body": "@mklement0 good to know it returns Collection. I actually tried it before posting but I was testing against type [array] and getting false.",
+      "created_at": "2020-11-19T22:33:01Z",
+      "updated_at": "2020-11-19T22:33:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Specifically, you'll get an instance of `[System.Collections.ObjectModel.Collection[psobject]]`.\r\n\r\nIf you want to more generally test for something that is _enumerable_, use `-is [System.Collections.IEnumerable]`",
+      "created_at": "2020-11-19T22:39:23Z",
+      "updated_at": "2020-11-19T22:39:23Z"
+    }
+  ],
+  "created_at": "2019-11-14T21:06:58Z",
+  "number": 11077,
+  "state": "closed",
+  "title": "why unbox single item array?",
+  "updated_at": "2020-11-19T22:39:23Z"
+}

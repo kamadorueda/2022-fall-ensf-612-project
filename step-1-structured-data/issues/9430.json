@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9430",
+  "author": "mklement0",
+  "body": "On Windows, `$env:PATHEXT` defines the filename extensions that should be directly executable, based on their associated file-type definition.\r\n\r\nIf the file-type definition happens to define a _console-subsystem_ application, that application is - as expected - executed in the _current_ console window.  \r\nAn example is extension `.exe` and running, say, `findstr.exe`.\r\n\r\n**It makes sense for the same logic to apply to _extension-less_ filenames**, _if_ they are marked as executable, after having added (non)-extension `.` to `$env:PATHEXT`:\r\n\r\n**Supporting direct execution of extension-less files is useful for emulating support for Unix-like scripts that specify their associated interpreter by their _shebang line_ only**.\r\n\r\nWith a suitable file-type definition mapped to `.`:\r\n\r\n* Invocation of extension-less files already works as expected in `cmd.exe`.\r\n\r\n* In PowerShell, the associated application is _invariably_ executed in a _new_ console window - even if it is a _console_ application.\r\n\r\n**The root cause is likely #7769**, which also causes problem in the context of `npm` use.\r\n\r\n**Note**: Direct invocation of extension-less files by filename only actually works even _without_ `.` present in `$env:PATHEXT` in PowerShell (but, as stated, invariably in a _new_ console window).\r\nHowever, #9469 proposes that this be disallowed, so as to restrict by-filename-only invocations to file types explicitly designated as _executables_ (rather than _documents_).\r\n\r\n# Steps to reproduce (Windows only)\r\n\r\n* Run the `Install-ShebangSupport.ps1` from [this Stack Overflow answer](https://stackoverflow.com/a/55619189/45375) to install support for direct execution of extension-less shebang-line-based scripts. (Run `Install-ShebangSupport.ps1 -Uninstall` to uninstall later.)\r\n\r\n* Create extension-less script `foo` in the current dir. with a `pwsh` shebang line:\r\n\r\n```powershell\r\n\"#!pwsh.exe`n'hello, world'; read-host\" > foo\r\n```\r\n\r\n* Invoke the script:\r\n\r\n```powershell\r\n.\\foo\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe script should execute in the _current_ console window, print `hello, world`, then wait for <kbd>Enter</kbd> to terminate.\r\n\r\n\r\n# Actual behavior\r\n\r\nThe script executes in a _new_ console window.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 6.2.0 on Windows\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looks like PowerShell already executes extension-less files, by passing them to Explorer.  I bet PowerShell is matching the EXACT command name (without extension) first and sending it to Explorer, and then Explorer is finding a means to execute it, such as you already have a handler set for extension-less files that reads the shebang?   Otherwise I cannot see how your script would be causing a new window to open.",
+      "created_at": "2019-04-25T19:38:48Z",
+      "updated_at": "2019-04-25T19:38:48Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Actually I think you really said most of what I questioned \u2026   it just looks like PowerShell does not accept the extension-less file as an executable, and passes it on to Explorer, so it probably isn't honoring PATHEXT.",
+      "created_at": "2019-04-25T19:41:15Z",
+      "updated_at": "2019-04-25T19:41:15Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "This caused me to find #9468, I just happened to have an extension-less file in my home folder that started with '.' and tried it without the normally preceeding '.\\'.",
+      "created_at": "2019-04-25T20:03:21Z",
+      "updated_at": "2019-04-25T20:03:21Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "but NOT in PowerShell if the file is in the current location.  In that case, you must at least include the 'dot path' as a reference.\r\n```\r\nSuggestion [3,General]: The command test.html was not found, but does exist in the current location. \r\nPowerShell does not load commands from the current location by default. If you trust this command, \r\ninstead type: \".\\test.html\". See \"get-help about_Command_Precedence\" for more details.\r\n```",
+      "created_at": "2019-04-25T21:23:19Z",
+      "updated_at": "2019-04-25T21:23:19Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Now its coming back to me, PATHEXT is the list of extensions that CMD/PowerShell (or Windows) will attempt to append to the end of an extension-less command name and then search the PATH to see if it exists.   Adding `;.` to PATHEXT is meaningless to PowerShell it seems, since PowerShell already checked for it without an extension (but CMD does not).   Maybe that is a separate issue yet?  It appears both Windows PowerShell 5.1 and PowerShell Core 6.2 exhibit this behavior.  I could understand this being normal on 'nix, but not expected on Windows.",
+      "created_at": "2019-04-25T23:44:30Z",
+      "updated_at": "2019-04-25T23:45:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@msftrncs:\r\n\r\n<sup>This replaces my since-deleted previous comment, which became obsolete after having gained further insights and now better understanding your previous comment.</sup>\r\n\r\n> since PowerShell already checked for it without an extension (but CMD does not)\r\n\r\nGood analysis, thanks.\r\n\r\n> Maybe that is a separate issue yet? \r\n\r\nThere's at least one related issue, summarized in https://github.com/PowerShell/PowerShell/issues/7769#issuecomment-423695890:\r\n\r\nThere, it is the presence of a an extension-less \"companion file\" to a file with an executable extension (`.cmd`). PowerShell, due to the exact file-path match (curiously only with _absolute_ paths) thinks that the companion file rather than the executable one is to be opened, and hands the companion-file path to `ShellExecute`, which invariably executes in a _new_ window but _does_ execute the `.cmd` file, after all.\r\n\r\nThat is, in the absence of a filename extension in the specified path, the Windows shell  (`ShellExecute`) prioritizes _executables_ over _documents_.\r\n(The question then arises how to instruct `ShellExecute` _not_ to look for a file with an executable extension and use the path verbatim in order to open the companion file - at least I _hope_ that is possible.)\r\n\r\nPowerShell should do the same, which in the presence of `.` in `$env:PATHEXT` would mean _not_ passing the file path to `ShellExecute` and attempt direct execution in the _current_ console window, as would happen for, say, a `.py` file.\r\n(I can't tell whether there are any technical challenges.)\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-04-26T16:31:26Z",
+      "updated_at": "2019-04-26T16:31:26Z"
+    },
+    {
+      "author": "eabase",
+      "author_association": "NONE",
+      "body": "Bump!?  \r\n\r\nI'm surprised not more people are interested in getting this working, but perhaps it is just the issue title that is a bit unclear for most, and certainly not something one would use to search powershell issues related to hashbang execution.  ",
+      "created_at": "2020-11-08T09:30:51Z",
+      "updated_at": "2020-11-08T09:30:51Z"
+    }
+  ],
+  "created_at": "2019-04-21T22:08:42Z",
+  "number": 9430,
+  "state": "open",
+  "title": "Windows: With $env:PATHEXT including \".\" (extension-less files), PowerShell executes even associated console applications in a NEW console window",
+  "updated_at": "2021-01-15T10:06:27Z"
+}

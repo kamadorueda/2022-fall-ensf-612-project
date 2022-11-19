@@ -1,0 +1,265 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/992",
+  "author": "vors",
+  "body": "## Steps to reproduce\n\nPut in your PS profile\n\n``` powershell\nWrite-Host 'PROFILE'\n```\n\nCreate a script `./foo.ps1` and `chmod +x` on it\n\n``` powershell\n#!/usr/local/bin/powershell\nWrite-Host 'foo'\n```\n\nFrom bash call `./foo.ps1`\n## Expected behavior\n\nShould not load profile\n\n```\nash-3.2$ ./foo.ps1\nfoo\n```\n\nReason: that's how bash handles it\n## Actual behavior\n\nLoad profile\n\n```\nash-3.2$ ./foo.ps1\nPROFILE\nfoo\n```\n## Environment data\n\nv0.4.0\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "Ha! I don't see anyway this is going to work without a shim that executes with `-noprofile`.\n",
+      "created_at": "2016-05-18T23:33:39Z",
+      "updated_at": "2016-05-18T23:33:39Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "We just need to figure out who called us, you know.\n\nAlso, if you run the same way\n\n``` powershell\n#!powershell\n\nWrite-Host 'foo'\n```\n\n```\nbash-3.2$ /Users/vors/dev/foo.ps1\nFailed to load , error: dlopen(, 1): no suitable image found.  Did find:\n    /usr/local/lib/: not a file\n    /usr/lib/: not a file\n\n```\n",
+      "created_at": "2016-05-19T21:17:23Z",
+      "updated_at": "2016-05-19T21:17:23Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "I don't see how we would reliably determine who called us, and how to interpret it (I as a user might call PowerShell via `env`, and wouldn't want its behavior to change because it detected that `env` launched it instead of Bash, that's just a bad idea).\n\nI think really we just want to run with `-noprofile` whenever an in-place script is run (and `-noexit` was _not_ used). Said another way, a profile should only be loaded when PowerShell is launched into an interactive shell.\n\nThis would be much better behavior (but we'd need a way to specify `-profile` to reverse it).\n",
+      "created_at": "2016-05-19T21:42:28Z",
+      "updated_at": "2016-05-19T21:42:28Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr can you comment on the profile/noprofile, please ?\n\nShould this work at all `#!powershell` ?\n",
+      "created_at": "2016-05-19T21:46:55Z",
+      "updated_at": "2016-05-19T21:46:55Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I just noticed this in my .bashrc:\n\n```\n# If not running interactively, don't do anything\ncase $- in\n    *i*) ;;\n      *) return;;\nesac\n```\n\nSo I would say we should run the profile with `#!powershell`, but we should also find a clean way of detecting the process is interactive, e.g. `if ($host.IsInteractive)`\n",
+      "created_at": "2016-07-21T00:03:04Z",
+      "updated_at": "2016-07-21T00:03:12Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": ":+1: \nI was asking for `$host.IsInteractive` for ages.\n",
+      "created_at": "2016-07-21T00:04:49Z",
+      "updated_at": "2016-07-21T00:04:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Since #3558 merged it seems we can get a fix for this.\r\n/cc @SteveL-MSFT @mklement0 ",
+      "created_at": "2017-10-07T19:09:46Z",
+      "updated_at": "2017-10-07T19:09:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Note: In this discussion, we're equating PowerShell _profiles_ with _one_ type of initialization file in POSIX-like shells, the \"_individual per-interactive-shell startup file\"_, as Bash calls it, stored in `~/.*rc` files; e.g., `~/.bashrc` for Bash. In POSIX-like shells, _profiles_ are distinct initialization files (which, unlike the `~/.*rc` files, exist both on a system and at a user level) only sourced  by _login shells_, irrespective of interactivity; A POSIX-like shell is a login shell only if the `-l` option is explicitly passed or invocation happens via the `login` utility - PowerShell has _no_ equivalent to that, but in contrast with POSIX-like `~/.*rc` files, PowerShell's profiles exist both at the current-user and all-users (and host) levels.\r\n\r\n* Shebang lines  (`#!...`) on Unix platforms only every work with _absolute paths_.\r\n\r\n* Only _2_ tokens are portably supported (`#!/path/to/foo bar`; macOS supports more, but Linux doesn't).\r\n\r\n* Given that the `powershell` binary (a symlink to it) is installed in different locations across supported Unix platforms (`/usr/bin` on Linux vs. `/usr/local/bin` on macOS), the only way to portably target PowerShell is to invoke it via `env`, relying on `env`'s ability to locate it via the `$PATH`, i.e.: `#!/usr/bin/env powershell`\r\n\r\n   * This means that if you want your script to remain portable, passing any parameters to `powershell` itself as part of the shebang line is NOT an option, given that `#!/usr/bin/env powershell` already uses up the 2 tokens that are portably supported.\r\n\r\n---\r\n\r\n* POSIX-like shells (`bash`, `ksh`, `zsh`) do NOT load their initialization files (`~/.*rc`) if _they themselves_ determine that they're being invoked _non-interactively_, such as via a shebang line.\r\n\r\n  * Providing something like `$host.IsInteractive` would be helpful in general, but should _not_ come into play here; in fact, initialization files doing their own interactivity detection causes [nothing but trouble](https://github.com/mklement0/n-install/issues/1#issuecomment-128536212), because it gets in the way of non-interactive scripts purposely re-sourcing initialization files after their modification.\r\n\r\n * Thus, if PowerShell wants to fit into the Unix world specifically and more generally wants to _provide a predictable scripting environment_ it _mustn't load profiles by default_ when executing scripts; unfortunately, that is a breaking change; see #3743",
+      "created_at": "2017-10-07T20:58:33Z",
+      "updated_at": "2017-10-08T21:51:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Here's how Bash determines if an instance is non-interactive - such as when invoked via a shebang line (as stated, non-interactive instances by default do not load _any_ initialization files):\r\n\r\n>       An interactive shell is one started without non-option arguments \r\n>       [read: a script filename operand optionally followed by its arguments] and\r\n>       without the -c option whose standard input and error are both connected\r\n>       to terminals (as determined by isatty(3)), or one started with  the  -i\r\n>       option.\t PS1 is set and $- includes i if bash is interactive, allowing\r\n>       a shell script or a startup file to test this state.\r\n\r\nNote that the use of shebang line `#!/bin/bash` in, for example, script `/tmp/foo` results in invocation  \r\n`/bin/bash /tmp/foo`.",
+      "created_at": "2017-10-08T03:40:17Z",
+      "updated_at": "2017-10-08T03:41:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting, if we install PowerShell in different locations across supported Unix platforms why not create a link to current version in `/bin`? Have we `bash` on all platforms there?\r\nSometimes loading a profile in non-interactive mode can be useful, ex. loading a compatibility module. So automatic detection of non-interactive mode is not best way for PowerShell. Since we discuss using a short name (`posh`) we can resolve the problem with shebang by adding new wrappers:\r\n- ` #!/usr/bin/env posh-no-user-profile`\r\n- ` #!/usr/bin/env posh-no-all-profile`\r\n- ` #!/usr/bin/env posh-no-profiles`",
+      "created_at": "2017-10-08T06:48:04Z",
+      "updated_at": "2017-10-08T06:48:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> why not create a link to current version in `/bin`\r\n\r\nAt least Linux platforms conform to the [FHS (Filesystem Hierarchy Standard)](https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard), according to which placing a symlink to the PowerShell binary in `/bin` would be inappropriate; similarly, it would be unexpected on macOS.\r\n\r\n> Do we have bash on all platforms there?\r\n\r\nProbably yes, but  how does that come into play here? \r\n\r\n> Sometimes loading a profile in non-interactive mode can be useful\r\n\r\nYou can always do that from _within_ a script, if needed; e.g., `. $PROFILE`.\r\n\r\n> we can resolve the problem with shebang by adding new wrappers:\r\n\r\nThat seems like an obscure and cumbersome workaround.\r\n",
+      "created_at": "2017-10-08T22:21:37Z",
+      "updated_at": "2017-10-08T22:43:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">That seems like an obscure and cumbersome workaround\r\n\r\nIf we want to be bash-behaivor-compatible we should use bash startup code and embed it in PowerShell startup code. But it doesn't seem compatible with PowerShell behavior. Dead lock :-). I think we're doomed to be rude and break a wall somewhere. Until we have the right solution, I prefer to have a wrapper. When it becomes stable, we could gradually embed it in the main code.\r\n",
+      "created_at": "2017-10-09T06:03:28Z",
+      "updated_at": "2017-10-09T06:03:28Z"
+    },
+    {
+      "author": "RichardSiddaway",
+      "author_association": "NONE",
+      "body": "Not clear here if you're thinking of not automatically loading profiles just in the shebang case or making that the default. if just the shebang case you have the issue of a different behaviour. if you're talking about making the default not to load profiles on all platforms then that's a huge breaking change that will upset the majority of Windows users. This is a case of which option is going to upset the least number of users.",
+      "created_at": "2017-10-09T15:34:37Z",
+      "updated_at": "2017-10-09T15:34:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@RichardSiddaway Windows and Unix sometimes is very different. Windows PowerShell and Bash too. We need easy ways to adapt PowerShell to Unix users. So we need support common Unix scenarios without breaking Windows users. This often affects many _interrelated_ features.",
+      "created_at": "2017-10-09T18:06:24Z",
+      "updated_at": "2017-10-09T18:06:24Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "FWIW we've already run into problems with shebang scripts spewing errors from users' profiles.  I guess if my team doesn't care about macOS support we could use:\r\n```\r\n#!/usr/bin/powershell -noprofile\r\n```\r\nToo bad we can't do this in a way that would work on macOS as well.",
+      "created_at": "2017-10-10T00:50:58Z",
+      "updated_at": "2017-10-10T00:50:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@RichardSiddaway: \r\n\r\nNote that a shebang line is just syntactic sugar (handled by the system) for invoking the executable named in it with the full path of containing file, so that `#!/usr/bin/pwsh` inside file `/path/to/script` is equivalent to explicit invocation `/usr/bin/pwsh /path/to/script`. Not only would it be difficult to distinguish these two forms, they _should_ be considered the same.\r\n\r\nTo be clear: the suggestion is not to make non-loading of the profile the default _categorically_, but only for _non-interactive_ scenarios, which notably includes executing a _script_.\r\n\r\nThis distinction is sensible:\r\n\r\n* When executing a _script_, do not load profiles, so as to provide a predictable, standardized execution environment.\r\n\r\n* When starting an _interactive_ session, load the profiles for a customized interactive experience with custom aliases, functions, ...\r\n\r\n@rkeithhill's example shows that automatic loading of profiles for script execution is problematic in practice - ranging from distracting extraneous output / benign errors to fundamentally changing the script's behavior.\r\n\r\nAlso note that even if this issue is addressed, invoking `*.ps1` files _in-process_ from an interactive session will continue to run in an environment customized by profiles.\r\n(This issue doesn't even arise in POSIX-like shells, where all scripts invariably run in a _child_ process (unless explicitly _sourced_) that is unaffected by the parent shell's state, save for modifications to _environment variables_.)\r\n\r\nAs @iSazonov notes, something's gotta give.\r\nIf a breaking change is not an option: To modify his suggestion, perhaps a _single_ wrapper for `pwsh -noprofile` for use in shebang lines (or directly) is a reasonable compromise: `#!/usr/bin/env pwsh-np`\r\n\r\n",
+      "created_at": "2017-10-12T02:19:11Z",
+      "updated_at": "2017-10-12T02:19:41Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "> When executing a script, do not load profiles, so as to provide a predictable, standardized execution environment.\r\n\r\nAgree 100%",
+      "created_at": "2017-10-12T02:52:31Z",
+      "updated_at": "2017-10-12T02:52:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Could you please comment? I remember you have some thoughts about profile loading.",
+      "created_at": "2017-10-12T04:51:51Z",
+      "updated_at": "2017-10-12T04:51:51Z"
+    },
+    {
+      "author": "4creators",
+      "author_association": "NONE",
+      "body": "One of possible solutions to that problem could be creation of system wide alias i.e. **posh** which would enforce Unix like behavior for shell scripts. This would make possible to have best of two worlds Windows convention based powershell (to preserve compatibility) and Unix convention based posh commands. For situations where current Windows powershell default behavior hurts see https://github.com/dotnet/source-build/issues/225 and issues linked there.",
+      "created_at": "2017-10-12T06:56:56Z",
+      "updated_at": "2017-10-12T06:56:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@4creators: Note that an _alias_ is not a viable solution, because the mechanism must be shell-independent. \r\n\r\nTherefore, an _executable in the filesystem_ is needed that ensures the no-profile behavior.\r\n\r\nIn the simplest case, a mere _symlink_ such as `/usr/bin/pwsh-np` would suffice:\r\nAssuming that PowerShell can determine the filename of a symlink that invoked it (which native programs can do), it can adjust the behavior accordingly.\r\n\r\nThe - suboptimal - fallback solution would be a wrapper script.",
+      "created_at": "2017-10-12T13:25:30Z",
+      "updated_at": "2017-10-12T13:25:38Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "As a user, I might want the profile loaded in such scenarios so I can stop my admin from messing with my machine. \ud83d\ude38  \ud83d\ude4c \r\n\r\nBut more seriously - admins don't want the profile loaded in non-interactive invocations of PowerShell. They should always specify `-noprofile`, but they don't, even when they are aware of the potential issues.\r\n\r\n",
+      "created_at": "2017-10-12T17:34:39Z",
+      "updated_at": "2017-10-12T17:34:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee to review proposal to have something like `pwsh-np`",
+      "created_at": "2018-04-13T04:20:31Z",
+      "updated_at": "2018-04-13T04:20:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I'd prefer to see a _common conception_ for interactive vs non-interactive vs login.\r\nWe could have some startup wrappers like `pwsh-np`.\r\nAlso we have a request to have a lightweight client for remoting.",
+      "created_at": "2018-04-13T04:43:09Z",
+      "updated_at": "2018-04-13T04:43:09Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and is ok with the `pwsh-np` proposal.  Recommend investigating using a symlink/hardlink to avoid having multiple copies of the host binary.",
+      "created_at": "2018-04-25T22:37:02Z",
+      "updated_at": "2018-04-25T22:37:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: Note that on Windows neither a symlink nor a hardlink works - see https://github.com/dotnet/core-setup/issues/3260",
+      "created_at": "2018-04-26T04:50:37Z",
+      "updated_at": "2018-04-26T04:50:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Could we implement `pwsh-np` as a custom pwsh.dll loader?",
+      "created_at": "2018-04-26T05:52:22Z",
+      "updated_at": "2018-04-26T05:52:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: I haven't taken a closer look, but it seems that .NET Core 2.1 may offer a solution.\r\nFrom https://github.com/dotnet/core-setup/issues/3260#issuecomment-375780087:\r\n\r\n> https://github.com/dotnet/core-setup/issues/3720 will provide a way to have a renamed exe (apphost) plus point to another location that contains the application files. However it does require a local startupconfig.json file to tell it where the app files are located. So the exe and a simple json file are similar in functionality to the symbolic link original requirements and this new functionality will be leveraged by global tools.\r\n\r\nIf I understand this correctly, then a shim executable with accompanying `startupconfig.json` will do.\r\n\r\nAs an aside: As I've mentioned in the linked issue, I can't help but think that a symlink-based solution should be technically possible, via  [GetFinalPathNameByHandle](https://msdn.microsoft.com/en-us/library/windows/desktop/aa364962%28v=vs.85%29.aspx), but from the absence of feedback I infer that there's no intent to tackle this.\r\n",
+      "created_at": "2018-04-26T12:47:39Z",
+      "updated_at": "2018-04-26T12:47:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 3720 was closed and they don't track closed issues - so you should open new issue for  `GetFinalPathNameByHandle`.\r\n\r\nAs for the solution I hope we'll able test this on next week after moving to .Net Core 2.1.",
+      "created_at": "2018-04-26T13:43:13Z",
+      "updated_at": "2018-04-26T13:43:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Good idea - please see https://github.com/dotnet/core-setup/issues/4080",
+      "created_at": "2018-04-26T15:17:28Z",
+      "updated_at": "2018-04-26T15:17:28Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm really not a fan of using a different binary - I think far too many people will use `pwsh` because of familiarity and that will be fine on their machine and maybe in production, but will fail on some random dev box.",
+      "created_at": "2018-04-26T17:23:48Z",
+      "updated_at": "2018-04-26T17:23:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We can look at it from the other side based on #3743 and introduce one exe as POSIX-like (or even POSIX-compliant) and second one with traditional behavior.\r\nFor example `powershell.exe` - traditional behavior, `pwsh.exe` - POSIX-like.\r\n",
+      "created_at": "2018-05-09T17:31:00Z",
+      "updated_at": "2018-05-09T17:31:00Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "It would really be nice to have something for 6.1 that works on Windows as well.  I've been trying to use git pre-commit hooks on my Windows dev box to ensure I have the right email configured.  This works but it slows down all my commits because it processes my profile scripts when it does **not** need to:\r\n```\r\n#!/usr/bin/env pwsh\r\n\r\n# Verify user's Git config has appropriate email address\r\nif ($env:GIT_AUTHOR_EMAIL -notmatch '@(non\\.)?acme\\.com$') {\r\n    Write-Warning \"Your Git email address '$env:GIT_AUTHOR_EMAIL' is not configured correctly.\"\r\n    Write-Warning \"It should end with '@acme.com' or '@non.acme.com'.\"\r\n    Write-Warning \"Use the command: 'git config --global user.email <name@acme.com>' to set it correctly.\"\r\n    exit 1\r\n}\r\n\r\nexit 0\r\n```\r\nThe only work around I've found is to put the PS script in a separate pre-commit.ps1 file and modify pre-commit to:\r\n```\r\n#!/bin/sh\r\npwsh.exe -NoProfile -File .git/hooks/pre-commit.ps1\r\n```\r\nBut I'd rather there be just a single file.  At this point, I'd be satisfied if I could do this:\r\n```\r\n#!/usr/bin/env pwsh-np\r\n...\r\n```",
+      "created_at": "2018-06-05T18:52:14Z",
+      "updated_at": "2018-06-05T18:53:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rkeithhill: \r\n\r\nIt's obviously just a stopgap, but you can roll your own `pwsh-np` by creating a script by that name with the content below and by placing it in a folder in your PATH (works on both Windows and Unix-like platforms, but on the latter you must also mark the script as executable (`chmod a+x pwsh-np`)):\r\n\r\n```sh\r\n#!/bin/sh\r\n\r\npwsh -noprofile \"$@\"\r\n```\r\n\r\nYour hooks should then be able to use the shebang you mentioned (`#!/usr/bin/env pwsh-np`).\r\n",
+      "created_at": "2018-06-05T19:21:18Z",
+      "updated_at": "2018-06-05T19:21:18Z"
+    },
+    {
+      "author": "nippyin",
+      "author_association": "NONE",
+      "body": "Able to Run .ps1 script on zsh manually, however if call same ps1 from ansible playbook gets error that Connect-AzAccount is not recognized. #!/usr/bin/env pwsh is what i use in .ps1\r\nPlease help me to setup my environment variable.",
+      "created_at": "2019-05-20T02:17:53Z",
+      "updated_at": "2019-05-20T02:18:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nippyin Please open new issue with step-by-step repo.",
+      "created_at": "2019-05-20T03:25:14Z",
+      "updated_at": "2019-05-20T03:25:14Z"
+    },
+    {
+      "author": "rashil2000",
+      "author_association": "NONE",
+      "body": "> I just noticed this in my .bashrc:\r\n> \r\n> ```\r\n> # If not running interactively, don't do anything\r\n> case $- in\r\n>     *i*) ;;\r\n>       *) return;;\r\n> esac\r\n> ```\r\n> \r\n> So I would say we should run the profile with `#!powershell`, but we should also find a clean way of detecting the process is interactive, e.g. `if ($host.IsInteractive)`\r\n\r\nIs `$Host.IsInteractive` planned? FWIW, `[Environment]::UserInteractive` always seems to return True, even in `pwsh -c <command>`. \r\n\r\nI just realized that setting PowerShell as default shell on Linux (using `chsh`) is a very bad idea. All my programs display a lag of 3-4 seconds when starting up. Many applications use `\"$SHELL\" -c <command>` to run external commands, and in each of them PowerShell seems to load the profile, causing the delay (since `$SHELL` is now `/usr/bin/pwsh`). This is particularly noticeable in Neovim and Fzf, as examples.\r\n\r\nPresence of `$Host.IsInteractive` would really help in aborting the sourcing of profile, as in the case of bash.",
+      "created_at": "2021-09-04T14:23:03Z",
+      "updated_at": "2021-09-04T14:25:51Z"
+    }
+  ],
+  "created_at": "2016-05-18T18:42:37Z",
+  "number": 992,
+  "state": "open",
+  "title": "#!/usr/local/bin/powershell bang should not load profile",
+  "updated_at": "2021-09-04T14:25:51Z"
+}

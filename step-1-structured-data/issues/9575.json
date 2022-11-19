@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9575",
+  "author": "mklement0",
+  "body": "This is a regression from Windows PowerShell, where the - useful - behavior is as follows:\r\n\r\n* If you repeatedly call  `Add-Type -TypeDefinition/-MemberDefinition` for the same target type, only the _first_ invocation adds the type to the session and subsequent calls are benign - and fast - no-ops, _if_ the source code is unchanged.\r\n\r\n* If you modify the source code, you get an error along the lines of:\r\n`Add-Type : Cannot add type. The type name '<name>' already exists.`\r\n\r\nThis behavior is sensible, as it alerts you to the fact that trying to change the type in-session isn't possible.\r\n\r\nBy contrast, PowerShell Core now quietly _ignores_ attempts to change the type, which means that you may not notice that your changes didn't take effect.\r\n\r\n\r\n# Steps to reproduce\r\n\r\nRun the following Pester test\r\n\r\n```powershell\r\n{\r\n  Add-Type -TypeDefinition @'\r\n  public class Foo {}\r\n'@\r\n  \r\n  # Try to redefine the type with different source code.\r\n  Add-Type -TypeDefinition @'\r\n  public class Foo { public int Bar {get {return 42;} } }\r\n'@\r\n  \r\n} | Should -Throw\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe test should succeed, because an error should be emitted.\r\n\r\n# Actual behavior\r\n\r\nThe test fails, because no error is emitted, because the second `Add-Type`  is ~~effectively quietly ignored~~ [a _new_ assembly is actually being created - see \r\n[@daxian-dbw's comment below](https://github.com/PowerShell/PowerShell/issues/9575#issuecomment-491634962)]\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core v6.2.0\r\n```\r\n",
+  "closed_at": "2019-08-22T04:35:37Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Add-Type was fully re-implemented on Roslyn (CodeDom was used in Windows PowerShell). \r\nAnd now we actively use caching - if we can find a type we use them and don't compile again. If I remember right this was accepted as preferred behavior. ",
+      "created_at": "2019-05-11T17:49:48Z",
+      "updated_at": "2019-05-11T17:49:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nWindows PowerShell is capable of detecting if the source code changed and only if it did does it complain - helpfully so; otherwise, the call is a quiet - and fast - no-op.\r\n\r\nAre you saying the same can't be done in PowerShell Core?\r\n\r\nI don't think anyone prefers the behavior of having their attempt to define a type quietly ignored.\r\n",
+      "created_at": "2019-05-11T18:19:08Z",
+      "updated_at": "2019-05-11T18:19:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Windows PowerShell is capable of detecting if the source code changed\r\n\r\nThere was very simple caching.\r\nCurrent cache is very effective in most use cases.  For example, we do not re-read the file every time, but just see if timestamp was changed. We don't cache based on source text but on SourceTree.\r\n\r\n> Are you saying the same can't be done in PowerShell Core?\r\n\r\nNo. Our thoughts was that the behavior is more safe in multi runspace environment. For example, we could destroy foregroud job by running a script which re-define a custom type. Recommendation for script/module authors is to define types in custom namespace.\r\n\r\n> quietly ignored.\r\n\r\nThere should be a verbose message.",
+      "created_at": "2019-05-11T19:05:21Z",
+      "updated_at": "2019-05-11T19:05:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> There should be a verbose message.\r\n\r\nThat's what this issue is asking for.\r\n\r\nNote that it's not just about clashes between _different_ authors. It's also about debugging by a single author, rerunning a script in a given session after having modified the source code, not realizing that the redefinition won't be possible in the same session - from what I understand, it's  technically impossible to redefine a given .NET type in a session, because unloading assemblies isn't possible, right?\r\n\r\nSo we're in agreement, then? Your original response sounded like you favored the quiet ignoring.\r\n\r\n\r\n",
+      "created_at": "2019-05-11T19:19:34Z",
+      "updated_at": "2019-05-11T19:19:55Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> If you modify the source code, you get an error along the lines of:\r\nAdd-Type : Cannot add type. The type name '<name>' already exists.\r\n\r\nThis should be the expected behavior. We should fix `Add-Type` in PS core.\r\n\r\n> subsequent calls are benign - and fast - no-ops, if the source code is unchanged.\r\n\r\nAgreed that a verbose message should be added in this case.\r\n",
+      "created_at": "2019-05-12T03:50:43Z",
+      "updated_at": "2019-05-12T05:23:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @daxian-dbw.\r\n\r\nA  message to the verbose stream  _is_ already being issued (but only in PS _Core_); i.e., you need to use `-Verbose` to see it: `The source code was already compiled and loaded.`\r\n\r\nI think that's sufficient - or were you thinking the message should be displayed _unconditionally_?\r\n\r\nI think it's better to be silent by default; this allows users not to have write additional logic around `Add-Type` calls: simply call them every time in your script, relying on subsequent calls to be quiet no-ops.\r\n",
+      "created_at": "2019-05-12T14:38:43Z",
+      "updated_at": "2019-05-12T14:40:34Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "I already remove additional logic around Add-Type calls and i don't think I'm the only one. \r\n",
+      "created_at": "2019-05-12T15:34:40Z",
+      "updated_at": "2019-05-12T15:34:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Note that it's not just about clashes between different authors. It's also about debugging by a single author, rerunning a script in a given session after having modified the source code, not realizing that the redefinition won't be possible in the same session - from what I understand, it's technically impossible to redefine a given .NET type in a session, because unloading assemblies isn't possible, right?\r\n\r\n1. Current behavior is nice for regular use.\r\n2. For development author have to re-run pwsh. I do so and don't think that it is a big problem.\r\n3. Add-Type compiles to new assembly and the new assembly is used then - so we could \"re-define\" types (in script at least). This can be useful in dev but dangerous in all other scenarios. If I wrong @daxian-dbw will correct me.\r\n",
+      "created_at": "2019-05-12T17:20:54Z",
+      "updated_at": "2019-05-12T17:21:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> 2. For development author have to re-run pwsh. I do so and don't think that it is a big problem.\r\n\r\nI too don't think that the need to re-start the session is a problem, and I'm not asking to change that.\r\n\r\nI do, however, think that _not alerting the user to the need_ for starting a new session is the problem, and it sounds @daxian-dbw agrees with that.\r\n\r\n> 3. Add-Type compiles to new assembly and the new assembly is used then - so we could \"re-define\" types (in script at least). This can be useful in dev but dangerous in all other scenarios. If I wrong @daxian-dbw will correct me.\r\n\r\nIt isn't dangerous. If the source code is effectively the same - and that would be the _only_ scenario in which the quiet no-op (no error) occurs - then there's no problem, regardless of who calls `Add-Type` and how often.\r\n\r\n\r\n\r\n",
+      "created_at": "2019-05-12T17:26:56Z",
+      "updated_at": "2019-05-12T17:26:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  If the source code is effectively the same\r\n\r\nI mean that only full type name is the same - that is dangerous.",
+      "created_at": "2019-05-12T17:35:02Z",
+      "updated_at": "2019-05-12T17:35:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I mean that only full type name is the same - that is dangerous.\r\n\r\nThat's not what we're talking about here.\r\nWe're talking about the case _where the source code hasn't changed_ for a given type.\r\n\r\nIncidentally, the verbatim source-code caching that you believe is exclusive to Windows PowerShell seems to be in PowerShell Core as well, which I infer from the following:\r\n\r\nThe current PS Core code too knows the difference between the two scenarios (source code changed vs. unchanged), because the aforementioned verbose message is _only_ emitted in the _unchanged_ case; the changed case is completely silent. \r\n\r\nThus, it sounds like making the changed case emit a statement-terminating as in Windows PowerShell is all that is needed.\r\n\r\nAs an aside:  I think that _verbatim_ source-code caching as the basis for determining whether a type's definition has changed is sufficient, not least because it allows for much faster testing than having to compile every time. As stated, verbatim checking seems to be in the code already.\r\n\r\n\r\n",
+      "created_at": "2019-05-12T17:42:33Z",
+      "updated_at": "2019-05-12T17:42:33Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> A message to the verbose stream is already being issued (but only in PS Core); i.e., you need to use -Verbose to see it\r\n\r\n@mklement0 I didn't know the verbose message was already there. I agree that's sufficient.\r\n\r\nI'm not sure if we are all clear on the current behavior as demonstrated in the repro steps:\r\n```\r\nAdd-Type -TypeDefinition @'\r\n  public class Foo {}\r\n'@\r\n  \r\n# Try to redefine the type with different source code.\r\nAdd-Type -TypeDefinition @'\r\n  public class Foo { public int Bar {get {return 42;} } }\r\n'@\r\n```\r\nToday, the second `Add-Type` actually generates another assembly with the type `Foo` that contains a `Bar` property. However, the use of `[Foo]` subsequently will have undefined behavior -- it could be resolved to either the first `[Foo]` that has an empty body, or the second `[Foo]` with a `Bar` property, because the type resolution will stop after finding the first `Foo` from all loaded assemblies. See the example below:\r\n\r\n```\r\n> $as =[System.AppDomain]::CurrentDomain.GetAssemblies() | ? -not Location | select -Last 2\r\n> $as.FullName\r\n0pyel1t2.h2v, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null\r\nbycuxatk.jhq, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null\r\n\r\n> $as[0].GetTypes()\r\n\r\nIsPublic IsSerial Name                                     BaseType\r\n-------- -------- ----                                     --------\r\nTrue     False    Foo                                      System.Object\r\n\r\n> $as[1].GetTypes()\r\n\r\nIsPublic IsSerial Name                                     BaseType\r\n-------- -------- ----                                     --------\r\nTrue     False    Foo                                      System.Object\r\n```\r\n@iSazonov I don't think this is the right behavior for `Add-Type`, because there is no way for the user to reliably use the generated type. I think we should fix it to throw error when redefining the same type with different source code.",
+      "created_at": "2019-05-12T22:33:16Z",
+      "updated_at": "2019-05-12T22:34:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @daxian-dbw; it sounds like we're in complete agreement (despite the fact that I hadn't realized that another assembly was actually being created, but that point is moot, given the suggested resolution).\r\n\r\n\r\n",
+      "created_at": "2019-05-12T22:44:22Z",
+      "updated_at": "2019-05-12T22:46:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  I don't think this is the right behavior for Add-Type, because there is no way for the user to reliably use the generated type. I think we should fix it to throw error when redefining the same type with different source code.\r\n\r\nAbove I just discribe this and I was sure that this was already done as we already have CheckDuplicateTypes() and AllNamedTypeSymbolsVisitor\r\n\r\n```powershell\r\n$a = Add-Type -TypeDefinition @'\r\n   public class Foo {}\r\n '@ -PassThru\r\n\r\n$a1 = Add-Type -TypeDefinition @'\r\n   public class Foo {}\r\n '@ -PassThru\r\n\r\n$a.Assembly.FullName\r\nbwb1lxup.0m4, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null\r\n\r\n$a1.Assembly.FullName\r\nbwb1lxup.0m4, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null\r\n```",
+      "created_at": "2019-05-14T03:30:50Z",
+      "updated_at": "2019-05-14T03:30:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I may have confused the issue by initially not realizing that  a _new_ assembly is created in the case of changed source code (resulting in a type with the same full name that isn't reliably used when referenced by that name).\r\n\r\nSo, are we all on the same page now, @iSazonov?\r\n\r\nTo recap, the desired behavior is:\r\n\r\n* If the source code didn't change, default to a fast and quiet no-op, although `-Verbose` allows emitting a message indicating that the existing definition is used - this part is already working.\r\n\r\n* If the source code did change, do not generate a new assembly and instead throw  a statement-terminating error indicating that the type cannot be changed in-session - this is how it works in Windows PowerShell and how it should work in PowerShell Core as well.",
+      "created_at": "2019-05-14T11:40:07Z",
+      "updated_at": "2019-05-14T11:40:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, code examples clarified and I prepared the fix.",
+      "created_at": "2019-05-14T15:26:28Z",
+      "updated_at": "2019-05-14T15:26:28Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #9609, which has now been successfully released as `v7.0.0-preview.4`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.4)\n",
+      "created_at": "2019-09-19T17:51:45Z",
+      "updated_at": "2019-09-19T17:51:45Z"
+    }
+  ],
+  "created_at": "2019-05-10T16:28:09Z",
+  "number": 9575,
+  "state": "closed",
+  "title": "Add-Type now quietly ignores attempts to change a previously added .NET type's definition in the same session",
+  "updated_at": "2019-09-19T17:51:45Z"
+}

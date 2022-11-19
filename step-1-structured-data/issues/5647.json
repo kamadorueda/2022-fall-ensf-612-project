@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5647",
+  "author": "markekraus",
+  "body": "Moving the discussion from  #2112\r\n\r\nWe should add simple accelerators for Files and Directories to ease their use within PowerShell. These accelerators should throw if the provided file or directory do not exist. It should be considered whether or not these should support be PSProvider aware.\r\n\r\nOne concern is that using `[file]` would be ambiguous with `using namespace System.IO`. For that purpose, my examples will tentatively use the `[PSFile]` accelerator. The accelerator names should be discussed here as well\r\n\r\n\r\nThe usage would work something like this:\r\n\r\n```powershell\r\nfunction Get-Widget {\r\n    param([PSFile]$File)\r\n    # Do something with $File\r\n}\r\nGet-Widget -File 'x:\\no\\lo\\existo.nope'\r\n# parameter binding error for non existent file\r\nGet-Widget -File 'c:\\some\\real\\file.txt'\r\n# works with existing file\r\n\r\n$file = [PSFile]'x:\\no\\lo\\existo.nope'\r\n# type conversion error on non existing file\r\n\r\n$file = [PSFile]'c:\\some\\real\\'\r\n# type conversion error on container\r\n\r\n$file = [PSFile]'c:\\some\\real\\file.txt'\r\n# no error\r\n\r\n$File = [PSFile](Get-Item 'c:\\some\\real\\file.txt')\r\n# no error\r\n\r\n$File = [PSFile][System.IO.FileInfo]'c:\\some\\real\\file.txt'\r\n# no error\r\n\r\n$file = [PSFile][System.IO.FileInfo]'x:\\no\\lo\\existo.nope'\r\n# type conversion error on non existing file\r\n```\r\n\r\nSomething similar would work for `[PSDirectory]`\r\n\r\n```powershell\r\n$Directory = [PSDirectory]'c:\\some\\real\\file.txt'\r\n# type conversion error on non-container\r\n\r\n$Directory = [PSDirectory]'x:\\no\\lo\\'\r\n# type conversion error on non existing folder\r\n\r\n$Directory = [PSDirectory]'c:\\some\\real\\'\r\n# no error\r\n```\r\n\r\n\r\nIf this supported providers, the API for `PSFile` would need to look something like\r\n\r\n```csharp\r\npublic object BaseObject { get; }\r\npublic string Name { get; }\r\npublic string FullName { get; }\r\npublic PSDirectory Directory { get; }\r\npublic string DirectoryName { get; }\r\n```\r\n\r\n`BaseObject` would store the System.IO.FileInfo` or whatever item type a PS Provider returns from `get-item`.",
+  "closed_at": "2019-01-24T02:01:33Z",
+  "comments": [
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "It's a little more to type but why not just use `[fileinfo]` and `[directoryinfo]`?  \r\n\r\nThese would be like the `[pscredential]` accelerator in the S.M.A namespace (or [string]/[datetime]) where you don't have to specify the full namespace. ",
+      "created_at": "2017-12-07T16:29:51Z",
+      "updated_at": "2017-12-07T16:29:51Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rkeithhill Because these need to throw on missing or nonexistent files and also they need to support files in PS Providers, IMO. `System.IO.FileInfo` does not provide either functionality. ",
+      "created_at": "2017-12-07T16:50:06Z",
+      "updated_at": "2017-12-07T16:51:12Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Throw? Or is returning `$null` reasonable?\r\n\r\nDoes this need to be a type? If it was roughly a shortcut to `Get-Item`, maybe an operator is the right approach, allowing something like:\r\n\r\n```\r\nif (-file '\\file\\doesnt\\exist') { ... }\r\n```\r\n\r\nThe operator could return items, e.g.\r\n\r\n```\r\n(-file \"$pshome\\powershell.exe\").VersionInfo\r\n```",
+      "created_at": "2017-12-07T18:43:04Z",
+      "updated_at": "2017-12-07T18:43:04Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr Ideally it would throw so it can be used as a parameter type and fail to bind when the file doesn't exist. It is to eliminate this logic which is everywhere:\r\n\r\n```powershell\r\n    param (\r\n        [ValidateNotNullOrEmpty()]\r\n        [ValidateScript({\r\n            if(-not (Test-Path $_)){\r\n                throw\r\n            }\r\n        })]\r\n        [string]\r\n        $File\r\n    )\r\n```\r\n\r\nWith this:\r\n\r\n```powershell\r\nparam(\r\n    [PSFile]$File\r\n)\r\n```\r\n\r\nI believe a type is probably the best implementation. I don't think an operator would work for parameters? I do like the idea of an operator though for use in `if()`... even if yet-another-unary-operator would rustle some jimmies.",
+      "created_at": "2017-12-07T19:32:41Z",
+      "updated_at": "2017-12-07T19:33:05Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "A new type could get messy with different conversions to worry about. Why not just introduce a validation attribute with the logic you need?",
+      "created_at": "2017-12-07T19:52:35Z",
+      "updated_at": "2017-12-07T19:52:35Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "The idea is that this solution is the de facto file identifier.  It's not *just* to use as parameter. The idea is to make a string path to meaningful file object in all circumstances. Assignments, parameters, etc. Validation attributes don't transform objects. Accepting/transforming other Objects such as FileInfo isn't completely necessary, but would make sense.\r\n\r\n```powershell\r\nfunction Write-Log {\r\n    param([PSFile]$Path, [string]$Message)\r\n    $message | Add-Content $Path.FullName\r\n}\r\n$LogFile = Get-Item $PSScriptRoot\\log.txt\r\nWrite-Log -Path $LogFile -Message 'one'\r\nWrite-Log -Path 'c:\\out.txt' -Message 'two'\r\n\r\n$Form = @{\r\n    UserPicture = [PSFile]'c:\\imgag.png'\r\n}\r\nInvoke-RestMethod -Auth OAuth -Token $Token -Form $Form -Method POST -Uri $Uri\r\n```\r\n",
+      "created_at": "2017-12-07T20:08:38Z",
+      "updated_at": "2017-12-07T20:08:38Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm skeptical - I think `string` is the de facto file identifier. Today we use a `string` to refer to file that:\r\n\r\n* exist\r\n* might exist\r\n* might not exist\r\n* will be created if they don't exist\r\n* etc.\r\n\r\nAlso worth noting - your proposed type has a false promise - even if the file exists when the instance is constructed, it might not when accessing the file (it shouldn't prevent the file from being deleted.)  In other words, good error reporting is not solved by use of this type.\r\n\r\nI am curious if you can point to an example of your proposed type in another environment - it feels like it's not a real (easily solvable) problem, because if it was, I'd expect .Net to already have such a type. For example, `System.IO.Path` feels like the right name for the type you want, but that's a static utility class.",
+      "created_at": "2017-12-07T21:41:11Z",
+      "updated_at": "2017-12-07T21:41:11Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Also worth noting - your proposed type has a false promise\r\n\r\nThat's a good point. \r\n\r\nI just hate that anytime something has to deal with files it has to also include redundant logic to check its existence.  But if there is no escaping than, then there wouldn't be any benefit.\r\n\r\nTo be clear, I'm just trying to flesh out something that was kind of an one-off comment brought up in #2112. Making `[System.IO.FileInfo]` accessible as `[FileInfo]` is still an improvement, but it just leaves so much off the table like files on a ps providers.\r\n\r\n> I  am curious if you can point to an example of your proposed type in another environment \r\n\r\nI don't have one. I thought I did, but I must have imagined this existing in other languages.",
+      "created_at": "2017-12-07T21:57:26Z",
+      "updated_at": "2017-12-07T21:57:26Z"
+    }
+  ],
+  "created_at": "2017-12-07T10:24:29Z",
+  "number": 5647,
+  "state": "closed",
+  "title": "Create new accelerators for easy file and directory operations",
+  "updated_at": "2019-01-24T02:01:33Z"
+}

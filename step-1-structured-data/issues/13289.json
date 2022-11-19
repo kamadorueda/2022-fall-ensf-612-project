@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13289",
+  "author": "mklement0",
+  "body": "When you make an in-session culture change by changing the current thread's culture by assigning to `[cultureinfo]::CurrentCulture` (the same applies to `[cultureinfo]::CurrentUICulture`), PowerShell commendably propagates this change to:\r\n\r\n* new *threads* (`Start-ThreadJob`, `ForEach-Object -Parallel`)\r\n\r\n* remotely executed code (e.g., `Invoke-Command -ComputerName. ...`)\r\n\r\nUnexpectedly, however, background jobs (`Start-Job`, postpositional `&`) do _not_ propagate such changes.\r\n\r\nNote: This discrepancy has always existed, including in Windows PowerShell.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n# Note: If 'it-IT' happens to be your current culture, target a different one.\r\n[cultureinfo]::CurrentCulture = 'it-IT'\r\nStart-Job { [cultureinfo]::CurrentCulture.Name } | Receive-Job -Wait -AutoRemoveJob | Should -Be it-IT\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe test should succeed.\r\n\r\n## Actual behavior\r\n\r\nThe test fails, because `Start-Job` executes the code in the child process with the culture that was in effect at session _start-up_ time rather than the currently effective one.\r\n\r\nE.g., if the persistently configured culture is `en-US`:\r\n\r\n```none\r\nExpected strings to be the same, but they were different. \r\nString lengths are both 5. Strings differ at index 0. Expected: 'it-IT' But was:  'en-US'\r\n```\r\n\r\n## Environment data\r\n\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.5\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems [cultureinfo]::CurrentCulture` is not reliable way to change culture on the fly.\r\n\r\nI think you could update #3833 and track the issue there.",
+      "created_at": "2020-07-28T15:25:57Z",
+      "updated_at": "2020-07-28T15:25:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "#3833 is merely about providing a _PowerShell-idiomatic_ way to change the culture in-session - all it would do behind the scenes is to update `[cultureinfo]::CurrentCulture`.\r\n\r\nUpdating `[cultureinfo]::CurrentCulture` _is_ the reliable way to change the _current thread_'s culture (WinPS had a bug where _it_ reset the culture after every interactively submitted command, but that no longer applies).\r\n\r\nWhat _this_ issue asks for is that the culture in effect for PowerShell's main thread  be _consistently_ propagated to other threads and child processes:\r\n\r\nIt already works as expected with PS remoting and `Start-ThreadJob` / `ForEach-Object -Parallel`, but not with `Start-Job`, so `Start-Job` is the place where the fix is required.\r\n\r\n",
+      "created_at": "2020-07-28T15:51:01Z",
+      "updated_at": "2020-07-28T15:51:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "See https://docs.microsoft.com/en-us/dotnet/api/system.globalization.cultureinfo.defaultthreadcurrentculture?view=netcore-3.1\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/api/system.globalization.cultureinfo.defaultthreadcurrentculture\">CultureInfo.DefaultThreadCurrentCulture Property (System.Globalization)</a></strong></div><div>Gets or sets the default culture for threads in the current application domain. </div></blockquote>",
+      "created_at": "2020-07-28T16:09:06Z",
+      "updated_at": "2020-07-28T16:09:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That neither changes the main thread's culture nor does it fix the problem with `Start-Job`.",
+      "created_at": "2020-07-28T16:13:36Z",
+      "updated_at": "2020-07-28T16:13:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This is why this can only be fixed in # 3833",
+      "created_at": "2020-07-28T16:35:17Z",
+      "updated_at": "2020-07-28T16:35:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As stated, #3833 would be _syntactic sugar_ for assigning to `[cultureinfo]::CurrentCulture`, and that wouldn't fix the behavior of `Start-Job` detailed here.\r\n\r\n",
+      "created_at": "2020-07-28T16:48:26Z",
+      "updated_at": "2020-07-28T16:48:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Makes no sense to implement Set-Culture as \"syntactic sugar for assigning to [cultureinfo]::CurrentCulture\".\r\nOnly in the cmdlet we can do more work to address all scenarios.",
+      "created_at": "2020-07-28T17:37:20Z",
+      "updated_at": "2020-07-28T17:37:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "No: Just like PS remoting calls and `Start-ThreadJob` / `ForEach-Object -Parallel` already respect the effective ` [cultureinfo]::CurrentCulture`, so should `Start-Job`, so _it_ needs to be fixed - this is independent of #3833.\r\n",
+      "created_at": "2020-07-28T17:41:31Z",
+      "updated_at": "2020-07-28T17:41:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "And: Making `Set-Culture -Session` syntactic sugar for assigning to `[cultureinfo]::CurrentCulture` _is_ the right implementation, given that the value of `[cultureinfo]::CurrentCulture` is what all culture-aware .NET calls (including cmdlets, scripts, and functions) called from the same thread automatically respect. \r\n\r\nFor a shell like PowerShell it makes sense to deliberately extend that behavior to all PowerShell code that is conceived of as executing _in the same session_ - we're mostly there, except for `Start-Job`.",
+      "created_at": "2020-07-28T18:03:19Z",
+      "updated_at": "2020-07-28T18:03:19Z"
+    }
+  ],
+  "created_at": "2020-07-27T14:17:36Z",
+  "number": 13289,
+  "state": "open",
+  "title": "Background jobs (Start-Job) do not respect in-session culture changes",
+  "updated_at": "2021-01-17T14:52:31Z"
+}

@@ -1,0 +1,237 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3061",
+  "author": "briantist",
+  "body": "It's common for people to inadvertently to use an [automatic variable](https://msdn.microsoft.com/en-us/powershell/reference/5.1/microsoft.powershell.core/about/about_automatic_variables) as a parameter name or a variable name, and then get confused when it doesn't contain the value they expect.\r\n\r\n[This is just one example](http://stackoverflow.com/q/41899833/3905079) but it comes up fairly often, and unless you already know the name is reserved, PowerShell doesn't offer you any clues as to what's going on.\r\n\r\nBecause the various automatic variables get overwritten based on different conditions, it can be even more confusing when it seems to work in one context but not another.\r\n\r\nGiven `Set-StrictMode`'s other roles, this seems like a good fit.\r\n\r\nOne intentional use is for nullification, as in:\r\n\r\n    $null = Invoke-CommandWithUnwantedOutput\r\n\r\nSo that could be an exception (because it's unlikely to be done unintentionally), but my thoughts are that there are other ways to achieve this, and strict mode is not enabled by default, so in my opinion it should not be an exception.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is rather the PSScriptAnalizer area.",
+      "created_at": "2017-01-27T19:16:32Z",
+      "updated_at": "2017-01-27T19:16:32Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I would be open to discussing this as a breaking change - assuming we can get the data to justify that the impact is minimal.",
+      "created_at": "2017-01-27T20:50:57Z",
+      "updated_at": "2017-01-27T20:50:57Z"
+    },
+    {
+      "author": "briantist",
+      "author_association": "NONE",
+      "body": "@lzybkr how would this be a breaking change? An update to `Set-StrictMode` would likely just mean supporting the next version number. Right now only `1` and `2` are defined; in theory we'd set `6` (or whatever version of PowerShell it ends up being), or `3` if version is not supposed to correspond to PS version.\r\n\r\nOr are you suggesting making this behavior default, without strict mode?",
+      "created_at": "2017-01-27T20:54:43Z",
+      "updated_at": "2017-01-27T20:54:43Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Right - parser error - not tied to `Set-StrictMode`.",
+      "created_at": "2017-01-27T20:55:48Z",
+      "updated_at": "2017-01-27T20:55:48Z"
+    },
+    {
+      "author": "briantist",
+      "author_association": "NONE",
+      "body": "@lzybkr ah ok got it. \r\n\r\nIt looks like at least some of them are already not writable. I tried to set `$Host` and it gave me this:\r\n\r\n> Cannot overwrite variable Host because it is read-only or constant.\r\n\r\nPresumably, variables that do change during the course of the script like `$Input` and `$args` can't be set that way unless the internal code handles undoing that or removing and recreating the variable?\r\n\r\nAnd of course `$OFS` has to remain writable.",
+      "created_at": "2017-01-27T21:16:00Z",
+      "updated_at": "2017-01-27T21:16:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The same issue just came up in #3695, with respect to `$_` / `$PSItem` being writable.\r\n\r\nHere's a list of all automatic variables that _shouldn't_ be writable, but currently are:\r\n\r\n```\r\nName                          Predefined\r\n----                          ----------\r\n_                                  False\r\nAllNodes                           False\r\nArgs                                True\r\nEvent                              False\r\nEventArgs                          False\r\nEventSubscriber                    False\r\nForEach                             True\r\nInput                               True\r\nMatches                             True\r\nMyInvocation                        True\r\nNestedPromptLevel                   True\r\nProfile                             True\r\nPSBoundParameters                   True\r\nPsCmdlet                           False\r\nPSCommandPath                       True\r\nPSDebugContext                     False\r\nPSItem                             False\r\nPSScriptRoot                        True\r\nPSSenderInfo                       False\r\nPwd                                 True\r\nSender                             False\r\nStackTrace                          True\r\nThis                               False\r\n```\r\n\r\n\"Predefined\" refers to whether they exist in the global scope.\r\n\r\nSome of them are only defined in certain contexts, but, arguably, to prevent confusion, preventing their custom use categorically is the right approach.\r\n\r\nThe following code was used to detect them (note that it has to rely on parsing the _help topic_ to identify all automatic variables - I'm not aware of a better way; the obsolete `ReportErrorShow*` variables were manually removed after the fact\r\n):\r\n\r\n```powershell\r\n$autoVarNames = ((get-help about_automatic_variables) -split [environment]::newline -match '^\\s*\\$\\w+\\s*$').Trim().Trim('$') | Sort-Object -Unique\r\n\r\nforeach ($varName in $autoVarNames) {\r\n  $var = Get-Variable $varName -ErrorAction 'SilentlyContinue'\r\n  $exists = $?\r\n  if ($exists -and $var.Options -match 'readonly|constant') {\r\n    Write-Verbose \"$varName`: read-only or constant\"\r\n  } elseif ($varName -in 'NULL', 'OFS', 'LastExitCode') { # exceptions\r\n    Write-Verbose \"$varName`: writable by design\"\r\n  } else {\r\n    Set-Variable -Name $varName -Value $null -ErrorAction SilentlyContinue\r\n    if ($?) {\r\n      [pscustomobject] @{ Name = $varName; Predefined = $exists }\r\n    }\r\n  }\r\n}\r\n```\r\n\r\nNote that the code has a fixed list of exceptions so as not to report automatic variables that should indeed be writable, such as `$OFS`, and `$LastExitCode`,  or assignable as a quiet no-op, such as `$NULL` - do tell us if other exceptions are missing.\r\n\r\n",
+      "created_at": "2017-05-09T04:35:02Z",
+      "updated_at": "2019-11-12T13:15:22Z"
+    },
+    {
+      "author": "briantist",
+      "author_association": "NONE",
+      "body": "Excellent work @mklement0 !",
+      "created_at": "2017-05-09T14:34:16Z",
+      "updated_at": "2017-05-09T14:34:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Related comment https://github.com/PowerShell/PowerShell/issues/2000#issuecomment-241473824",
+      "created_at": "2017-05-09T16:38:14Z",
+      "updated_at": "2017-05-09T16:38:14Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "We try to use [this file](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/SpecialVariables.cs) to make it easier to know what variables PowerShell cares about, automatic or otherwise.\r\n\r\nI'll also point out the need to be careful here, e.g. disallowing anyone to set `$LastExitCode` would break posh-git which saves and restores the value in the prompt function so that it can call `git` and not clobber the real `$LastExitCode` from your last command.",
+      "created_at": "2017-05-09T17:24:00Z",
+      "updated_at": "2017-05-09T17:24:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr: \r\n\r\nThanks for the link, that's handy.  I've noticed that not all variables listed in the automatic-variables help topic are defined in that file, however, such as `AllNodes`, `Event`, `EventSubscriber`\r\n\r\nAnd thanks for the correction re `$LastExitCode` - I've removed it from the list above and adapted the code that generates it (it has a hard-coded list of exceptions).\r\n\r\nThe list definitely needs careful reviewing - do let me know if there are others that should be excluded.\r\n\r\nI think it's also important going forward to think about the proper read-only status at the time of introducing an automatic variable.\r\n\r\nLonger-term, it would be helpful if automatic and preference variables could be discovered through _reflection_, in user code.  \r\nAt least for preference variables this has been suggested before on [uservoice.com](https://windowsserver.uservoice.com/forums/301869-powershell/suggestions/17407222-powershell-and-collections-in-particular-collect)\r\n\r\n\r\n\r\n",
+      "created_at": "2017-05-09T17:53:56Z",
+      "updated_at": "2017-05-09T17:53:56Z"
+    },
+    {
+      "author": "briantist",
+      "author_association": "NONE",
+      "body": "Definitely seconding (and voted on) the suggestion for discoverability.",
+      "created_at": "2017-05-09T17:55:52Z",
+      "updated_at": "2017-05-09T17:55:52Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee recommends we have psscriptanalyzer rules for all the automatic variables with enforcement in parser for $_/$psitem and $input",
+      "created_at": "2017-08-02T23:32:13Z",
+      "updated_at": "2017-08-02T23:32:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm glad to hear that writing to `$_`/ `$psitem` and `$input` will be prevented, @SteveL-MSFT.\r\n\r\nGiven that we know that this will be a _breaking_ change, it seems to me that this is an opportunity to get it _fundamentally_ right, by making _all_ automatic variables that are _conceptually_ read-only _actually_ read-only - without having to rely on a code-analysis tool  (PSScriptAnalyzer) that may or may not be used by users.\r\n\r\nSimilarly, PSScriptAnalyzer can't protect you from trying things like `$PWD = '/'` from the command line.\r\n\r\nThis ties in with making automatic variables discoverable as such.",
+      "created_at": "2017-08-03T03:40:56Z",
+      "updated_at": "2017-08-03T03:40:56Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "We discussed possibly making all automatic variables functionally read only, however, agreed that in many cases like $PWD someone could be using it already without problem as they didn't Set-Location so $PWD isn't overwritten.  So other than $_, $PSItem, and $Input, we decided to error on the side of limiting the breaking change to the most common cases.",
+      "created_at": "2017-08-03T05:04:51Z",
+      "updated_at": "2017-08-03T05:04:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "See [this documentation issue](https://github.com/PowerShell/PowerShell-Docs/issues/1510) for the necessary attendant change to the documentation.",
+      "created_at": "2017-08-04T02:20:41Z",
+      "updated_at": "2017-08-04T02:20:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Now that I think about it: We've lost sight of @briantist's original idea: that a _new_ `Set-StrictMode` version level could solve the problem _comprehensively_ at the _engine_ level, without breaking backward compatibility.",
+      "created_at": "2017-08-04T02:40:56Z",
+      "updated_at": "2017-08-04T02:41:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If we can avoid this, we'd better avoid it.",
+      "created_at": "2017-08-04T04:26:31Z",
+      "updated_at": "2017-08-04T04:26:31Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "It is very good that writing to `$input` will be prevented. Such a code did not work anyway and users only discovered this on troubleshooting. This fixes the problem and does not break anything.\r\n\r\nBut I afraid preventing writing to `$_` breaks things and make coding harder. See these two examples:\r\n- https://github.com/PowerShell/PowerShell/issues/3695#issuecomment-315672717\r\n- https://github.com/PowerShell/PowerShell/issues/3695#issuecomment-320151872\r\n\r\n",
+      "created_at": "2017-08-04T04:28:59Z",
+      "updated_at": "2017-08-04T04:28:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe that we want just exclude such practise and recommend use custom variables - it makes scritps more clear and reliable.",
+      "created_at": "2017-08-04T04:32:14Z",
+      "updated_at": "2017-08-04T04:32:14Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "I am not sure about more clear for `$_`. Using `$_` as a custom variable in proper contexts may be more clear and more *reusable* than something else. It is well known as \"the current target object\" variable, either in pipelines/loops or in custom expressions defined as script blocks.",
+      "created_at": "2017-08-04T04:40:30Z",
+      "updated_at": "2017-08-04T04:48:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\n> If we can avoid this, we'd better avoid it.\r\n\r\nIt seems to me that a `Set-StrictMode -Version 6` would generally be - not just in this case - a great opportunity not to burden users with historical warts that are only retained to avoid breaking old code.\r\n\r\n",
+      "created_at": "2017-08-04T04:53:40Z",
+      "updated_at": "2017-08-04T04:53:40Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@nightroman: \r\n\r\nIn the case of cmdlets,  an automatically defined `$_` is a _necessity_, because  the pipeline object being processed has _no other name_.\r\nThe same applies analogously to `$_` in `switch` statements (with array-valued input) and the `catch` handlers of `try` / `catch` statements.\r\n\r\nIn [your example](https://github.com/PowerShell/PowerShell/issues/3695#issuecomment-320151872), there is no need for an implicit variable: you can simply pass argument(s) to the script-block invocation, and either define parameters inside the script block or use `$Args` to reference them:\r\n\r\n```powershell\r\n$foo = ...  # value to pass to the script block below\r\nif (& { ... ) $foo) {  # inside the script block, use $Args or define parameters with param(...) \r\n        ...\r\n}\r\n```    \r\n\r\nSimilarly, in a `foreach` loop, you _must_ specify an _explicit_ iteration variable that names each item being enumerated; choosing a variable name that the engine _implicitly_ defines in other contexts is problematic.\r\n\r\nThat said, in the case of a _loop_ with _item-by-item_ processing, there is a stronger case for the `$_` paradigm, but as I've suggested, the right way to resolve this is to make `$_` _implicit_ as well, by [allowing a `foreach` syntax variation without an explicit iteration variable](https://github.com/PowerShell/PowerShell/issues/3830).",
+      "created_at": "2017-08-04T05:16:31Z",
+      "updated_at": "2017-08-04T05:16:31Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "@mklement0 Thank you. This is not what I worry about. Here are my concerns:\r\n\r\n- Read only `$_` will break existing code for sure.\r\n- Replacement expressions with arguments and parameters will work but they will not be universal, e.g. I will not be able to use them as is in my code and in built-in cmdlets that require expressions with `$_`.\r\n- On moving code between `ForEach-Object` pipelines and `foreach` loops I will have to rename variables.\r\n",
+      "created_at": "2017-08-04T06:31:55Z",
+      "updated_at": "2017-08-04T06:31:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 The main drawback of `Set-StrictMode` is that it is realtime. Before we dicussed that we could be parse-time with `using`. That's why I think we should avoid the cmdlet.",
+      "created_at": "2017-08-04T06:39:42Z",
+      "updated_at": "2017-08-04T06:39:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Good point about `Set-StrictMode` - I assume you're referring to [@lzybkr's RFC for a _lexical_ strict mode with something like `using strict`](https://github.com/PowerShell/PowerShell-RFC/blob/master/1-Draft/RFC0003-Lexical-Strict-Mode.md).\r\n\r\nIf we had something like that, I think it would be a good general way to get rid of historical warts on an opt-in basis while not breaking old code.",
+      "created_at": "2017-08-04T15:20:36Z",
+      "updated_at": "2017-08-04T15:20:36Z"
+    },
+    {
+      "author": "briantist",
+      "author_association": "NONE",
+      "body": "@mklement0 I haven't followed this in a while, but as I think about it more I do actually think that `$_` should remain writable.\r\n\r\nOne reason for this is that it's common to modify the object in `$_`, using `Add-Member` for instance. Because the object is probably a reference, it could be that this would still work, if the only thing being prevented is overwriting the variable itself (with a value type or a new reference).\r\n\r\nBut the other use I have in mind is, I think, legitimate.\r\n\r\nIf you want to have a function that takes a scriptblock parameter and then executes it against a series of items within your function, you have only a few choices:\r\n\r\n1. Don't support `$_`. This sucks for the caller. In PowerShell, you're used to writing such scriptblocks where `$_` represents the current item. Not being able to do also means you can't easily store and re-use such a scriptblock. So this ends up with \"custom\" code being non-idiomatic.\r\n1. Set the variable in your function before executing the scriptblock (that is do something like `$_ = $CurrentItem ; & $UserSuppliedScriptBlock`). This wouldn't work anymore.\r\n1. \"Fake it\" with `ForEach-Object`. I've done this before, mostly for prototyping, but it feels wrong. Basically, in your own function, you do something like this: `$CurrentItem | % -Process $UserSuppliedScriptBlock`. This does work... until `$CurrentItem` is an array and needs to be treated as such. There are other situations I don't remember offhand where this is problematic. I'd prefer that we didn't have to resort to this to support the same workflow that lots of other things in PowerShell do.",
+      "created_at": "2017-10-22T00:45:18Z",
+      "updated_at": "2017-10-22T00:49:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@briantist: You should read the thread at #3695 - it's been decided to leave `$_` writable, mostly so as not to break existing code.\r\n\r\nThat said, the solution to passing a collection to `ForEach-Object` as-is is to use `-InputObject` rather than the pipeline:\r\n\r\n```powershell\r\n> ForEach-Object { $_.GetType().Name } -InputObject 1, 2\r\nObject[]\r\n```\r\n\r\n",
+      "created_at": "2017-10-22T02:31:11Z",
+      "updated_at": "2017-10-22T02:31:11Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr I am currently implemting the rule in PSSA to warn against assignment of automatic variables, could we consider making the [SpecialVariables](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/SpecialVariables.cs) class public to avoid having a copy of those magic strings in PSSA or is there a better way to determine whether a variable is automatic?",
+      "created_at": "2018-01-30T22:39:41Z",
+      "updated_at": "2018-01-30T22:40:00Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It's a good idea, but it would take some work to make it useful.\r\n\r\nFor your use case - it's insufficient because some of those variables are, by design, assignable.\r\n\r\nIn other cases, there is insufficient metadata to say why the variable is special. Many variables are read but not normally assigned by PowerShell, some are assigned by PowerShell in very specific (and uncommon) circumstances, etc.\r\n\r\nSome historical background - that file didn't exist until V3. Before that, there was no good way to find all references to variables that the PowerShell engine cared about in some way. It's also probably missing some that I missed or were added when I wasn't looking.",
+      "created_at": "2018-01-30T22:50:24Z",
+      "updated_at": "2018-01-30T22:50:24Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr I was also thinking about splitting the warnings into 2 categories:\r\n- definitely avoid/cannot assign for variables such as e.g. `$false` where PowerShell itself would throw an error -> severity error\r\n- re-consider assignment for variables such as `$PSItem` -> severity warning\r\n\r\nThanks for the info. Version should be more than enough since v2 is already deprecated and PSSA requires at least v3 as far as I know. For starters, I could start at least with the official list [here](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_automatic_variables?view=powershell-5.1), which should be the most useful anyway. Some of them like `$IsWindows` cannot be put into it yet since PSSA is not aware of PowerShell Core yet as far as I know.",
+      "created_at": "2018-01-30T23:02:04Z",
+      "updated_at": "2018-01-30T23:02:04Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "That list is good, but review it closely. After my quick scan, I think warning on `$sender` would be very noisy and I think the doc is outdated regarding the `$REPORTERRORSHOW*` variables - those are not defined anymore, I don't recall when they were removed though.",
+      "created_at": "2018-01-30T23:34:33Z",
+      "updated_at": "2018-01-30T23:34:33Z"
+    },
+    {
+      "author": "sicklittlemonkey",
+      "author_association": "NONE",
+      "body": "Having just run into this, the real problem is that automatic variables should should have different naming or syntax. At least the ones starting in PS are a good start, but $input is an accident waiting to happen.",
+      "created_at": "2021-03-01T02:24:33Z",
+      "updated_at": "2021-03-01T02:24:33Z"
+    }
+  ],
+  "created_at": "2017-01-27T18:29:16Z",
+  "number": 3061,
+  "state": "open",
+  "title": "Set-StrictMode should detect use of automatic variables as parameters or the target of an assignment",
+  "updated_at": "2021-03-01T02:24:33Z"
+}

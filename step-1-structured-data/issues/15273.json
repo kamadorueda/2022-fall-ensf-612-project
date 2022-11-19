@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15273",
+  "author": "iRon7",
+  "body": "`Export-Csv` and `ConvertTo-Csv` fail when the first object is empty, yet the display output (and other cmdlets like `Format-*` cmdlets) appear to work fine.\r\n\r\n<!--\r\n\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n@(\r\n    [pscustomobject]@{}             # Remvoe this line to \"fix\" the issue\r\n    [pscustomobject]@{a=2; b=5}\r\n    [pscustomobject]@{a=4; b=6}\r\n) | ConvertTo-Csv\r\n```\r\n\r\n## Expected behavior\r\n\r\n```PowerShell\r\n\"a\",\"b\"\r\n\"2\",\"5\"\r\n\"4\",\"6\"\r\n```\r\n\r\n## Actual behavior\r\n\r\nNo results\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.3\r\nPSEdition                      Core\r\nGitCommitId                    7.1.3\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nRelated: [ConvertTo-Csv and Export-Csv fail when -usequotes asneeded option is used and input object has null properties `#12279`](https://github.com/PowerShell/PowerShell/issues/12279)",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "`ConvertTo-Csv` / `Export-Csv`, like (possibly implicit) `-Format-Table` (normally), lock in the set of properties to serialize / display in columns based on the _first_ object only.\r\n\r\nBased on that, were' seeing two inconsistencies:\r\n\r\n* `ConvertTo-Csv` should output _4 empty lines_ , as `Export-Csv` does (in the latter case followed by a trailing newline, as usual); that is, an empty line for the header and 3 empty data rows; it currently outputs an empty string.\r\n\r\n* (Implicit) `Format-Table` should similarly output empty lines only (the behavior just happens to be more helpful in this case, but I suspect that just's a lucky fallout from the implementation rather than by design).\r\n\r\nWe could consider emitting a warning in this case.\r\n\r\nSee also:\r\n * With respect to non-surprising display behavior:  #4552\r\n * With respect to unifying property sets across disparate objects:  #13906 (your own) \r\n \r\n\r\n",
+      "created_at": "2021-04-19T17:14:01Z",
+      "updated_at": "2021-04-19T17:14:42Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@mklement0,\r\n\r\nYou have a point, I indeed didn't look at it this way.\r\nYet:\r\n\r\n> `ConvertTo-Csv` should output 4 empty lines\r\n\r\nIf the first *empty* object, is used to define the columns, the output should be a table with zero columns where you might question whether any of its rows (with zero columns) should be represented as an empty line or just nothing...\r\nMeaning that it differs a little from #13906 where the first object has at least some data.\r\nRather than emitting a warning in this case, I think it might be safe to consider to skip any empty objects and start with defining the properties (columns) and processing data when the pipeline hits the first object that isn't empty.\r\n",
+      "created_at": "2021-04-19T18:27:05Z",
+      "updated_at": "2021-04-19T18:35:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Personally, I think emitting an empty line for each input object is more consistent, but it's definitely a pathological case, which is why I think a warning is called for.\r\n\r\nTo me, the question is whether (public) property-less objects among the input objects occur frequently enough to warrant implementing their getting _ignored_ as a fallback - when do such empty objects occur, and is ignoring them helpful, or are they the result of an upstream error that users had better be alerted to?\r\n\r\nAnd even if ignoring is the way to go,  I'd be inclined to _also_ emit a warning.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-19T20:00:52Z",
+      "updated_at": "2021-04-20T02:13:17Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@mklement0,\r\n\r\n> when do such empty objects occur\r\n\r\nSorry, I think I wasn't clear, **it only concerns the _first_ consecutive empty objects**.\r\nTo be more clear, taken the following object list:\r\n\r\n```PowerShell\r\n@(\r\n    [pscustomobject]@{}         # Row 1\r\n    [pscustomobject]@{}         # Row 2\r\n    [pscustomobject]@{a=1; b=5} # Row 3\r\n    [pscustomobject]@{a=2; b=6} # Row 4\r\n    [pscustomobject]@{}         # Row 5\r\n    [pscustomobject]@{a=3; b=7} # Row 6\r\n) | ConvertTo-Csv\r\n```\r\n\r\nI would expect the output to be:\r\n```\r\n\"a\",\"b\"\r\n\"1\",\"5\"\r\n\"2\",\"6\"\r\n,\r\n\"3\",\"7\"\r\n```\r\n... and not to be empty (or any list of empty lines).\r\nAs a known PowerShell behavior, the `ConvertTo-Csv` cmdlet (along some other cmdlets) takes the first object to define the properties of the following object in the pipeline. But if the first object (or consecutive objects, as in the above example `Row 1` and `Row 2`)  is an empty object, it is quiet pointless to take that as model to define the column header names (as there aren't any, causing any void/column-less table with void/column-less rows).\r\nMeaning, you might as well skip (omit) just the first empty objects and begin outputting (starting with a header row `\"a\",\"b\"`) at the first filled object: `\"1\",\"5\"` (`Row 3`).\r\nIn this case, a warning might make sense as a scripter might expect the following output instead (which will not happen because PowerShell needs to use the first empty object to define the header for that):\r\n<strike>\r\n```\r\n\"a\",\"b\"\r\n,\r\n,\r\n\"1\",\"5\"\r\n\"2\",\"6\"\r\n,\r\n\"3\",\"7\"\r\n```\r\n</strike>\r\n\r\nthe warning could be something like:\r\n\r\n> The first consecutive objects have been omitted because they didn't contain any property information.\r\n\r\n**For the empty object at `Row 5`.** This is a different situation, the properties (column names) are already known and defined. If it concerns a single column it might just produce an empty line, if it concerns multiple lines, it should return a (column count - 1) number of consecutive delimiters (commas). I think, in this case it is clear from the output that the object is empty (and therefore doesn't require any additional warnings).\r\n",
+      "created_at": "2021-04-20T07:22:53Z",
+      "updated_at": "2021-04-20T07:32:36Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "Second/other thought (quoting myself):\r\n\r\n> In this case, a warning might make sense as a scripter might expect the following output instead ...\r\n\r\nConsidering the fact that it might hardly use any memory just to count the preceding empty objects (`$EmptiesCount`).\r\nThe `$EmptiesCount` can be used at the moment the first non-empty object arrives from the pipeline, and than:\r\n- Output the csv header: `\"a\",\"b\"`\r\n- Output the lines with empty properties: `@(',' * (@(\"a\",\"b\").count - 1)) * $EmptiesCount`\r\n- Output the first non-empty object `\"1\",\"5\"`\r\n\r\nAfter that, treat each following pipeline object (Output \"2\",\"6\" etc.) as usual.\r\n\r\n(if in the end no objects where found with properties, return nothing: `AutomationNull`)\r\n\r\n**_Caveat:_** If the list of input objects also contains non-unified objects (#13906) it might get somewhat confusing as it will take the first object **_that has properties_** to define the column names (rather than the first **_possible empty_** object).",
+      "created_at": "2021-04-20T09:52:40Z",
+      "updated_at": "2021-04-20T10:04:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  it only concerns the first consecutive empty objects.\r\n\r\nUnderstood, but the questions in my mind still are:\r\n\r\n* When do such objects occur?\r\n* When they do, are they a legitimate byproduct of _intended_ activity, or are they indicative of a _problem_?\r\n\r\nIn the latter case, I don't think it is worth special-casing this scenario, and a warning - as a courtesy - would alert users to the fact that the input results in no meaningful output.\r\n",
+      "created_at": "2021-04-20T12:37:45Z",
+      "updated_at": "2021-04-20T12:37:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Situations like this cannot be solved in general. Specific scenarios need to be considered. Is there such a scenario?\r\n\r\nExample, I read an information from an service, then send to ConvertTo-Csv\r\n1. For [pscustomobject]@{} - what is output I expect?\r\n```\r\n\"a\",\"b\"\r\n,\r\n```\r\n2. I re-run and get `[pscustomobject]@{a=1; b=5}`  - what is output I expect?\r\n```\r\n\"a\",\"b\"\r\n1,5\r\n```\r\n\r\nThis obviously says I need to pre-process my input before send to ConvertTo-Csv to get expected results.",
+      "created_at": "2021-04-20T12:41:20Z",
+      "updated_at": "2021-04-20T12:41:20Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "My used case is actually stackoverflow answer: [PowerShell: Extracting HTML table as CSV](https://stackoverflow.com/a/67162906/1701026).\r\nIn the earlier function version  (below) \r\n<details>\r\n  <summary>Read-HtmlTable (old)</summary>\r\n\r\n```PowerShell\r\nFunction Read-HtmlTable {\r\n    [CmdletBinding()][OutputType([Object[]])] param(\r\n        [Parameter(ValueFromPipeLine = $True, Mandatory = $True)][String]$Html,\r\n        [Int[]]$TableIndex\r\n    )\r\n    Begin {\r\n        Function Get-Elements { # Get closed descendants by tag name\r\n            [CmdletBinding()][OutputType([__ComObject[]])] param(\r\n                [Parameter(Mandatory = $True)][String]$TagName,\r\n                [Parameter(Mandatory = $True, ValueFromPipeLine = $True)]$Element\r\n            )\r\n            if ($Element.tagName -eq $TagName) { $Element }\r\n            else { $Element.Children | Foreach-Object { $_ | Get-Elements $TagName } } \r\n        }\r\n    }\r\n    Process {\r\n        $Unicode = [System.Text.Encoding]::Unicode.GetBytes($Html)\r\n        $Document = New-Object -Com 'HTMLFile'\r\n        if ($Document.IHTMLDocument2_Write) { $Document.IHTMLDocument2_Write($Unicode) } else { $Document.write($Unicode) }\r\n        $Index = 0 \r\n        foreach($table in ($Document.Body | Get-Elements 'table')) {\r\n            if (!$PSBoundParameters.ContainsKey('TableIndex') -or $Index++ -In $TableIndex) {\r\n                $Names = $Null\r\n                foreach ($tr in ($table | Get-Elements 'tr')) {\r\n                    if (!$Names) { $Names = ($tr | Get-Elements 'th').innerText }\r\n                    if (!$Names) { $Names = ($tr | Get-Elements 'td').innerText }\r\n                    else {\r\n                        $Values = ($tr | Get-Elements 'td').innerText\r\n                        $Properties = [Ordered]@{}\r\n                        $Count = [Math]::Min($Names.Count, $Values.Count)\r\n                        for ($i = 0; $i -lt $Count; $i++) { $Properties[$Names[$i]] = $Values[$i] }\r\n                        if ($Properties.Count -gt 0) { [pscustomobject]$Properties }\r\n                        [pscustomobject]$Properties\r\n                    }\r\n                }\r\n            }\r\n        }\r\n    }\r\n}\r\n\r\n$url = \"https://winreleaseinfoprod.blob.core.windows.net/winreleaseinfoprod/en-US.html\"\r\n$webClient = New-Object System.Net.Webclient\r\n$HTML = $webClient.DownloadString($url)\r\n```\r\n</details>\r\n\r\nThere was a bug where it produced an unwanted empty object (`[pscustomobject]@{}`) at start.\r\nThe pitfall in this, is that if you look at the display output:\r\n\r\n```PowerShell\r\n$HTML | Read-HtmlTable -Table 0 | Format-Table\r\n```\r\n\r\nIt appears to run just fine, yet if you output the results to a csv file (using `Export-Csv` or `ConvertTo-Csv`):\r\n\r\n```PowerShell\r\n$HTML | Read-HtmlTable -Table 0 | ConvertTo-Csv\r\n```\r\n\r\nthe output completely disappears.\r\n\r\nMaybe there is too much weight on this issue and should just be *noted* and closed...\r\n",
+      "created_at": "2021-04-20T14:13:21Z",
+      "updated_at": "2021-04-20T14:13:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I can only think about `-Header` parameter (as in Import-Csv). Although it too complicates the cmdlet. A simple filter is much simpler and clearer.",
+      "created_at": "2021-04-20T15:35:20Z",
+      "updated_at": "2021-04-20T15:35:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "If we were to take action here, my recommendation is as follows:\r\n\r\n* Fix the inconsistent `Format-Table` and `ConvertTo-Csv` behaviors: output empty lines for each input object if the first one has no (public) properties, as `Export-Csv` already does.\r\n\r\n* Emit a warning in this case.\r\n",
+      "created_at": "2021-04-20T16:25:02Z",
+      "updated_at": "2021-04-20T16:25:02Z"
+    }
+  ],
+  "created_at": "2021-04-19T16:45:19Z",
+  "number": 15273,
+  "state": "open",
+  "title": "`Export-Csv` and `ConvertTo-Csv` fail when the first object is empty",
+  "updated_at": "2021-04-20T16:25:02Z"
+}

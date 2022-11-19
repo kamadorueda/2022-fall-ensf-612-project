@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13607",
+  "author": "ParadoxGBB",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\nThe following script apparently boots out of the inner foreach loop and I can't come up with a reason why. The intent is to iterate through all variables in the current scope and do customized handling for those that are collections.\r\n\r\n```powershell\r\n#REPRO BEGIN\r\n\r\nforeach($currentIteration in @(\"one\"))\r\n{\r\n\t#ONE OF THESE VARIABLES IS NOW \"FOREACH\"\r\n\t$allVars = Get-Variable -Scope 0\r\n\r\n\tWrite-Host Total Variable Count: [($allVars.Count)]\r\n\t$cVar = 0\r\n\r\n\tforeach($currentVariable in $allVars)\r\n\t{\r\n\t\t$cVar++\r\n\t\tif($currentVariable.Value -eq $null)\r\n\t\t{\r\n\t\t\tWrite-Host Variable: [$cVar] [($currentVariable.Name)] [NULL]\r\n\t\t}\r\n\t\telse\r\n\t\t{\r\n\t\t\tWrite-Host Variable: [$cVar] [($currentVariable.Name)] [($currentVariable.Value.GetType().ToString())]\r\n\t\t}\r\n\r\n\t\t#THIS CAUSES A BREAK FOR \"FOREACH\" VARIABLE\r\n\t\tif($currentVariable.Value.Count -gt 1)\r\n\t\t{\r\n\t\t\tWrite-Host Collection\r\n\t\t}\r\n\t}\r\n\r\n\tWrite-Host Total Variables Iterated: [$cVar]\r\n}\r\n```\r\n\r\n## Expected behavior\r\n\r\nList all 28 variables in scope, output similar to the below (or in other words, $cVar -eq $allVars.Count):\r\n\r\n```\r\nPS > .\\testscript.ps1\r\nTotal Variable Count: [ 28 ]\r\nVariable: [1] [ ? ] [ System.Boolean ]\r\nVariable: [2] [ currentIteration ] [ System.String ]\r\nVariable: [3] [ EnabledExperimentalFeatures ] [ System.Management.Automation.Internal.ReadOnlyBag`1[System.String] ]\r\nVariable: [4] [ ExecutionContext ] [ System.Management.Automation.EngineIntrinsics ]\r\nVariable: [5] [ false ] [ System.Boolean ]\r\nVariable: [6] [ foreach ] [ System.SZArrayEnumerator ]\r\n.\r\n.\r\n.\r\nVariable: [28] ...\r\nTotal Variables Iterated: [28]\r\n```\r\n\r\n## Actual behavior\r\n\r\n```\r\nPS > .\\testscript.ps1\r\nTotal Variable Count: [ 28 ]\r\nVariable: [1] [ ? ] [ System.Boolean ]\r\nVariable: [2] [ currentIteration ] [ System.String ]\r\nVariable: [3] [ EnabledExperimentalFeatures ] [ System.Management.Automation.Internal.ReadOnlyBag`1[System.String] ]\r\nVariable: [4] [ ExecutionContext ] [ System.Management.Automation.EngineIntrinsics ]\r\nVariable: [5] [ false ] [ System.Boolean ]\r\nVariable: [6] [ foreach ] [ System.SZArrayEnumerator ]\r\nTotal Variables Iterated: [6]\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.3\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": "2020-09-11T12:00:14Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`$foreach` has no `.Count` property natively, so I'm assuming it causes the enumerator to be iterated to find said count value, similar to how you can iterate an array with `$array.Property` to look at all the `.Property` values in the array. This causes the iterator to be accelerated to the end of the loop entirely as soon as you call `.Count` on it.\r\n\r\nBasically what you're triggering is the same as what this will do:\r\n\r\n```ps1\r\nforeach ($a in 1..10) {\r\n    Write-Host $a\r\n    $foreach.MoveNext()\r\n}\r\n```\r\n\r\nExcept instead of advancing one additional time (skipping values, in effect), you're iterating the whole thing by accident and the next time the loop tries to iterate, it's just told \"we reached the end, exit the loop\".",
+      "created_at": "2020-09-09T21:04:01Z",
+      "updated_at": "2020-09-09T21:04:01Z"
+    },
+    {
+      "author": "ParadoxGBB",
+      "author_association": "NONE",
+      "body": "Thanks for the response. That's a better explanation than what I was able to come up with --- but if that's the case, that's a pretty funky side-effect of calling System.SZArrayEnumerator.Count and is probably never the intention.",
+      "created_at": "2020-09-09T21:17:44Z",
+      "updated_at": "2020-09-09T21:17:44Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> that's a pretty funky side-effect of calling System.SZArrayEnumerator.Count and is probably never the intention.\r\n\r\nA bit of a niche scenario for sure, but I would say the example above is as well.  Special casing enumerators here would technically be a [bucket 1 breaking change](https://github.com/PowerShell/PowerShell/blob/b1e998046e12ebe5da9dee479f20d479aa2256d7/docs/dev-process/breaking-change-contract.md#bucket-1-public-contract) (though probably lower impact than that implies), and probably a very small performance hit in the binder.  I don't think it's likely to be changed unless you have a few high impact scenarios you can share.",
+      "created_at": "2020-09-10T01:00:13Z",
+      "updated_at": "2020-09-10T01:00:43Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-09-11T12:00:12Z",
+      "updated_at": "2020-09-11T12:00:12Z"
+    }
+  ],
+  "created_at": "2020-09-09T20:26:13Z",
+  "number": 13607,
+  "state": "closed",
+  "title": "System.Array+SZArrayEnumerator Count check boots out of foreach loop",
+  "updated_at": "2020-09-11T12:00:14Z"
+}

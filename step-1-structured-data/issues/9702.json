@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9702",
+  "author": "mklement0",
+  "body": "Note: Only `[void]`-typed methods do _not_ exhibit the problem demonstrated below.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nclass Foo { [string] Bar() { Get-Item /NoSuch; return 'hi' } }; [Foo]::new().Bar()\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nGet-Item : Cannot find path '/NoSuch' because it does not exist.\r\n...\r\nhi\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nhi\r\n```\r\n\r\nThat is, the error stream output was quietly suppressed.\r\n\r\nHowever, the error _is_ recorded in the automatic `$Error` variable.\r\n\r\n_Update_: By contrast, all other streams (warning, verbose, debug, information) are passed through.\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nPowerShell Core 6.2.1\r\nWindows PowerShell v5.1\r\n```\r\n",
+  "closed_at": "2019-06-28T03:20:48Z",
+  "comments": [
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "Write-Error doesn't work inside method, only throw works (this is maybe by design)\r\n`class Foo { [string] Bar() { Write-Error \"MyError\" ; return 'hi' } }; [Foo]::new().Bar()`\r\n\r\n`class Foo { [string] Bar() { throw \"MyError\" ; return 'hi' } }; [Foo]::new().Bar()`\r\n\r\nSet ErrorAction to Stop, throws the error ( and you can use try/catch to handle the error)\r\n`class Foo { [string] Bar() { Get-Item /NoSuch -ErrorAction Stop ; return 'hi' } }; [Foo]::new().Bar()`\r\n\r\n`class Foo { [string] Bar() { try { Get-Item /NoSuch -ErrorAction Stop } catch { throw \"MyError:$_\" } ; return 'hi' } }; [Foo]::new().Bar()`\r\n\r\n",
+      "created_at": "2019-05-23T16:37:53Z",
+      "updated_at": "2019-05-23T16:37:53Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Indeed, the use of `Write-Error` inside a class method... the expected outcome isn't clear at all. Classes don't have stream implementations of their own, only input and output for data (and exceptions for errors).",
+      "created_at": "2019-05-23T16:44:49Z",
+      "updated_at": "2019-05-23T16:44:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@fMichaleczek: Yes, _terminating_ errors work, because they abort execution of the method, but my concern was about _nonterminating_ errors that you may simply want to _pass through_ - while continuing to execute the method.\r\n\r\n@vexx32, I naively thought that given that you call cmdlets inside methods, their nonterminating errors would surface too (e.g., `Get-ChildItem /nosuchdir`).\r\nCurrently, there is no way to to directly surface them from methods.",
+      "created_at": "2019-05-23T16:53:21Z",
+      "updated_at": "2019-05-23T16:53:21Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I'd be more inclined to call it a bug that they leak through when the return type is `void` tbh.  Otherwise the only way you'd be able to suppress them would be redirection or maybe `$ErrorActionPreference`.\r\n\r\n> Currently, there is no way to to directly surface them from methods.\r\n\r\nI think if you *really* want a class to emit error records or any other stream, you should pass a `PSCmdlet` object as an argument or save it to a property.",
+      "created_at": "2019-05-24T11:39:57Z",
+      "updated_at": "2019-05-24T11:39:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience \r\n\r\nSo you think custom classes are their own world that deals in _return values only_ that then _map onto the success output stream_ - with no other streams available?\r\n\r\nCertainly would require documentation, so that no one expects it to work differently, they way I did (happy to create an issue once we have a shared understanding).\r\n\r\nHowever, the worlds are _not_ separate; _the error stream is the only exception_:\r\n* All other streams are passed through (which I think makes sense).\r\n* Additionally, `$Error` _does_ reflect non-terminating errors that occur in methods.\r\n\r\n```powershell\r\nPS> class Foo { [string] Bar() { Get-Item /NoSuch; write-warning warning; write-verbose verbose -vb; write-debug -debug debug; write-information -InformationAction continue information;  return 'hi' } }; $Error.Clear(); [Foo]::new().Bar()\r\nWARNING: warning\r\nVERBOSE: verbose\r\nDEBUG: debug\r\ninformation\r\nhi\r\n```\r\n\r\n",
+      "created_at": "2019-05-24T11:56:13Z",
+      "updated_at": "2019-05-24T11:59:17Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> So you think custom classes are their own world that deals in return values only that then map onto the success output stream - with no other streams available?\r\n\r\nIn my opinion, yeah absolutely.\r\n\r\n> However, the worlds are not separate; the error stream is the only exception:\r\n\r\nWell, yes and no.  Something that I've never liked about those cmdlets is they work in the context of the `ICommandRuntime` of *their own command processor*, not of the caller.  Class methods don't have a command processor or `ICommandRuntime`, their invocation is generated sort of like `ScriptBlock.Invoke` as opposed to an advanced function processed by the `Compiler`.  That's *why* those cmdlets still work and why it'd be difficult to \"fix\".\r\n\r\nJust so I'm clear though, I'm not pointing at any of that as proof that it should be one way or another, it's just implementation detail.  I don't have any insight on what the PowerShell team intended, this is just my opinion.",
+      "created_at": "2019-05-24T12:44:07Z",
+      "updated_at": "2019-05-24T12:44:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's helpful background information, @SeeminglyScience, thanks.\r\n\r\n@SteveL-MSFT, can you shed light on the design intent and suggest a resolution?\r\nHaving consistent behavior one way or the other would be helpful.",
+      "created_at": "2019-05-24T15:39:57Z",
+      "updated_at": "2019-05-24T15:39:57Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 The design intent was that PowerShell classes should have semantics equivalent to .NET classes (since they are, in fact, .NET classes.) This means explicit return types, a requirement to use the return statement, variables must be initialized before being used, detected at **compile-time**, not run time, etc. The goal with classes was to make it possible to write more reliable (and larger) scripts in PowerShell by providing more conventional programming language semantics.",
+      "created_at": "2019-05-24T22:39:15Z",
+      "updated_at": "2019-05-24T22:39:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @bpayette, but what I want to know more specifically is the design intent with respect to _passing the PowerShell output streams through_ (except the success output stream) when commands are called from inside custom-class methods.",
+      "created_at": "2019-05-24T22:46:26Z",
+      "updated_at": "2019-05-24T22:48:41Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 \r\n>  design intent with respect to passing the PowerShell output streams through\r\n\r\nThe intent was that streams are not a part of classes semantically speaking. Methods *return* values and *throw* errors. ",
+      "created_at": "2019-05-28T21:56:40Z",
+      "updated_at": "2019-05-28T21:56:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "A somewhat tangential question, @bpayette, then: what of the other streams? It seems the information stream is handled well enough, and though I'll have to test this evening I am fairly sure I recall verbose and debug streams also behaving as they would outside a class context.",
+      "created_at": "2019-05-28T22:38:15Z",
+      "updated_at": "2019-05-28T22:38:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Indeed, @vexx32: as the code in the [comment above](https://github.com/PowerShell/PowerShell/issues/9702#issuecomment-495592638) demonstrates, streams 3 - 6 are passed through.",
+      "created_at": "2019-05-28T23:30:41Z",
+      "updated_at": "2019-05-28T23:30:55Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 Those streams are neither _output_ nor _error_ hence they are not involved in a discussion of _output/error_ semantics.",
+      "created_at": "2019-05-29T00:38:03Z",
+      "updated_at": "2019-05-29T00:38:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@bpayette \r\n\r\n> Those streams are neither output nor error hence they are not involved in a discussion of _output/error_ semantics.\r\n\r\nHow unfortunate, then, that they are involved in the _implementation_ - which led to their involvement in this _discussion_.\r\n\r\nI guess documenting this half-blending/separation of the worlds is our best option at this point: https://github.com/MicrosoftDocs/PowerShell-Docs/issues/4497\r\n\r\n",
+      "created_at": "2019-06-28T03:16:11Z",
+      "updated_at": "2019-06-28T03:16:11Z"
+    }
+  ],
+  "created_at": "2019-05-23T03:17:30Z",
+  "number": 9702,
+  "state": "closed",
+  "title": "Writing to the error stream produces no output in methods of custom classes",
+  "updated_at": "2019-06-28T13:10:18Z"
+}

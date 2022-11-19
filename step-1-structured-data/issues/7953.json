@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7953",
+  "author": "felixfbecker",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\n- Windows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n- Fill out the following repro template:\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nI have this `PATH`:\r\n```\r\n/Users/felix/src/ps-nvm/vs/v10.10.0/bin:./node_modules/.bin:/usr/local/opt/qt/bin:/Users/felix/google-cloud-sdk/bin:/Users/felix/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/usr/local/go/bin:/Library/Frameworks/Mono.framework/Versions/Current/Commands:/Library/TeX/texbin:/usr/local/microsoft/powershell/6:/usr/bin:/bin:/usr/sbin:/sbin\r\n```\r\n`/Users/felix/src/ps-nvm/vs/v10.10.0/bin` contains a `node` binary:\r\n```\r\n-rwxr-xr-x  1 felix  staff  39631440 Sep  6 22:40 /Users/felix/src/ps-nvm/vs/v10.10.0/bin/node\r\n```\r\n\r\nRunning `which node` correctly returns:\r\n\r\n```\r\n> which node\r\n/Users/felix/src/ps-nvm/vs/v10.10.0/bin/node\r\n```\r\n\r\nAnd running `bash -c 'node'` also invokes node correctly.\r\n\r\nI also checked that no other other directory in PATH contains a bad symlink named `node`.\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nRunning `node` should invoke the NodeJS binary.\r\n\r\nActual behavior\r\n---------------\r\n\r\nPowerShell invokes the `Node` function from DSC.\r\n\r\n`Get-Command node` returns this:\r\n```powershell\r\n> Get-Command node\r\n\r\nCommandType     Name                                               Version    Source\r\n-----------     ----                                               -------    ------\r\nFunction        Node                                               0.0        PSDesiredStateConfiguration\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Darwin 18.0.0 Darwin Kernel Version 18.0.0: Wed Aug 22 20:13:40 PDT 2018; root:xnu-4903.201.2~1...\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "This happens whenever the `PSDesiredStateConfiguration` module happens to be loaded, because its `Node` _function_ then takes precedence over the `node` _external utility_, based on the usual command-form precedence rules.\r\n\r\n(I'm not sure why and when, but in VSCode I have at times ended up with `PSDesiredStateConfiguration` imported, without my having done so explicitly.)\r\n\r\nPowerShell still knows about the external utility, though, as running `Get-Command -All node` will show you.\r\n\r\n\r\n```powershell\r\n# If DSC isn't loaded, 'node' invokes the external utility by that name in $env:PATH\r\nPS> Remove-Module -EA Ignore PSDesiredStateConfiguration; Get-Command node\r\n\r\nCommandType     Name                                               Version    Source\r\n-----------     ----                                               -------    ------\r\nApplication     node                                               0.0.0.0    /usr/local/bin/node\r\n\r\n# Once DSC is loaded, its Node function takes precedence.\r\nPS> Import-Module  PSDesiredStateConfiguration; Get-Command node\r\n\r\nCommandType     Name                                               Version    Source\r\n-----------     ----                                               -------    ------\r\nFunction        Node                                               0.0        PSDesiredStateConfiguration\r\n\r\n# Use -All to show all available command forms.\r\nPS> Import-Module  PSDesiredStateConfiguration; Get-Command -All node\r\n\r\nCommandType     Name                                               Version    Source\r\n-----------     ----                                               -------    ------\r\nFunction        Node                                               0.0        PSDesiredStateConfiguration\r\nApplication     node                                               0.0.0.0    /usr/local/bin/node\r\n```\r\n\r\nIf this were Windows, you could use `.exe` to disambiguate, but on Unix-like platforms that's not an option.\r\n\r\n",
+      "created_at": "2018-10-05T18:08:40Z",
+      "updated_at": "2018-10-05T18:09:03Z"
+    },
+    {
+      "author": "felixfbecker",
+      "author_association": "CONTRIBUTOR",
+      "body": "How could it have happened that I loaded this module? This happens to me on a fresh terminal instance",
+      "created_at": "2018-10-05T18:11:05Z",
+      "updated_at": "2018-10-05T18:11:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The - obviously cumbersome - workaround:\r\n\r\n```powershell\r\nPS> & (Get-Command -CommandType Application node) --version # OK, calls Node.js\r\nv10.7.0\r\n```\r\n\r\nPOSIX-like shells have syntactic sugar (_quoting_ any part of the command name to request bypassing _aliases_) and built-in helper functions (`command`, which bypasses functions too) to deal with this scenario.\r\n\r\nPerhaps we need something similar in PowerShell.",
+      "created_at": "2018-10-05T18:14:01Z",
+      "updated_at": "2018-10-05T18:14:01Z"
+    },
+    {
+      "author": "felixfbecker",
+      "author_association": "CONTRIBUTOR",
+      "body": "`&(which node)` works fine too. But I don't want to use a workaround, what I really want to know is how DSC ends up in the session without me ever calling any command from it or importing it. I don't use DSC, but I use `node` all the time.",
+      "created_at": "2018-10-05T18:16:57Z",
+      "updated_at": "2018-10-05T18:16:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@felixfbecker: The likeliest explanation is that something in your `$PROFILE` caused the module to be loaded - it doesn't happen for me, on any platform.\r\n\r\nTry `pwsh -noprofile -command \"get-command node\"` to see if it happens without your profile as well.",
+      "created_at": "2018-10-05T18:16:59Z",
+      "updated_at": "2018-10-05T18:16:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> (I'm not sure why and when, but in VSCode I have at times ended up with PSDesiredStateConfiguration imported, without my having done so explicitly.)\r\n\r\nIn VSCode, intellisense will import modules that are not already loaded for syntax/parameters/argument completers.\r\n\r\nMay not be related to the original issue, just wanted to clear that up.",
+      "created_at": "2018-10-06T19:34:40Z",
+      "updated_at": "2018-10-06T19:34:40Z"
+    },
+    {
+      "author": "felixfbecker",
+      "author_association": "CONTRIBUTOR",
+      "body": "Is there a way to trace when modules get loaded? ",
+      "created_at": "2018-10-14T15:10:41Z",
+      "updated_at": "2018-10-14T15:10:41Z"
+    }
+  ],
+  "created_at": "2018-10-05T17:55:18Z",
+  "number": 7953,
+  "state": "open",
+  "title": "PowerShell cannot find executable, but which and bash can",
+  "updated_at": "2018-10-14T15:10:41Z"
+}

@@ -1,0 +1,286 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4568",
+  "author": "mklement0",
+  "body": "This is a longstanding issue that @dlwyatt explained in detail in this [2014 blog post](https://blogs.technet.microsoft.com/heyscriptingguy/2014/04/26/weekend-scripter-access-powershell-preference-variables/), and he has even published module `PreferenceVariables` with advanced function `Get-CallerPreference` to ease the pain, via a hard-coded list of preference variable names.\r\n\r\nIn short: A _script_ module's functions do not see the preference-variable values set in the _caller's_ context (except if that context happens to be the _global_ one), which means that **the caller's preferences are not honored**.\r\n\r\n_Update: Since implicitly setting preference variables is PowerShell's method for propagating (inheriting) common parameters such as `-WhatIf`, such parameters are ultimately not honored in calls to script-module functions when passed via an advanced function - see #3106, #6556, and #6342. In short: **the common-parameter inheritance mechanism is fundamentally broken for advanced functions across module scopes, which also affects standard modules such as `NetSecurity` and `Microsoft.PowerShell.Archive`**_ .\r\n\r\n* From a user's perspective this is (a) surprising and (b), once understood, inconvenient.  \r\nAdditionally, given that _compiled_ cmdlets do not have the same problem, it is not easy to tell in advance which cmdlets / advanced functions are affected. In a similar vein, compiled cmdlets proxied via implicitly remoting modules also do not honor the caller's preferences.\r\n\r\n* From a developer's perspective, it is (a) not easy to keep the problem in mind, and (b) addressing the problem requires a *workaround* that is currently quite cumbersome, exacerbated by currently not having a _programmatic_ way identify _all_ preference variables in order to copy their values to the callee's namespace - see #4394.\r\n\r\nA simple demonstration of the problem:\r\n\r\n```powershell\r\n# Define an in-memory module with a single function Foo() that provokes\r\n# a non-terminating error.\r\n$null = New-Module {\r\n  function Foo {\r\n    [CmdletBinding()] param()\r\n    # Provoke a non-terminating error.\r\n    Get-Item /Nosuch\r\n  }\r\n}\r\n\r\n# Set $ErrorActionPreference in the *script* context:\r\n# Request that errors be silenced.\r\n# (Note: Only if you defined this in the *global* context would the module see it.)\r\n$ErrorActionPreference = 'SilentlyContinue'\r\n\r\n# Because the module in which Foo() is defined doesn't see this script's\r\n# variables, it cannot honor the $ErrorActionPreference setting, and \r\n# the error message still prints.\r\nFoo\r\n```\r\n\r\nDesired behavior \r\n-----------------\r\n\r\nNo output.\r\n\r\nCurrent behavior\r\n---------------\r\n\r\n```none\r\nGet-Item : Cannot find path '/Nosuch' because it does not exist.\r\n...\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.5 on macOS 10.12.6\r\nPowerShell Core v6.0.0-beta.5 on Ubuntu 16.04.3 LTS\r\nPowerShell Core v6.0.0-beta.5 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.483 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Module has its own context. It may be preferable to set the preference variable value for the module\r\n`Set-Variable -Module moduleName`",
+      "created_at": "2017-08-14T15:50:41Z",
+      "updated_at": "2017-08-14T15:50:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, modules have their own scope, which is generally a good thing.\r\n\r\nHowever, this special case calls for a _concise, PS-supported_ way to copy all the preference-variable values from the caller's scope.\r\n(The current workaround of using `$PSCmdlet.SessionState.PSVariable`  based on a hard-coded list of preference variable names is neither future-proof nor reasonable.)\r\n\r\nConsider the user's perspective:\r\n\r\nIf `$ErrorActionPreference = 'Ignore'; Get-Item /NoSuch` works,   \r\n`$ErrorActionPreference = 'Ignore'; Get-MyItem /NoSuch` _not_ working, just because the `Get-MyItem` command _happens to be_ defined as an advanced function in a script module, is highly obscure and confusing.\r\n\r\nGiving module developers an easy, built-in way to opt into the caller's preferences would mitigate that problem.\r\n\r\n",
+      "created_at": "2017-08-14T16:39:10Z",
+      "updated_at": "2017-08-14T16:59:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Main module's function is to isolate code that expose public API and hide implementation. We can get unpredictable behavior if we just copy any variables (and maybe indirectly functions) to a module context.\r\nAlso internally there are difference of global and local preference variables.\r\nPreference variables is not protected and can be used other ways:\r\n```powershell\r\nRemove-Variable ErrorActionPreference\r\n$ErrorActionPreference =@()\r\n```\r\nWe may have problems if these variables are simply copied in a module context.\r\n\r\nWhat scenarios do we need to? It seems it is only debug. If so we could resolve this otherwise,  for example, by loading a module in debug mode. If we want to manage the preference variables in a module, we must do this in a predictable way (We can load tens modules in session!):\r\n```powershell\r\nImport-Module testModule -SetErrorActionPreference Stop\r\n```\r\n",
+      "created_at": "2017-08-15T04:11:52Z",
+      "updated_at": "2017-08-15T04:12:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Also we have an Issue with the request to share modules between runspaces. If we want implement this we can not simply copy any variables - no single parent context exists.",
+      "created_at": "2017-08-15T04:20:19Z",
+      "updated_at": "2017-08-15T04:20:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Preference variables is not protected and can be used other ways:\r\n\r\nIndeed, but that is (a) incidental to the issue at hand and  (b) should in itself be considered a bug: see  #3483",
+      "created_at": "2017-08-15T04:48:56Z",
+      "updated_at": "2017-08-15T04:48:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  We can get unpredictable behavior if we just copy any variables (and maybe indirectly functions) to a module context.\r\n\r\nWe're not talking about _any_ variables. We're talking about the well-defined set of _preference_ variables - even though, as stated, there's currently no _programmatic_ way to enumerate them.",
+      "created_at": "2017-08-15T04:56:12Z",
+      "updated_at": "2017-08-15T04:56:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> What scenarios do we need to? It seems it is only debug. \r\n\r\n* Please read the blog post that the original post links to.\r\n* Then consider my `Get-Item` vs. `Get-MyItem` example.\r\n\r\nThis is very much a _production_ issue, unrelated to debugging:\r\n\r\nCurrently, if you create a script module, that module's functions will by default _ignore_ a caller's preferences variables (unless you're calling from the global scope), which to me is self-evidently problematic:\r\n\r\nFor instance, if a caller sets `$ErrorActionPreference` to `Stop`, they have a reasonable expectation that cmdlets / advanced functions invoked subsequently honor that setting - without having to know whether a given command happens to be defined in a script module that doesn't see that setting by default.\r\n",
+      "created_at": "2017-08-15T05:11:47Z",
+      "updated_at": "2017-08-15T05:12:21Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Honoring the callers preference might cause serious problems by introducing exceptions (e.g. `$errorActionPreference = 'Stop'` in places where none were expected.\r\n\r\nSome examples - `Dispose` might not get called and resources leak, or the system may be left in an inconsistent state because some side effects do not execute.\r\n\r\nIf the goal is to silence a noisy function - one can work with the function author to provide a better experience or else explicitly pass `-ErrorActionPrefernce SilentlyContinue`.",
+      "created_at": "2017-08-15T06:18:27Z",
+      "updated_at": "2017-08-15T06:18:27Z"
+    },
+    {
+      "author": "dlwyatt",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think the focus is too much on the implementation here and not on the problem:  a user shouldn't have to know or care how a particular PowerShell command is implemented.  Whether it's a cmdlet, function, cdxml, imported from a remote session, whatever:  they should have a consistent experience with regard to common parameters and preference variables.  If I put `$VerbosePreference = 'Continue'` in my script, I should expect to see all the verbose output that I asked for.  If I say `$ErrorActionPreference = 'Stop'`, then anything that bubbles up through the Error stream to my code should cause a terminating error.\r\n\r\n> Honoring the callers preference might cause serious problems by introducing exceptions (e.g. $errorActionPreference = 'Stop' in places where none were expected.\r\n\r\nI don't see this as a problem, since that's exactly what happens if the caller specifies `-ErrorAction Stop` today.  (Common parameters cause the equivalent preference variables to be set in the advanced function's scope.)",
+      "created_at": "2017-08-15T17:20:29Z",
+      "updated_at": "2017-08-15T17:20:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@dlwyatt: Amen to that. I was in the middle of composing the following:\r\n\r\nThe point is that if _compiled_ cmdlets respect preference variables set in the caller's scope, it's reasonable to expect _advanced functions_ to respect them too - the user shouldn't have to worry about module scopes or how a given command happens to be implemented.\r\n\r\nWith respect to `$ErrorActionPreference = 'Stop'`: It sounds like using `Stop` (whether via the pref. variable or the common parameter) is inherently problematic, which is a separate conversation (and I personally wasn't aware that it's problematic - probably worth documenting).\r\n\r\nLet's take a more innocuous example: setting `$VerbosePreference = 'Continue'` in an effort to make _all_ cmdlet invocations in the current script produce verbose output:\r\n\r\nThe following example defines `Get-Foo1` as a compiled cmdlet, and functionally equivalent `Get-Foo2` as an advanced function _in a module_:\r\n\r\n`Get-Foo1` respects the verbose preference, `Get-Foo2` does not.\r\n\r\n```powershell\r\n# Define compiled cmdlet Get-Foo1 (via an in-memory assembly and module).\r\nAdd-Type -TypeDefinition @'\r\n    using System;\r\n    using System.Management.Automation;\r\n    [Cmdlet(\"Get\", \"Foo1\")]\r\n    public class GetFoo1 : PSCmdlet {\r\n\r\n        protected override void EndProcessing() {\r\n            WriteVerbose(\"foo1\");\r\n        }\r\n    }\r\n'@ -PassThru | % Assembly | Import-Module\r\n\r\n# Define analogous advanced function Get-Foo2 via an in-memory module.\r\n$null = New-Module {\r\n    Function Get-Foo2 {\r\n        [cmdletbinding()]\r\n        param()\r\n\r\n        End {\r\n            Write-Verbose(\"foo2\");\r\n        }\r\n    }\r\n}\r\n\r\n$VerbosePreference = 'Continue'\r\n\r\n# Compiled cmdlet respects $VerbosePreference.\r\nGet-Foo1\r\n# Verbose: foo1\r\n\r\n# Advanced function in script module does NOT, because it doesn't see the caller's\r\n# $VerbosePreference variable.\r\nGet-Foo2\r\n# (no output)\r\n```\r\n\r\nExpecting the user to even anticipate a distinction here and to then know which commands are affected based on how they happen to be implemented strikes me as highly obscure.\r\n\r\nA scenario in which the behavior is even more obscure is with _implicit remoting_ modules that _proxy_ compiled cmdlets that execute remotely. In that case, the remotely executing cmdlets, even though they _normally_ respect the caller's preference, do not. (On a related note: even `-ErrorAction Stop` does not work in that scenario, because the parameter is applied _remotely_, and terminating errors that occur remotely are by design converted to non-terminating ones.)\r\n\r\n---\r\n\r\nI don't know what the right solution is, but if we can agree that there is a problem, we can tackle it.\r\n",
+      "created_at": "2017-08-15T17:37:53Z",
+      "updated_at": "2017-08-15T17:37:53Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Keep in mind one big difference between binary cmdlets and functions - binary cmdlets are rarely implemented in terms of PowerShell functions or other cmdlets.\r\n\r\nThe error or verbose output is likely carefully crafted for a binary cmdlet, whereas it's a bit more random for functions.\r\n\r\nAlso note that the equivalence of `-ErrorAction Stop` and setting the preference variable could be thought of as an implementation detail and is considered a bug by some people for some of the reasons mentioned above.\r\n\r\nIt's worth pointing out that extra verbosity is not always desirable - and this proposal could turn some useful verbose output into noisy useless output.",
+      "created_at": "2017-08-15T19:53:57Z",
+      "updated_at": "2017-08-15T19:53:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Keep in mind one big difference between binary cmdlets and functions - binary cmdlets are rarely implemented in terms of PowerShell functions or other cmdlets.\r\n\r\nUsers needing to be aware of how a given command happens to be implemented is an unreasonable expectation.\r\nAside from that, I don't understand your comment.\r\n\r\n> The error or verbose output is likely carefully crafted for a binary cmdlet, whereas it's a bit more random for functions.\r\n\r\nPowerShell has evolved toward making the PowerShell language a first-class citizen with respect to creating cmdlets (advanced functions).\r\nSomeone skilled enough to create advanced functions as part of a module should be assumed to exercise the same care as someone creating a compiled cmdlet.\r\n\r\n> It's worth pointing out that extra verbosity is not always desirable - and this proposal could turn some useful verbose output into noisy useless output.\r\n\r\nIf I, as a user, set `$VerbosePreference = 'Continue'` _scope-wide_, I expect _all_ commands invoked subsequently to honor that settings; if I didn't want that, I would use `-Verbose` on a _per-command_ basis.\r\n\r\nNote that backward compatibility is a separate discussion - _opting in_ to copying the caller's preference variables is a viable option in that context, perhaps via a new [`[System.Management.Automation.CmdletBindingAttribute]`](https://msdn.microsoft.com/en-us/library/system.management.automation.cmdletbindingattribute%28v=vs.85%29.aspx) property such as `[CmdletBinding(UseCallerPreferences)]`.\r\n\r\n> the equivalence of -ErrorAction Stop and setting the preference variable\r\n\r\nAgain I don't fully understand your comment; at the risk of going off on a tangent:\r\n\r\nThey are _not_ equivalent: `-ErrorAction Stop` only affects _non-terminating_ errors (escalates them to _script_-terminating errors); `$ErrorActionPreference = 'Stop'` affects both non-terminating and statement-terminating errors - see [Our Error Handling, Ourselves - time to fully understand and properly document PowerShell's error handling](https://github.com/PowerShell/PowerShell-Docs/issues/1583).\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-08-15T23:55:08Z",
+      "updated_at": "2017-08-15T23:55:08Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "> Users needing to be aware \r\n\r\nI think you're emphasizing my point. Users of a command aren't aware of the implementation and do have the expectation of reasonable output.\r\n\r\nCommand authors are a different story - they need to be aware of the implications of preference variables and parameters like `-Verbose` in a way that differs from the user.\r\n\r\nIn some cases, the command author and user are the same, and I do wonder if that's where some of this feedback is coming from - because the command author sometimes wants more help debugging during development.",
+      "created_at": "2017-08-16T17:33:30Z",
+      "updated_at": "2017-08-16T17:33:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Users of a command aren't aware of the implementation and do have the expectation of reasonable output.\r\n\r\nNo argument there. And let's not forget predictable behavior, which brings us to the next point:\r\n\r\n>  I do wonder if that's where some of this feedback is coming from \r\n\r\nI can't speak for @dlwyatt, but to me this is _all_ about the user perspective:\r\n\r\n* I set a preference variable to modify the behavior scope-wide.\r\n* I expect commands called from that scope to honor them, just as the standard cmdlets do.\r\n\r\nIf I can't predict which of the commands I'll invoke will actually honor the preferences, I might as well do without preferences altogether and only use common parameters.\r\n\r\nWe've covered `$VerbosePreference`, but let's consider `$WhatIfPreference` and `$ConfirmPreference`:\r\n\r\nIf I set these with the expectations that all commands invoked from the same scope will honor them, I may be in for nasty surprises.\r\n\r\nSimilarly, to return to `$ErrorActionPreference`: An approach I've personally used it to set `$ErrorActionPreference = 'Stop'` at the start of a script as _fallback_ and then handle errors that I _anticipate_ on a per-command basis. That way, unanticipated errors cause the script to abort, as a fail-safe - or so I'd hoped.\r\n\r\n",
+      "created_at": "2017-08-16T20:13:24Z",
+      "updated_at": "2017-08-16T20:13:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Also note that the equivalence of -ErrorAction Stop and setting the preference variable could be thought of as an implementation detail and is considered a bug by some people for some of the reasons mentioned above.\r\n\r\nI _think_ I now understand what you're saying, and I hope I'm not wasting my breath based on a misinterpretation:\r\n\r\nIt sounds like you're conceiving of preference variables as being limited to the _current scope only_, without affecting its _descendant_ scopes or the potentially completely separate scopes of _commands invoked_.\r\n\r\n* By itself, this conception runs counter to how variables work in PowerShell, at least with respect to _descendant_ scopes.  \r\nTo be consistent with how PS variables work, you'd have to define a variable as `$private:` in order to limit it to the current scope only.\r\n\r\n* Certainly, given that core cmdlets currently  _do_ honor the preference variables, changing that behavior - selectively, for preference variables only - would be a serious breaking change and would require a focused effort to reframe the purpose of preference variables.\r\n\r\n---\r\n\r\nLeaving the syntax and backward compatibilities issues aside, I can see how _some_ preference variables can be helpful as limited to the current scope:\r\n\r\n  * `$DebugPreference` and `$VerbosePreference` and `$ErrorActionPreference` only applied to `Write-Debug` and `Write-Verbose` and `Write-Error` commands issued directly in the current scope could help with debugging only a given script, without being distracted by debug/verbose commands / errors from _commands_ invoked from the current scope. \r\nAs an aside: As stated, against documented behavior, `$ErrorActionPreference` currently also takes effect for _terminating_ errors.\r\n\r\n    * Again: In the realm of PowerShell variables, that would call for something like `$private:VerbosePreference = 'Continue'`.  On a side note: _that doesn't actually work_ - descendant scopes still see the value, which means that any non-module-defined functions currently _do_ respect these preferences either way.\r\n\r\n  * And, again, just as I and  @dlwyatt have, I assume that many people are currently _relying_ on `$ErrorActionPreference` applying to errors reported by _commands_ called from the current scope too - or at least have had that expectation, which currently only holds true for _compiled_ cmdlets by default, a distinction that brings us back to the original problem.",
+      "created_at": "2017-08-18T02:53:55Z",
+      "updated_at": "2018-03-03T03:39:33Z"
+    },
+    {
+      "author": "StingyJack",
+      "author_association": "CONTRIBUTOR",
+      "body": "I found that specifying `$global:` addresses this for progress bar issues. \r\n\r\n`$global:ProgressPreference = 'silentlycontinue'`  at the top of a script suppresses the performance killing progress indicator when downloading things.\r\n\r\nIt's probably easier to do that with VerbosePreference than adding `-Verbose:($PsCmdlet.MyInvocation.BoundParameters['verbose'] -eq $true)` to every single command my script calls.",
+      "created_at": "2018-02-08T15:08:02Z",
+      "updated_at": "2018-02-08T15:09:22Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "It seems to me that when considering code inside a script module there are two distinct kinds of code to which [preference variables](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-6) (eg. `$ErrorActionPreference`, etc) and [common parameters](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_commonparameters?view=powershell-6) (eg. `-ErrorAction`, etc) might apply:\r\n   - business logic implemented within the module\r\n      * The cause of errors arising from such code are bugs (ie. \"boneheaded\" errors per [Eric Lippert's taxonomy](https://blogs.msdn.microsoft.com/ericlippert/2008/09/10/vexing-exceptions/)).  Accordingly, such code should be run with `$ErrorActionPreference='Stop'`.\r\n      * Deciding the conditions for and quantity of verbose messages output from the business logic requires the good judgment of the module author.  This probably involves careful consideration of what should happen when the module is called with the different values of `$VerbosePreference` and `-Verbose` at the call site of module entry points.\r\n      * `$DebugPreference`, `$WarningPreference`, and `$InformationPreference` for such code should probably be the PowerShell defaults regardless of what the caller's values of those variable are.\r\n   - calls made to outside the module\r\n      * Such code is subject to all sorts of untidy unpredictable external realities that cause errors (Eric Lippert calls these \"exogenous\").  The user of the module should be the party deciding what to do when such an error arises.  Accordingly,\r\n      * the value of common parameters and preference variables for such calls should be the same as they were at the call site of the _entry point_ to the module.\r\n\r\nThe above points aren't hard and fast, but I think they're a reasonable starting point for most modules involving a mix of business logic and calls made to outside the module.  PowerShell, of course, does not behave this way by default.  To implement a module that is consistent with the above points requires two things to happen as follows:\r\n\r\n   1. Capture preference variables and common parameters at the call site of the entry point to the module.\r\n   2. Apply those preference variables and common parameters to the calls made to outside the module.\r\n\r\nI suspect that these tasks can be handled reasonably well by a utility module.  I wrote [an annotated proof-of-concept of such a module](https://gist.github.com/alx9r/a021854c06efdae411f7ae80e6f13d0f).  The entry points to a user module that uses the utility module would look, for example, like this:\r\n\r\n```PowerShell\r\nfunction Get-MyItem {\r\n    param(\r\n        [Parameter(Position=1)] $Path\r\n    )\r\n    HonorCallerPrefs {\r\n        Get-MyItemImpl $Path\r\n    }\r\n}\r\n\r\nfunction New-MyItem {\r\n    param(\r\n        [Parameter(Position=1)] $Path,\r\n        [switch]                $WhatIf,\r\n        [switch]                $Confirm\r\n    )\r\n    HonorCallerPrefs {\r\n        New-MyItemImpl $Path\r\n    }\r\n}\r\n```\r\n\r\nThe corresponding sites that call out of the user module would look like this:\r\n\r\n```PowerShell\r\nInvokeWithCallerPrefs {\r\n    Get-Item $path @CallerCommonArgs\r\n}\r\n\r\nInvokeWithCallerPrefs {\r\n    New-Item $path @CallerCommonArgs\r\n}\r\n```\r\n\r\n`HonorCallerPrefs{}` and `InvokeWithCallerPrefs{}` are implemented by the utility module and capture and apply, respectively, the preference variables and common parameters.  The concept should work even if the call stack between `HonorCallerPrefs{}` and `InvokeWithCallerPrefs{}` is deep and complicated, as long as the calls to `HonorCallerPrefs{}` and `InvokeWithCallerPrefs{}` are in the same module.\r\n",
+      "created_at": "2018-02-28T20:09:53Z",
+      "updated_at": "2018-02-28T20:12:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The recent #6556 is a more pernicious manifestation of the problem discussed here:\r\n\r\nBecause CDXML-based cmdlets are seemingly _advanced functions_ rather than binary cmdlets, the **functions in the `NetSecurity` module such as `Enable-NetFirewallRule` situationally do not honor the `-WhatIf` switch**, namely if invoked via an advanced function that itself supports `-WhatIf` or via an explicitly set `$WhatIfPreference` value, as discussed.\r\n\r\nRevisiting @lzybkr's comment:\r\n\r\n> Also note that the equivalence of\u00a0`-ErrorAction Stop`\u00a0and setting the preference variable could be thought of as an implementation detail\r\n\r\nFrom what I gather, PowerShell _implicitly_ translating a common parameter such as `-WhatIf` into the equivalent locally scoped preference variable such as `$WhatIfPreference` is _the_ mechanism for automatically propagating common parameters to calls to other cmdlets inside an advanced function.\r\nSo, yes, you can conceive of it as an implementation detail, but even as such it is broken.\r\n\r\n@alx9r: As commendable as starting scripts / functions with `$ErrorActionPreference = 'Stop'` is (it is what I usually do in my own code), it actually interferes with that mechanism (I have yet to take a look at your proof of concept).\r\n\r\n\r\n",
+      "created_at": "2018-04-04T19:37:31Z",
+      "updated_at": "2018-04-04T19:44:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "#6342 is a similar manifestation of the problem, in the context of `Expand-Archive`.",
+      "created_at": "2018-04-04T20:33:59Z",
+      "updated_at": "2018-04-04T20:33:59Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@mklement0 \r\n\r\n>As commendable as starting scripts / functions with $ErrorActionPreference = 'Stop' is (it is what I usually do in my own code), it actually interferes with that mechanism...\r\n\r\nJust to be clear.  I did not suggest (or if I did, I did so unintentionally) \"starting scripts / functions with `$ErrorActionPreference = 'Stop'`\" in the [proof-of-concept I proposed](https://github.com/PowerShell/PowerShell/issues/4568#issuecomment-369366936).  The proof-of-concept is specific to advanced functions in modules.  I do suggest that, for advanced functions in modules, the code internal to the module be run with `$ErrorActionPreference = 'Stop'`.  But that is quite a different thing from, in general, \"starting scripts / functions with `$ErrorActionPreference = 'Stop'`\".\r\n\r\n>From what I gather, PowerShell implicitly translating a common parameter such as -WhatIf into the equivalent locally scoped preference variable such as $WhatIfPreference is the mechanism for automatically propagating common parameters to calls to other cmdlets inside an advanced function.\r\n\r\nThat is my understanding too.  I think, though, that that mechanism alone produces inadequate results. \r\n  FWIW, the proof-of-concept currently doesn't do any refereeing based on the impact of `-WhatIf`, etc.  I see no reason, though, why such a library couldn't be expanded deal correctly with that matter as well.",
+      "created_at": "2018-04-04T21:10:42Z",
+      "updated_at": "2018-04-04T21:12:19Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "This issue seems stalled, but it's such an important one, and with the upcoming PowerShell 7.0 milestone it would be really, really great if people put their heads together and come up with a model that makes sense for the caller, has the right default behavior, and that gives the developer the flexibility they need to override the default behavior if necessary. @SteveL-MSFT ",
+      "created_at": "2019-04-16T15:18:19Z",
+      "updated_at": "2019-04-16T15:18:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Agreed. If we can come to a conclusion on this it would be great to get a more consistent model in place.",
+      "created_at": "2019-04-16T16:08:24Z",
+      "updated_at": "2019-04-16T16:08:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could move forward if we created examples of the desired behavior in the form of Pester tests.",
+      "created_at": "2019-04-16T17:46:39Z",
+      "updated_at": "2019-04-17T03:55:41Z"
+    },
+    {
+      "author": "StingyJack",
+      "author_association": "CONTRIBUTOR",
+      "body": "The expectation from my POV is that caller preferences that do not affect the script or module execution paths are replicated out to every script or module that gets involved, as a default, without having to opt-in (other than `[CmdletBinding()]` ofc).\r\n\r\nThis would be things like Verbose, Debug, Information, and Progress, but not something like ErrorActionPreference, PSEmailServer, or ModuleAutoLoadingPreference.",
+      "created_at": "2019-04-16T18:34:36Z",
+      "updated_at": "2019-04-16T18:34:36Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I just read through this discussion again, taking some more time this time around to catch all of the details. Before I share what I believe may be a solution, I think it's worth summing up some of the key points, as follows:\r\n\r\n1. To an end user who is not a command author, a function, advanced function, filter, cmdlet, and alias, and even a script discoverable via `$env:Path` that is invoked by name, are all just commands.\r\n1. End users should never have to care what type of command they invoke, and any scripts they write should function the same regardless of the type of command they invoke.\r\n1. If a command author decides to convert a cmdlet into an advanced function, or vice versa, as long as that author can perform a perfect conversion of the functionality within the command, they should be able to do so without having to worry about existing scripts that directly or indirectly call that command behaving differently just because they changed the way that command was implemented.\r\n\r\nWith this issue as it exists today, only the first item in that list is true, and that is a problem that leads to non-intuitive behavior at best and bugs that cannot be easily worked around without duplicating a lot of code at worst.\r\n\r\nWhen it comes to invocation preferences, I strongly feel that all preferences (not necessarily preference variables, read on to see what I mean) that can be influenced by common parameters (Error, Warning, Information, Verbose, Debug, Progress, Confirm, and WhatIf) need to be carried through the entire invocation of a command, end to end, regardless of what other commands are invoked internally as part of that process. That means a few things:\r\n\r\n1. End users get a declarative syntax for every command they invoke. If they invoke with `-Verbose`, they should get all verbose messages that the command author intended them to get. Ditto with `-Debug`, but for debug messages. And if they use any of the `-*Action` common parameters, that action needs to apply to everything done internally in that command and in any commands invoked internally within that command according to how the author _intentionally_ wrote the command.\r\n\r\n1. Command authors need features that allow them to control the volume of output sent to various streams, as well as features that allow them to silence or ignore certain messages or errors. They have this already. The [behavior of `-Debug` has very recently changed](https://github.com/PowerShell/PowerShell/pull/8195) such that users are no longer prompted when messages are sent to the debug stream, so now command authors have two levels of output for troubleshooting-type messages. This gives command authors more flexibility over the volume of output to specific message streams (they no longer just have the verbose stream to realistically work with). Similarly they have common parameters and preference variables to control other message streams and error handling in the commands that they invoke.\r\n\r\nPart of the discussion here suggests that it may be detrimental to carry through these preferences -- that users may receive too much verbose output, for example. What is/is not too much output from a command, regardless of which stream it is sent to, is a decision that _must_ be made by the command author, _intentionally_, not _incidentally_. Command authors can turn verbose/debug output off for other commands that they invoke, if they feel that information is not helpful/relevant to the caller. They can also silence or ignore errors, warnings, or information messages in commands that they invoke, regardless of how their command is being invoked. The decision on what to allow to pass through or not needs to be a conscious one, not accidental, made by the command author, and it should respect the way the command was invoked by default (common parameters). It should never have been something that a caller should concern themselves with by having to pay attention to the nuances associated with type of command they are invoking and the way that command was loaded.\r\n\r\nIt is also worth pointing out how we got here, and some relevant changes, because that information may lead to a solution to this problem. We've had common parameters and preference variables in PowerShell since v1 was released in 2006. When PowerShell v2 came out in 2009, the PowerShell Team added modules (along with the scoping they have today that contributes to this problem because of how all variables, including preference variables, are only accessible in nested scopes), as well as the addition of the largely underused `$PSDefaultParameterValues` feature, which allows users to assign default values to be used for parameters on commands that are invoked. While the globally visible `$PSDefaultParameterValues` variable was initially accessible from modules (which caused problems because `$PSDefaultParameterValues` is meant to be a user convenience for commands users invoke ad hoc or in scripts, but its use was also impacting commands used within module internals), in PowerShell v5, modules received their own `$PSDefaultParameterValues` so that module commands could run as they were designed without this user convenience getting in the way.\r\n\r\nWhat's most interesting about `$PSDefaultParameterValues` with respect to this issue is that the values it contains impact the _parameters_ (not variables) used in the invocation of all commands in its scope and any child scope. What if `$*Preference` variables continued to function as they do today (current scope plus child scopes unless they are redefined), but when a command is invoked using common parameters to control the various streams and how errors should be handled would not only assign the locally-scoped `$*Preference` variable, but would also result in assignment of a locally-scoped dictionary (maybe as a property of `$PSCmdlet`?) that works like `$PSDefaultParameterValues` but with higher precedence (so `$PSDefaultParameterValues` would still function if it was already in use), such that any command invoked within that command would automatically be invoked with the same common parameter values used in the invocation if those parameters were not specifically used.\r\n\r\nFor example, consider this script:\r\n\r\n```PowerShell\r\n# First, create two modules, where a command in one module invokes a command in the other\r\nnmo -name test1 {\r\n    function Test-1 {\r\n        [cmdletBinding()]\r\n        param()\r\n        Test-2\r\n    }\r\n} | ipmo\r\nnmo -name test2 {\r\n    function Test-2 {\r\n        [cmdletBinding()]\r\n        param()\r\n        Write-Verbose 'Verbose output'\r\n    }\r\n} | ipmo\r\n\r\n# The next command shows verbose output, as expected\r\nTest-2 -Verbose\r\n\r\n# Output: VERBOSE: Verbose output\r\n\r\n# This command does not show verbose output, because of the design flaw identified in this GitHub issue\r\nTest-1 -Verbose\r\n\r\n# Output: none\r\n\r\n# Now let's redefine the test1 module, with some extra logic to assign a locally-scoped\r\n# PSDefaultParameterValues hashtable based on the Verbose common parameter (this would be a\r\n# property of PSCmdlet, but I'm just using PSDefaultParameterValues to show how it could work).\r\nnmo -name test1 {\r\n    function Test-1 {\r\n        [cmdletBinding()]\r\n        param()\r\n        $PSDefaultParameterValues = @{'*:Verbose' = ($VerbosePreference -eq 'Continue')} # The magic\r\n        Test-2\r\n    }\r\n} | ipmo\r\n\r\n# Now this works, because of PSDefaultParameterValues impact on common parameters\r\nTest-1 -Verbose \r\n\r\n# Output: VERBOSE: Verbose output\r\n```\r\n\r\nAs you can see, if we maintain the current scope visibility on preference variables, but apply a locally-scoped collection based on common parameters, then we get commands whose internal behavior is end-to-end as a default, resolving this issue. Command/script authors who are assigning preference variables that are not globally scoped in hopes that they will get this behavior will be provided with a solution that allows them to get this more desirable functionality, and rules can be created for PowerShell Script Analyzer to catch these variable assignments and recommend how users should work with the locally scoped collection in `PSCmdlet` instead.\r\n\r\nSimple, right? :smile:\r\n\r\nThe only detail I find missing from this is related to how this can work with `ShouldProcess` common parameters in the following scenario: If within a single module or script file you have one advanced function that supports `ShouldProcess`, and therefore has a `-WhatIf` common parameter, and if internally you invoke another advanced function in the same file that does not support `-WhatIf`, the `$WhatIfPreference` variable set in the first advanced function will influence behavior in the second advanced function. That always felt wrong to me, because the second advanced function doesn't support `ShouldProcess` (i.e. if it's properly designed, it's deemed \"safe\"). It's generally not much of a problem, unless you invoke something like `Set-Variable` where you may not want to use `-WhatIf`. This is also a case where the way the command was written (advanced function in PowerShell vs cmdlet in C#) results in different behavior, even if the proposed solution is implemented. I'm going to sleep on it and see if I can come up with something that works for that scenario.",
+      "created_at": "2019-05-09T00:20:35Z",
+      "updated_at": "2019-05-09T17:42:28Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thinking about the last paragraph in my previous comment a little more, I'm inclined to push for the following to address this (and yes, I'll log this as a separate issue):\r\n\r\nAny `ShouldProcess` command that works with PowerShell entities in the current scope (e.g. any of the following commands invoked without `-Scope`: `Clear-Variable`, `New-Variable`, `Set-Variable`, `Remove-Variable`, `Import-Alias`, `New-Alias`, `Set-Alias`, along with any of their corresponding `New-Item`, `Set-Item`, or `Remove-Item` commands) should run without checking `$PSCmdlet.ShouldProcess`. i.e. If `-Scope` is not used, or if `-Scope` is 0, just do it regardless of WhatIf or Confirm preferences. Local scope operations for these commands should be considered safe, because they have no bearing on any parent scopes whatsoever, and are therefore non-destructive. This model should be followed for any command that supports `ShouldProcess` for both actions that may be destructive as well as actions that are non-destructive -- just because `ShouldProcess` is supported in the command, doesn't mean it should be the gatekeeper to all actions taken by that command.\r\n\r\nThis is an exception, but one easily explained and worth having because some commands should only cause `-WhatIf` or `-Confirm` to change how they run some of the time. For example, there are cases where you want to create a set of variables with dynamic names in a loop without ShouldProcess preferences getting in the way of invocation, and while you can do this using APIs, it should be possible to do this using cmdlets since that's what they are for. Command authors shouldn't have to learn by trial and error which one they should be using -- the cmdlets should just do the right thing.\r\n\r\nIf that gets accepted, then the last paragraph in my previous post in this discussion becomes a non-issue.",
+      "created_at": "2019-05-09T15:45:47Z",
+      "updated_at": "2019-05-09T15:47:58Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "FYI, I opened a set of RFCs to address error handling issues in PowerShell, this one included. If you're keen and you don't want to wait for the RFCs to reach the draft stage, you can find the PR with those RFCs [here](https://github.com/PowerShell/PowerShell-RFC/pull/187).",
+      "created_at": "2019-06-10T14:28:23Z",
+      "updated_at": "2019-06-10T14:28:23Z"
+    },
+    {
+      "author": "nacitar",
+      "author_association": "NONE",
+      "body": "This is still a problem and still needs to be addressed.  Just adding another voice to the pile here... I ran into difficulties from this, figured out the origin of my difficulties and ended up here after some web searches.",
+      "created_at": "2019-10-29T16:16:31Z",
+      "updated_at": "2019-10-29T16:16:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nacitar You can leave a feedback in RFC https://github.com/PowerShell/PowerShell-RFC/pull/221",
+      "created_at": "2019-10-29T17:24:29Z",
+      "updated_at": "2019-10-29T17:24:29Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "For anyone who has tripped on this issue and is following this discussion, please do share your feedback in https://github.com/PowerShell/PowerShell-RFC/pull/221.\r\n\r\nThat RFC, the way it is currently written, talks about adopting optional features in PowerShell (described in another RFC: https://github.com/PowerShell/PowerShell-RFC/pull/220). There is some pushback on the optional feature idea because it requires time/resources to properly manage, and it may be too risky to be worth it to the PowerShell Team (see discussion in optional features RFC), in which case you need to ask yourself: is the current problem with how execution preferences do not propagate beyond module or script scope worth fixing even if it may result in breaking changes?\r\n\r\nBreaking changes may occur because you would be changing how execution preferences influence existing code without specifically testing that code to make sure that it still works as intended.\r\n\r\nFrom my perspective, I think it is worth it, because the current behavior is the root cause of many issues that show up in different modules. If folks agree, and if the optional feature idea is officially rejected, I can at least set up an experimental feature (these are different from optional features) to allow folks to try it out with their modules and make sure things still work the way they intended with execution preferences properly propagating beyond module or script scope.",
+      "created_at": "2019-10-29T19:17:24Z",
+      "updated_at": "2019-10-29T19:17:48Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "EDIT: Comment Moved to https://github.com/PowerShell/PowerShell/issues/12148\r\n",
+      "created_at": "2020-03-18T17:12:24Z",
+      "updated_at": "2020-03-18T19:12:36Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Couldn't say off the top of my head, but given that you're setting $VerbosePreference immediately before it, I would be inclined to say that it's likely a separate issue, something to do with how WhatIf only see verbose set by the switch and not an in-session variable.",
+      "created_at": "2020-03-18T17:42:11Z",
+      "updated_at": "2020-03-18T17:42:11Z"
+    },
+    {
+      "author": "MatejKafka",
+      "author_association": "NONE",
+      "body": "Sorry if this has already been mentioned, but this thread is quite long so I mostly just skimmed it.\r\n\r\nI believe there isn't a single \"right answer\" here:\r\n\r\nFor `$ErrorActionPreference`, I personally use\r\n```powershell\r\nSet-StrictMode -Version Latest\r\n$ErrorActionPreference = \"Stop\"\r\n```\r\nas a header in every module I write, because I want to fail hard when an unhandled error occurs, and my code is written with this in mind. So just blindly copying the variable from caller scope is imo not a good approach, because scripts that do not declare the variable themselves will work differently in different sessions.\r\n\r\nFor output level preference variables (`$VerbosePreference`, `$InformationPreference`,...), I think the current situation where the output is controlled in each scope separately (so the effective output is the minimum of all set preference variables in all scopes the output passes through) is quite nice and I'd like to keep it both as a module writer and a user.\r\n\r\nEDIT: I just tested my assumption from the last paragraph, and surprisingly, this is NOT the current behavior. When `$VerbosePreference` is set to `SilentlyContinue` in module A, and it calls function from module B and passes `-Verbose`, the message is printed, which is imo wrong - it would seem more intuitive to evaluate each message stream on each scope it passes through separately, not just at the source (so if any scope along the way disables verbose output, no output is printed, even if a nested scope runs with verbose output enabled), and inheriting value from parent scope when not explicitly set.",
+      "created_at": "2020-11-25T23:09:59Z",
+      "updated_at": "2020-11-26T02:18:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@MatejKafka: There are two separate aspects, which are _independent_ of one another:\r\n\r\n* Designing your module so that it reports the _appropriate_ type of error, based on the official guidelines, summarized [here](https://stackoverflow.com/a/39949027/45375) (by me). The same applies to using the other output streams, such as the one for verbose output.\r\n\r\n* Respecting the _caller's_ preference variables so as to _modify_ the module's _default_ behavior _on demand_. For that, there's no justification for distinguishing between (a) functions (and scripts) _outside_ a module scope, (b) functions _inside_ a module, and (c) cmdlets.\r\n  * (a) and (c) properly respect the caller's preferences, whereas (b) doesn't. This distinction doesn't make sense, and no user should ever have to think about the _implementation details_ of a given command, i.e. whether it _happens to be_ implemented as (a), (b), or (c). ",
+      "created_at": "2020-11-25T23:20:47Z",
+      "updated_at": "2020-11-25T23:21:12Z"
+    },
+    {
+      "author": "MatejKafka",
+      "author_association": "NONE",
+      "body": "@mklement0 I agree that the behavior being inconsistent is an issue, but it seems we partially disagree in which direction they should be unified.\r\n\r\nAd 1) - I'm more of a programmer than sysadmin - the concept of a non-terminating error seems like something terrifying to me - an error occurred, meaning that something bad happened and I did not correctly anticipate it and handle it, and the program is in an undefined state. Continuing ahead instead of panicking is imo irresponsible, as I cannot further safely reason about the behavior of my own program. Non-terminating error should imo either be a terminating error, or a warning, not a weird mix of both.\r\n\r\nI also edited my previous comment, as I found out that my assumption in the last paragraph isn't correct.",
+      "created_at": "2020-11-25T23:37:31Z",
+      "updated_at": "2020-11-25T23:48:31Z"
+    },
+    {
+      "author": "wisemoth",
+      "author_association": "NONE",
+      "body": "> the concept of a non-terminating error seems like something terrifying to me \r\n\r\nIt shouldn't do. There's a difference between errors and exceptions.  Whether an error is \"exceptional\" depends on the context.  If you've correctly functionally decomposed your code into a series of small pipeline functions each function by itself can't determine if an error is an exception, because it can't own that policy because it doesn't know why it's being called.  Errors from that function should bubble through the pipeline to the creator of the pipeline who can, in that context, determine whether the error is exceptional in that context/pipeline.",
+      "created_at": "2020-11-26T12:36:17Z",
+      "updated_at": "2020-11-26T12:36:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "As a general rule, non-terminating errors tend to be something that comes from an individual object input in the pipeline. If one bad piece of data is received, you don't necessarily want to cancel processing the next 10,000 bits of input. On the other hand, if the error comes from bad / unusable input as the result of a fixed (non-pipeline) parameter input, you can deduce that processing all 10,000 bits of input will yield with the same result (say, for example, the cmdlet requires authentication, and the authentication provider you're using indicates that the credentials specified are invalid) -- then you can throw a terminating error to avoid wasting time trying the known-bad credentials 10,000 times.",
+      "created_at": "2020-11-26T15:27:36Z",
+      "updated_at": "2020-11-26T15:27:46Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "I would prefer we do not use this Issue to discuss/debate PowerShell's error handling models. There are existing Issues you can pile onto, or start a new one.",
+      "created_at": "2020-11-26T15:32:52Z",
+      "updated_at": "2020-11-26T15:32:52Z"
+    },
+    {
+      "author": "jimbobmcgee",
+      "author_association": "NONE",
+      "body": "Having just fallen foul of this one myself, a *good-enough* syntax (for me), as an occasional AF-author would simply be...\r\n\r\n````\r\nGet-Variable -Preference | Set-Variable -Scope Local\r\n````\r\n\r\n...where `-Preference` was a new switch added to `Get-Variable` which limited the output of that command to the known preference variables and supplied *the correctly-resolved value for whatever the current scope intended, apropos of any magic that might apply to that preference variable*.\r\n\r\nI *think* the intent of such a call would be clear and idiomatic, and&mdash;given `-Preference` doesn't exist yet&mdash;shouldn't break any backward compatibility, but I've of course only spent a minimal amount of time looking into it, so I am sure there are all manner of cases that I am not considering.  I don't *think* it requires alteration to `Set-Variable`, since both `-Name` and `-Value` accept the pipeline input that `Get-Variable` outputs, and `-Scope` does not.\r\n\r\nI suppose it might be open to global scope abuse (but, surely so is `$global:*Preference`, so I'm not going to lose sleep over it).",
+      "created_at": "2022-02-15T22:10:27Z",
+      "updated_at": "2022-02-15T22:10:27Z"
+    }
+  ],
+  "created_at": "2017-08-14T14:40:45Z",
+  "number": 4568,
+  "state": "open",
+  "title": "Need straightforward way to honor the caller's preference-variable values / inherited common parameters in functions defined in script modules",
+  "updated_at": "2022-02-15T22:10:28Z"
+}

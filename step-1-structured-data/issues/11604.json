@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11604",
+  "author": "SteveL-MSFT",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nInitially for 7.0, we accepted a change to have [DBNull]::Value treated as $null.  The expectation is that this would make it easier for DB users where their content may contain a DBNull and not require them to explicit check that as well as $null.  However, this introduced other issues:\r\n\r\nhttps://github.com/PowerShell/PowerShell/issues/11084\r\nhttps://github.com/PowerShell/PowerShell/issues/10980\r\nhttps://github.com/PowerShell/PowerShell/issues/10404\r\n\r\n(note that we should probably treat NullString and AutomationNull equivalently)\r\n\r\nSo we had to revert that change before 7.0 GA (**note:** that change was reverted in rc.2 release branch which will be used for GA release, but kept in the master branch for now).  We would still like to investigate whether such a change (or perhaps a different change) makes sense and consider all peripheral impact (so not just `-eq`, but `-lt`, etc... as well as how it works with null coalescing, etc...)\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT NullString and AutomationNull should be treated equivalently? `[nullstring]::Value | % { 1 }` should return no results?\r\n\r\nJust want to clarify, because I don't think that point has been brought up before -- I recall @daxian-dbw mentioning we wanted it to behave the same way [dbnull]::Value does though.",
+      "created_at": "2020-01-16T21:51:35Z",
+      "updated_at": "2020-01-16T21:51:35Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I know I'm a bit late to say this but they definitely want this right?  I don't know much about databases, but is there really no reason to check for `DBNull`?\r\n\r\n/cc @potatoqualitee @SQLDBAWithABeard",
+      "created_at": "2020-01-17T13:40:48Z",
+      "updated_at": "2020-01-17T13:40:48Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "There does need to be a way to explicitly test for DBNull in some circumstances I'm sure, but from what I've heard the difference is mostly a pain and complicates conditional expressions unnecessarily. \r\n\r\nIf you need to check for DBNull specifically you could still do so with `-is [dbnull]` and I think it makes sense for that to be preserved even if we otherwise treat DBNull the same as $null for most / all other intents and purposes.\r\n\r\nWe should also reference the original feature request here: #10404\r\n\r\nTangentially related is this issue about treatment of AutomationNull as well, I suppose: #9997",
+      "created_at": "2020-01-17T13:44:43Z",
+      "updated_at": "2020-01-17T13:44:58Z"
+    },
+    {
+      "author": "ConstantineK",
+      "author_association": "NONE",
+      "body": "My read on the original issue is that DBNull makes working in idiomatic powershell and SQL Server harder for noobs, you dont have to do any special magic to get value types out of your data normally. A dbnull requires an entirely different set of conditionals and checks before you get to anything resembling your business logic. \r\n\r\nExactly @vexx32 ",
+      "created_at": "2020-01-17T13:45:13Z",
+      "updated_at": "2020-01-17T13:45:13Z"
+    },
+    {
+      "author": "potatoqualitee",
+      "author_association": "NONE",
+      "body": "+1 to CK. It's ultra confusing initially (and I still don't understand the underlying mechanics). I've had to visit [this SO post](https://stackoverflow.com/questions/22285149/dealing-with-system-dbnull-in-powershell) more than a couple times in my sql ps travels.",
+      "created_at": "2020-01-17T13:51:57Z",
+      "updated_at": "2020-01-17T13:51:57Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'm sure if we were redesigning these APIs these days it would be much simpler to always have the same wrapper return type that indicated both 1) was something returned (`true` normally, and `false` would indicate what we currently get as `null` from those methods iirc?), and 2) what the resulting value is; in most cases you'd just look at the value (which would simply be `null` both in the case that there is a null value in the DB field and also if there is no data returned at all). In the rare case that you do want to check if the database even had anything to give you'd check the other field.\r\n\r\nI think this solution is likely the closest we're likely to get to that more friendly user experience for handling database values at present, at least until the database APIs get replaced with a newer library entirely (which likely won't happen for quite a few years yet).\r\n\r\nThe hard part is, as @SteveL-MSFT mentioned in the original post, there are some edge cases we'd need to account for when doing this special handling, and we want to be sure we're handling it appropriately in those cases as well. \ud83d\ude42 ",
+      "created_at": "2020-01-17T13:55:52Z",
+      "updated_at": "2020-01-17T14:47:01Z"
+    },
+    {
+      "author": "SQLDBAWithABeard",
+      "author_association": "NONE",
+      "body": "OK, this is a tricky one I think.\r\n\r\nIn database terms NULL has a specific meaning, different in my understanding, to the meaning in a programming language. The absence of a value instead of the absence of an object or object property. (you can dive deeper on SQL here https://www.red-gate.com/simple-talk/sql/t-sql-programming/how-to-get-nulls-horribly-wrong-in-sql-server/)\r\n\r\nYou cannot compare to a NULL value, two null values are not equal in a database. In SQL we use IS (NOT) NULL, which matches obviously to DbNull here.\r\n\r\nSo as the two have a different meaning if I do something like this\r\n\r\n````\r\nCREATE TABLE HasNUlls (id INT,somenullshere varchar(3))\r\n\r\nINSERT INTO HasNUlls VALUES \r\n(1,NULL),\r\n(2,'1'),\r\n(3,'5'),\r\n(4,'115'),\r\n(5,NULL)\r\n````\r\nand ask the database to return the somenullshere column where ID = 5 (Where it is a database NULL) and where ID = 6 (where it doesnt exist) I get a different response.\r\n\r\n![image](https://user-images.githubusercontent.com/6729780/72623296-c5f1ca80-393c-11ea-8cb8-d1bcc3ba87fc.png)\r\n\r\nand the same in pwsh\r\n\r\n![image](https://user-images.githubusercontent.com/6729780/72623613-647e2b80-393d-11ea-8dbf-61492f16d390.png)\r\n\r\nand they are not the same :-)\r\n\r\n![image](https://user-images.githubusercontent.com/6729780/72623718-89729e80-393d-11ea-8ff4-2cfc56aff9b9.png)\r\n\r\nwhich is what is required otherwise you are hiding the difference between the two and perpetuating the impression that DbNull -eq $null\r\n\r\nI might do something like this\r\n\r\n````\r\n$Query = \"SELECT * FROM HasNulls\"\r\n$AllOfThem = Invoke-DbaQuery -SqlInstance $sqlinstance -Database tempdb -Query $query\r\n$dbnull = [System.DBNull]::Value\r\n$AllOfThem | Where somenullshere -eq $null\r\n$AllOfThem | Where somenullshere -eq $dbnull\r\n````\r\n![image](https://user-images.githubusercontent.com/6729780/72624617-326dc900-393f-11ea-8109-c995457c0730.png)\r\n\r\nThe last command might be returning the SQL Instances that my information gathering scripts have not gathered any information for. (To be honest this is a made up example with flaws as I would probably use SQL to do the data munching here as that is what it is good for) \r\n\r\nThe first command might help me to find any SQL Instances that I have not got in my reference table.These are two different things.\r\n\r\nThe complication comes when you dont know what you are returning and need another comparison (as @vexx32  says) but personally, I think people need to code for the two options.\r\n\r\nThis I think is how it should be for -lt -gt etc comparisons as well. \r\n\r\nI would like \r\n\r\n`$AllOfThem | Where somenullshere -eq [System.DBNull]::Value`\r\n\r\nto work without first setting it to a variable and if there was a $DatabaseNull variable that would be even better (but naming it would be hard to avoid breaking things (like my scripts!))\r\n\r\n\r\n\r\n\r\n\r\n\r\n<blockquote><img src=\"https://www.red-gate.com/simple-talk/wp-content/uploads/2019/06/SimpleTalk.png\" width=\"48\" align=\"right\"><div><img src=\"https://www.red-gate.com/simple-talk/wp-content/uploads/2016/07/gatebase-favicon.png\" height=\"14\"> Simple Talk</div><div><strong><a href=\"https://www.red-gate.com/simple-talk/sql/t-sql-programming/how-to-get-nulls-horribly-wrong-in-sql-server/\">How to Get NULLs Horribly Wrong in SQL Server - Simple Talk</a></strong></div><div>NULLs in SQL are a mixed blessing. The Three-Valued Logic of SQL has its uses but can cause difficulties to anyone who assumes that NULL has a 'value'. It can make reports go horribly wrong in a number of alarming ways, as Robert Sheldon explains.</div></blockquote>",
+      "created_at": "2020-01-17T15:53:59Z",
+      "updated_at": "2020-01-17T16:04:58Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I would like\r\n> \r\n> `$AllOfThem | Where somenullshere -eq [System.DBNull]::Value`\r\n> \r\n> to work without first setting it to a variable and if there was a $DatabaseNull variable that would be even better (but naming it would be hard to avoid breaking things (like my scripts!))\r\n\r\nYou can do `-eq ([DBNull]::Value)` or `Where { $_.somenullshere -eq [DBNull]::Value }`.  As much as I'd love to be able to use type literals and static members in command arguments, that's currently valid syntax for a bare word string (e.g. `echo [DBNull]::Value` works like `echo '[DBNull]::Value'`)\r\n\r\nBut also keep in mind that with the changes proposed, you'd have to change that to `Where somenullshere -is ([DBNull])`, otherwise it would also include all literal null values (correct me if I'm wrong @vexx32).",
+      "created_at": "2020-01-17T16:07:55Z",
+      "updated_at": "2020-01-17T16:13:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah that's correct @SeeminglyScience. \r\n\r\nThe proposal is not that they be considered entirely identical to `$null` in PS, but moreso that PS will allow you to somewhat ignore the difference when the distinction isn't important, much as it allows coercion for many other types when the distinction isn't especially important. `-eq` and most other comparison operators are well known to do type coercions between quite a few different types, and this would let you easily compare values without _always_ needing to first check for DBNull if you don't particularly care about the underlying difference in the database state.\r\n\r\nWhen distinguishing the true states is imperative, you would still be able to use `$value -is [dbnull]` to be absolutely certain \ud83d\ude42 ",
+      "created_at": "2020-01-17T16:09:50Z",
+      "updated_at": "2020-01-17T16:12:28Z"
+    },
+    {
+      "author": "SQLDBAWithABeard",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience I do know that! I was being a bit daft because we're are discussing making it simpler \ud83d\ude09\r\n\r\n@vexx32 I think understanding when the difference is not important is a difficult thing",
+      "created_at": "2020-01-17T16:55:16Z",
+      "updated_at": "2020-01-17T16:55:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "From the other folx responses, it seems that understanding the reason for the difference at all is a bit baffling at the best of times. If @potatoqualitee hasn't quite mastered it, I'm not sure there's a lot of hope for the rest of folx out there at the moment! \ud83d\ude06 \r\n\r\nBut yes, that's a valid concern -- I suppose the question is, is it better to be able to ignore the difference, or should we be exposing the difference as we currently are, and forcing users to deal with it themselves? From what I've seen, the current way it's handled leads to a lot of boilerplate and messy `-or` conditionals when folx don't really care one way or the other. \r\n\r\nI definitely can't speak to what would be a better route, though; that's why we're pinging all you folx left and right. \ud83d\udc96 \ud83d\ude01 ",
+      "created_at": "2020-01-17T17:31:36Z",
+      "updated_at": "2020-01-17T17:31:36Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "In the case of getting a null value vs getting null returned as in no results, that's no different today in just PowerShell:\r\n\r\n```powershell\r\nPS> (1,2,3,$null).count\r\n4\r\nPS> $null.count\r\n0\r\n```\r\n\r\n@vexx32, regarding nullstring and automationnull, let's defer whether they should be symmetric to dbnull until after we resolve whether a change makes sense and what kind of change is needed for dbnull",
+      "created_at": "2020-01-17T17:46:23Z",
+      "updated_at": "2020-01-17T17:46:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The thing I keep coming back to is does this really solve the original problem?  In the first thread that spawned @vexx32's PR (#9561), it was mentioned that dbnull keeps escaping into non database code.  That's still going to happen, just not for comparisons specifically.  The dbnull is still going to be there, so as soon as you pass it to something that doesn't work like PowerShell (a dotnet method, a serializer, etc) won't this just make the problem harder to understand?\r\n\r\nI'm not saying that the above will or won't be a problem necessarily, I just want to make sure it's been considered.",
+      "created_at": "2020-01-17T18:00:29Z",
+      "updated_at": "2020-01-17T18:00:29Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Very good point. I'm sure we _could_ make adjustments to the method binder to handle DBNull as well, but equally... should we? \ud83e\udd14 \ud83d\ude15 ",
+      "created_at": "2020-01-17T18:13:46Z",
+      "updated_at": "2020-01-17T18:13:46Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Very good point. I'm sure we _could_ make adjustments to the method binder to handle DBNull as well, but equally... should we? \ud83e\udd14 \ud83d\ude15\r\n\r\nWould there be scenarios where you would want to actually send dbnull to a method though? You'd have to have a `RealDBNull` type like `NullString` which would get *really* confusing.  On top of that, you might have to recursively search objects for members that are `DBNull`, same with arrays (which even `AutomationNull` doesn't handle, but is more likely to occur here).\r\n\r\nIt may be the case that *most of the time* the comparison change is fine.  Maybe most affected code doesn't actually end with sending the objects somewhere that would cause any issues.  I'm not sure if this can really be answered without testing, so this might just need to be put into a beta and tested vigorously by the DBA folks.",
+      "created_at": "2020-01-17T18:21:54Z",
+      "updated_at": "2020-01-17T18:21:54Z"
+    },
+    {
+      "author": "essentialexch",
+      "author_association": "NONE",
+      "body": "I wasn't thrilled about the original change (making DBNull compare like $null), perhaps because I had already gone through the learning curve so that it didn't impact my scripts.\r\n\r\nBut I agree with the reversion and think it should stay reverted. Different values should have different comparisons IMO. Sometimes, a higher learning curve is associated with accuracy.",
+      "created_at": "2020-01-19T23:51:27Z",
+      "updated_at": "2020-01-19T23:51:27Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@SteveL-MSFT We probably need a decision on whether to revert those 2 PRs in the master branch too. New changes may touch the same code that were changed in those 2 PRs and make a reversion harder.",
+      "created_at": "2020-01-21T17:08:38Z",
+      "updated_at": "2020-01-21T17:08:38Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@daxian-dbw we should revert those changes in master until we have some conclusion in this issue",
+      "created_at": "2020-01-21T17:20:35Z",
+      "updated_at": "2020-01-21T17:20:35Z"
+    },
+    {
+      "author": "FireInWinter",
+      "author_association": "NONE",
+      "body": "I really hope this reversion isn't permanent.  The difference between $null and DBNull.Value is just semantics for the most part.  It's like saying 3 x infinity is greater than 2 x infinity.  It's sort of a true statement depending on the type of math your using, but also meaningless in almost all cases.  I've worked with SQL Server, MySQL, and other databases for years.  I understand the difference, but personally I wouldn't mind if DBNull.Value was replaced by $null entirely.  It's greatly simplifies usage in PowerShell and if you know the datasource, you can understand the origin of the null.  And if you don't know the origin of the data, you won't understand the DBNull anyway.  Heck, I had to write a function Remove-DBNull to replace DBNull with null in result sets.  It sucks since it slows down usage of the results, but it makes it much easier to use.  If it at least compared as $null, I probably wouldn't bother with converting the data unless I was exporting it to another system.",
+      "created_at": "2020-02-11T17:59:34Z",
+      "updated_at": "2020-02-11T17:59:34Z"
+    }
+  ],
+  "created_at": "2020-01-16T19:21:06Z",
+  "number": 11604,
+  "state": "open",
+  "title": "Improve PowerShell experience for working with databases",
+  "updated_at": "2020-02-11T17:59:35Z"
+}

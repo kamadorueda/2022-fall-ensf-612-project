@@ -1,0 +1,174 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4726",
+  "author": "mklement0",
+  "body": "<sup>Edited for the current status as of PowerShell Core 7.3.0-preview.4</sup>\r\n\r\nNote: \r\n\r\n* Originally, this issue was also about the inability to _execute_ files whose literal names happen to be syntactically invalid wildcard patterns. \r\n\r\n* This execution aspect was _partially_ fixed in #9202 (but wasn't back-ported to the currently stable version, v6.2.3)\r\n  * Invocation by wildcard pattern still works as a fallback, but paths with `[` and `]` that exist _literally_ now take precedence.\r\n  * Therefore, **if no literal match is present, you may still end up invoking an unrelated file by accident**, which is problematic (e.g., if `a.ps1` is present in the current dir. and `.\\[ab].ps1` is invoked, with no file _literally_ named `[ab].ps1` present, `.\\a.ps1` is executed instead.)\r\n\r\nSeemingly, all external-executable invocation methods ( `.`, `&`, `Start-Process`, `powershell -File`) as well as redirections `>` / `>>` mistakenly interpret script / file paths as _wildcard patterns_, and if  a path that contains `[` happens not contain a syntactically valid range expression, invocation and redirection _break_ (in _Windows PowerShell_, no longer in PowerShell Core, except with `Start-Process`) or can end up accidentally targeting an unrelated executable.\r\n\r\n* In other words: The problem _sometimes_ occurs, unless each instance of `[` happens to be part of a _valid_ range expression; e.g., `a[b]` (valid) vs. `a[b` (invalid); curiously, however, the equally invalid `b[b` does not.\r\n\r\n* But even with a syntactically valid range expression - and some invalid ones - the behavior is unexpected:\r\n\r\n  * `'foo' > 'file[1].txt'` attempts wildcard matching and complains, `Cannot perform operation because the wildcard path file[1].txt did not resolve to a file.`\r\n    * Attempting _escaping_ then inappropriately retains the escape characters - see #9475\r\n\r\n* Attempting to invoke (open) such a file fails quietly, even with escaping (run `New-Item file[1].txt` first):\r\n  * `./file[1].txt` ... quiet no-op\r\n  * ``./file`[1`].txt`` ... quiet no-op\r\n  * If you created a `.ps1` file named, say, `file[1].ps1` (`'\"hi\"' | Set-Content -LiteralPath file[1].ps1`):\r\n    * Invocation with an explicit path unexpectedly only works if `.ps1` is also specified.\r\n    * Invocation via $env:PATH doesn't work at all - neither with or without `.ps1`\r\n\r\n**Fundamentally, external-executable / redirection output paths should be treated as _literals_ in these situations.**\r\nSee [this comment](https://github.com/PowerShell/PowerShell/issues/17106#issuecomment-1088755835) for a discussion and an overview of related issues.\r\n\r\nOriginal tests below.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nRun the following Pester tests.\r\n\r\n```powershell\r\nDescribe \"Redirection with and invocation of literal file paths that are invalid as wildcard patterns\" {\r\n\r\n  BeforeAll {\r\n    Push-Location testdrive:\\\r\n    $f1 = './t[1.ps1'\r\n    $f2 = './t[1.txt'\r\n    New-Item -Type File $f1 -Value \"'hi'\"\r\n  }\r\n\r\n # Passes now, due to fix in #9202\r\n  It \"Script file can be dot-sourced.\" {\r\n    . $f1 | Should -Be 'hi'\r\n  }\r\n\r\n # Passes now, due to fix in #9202\r\n  It \"Script file can be called.\" {\r\n    & $f1 | Should -Be 'hi'\r\n  }\r\n\r\n # Passes now, due to fix in #9202\r\n  It \"Script file can be called via CLI with -File\" {\r\n    pwsh -noprofile -file $f1 | Should -Be 'hi'\r\n  }\r\n\r\n  It \"Redirection works with new file (>)\" {\r\n    & { 'hi' > $f2; Get-Content -LiteralPath $f2 } | Should -Be 'hi'\r\n  }\r\n\r\n  It \"Redirection works with existing file (>)\" {\r\n    New-Item -Force -Type File $f2\r\n    & { 'hi' > $f2; Get-Content -LiteralPath $f2 } | Should -Be 'hi'\r\n  }\r\n\r\n  It \"File path is passed correctly to external programs\" {\r\n    if ($IsWindows) {\r\n      cmd /c type ($f1 -replace '/', '\\') | Should -Be \"'hi'\"\r\n    } else {\r\n      /bin/cat $f1 | Should -Be \"'hi'\"\r\n    }\r\n  }\r\n\r\n  AfterAll {\r\n    Pop-Location\r\n  }\r\n}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nAll tests should pass.\r\n\r\nActual behavior\r\n---------------\r\n\r\nThe `>` tests fail on all platforms.\r\n\r\nIn v6.2.3, the invocation tests fail too.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core 7.0.0-preview.5\r\n```\r\n\r\nOriginally reported for PowerShell Core v6.0.0-beta.7.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems we should escape (try tab completion):\r\n```\r\n. './t`[`].ps1'\r\n```",
+      "created_at": "2017-09-04T12:15:30Z",
+      "updated_at": "2017-09-04T12:16:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "No, I think there is no reason to attempt wildcard pattern matching at all in all these scenarios - the paths should be taken as literals, which obviates the need for escaping.",
+      "created_at": "2017-09-04T12:43:12Z",
+      "updated_at": "2017-09-04T12:43:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I discover this in #4699 and we can see this in https://github.com/iSazonov/PowerShell/blob/c1b300caeef8e242e484eb827667931fde714796/test/powershell/Host/TabCompletion/TabCompletion.Tests.ps1#L752\r\n",
+      "created_at": "2017-09-04T13:02:45Z",
+      "updated_at": "2017-09-04T13:02:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "When tab-completing for _parameters that support wildcards_, the escaping you mention makes sense:\r\n\r\n```powershell\r\n# -Path implied, which supports wildcards -> escaping\r\nGet-Item './t`[`].ps1'  # The result of typing Get-Item ./t<tab> *on Unix*\r\n\r\n# -LiteralPath specified, which does NOT support wildcards -> NO escaping\r\nGet-Item -LiteralPath ./t[].ps1  # The result of typing Get-Item -LiteralPath ./t<tab>\r\n```\r\n\r\nSince there is no good reason to treat the file path in scenarios such as  `. <file-path>` as a wildcard pattern:\r\n\r\n*  _tab completion_ should work the same way it does with `Get-Item -LiteralPath` - treat it as a literal.\r\n\r\n* and _execution_ of such a path should obviously succeed.\r\n",
+      "created_at": "2017-09-04T13:32:06Z",
+      "updated_at": "2017-09-04T13:33:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Here can be a root of the bug.",
+      "created_at": "2017-09-04T13:56:37Z",
+      "updated_at": "2017-09-04T13:56:37Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@mklement0 The file redirection is broken for this scenario, but the invocations seem working fine on `beta.7`:\r\n```\r\nPS:4> '\"Hi!\"' | Set-Content -literalpath './t[].ps1'\r\n[F:\\tmp]\r\nPS:5> ./t[].ps1\r\nHi!\r\n[F:\\tmp]\r\nPS:6> . './t[].ps1'\r\nHi!\r\n[F:\\tmp]\r\nPS:7> & './t[].ps1'\r\nHi!\r\n[F:\\tmp]\r\nPS:8> E:\\pscore\\powershell.exe -noprofile -file './t[].ps1'\r\nHi!\r\n[F:\\tmp]\r\nPS:9>\r\n```\r\nThe `$PSVersion`:\r\n```\r\nPS:9> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-beta\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-beta.7\r\nOS                             Microsoft Windows 10.0.15063\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\nAm I missing something?",
+      "created_at": "2017-09-16T01:03:31Z",
+      "updated_at": "2017-09-16T01:03:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw:\r\n\r\nSorry, I didn't realize that the behavior varies with similar filenames present in the same directory.\r\n\r\nI've updated the original post with scenarios that should fail predictably with initially empty directories, on both Windows and Unix platforms.\r\n\r\nThe key is to use something like `t[.ps1` - something truly invalid if interpreted as a wildcard pattern.\r\n\r\n",
+      "created_at": "2017-09-18T02:46:17Z",
+      "updated_at": "2017-09-18T02:46:17Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@mklement0  Thanks for the clarification!",
+      "created_at": "2017-09-18T18:16:03Z",
+      "updated_at": "2017-09-18T18:16:03Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@mklement0 \tThis issue is about redirection.  Which occurs at execution time, but it is not about what you execute.  I think this would drop it out of the Defense in Depth category and into a functional issue.  If you believe this is a security issue, Please report this issue to `secure@microsoft.com` per the contribution guidelines and not via GitHub.  If they determine that the issue, can be disclosed publicly, feel free to post security issues here.",
+      "created_at": "2019-03-22T19:44:02Z",
+      "updated_at": "2019-03-22T19:44:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13, quoting from the OP (emphasis added):\r\n\r\n> Seemingly, **all external-executable invocation methods ( ., &, Start-Process, powershell -File)** as well as redirections > / >> mistakenly interpret script / file paths as wildcard patterns,\r\n\r\nSimilarly, the repro steps show _execution_ commands.\r\n\r\nSo, as stated in #9202, the latter therefore addresses _part_ of this issue, correct?\r\n\r\nAs for the _other_ part of this issue, redirection: no, I don't think it is security-critical.",
+      "created_at": "2019-03-22T19:51:44Z",
+      "updated_at": "2019-03-22T19:51:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "(The execution issue is _framed_ differently here, because my angle was the _inability_ to execute, but my understanding is that #9202 will fix that too.)",
+      "created_at": "2019-03-22T19:54:17Z",
+      "updated_at": "2019-03-22T19:54:17Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Yes... sorry... I was reading only the parts, not address by #9202 .  I'm in a bit of a rush to get that PR done and some of the suggested changes have broken the PR.  I'm trying to track back which change broke the PR. ",
+      "created_at": "2019-03-22T19:55:31Z",
+      "updated_at": "2019-03-22T19:55:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for letting me know, @TravisEz13. I just wanted to make sure we keep track of what has and hasn't been fixed yet. I've added a note to the OP.",
+      "created_at": "2019-03-22T20:01:53Z",
+      "updated_at": "2019-03-22T20:01:53Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@mklement0 \tI updated you comment.  We use Defense in Depth rather than `security` and especially `critical` for this type of change as it would likely require social engineering or an existing exploit to be useful. ",
+      "created_at": "2019-03-22T20:55:41Z",
+      "updated_at": "2019-03-22T20:55:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @TravisEz13 - didn't know the customary lingo.",
+      "created_at": "2019-03-22T20:57:32Z",
+      "updated_at": "2019-03-22T20:57:32Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "I haven't found a great current document, but PowerShell has had two types of issues that I'm aware of.\r\n\r\nDefense in Depth and Security Boundary Bypass.\r\n\r\nThis document defines `Defense in Depth` and `Security Boundary`: https://www.microsoft.com/en-us/msrc/windows-security-servicing-criteria \r\n\r\nIt also has a link to the bar to call an issue critical near the top called [meet the bar for servicing](https://aka.ms/windowsbugbar).",
+      "created_at": "2019-03-22T21:26:31Z",
+      "updated_at": "2019-03-22T21:26:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I appreciate the pointers, @TravisEz13.",
+      "created_at": "2019-03-22T21:39:04Z",
+      "updated_at": "2019-03-22T21:39:04Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Attempting to escape the wildcard characters from a redirection target argument is still broken.   I ran in to this issue testing file path completion scenario's.",
+      "created_at": "2019-07-24T05:26:08Z",
+      "updated_at": "2019-07-24T05:26:08Z"
+    },
+    {
+      "author": "arberg",
+      "author_association": "NONE",
+      "body": "I suspect this bug I found is this issue, but since I'm not sure I think its valuable if I add the details:\r\n\r\nSomehow create the file: `c:\\temp\\ivydata-[2.4,).properties`\r\npiping to the file in powershell does not work, it gives the same error.\r\n\r\n```\r\n> pwsh -version\r\nPowerShell 6.2.3\r\n\r\nC:\\temp> Test-Path -PathType Leaf \"c:\\temp\\ivydata-[2.4,).properties\"\r\nTest-Path : The specified wildcard character pattern is not valid: ivydata-[2.4,).properties\r\nAt line:1 char:1\r\n+ Test-Path -PathType Leaf \"c:\\temp\\ivydata-[2.4,).properties\"\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [Test-Path], WildcardPatternException\r\n+ FullyQualifiedErrorId : RuntimeException,Microsoft.PowerShell.Commands.TestPathCommand\r\n\r\nC:\\temp> dir \\temp\\*.properties | %{test-path $_}\r\nTest-Path : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: ivydata-[2.4,).properties\r\nAt line:1 char:28\r\n+ dir \\temp\\*.properties | %{test-path $_}\r\n+                            ~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidArgument: (:) [Test-Path], ParameterBindingException\r\n+ FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.TestPathCommand\r\n\r\n```\r\nps: I found the file under c:\\users\\<myname>\\.ivy2",
+      "created_at": "2019-10-25T08:27:15Z",
+      "updated_at": "2019-10-25T08:28:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @arberg, but the behavior you're seeing is by design, because _positionally_ passing a path to `Test-Path` implicitly binds to the `-Path` parameter, which by design interprets its argument as a wildcard expression. If you use `Test-Path -LiteralPath \"c:\\temp\\ivydata-[2.4,).properties\"`, the problem goes away.\r\n\r\nBy contrast, the issue at hand is that when you use `>` / `>>` you (a) don't get a choice about how the path is interpreted and (b) the implied behavior should be the same as with `-LiteralPath`, i.e. interpretation as a _literal_ path.\r\n\r\nIn the past, the same problem existed for _invoking_ files, but that has been fixed in #9202 (though not back-ported to 6.2.3).\r\n\r\nI've updated the OP with the current bug status and Pester tests.",
+      "created_at": "2019-10-25T14:40:13Z",
+      "updated_at": "2019-10-25T14:40:13Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Here is the code for the redirection:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/d58a82ad19fbfad81e85778c8b08cb1b28f58fce/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L1153-L1173\r\n\r\nOf course, changing this, makes it a breaking change.",
+      "created_at": "2019-11-07T07:19:52Z",
+      "updated_at": "2019-11-07T07:19:52Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also, it really seems like its `Out-File` that is broken.  Its not processing wildcard paths correctly, when they have been escaped.  Doesn't seem to be something specific to Out-File, as it calls the LocationGlobber to handle wildcards ...",
+      "created_at": "2019-11-07T07:50:44Z",
+      "updated_at": "2019-11-07T07:50:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the pointer, @msftrncs:\r\n\r\nAs for broken escaping in wildcards - see #7999\r\n\r\nAs for making `>` / `>>` bind to `Out-File`'s `-LiteralPath` parameter instead being a breaking change:\r\n\r\nTechnically, yes, but the current behavior is unexpected, always fraught and mostly useless:\r\n\r\n* It is fraught, because the file getting targeted after matching the wildcard may not be the one you intended to target. (And, of course, if _no_ file matches, you'll get an error.)\r\n\r\n* It is mostly useless in that you can't target _multiple_ files with a wildcard pattern.\r\n  * If that worked, it would definitely be fraught in itself; in fact, it currently does work with `Set-Content`, which I feel should switch to treating its paths as _literals_ too - see #6729 and #9588\r\n\r\n",
+      "created_at": "2019-11-07T12:02:03Z",
+      "updated_at": "2019-11-07T12:08:17Z"
+    }
+  ],
+  "created_at": "2017-08-31T16:34:25Z",
+  "number": 4726,
+  "state": "open",
+  "title": "Some scripts / files with wildcard metacharacter [ in the file name or path cannot be invoked or redirected to",
+  "updated_at": "2022-06-01T17:04:49Z"
+}

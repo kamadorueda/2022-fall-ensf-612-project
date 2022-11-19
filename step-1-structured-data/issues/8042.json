@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8042",
+  "author": "masaeedu",
+  "body": "\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n$x = @(\"foo\") | % { \"Hello, $_\" }\r\necho @x\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nOutput:\r\n\r\n```none\r\nHello, foo\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nPS /home/ankh> echo @x\r\nH\r\ne\r\nl\r\nl\r\no\r\n,\r\n\r\nf\r\no\r\no\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Linux 4.18.12-arch1-1-ARCH #1 SMP PREEMPT Thu Oct 4 01:01:27 UTC 2018\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\nWorkaround\r\n----------------\r\n\r\n```powershell\r\necho @($x)\r\n```",
+  "closed_at": "2019-07-17T15:16:21Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This is a bit of an edge case, really. It requires that one splat a single string as though it contained multiple arguments.\n\nPretty uncommon, especially given that the primary use case is for hashtable splatting, with array splatting being used by practically nobody.\n\nStill... Weird, I suppose, but you've not stored an array into the variable.\n\nIt's fairly common knowledge that PowerShell unwraps one-element arrays. The reason for that is down to how the pipeline works, fundamentally. It unwraps the array and sends each object down the pipeline, individually. As soon as this output begins being sent over a pipeline, the original array is gone. There is no data of whether it originated form a pipeline command, single input, array, whatever.\n\nThe only thing PS has to work with to determine the final shape of data once you start using a pipeline is the number of objects you're working with. Thus, one-element arrays are indistinguishable from a bare single object,",
+      "created_at": "2018-10-16T07:31:41Z",
+      "updated_at": "2018-10-16T07:32:09Z"
+    },
+    {
+      "author": "masaeedu",
+      "author_association": "NONE",
+      "body": "> Pretty uncommon, especially given that the primary use case is for hashtable splatting, with array splatting being used by practically nobody.\r\n\r\nI don't know what data you're relying on for this, but I'm pretty sure I'm somebody, and have been using array splatting frequently \ud83d\ude42. A lot of non-Powershell executables rely on positional arguments, so maybe if you're only working within the domain of Powershell cmdlets and scripts it's unnecessary.\r\n\r\n> you've not stored the array into the variable\r\n\r\nHow would I do this? I thought `$x = @(\"foo\") | % { \"Hello, $_\" }` *was* storing the array into a variable. Just in case I tried `$x = @(\"foo\"); $result = $x | % { \"Hello, $_\" }; echo @result` to store stuff in variables extra hard, but that doesn't seem to work either. In the original use case the array (or apparently non-array, if single element) is `ConvertFrom-Json`-ed and stored into a variable, which is then splatted on the next line.\r\n\r\n> Thus, one-element arrays are indistinguishable from a bare single object\r\n\r\nYes, that is what this issue is about. Another way to put this is that one-element arrays don't exist at all. Most of PowerShell's machinery is therefore built to help non-array values pretend they're one-element arrays (e.g. `\"foo\".Count` is `1`), but in the case of `@` this falls apart.",
+      "created_at": "2018-10-16T07:59:21Z",
+      "updated_at": "2018-10-16T07:59:21Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, I avoid external executables when possible. It's much more painful to have to deal with the text output, and there's almost always a PowerShell native option these days.\n\nOne-element arrays *do* exist, but if you want to pass them over the pipeline as-is and retain the array you need to prevent them being unwrapped.\n\n```\n@(10) | % { $_.GetType() } # unwraps\n,@(10) | % { $_.GetType() } # unwraps, leaving the array intact\n@(@(10)) | % { $_.GetType() } # unwraps first layer, leaving inner array untouched\n```\n\nSo, as I was saying, you weren't really storing the array into your variable in your examples. You were storing the result of the pipeline expression, which is *not* an array.",
+      "created_at": "2018-10-16T11:18:08Z",
+      "updated_at": "2018-10-16T11:19:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Indeed, array-based splatting is useful for external programs, given that hashtable-based splatting is virtually useless in that case: #9343\r\n\r\nArray-based splatting has additional challenges: #6360\r\n\r\n@masaeedu \r\n\r\nThe simplest way to avoid the problem is to simply pass the array (or scalar) _as-is_ - you generally don't need the `@` syntax for external programs:\r\n\r\n```powershell\r\n$x = @(\"foo\") | % { \"Hello, $_\" }\r\necho $x   # works with a scalar $x as well as an array\r\n``` \r\n\r\nThe only time use of an array as-is vs. with `@` makes a difference is that you need the latter syntax to pass `--%` symbol (stop-parsing symbol) through (thought I'd generally avoid that, not least due to its awkwardness on Unix-like platforms).\r\n\r\nIn that event, it's simplest to make `$x` an array by  type constraint:\r\n\r\n```powershell\r\n[array] $x = @(\"foo\") | % { \"Hello, $_\" }\r\necho @x   # OK\r\n```\r\n\r\n`@var` trying to enumerate a  single _string_ argument and passing its individual _characters_ as arguments is definitely pointless, and, to me, worth fixing.\r\n\r\n@vexx32 \r\n\r\n> Yeah, I avoid external executables when possible.\r\n\r\nThat may work fine on Windows, where few capable CLIs are natively available - though in an increasingly cross-platform world installing 3rd-party CLIs is increasingly common there too.\r\n\r\nThe Unix world has always had a wealth of capable (terminal-based) utilities, and while they are usually not as sophisticated as PowerShell cmdlets - and text-based, as you point out - they have one crucial advantage: vastly superior speed.  \r\n\r\nMy guess is that there are many tasks that PowerShell is capable of performing in principle - and typically more elegantly - but are impractical with large datasets  due to poor performance; `Select-String` vs. `grep` performance is one example that comes to mind.\r\n\r\nTherefore, I think that frictionless integration with external utilities is an important aspect of PowerShell adoption on Unix-like platforms, and we currently definitely fall short there, most notably due to the broken passing of arguments with embedded `\"` chars. to external programs, as detailed in [this docs issue](https://github.com/PowerShell/PowerShell-Docs/issues/2361) and [this Stack Overflow answer](https://stackoverflow.com/a/55604316/45375).\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-04-11T19:42:48Z",
+      "updated_at": "2019-04-11T20:50:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A quick aside, @vexx32 \r\n\r\n> `@(@(10)) | % { $_.GetType() } # unwraps first layer, leaving inner array untouched`\r\n\r\nNesting `@(...)` has no effect, so `@(@(10))` is the same as `@(10)`, i.e., a single-element array that is unwrapped in the pipeline.",
+      "created_at": "2019-04-11T20:47:01Z",
+      "updated_at": "2019-04-11T20:47:01Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yep, that wouldn't work heh. Needs a unary comma in there somewhere. :smile:",
+      "created_at": "2019-04-11T22:24:17Z",
+      "updated_at": "2019-04-11T22:25:33Z"
+    }
+  ],
+  "created_at": "2018-10-16T05:10:49Z",
+  "number": 8042,
+  "state": "closed",
+  "title": "Splatting is messed up by Powershell's implicit coercion of arrays to non-arrays",
+  "updated_at": "2019-07-17T15:16:21Z"
+}

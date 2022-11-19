@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9089",
+  "author": "jazzdelightsme",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nSometimes when I'm writing a little script, I test out a bit of code by pasting into a console. And if I had a reference to `$PSScriptRoot` in that code, it blows up, usually looking for files in the root of my drive. E.g. `Get-Content \"$PSScriptRoot\\Version.txt\"` turns into `Get-Content \"\\Version.txt\"` (which in turn becomes an access for \"C:\\Version.txt\", which of course does not exist).\r\n\r\nThe current behavior of `$PSScriptRoot` returning null/empty when there is no script running makes sense from the point of view that, \"hey, there is no script, so... no script root\". However, in *practice* I think it might be much more convenient for the value of `$PSScriptRoot` to be the current [PowerShell] directory (`$PWD`) when accessed interactively.\r\n\r\nThis certainly wouldn't solve all uses of `$PSScriptRoot` from the command line (what if you're not in the right directory?), but it would certainly improve a particular common case.\r\n\r\nIs this a breaking change? I think it's in the \"unlikely grey area\" bucket--it seems unlikely that somebody would take a dependency on `$PSScriptRoot` being empty when accessed from the command line (though certainly not impossible, such as if someone tried to write a guard to detect being pasted into a console instead of being run from script).",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems we can not detect interactive input.",
+      "created_at": "2019-03-09T04:51:45Z",
+      "updated_at": "2019-03-09T04:51:45Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov : well... what if any time `$PSScriptRoot` is going to return `null`, then just return `$PWD` instead?",
+      "created_at": "2019-03-09T05:09:05Z",
+      "updated_at": "2019-03-09T05:09:05Z"
+    },
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "Making it work interactively will make the name of this variable meaningless.",
+      "created_at": "2019-03-09T14:20:16Z",
+      "updated_at": "2019-03-09T14:20:16Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "FWIW, `$PSScriptRoot` is the empty string, not `$null`, when used interactively. I don't know if in any possible future we would be working on a platform where the empty string is a valid absolute path.\r\n\r\nBTW, don't join paths yourself. Use `[System.IO.Path]::Combine` instead.",
+      "created_at": "2019-03-10T14:45:15Z",
+      "updated_at": "2019-03-10T14:45:15Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "This is an interesting idea, it's definitely tripped me up before.\r\n\r\nI do think it's a risky change though - there are too many scenarios where `$PSScriptRoot` might not have a useful value, and I think it's likely real scripts might use that detail in some meaningful way.\r\n\r\nMaybe what you really want is to replace `$PSScriptRoot` with `$PWD` when pasting? It seems simple to do as a custom PSReadLine key binding.",
+      "created_at": "2019-03-10T17:40:12Z",
+      "updated_at": "2019-03-10T17:40:12Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "We've also seen people have issues with this in VSCode with the PowerShell extension.  This crops up when you select script that refers to $PSScriptRoot and press <kbd>F8</kbd> to run the selected script in the console. In this case, the extensions \"knows\" the path for the script.  If we could just **set** the $PSScriptRoot variable in the global session, then <kbd>F8</kbd> would work better for folks.  ",
+      "created_at": "2019-03-10T17:49:56Z",
+      "updated_at": "2019-03-10T17:50:55Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "For PSRL you can override `PSConsoleHostReadLine` like this\r\n\r\n```powershell\r\nfunction PSConsoleHostReadLineProxy {\r\n    Microsoft.PowerShell.Core\\Set-StrictMode -Off\r\n    $command = [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($host.Runspace, $ExecutionContext)\r\n    $ast = [System.Management.Automation.Language.Parser]::ParseInput(\r\n        $command,\r\n        [ref] $null,\r\n        [ref] $null)\r\n\r\n    $findVariablesDelegate = {\r\n        param($a)\r\n        end {\r\n            $a -is [System.Management.Automation.Language.VariableExpressionAst] -and\r\n            $a.VariablePath.UserPath -eq 'PSScriptRoot'\r\n        }\r\n    }\r\n\r\n    $variables = $ast.FindAll($findVariablesDelegate, $true) |\r\n        Microsoft.PowerShell.Utility\\Sort-Object { $PSItem.Extent.StartOffset } -Descending\r\n\r\n    $newPrompt = [System.Text.StringBuilder]::new($command)\r\n    foreach ($variable in $variables) {\r\n        $extent = $variable.Extent\r\n        $null = $newPrompt.\r\n            Remove($extent.StartOffset, $extent.EndOffset - $extent.StartOffset).\r\n            Insert($extent.StartOffset, '$($PWD.ProviderPath)')\r\n    }\r\n\r\n    return $newPrompt.ToString()\r\n}\r\n\r\nMicrosoft.PowerShell.Utility\\New-Alias PSConsoleHostReadLine PSConsoleHostReadLineProxy -Force\r\n```\r\n\r\nWorth noting though that this won't work in the VSCode preview extension because it doesn't actually call `PSConsoleHostReadLine`.  Maybe that should be revisited though.",
+      "created_at": "2019-03-11T12:51:57Z",
+      "updated_at": "2019-03-11T12:51:57Z"
+    },
+    {
+      "author": "chriskuech",
+      "author_association": "NONE",
+      "body": "Writing code with `$PSScriptRoot` is a best practice to avoid opaque dependencies on shell location.  However, this makes testing snippets very frustrating, as they must be rewritten.  This feature would be immensely valuable on a daily basis.",
+      "created_at": "2019-10-10T18:27:30Z",
+      "updated_at": "2019-10-10T18:27:30Z"
+    }
+  ],
+  "created_at": "2019-03-08T16:50:12Z",
+  "number": 9089,
+  "state": "open",
+  "title": "Feature Request: What if $PSScriptRoot returned $PWD when used interactively?",
+  "updated_at": "2019-10-10T18:27:31Z"
+}

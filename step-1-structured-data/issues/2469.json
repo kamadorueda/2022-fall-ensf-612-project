@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2469",
+  "author": "stishkin",
+  "body": "<!--\n\nIf it is a bug report:\n- make sure you are able to repro it on the latest released version. \nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\n- Search the existing issues.\n- Refer to the [FAQ](../docs/FAQ.md).\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\n- Fill out the following repro template\n\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\n-->\n## Steps to reproduce\n\nCopy a folder recursively to a remote session (WinRM)\n\nCopy-Item $PSScriptRoot\\TemplateUtils -Destination C:\\ -Force -Recurse -ToSession $session \n## Expected behavior\n\nCopy succeeds and this worked for Powershell 5.0._._\n\n```\nMajor  Minor  Build  Revision\n-----  -----  -----  --------\n5      0      10586  494\n```\n## Actual behavior\n\n```\ncopy : Unable to index into an object of type System.IO.DirectoryInfo.\n\n+     copy $PSScriptRoot\\TemplateUtils -Destination C:\\ -Force -Recurse ...\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : InvalidOperation: (0:Int32) [Copy-Item], RuntimeException\n    + FullyQualifiedErrorId : CannotIndex\n```\n## Environment data\n\n```\nMajor  Minor  Build  Revision\n-----  -----  -----  --------\n5      1      14942  1000\n```\n\n<!-- provide the output of $PSVersionTable -->\n\n``` powershell\n> $PSVersionTable\n\n```\n",
+  "closed_at": "2019-03-15T18:01:14Z",
+  "comments": [
+    {
+      "author": "stishkin",
+      "author_association": "NONE",
+      "body": "The copy fails to a WinRm session over https. In particular we the following function to create the session:\n\n```\nfunction SecureRemotePSToAnAzureVM_ARM(\n      [Parameter(Mandatory=$true)]$ResourceGroup\n    , [Parameter(Mandatory=$true)]$VMName\n    # Name of the KeyVault containing the WinRM certificate\n    , [Parameter(Mandatory=$true)]$VaultName\n    # Name of the certificate\n    , $WinRMSecretName\n    , $Credential\n)\n{\n    Write-Host \"Downloading certificate from azure vault\"\n    Import-PfxCertificateFromKeyVaultToLocalStore -VaultName $VaultName -secretName $WinRMSecretName\n\n    # Get Public IP address from resource group\n    $c = GetBackendIpAndPort -resourceGroup $resourceGroup -ruleName 'WinRM_HTTPS' -defaultPort 5986\n\n    # Construct the RemotePS/WinRM Uri to connect to\n    # Enter a remote PS session on the VM\n    $uri = \"https://$($c.hostname):$($c.port)\"\n    $ipUri = \"https://$($c.ipaddress):$($c.port)\"\n    Write-Host \"WinRM secured:\" $uri \"(IP: $ipUri)\"\n    $options = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck\n    New-PSSession -ConnectionUri $uri -Credential $Credential -SessionOption $options\n}\n\n```\n\nThe copy to this session does fail with the described error\n",
+      "created_at": "2016-10-13T19:43:36Z",
+      "updated_at": "2016-10-13T19:44:34Z"
+    },
+    {
+      "author": "stishkin",
+      "author_association": "NONE",
+      "body": "Another bit of information: the target VM OS is Windows Server 2008 R2\n",
+      "created_at": "2016-10-13T23:29:57Z",
+      "updated_at": "2016-10-13T23:29:57Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is a good find.  This bug was introduced in V5.x with the addition of copy-item -tosession functionality.  Fortunately this only affects copying to a V2 remote session.  The reason for this bug is that the one helper function copied to the remote session uses a script feature that is not available in PowerShell V2 (the ability to use '[0]' to select the first element on an non-array type).  This is in the PSValidatePathDefinition function:\n\n``` powershell\n        # Get the root path using Get-Item\n        $item = Microsoft.PowerShell.Management\\Get-Item $pathToValidate -ea SilentlyContinue\n        if (($item -ne $null) -and ($item[0].PSProvider.Name -eq 'FileSystem'))\n        {\n...\n```\n\n$item[0] results in the \"Unable to index into an object of type System.IO.DirectoryInfo.\" error.  The file copy still works because fortunately there is enough information returned to continue with the copy operation.\n",
+      "created_at": "2016-10-14T18:42:23Z",
+      "updated_at": "2016-10-14T18:42:23Z"
+    },
+    {
+      "author": "stishkin",
+      "author_association": "NONE",
+      "body": "@PaulHigin  you are right, copy -toSession succeeds. The problem becomes bigger when I try to do copy -fromSession\n\nSee the last error at the end of the list below\n\nCopy : Unable to index into an object of type System.IO.FileInfo.\n- ...             Copy -FromSession $session $remoteSymbolsListPath -Destin ...\n-                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n  - CategoryInfo          : InvalidOperation: (0:Int32) [Copy-Item], RuntimeException\n  - FullyQualifiedErrorId : CannotIndex\n\nCopy : Parameter attributes need to be a constant or a script block.\n- ...             Copy -FromSession $session $remoteSymbolsListPath -Destin ...\n-                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n  - CategoryInfo          : InvalidOperation: (System.Management.Automation.PowerShell:PowerShell) [Copy-Item], RemoteException\n  - FullyQualifiedErrorId : CopyFileRemoteExecutionError,Microsoft.PowerShell.Commands.CopyItemCommand\n\nCopy : The term 'PSCopyFromSessionHelper' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and \ntry again.\n",
+      "created_at": "2016-10-14T19:09:06Z",
+      "updated_at": "2016-10-14T19:10:14Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@stishkin Thanks, I didn't notice that before.  This is a similar issue except that in this case the helper function (PSCopyFromSessionHelper) won't parse because it is using a parameter validation attribute not supported in V2.\n\n``` powershell\n[ValidateRange(0, [long]::MaxValue)]\n```\n\nV2 won't evaluate [long]::MaxValue.\nThis case is worse because the helper function is not available and so the copy operation will not run.\n",
+      "created_at": "2016-10-14T19:37:02Z",
+      "updated_at": "2016-10-14T19:37:02Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Francisco-Gamino /cc\n",
+      "created_at": "2016-10-25T21:42:40Z",
+      "updated_at": "2016-10-25T21:42:40Z"
+    },
+    {
+      "author": "hayleybai",
+      "author_association": "NONE",
+      "body": "Do this issue has any flexible solution?\r\n@Francisco-Gamino \r\n@palladia ",
+      "created_at": "2017-01-10T02:35:21Z",
+      "updated_at": "2017-01-10T02:35:21Z"
+    },
+    {
+      "author": "pmartindev",
+      "author_association": "NONE",
+      "body": "Is there any workaround for this issue?",
+      "created_at": "2018-01-10T20:39:34Z",
+      "updated_at": "2018-01-10T20:39:34Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Since this only affects remoting to v2, this is no longer a priority as v2 is formally deprecated",
+      "created_at": "2018-06-15T05:06:16Z",
+      "updated_at": "2018-06-15T05:06:16Z"
+    },
+    {
+      "author": "pmartindev",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT Sounds good. I've posted this question on SE as well. If anyone finds a resolution for it, and would care to post it there as well for others, it would be greatly appreciated!\r\nhttps://serverfault.com/questions/891643/copy-item-tosession-from-powershell-v-5-0-to-v-2-0\r\n",
+      "created_at": "2018-06-15T21:13:26Z",
+      "updated_at": "2018-06-15T21:13:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@pmartindev my recommendation is to use https://github.com/PowerShell/Win32-OpenSSH/releases with `scp` to copy files",
+      "created_at": "2018-06-15T21:59:25Z",
+      "updated_at": "2018-06-15T21:59:25Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "I think we can probably close this issue now, right? 2yo, only repros with v2... ",
+      "created_at": "2019-03-09T23:35:16Z",
+      "updated_at": "2019-03-09T23:35:16Z"
+    },
+    {
+      "author": "jmbeach",
+      "author_association": "NONE",
+      "body": "I found a workaround that I like a good bit.\r\n\r\n```powershell\r\nfunction Copy-ItemRemote {\r\n  param (\r\n      [Parameter(Mandatory)][string] $filePath,\r\n      [Parameter(Mandatory)][string] $destination,\r\n      [Parameter(Mandatory)][System.Management.Automation.Runspaces.PSSession] $session\r\n  )\r\n  Invoke-Command -Session $session -ScriptBlock {\r\n    param($txt, $destination)\r\n    [System.Io.File]::WriteAllText($destination, $txt);\r\n  } -ArgumentList ([System.IO.File]::ReadAllText($filePath)), $destination;\r\n}\r\n```\r\n\r\nbased on the solution [here](https://social.technet.microsoft.com/Forums/en-US/64a3d37c-9828-4feb-817a-d28e7a147f25/copy-file-from-local-to-remote?forum=winserverpowershell)\r\n\r\n[here it is](https://github.com/jmbeach/custom-powershell-scripts/blob/99bc2af706c3eac8d29430cecc7c187db5077508/file-utilities.ps1#L104) in my personal scripts repo with better documentation. Wouldn't be hard to make this recursive; although it might take some thought to make it efficient.",
+      "created_at": "2021-01-08T02:45:38Z",
+      "updated_at": "2021-01-08T02:48:03Z"
+    }
+  ],
+  "created_at": "2016-10-13T16:23:33Z",
+  "number": 2469,
+  "state": "closed",
+  "title": "Copy-Item folder recursively to WinRm session is broken in Powershell 5.1.*.*",
+  "updated_at": "2021-01-08T02:48:03Z"
+}

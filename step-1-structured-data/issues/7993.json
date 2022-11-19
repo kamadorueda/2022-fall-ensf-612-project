@@ -1,0 +1,293 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7993",
+  "author": "vexx32",
+  "body": "## PR Summary\r\n\r\nFixes #7557 \r\n\r\n* Adds support for binary parsing in format echoing hex: `0b11010110`\r\n  * Works with all existing type suffixes and multipliers.\r\n  * Supports arbitrary length parsing with `n` suffix using BigInteger; details below.\r\n* Adds `NumberFormat` enum to specify hex/binary/base 10 for the tokenizer, replacing old `bool hex`.\r\n* Adds `n` suffix for all numeric literals to support returning value as a `BigInteger` if requested. This bypasses the issue of large literals losing accuracy when they cast through `double`.\r\n* Adds tests for all new behaviours.\r\n\r\n---\r\n\r\n### Binary / Hex Parsing Implementation\r\n\r\n* Mimics old sign bit behaviour for int and long types. Sign bits accepted for 8 or 16-bit Hex parsing, and 8, 16, 32, 64 for binary.\r\n  * i.e., `0xFFFFFFFF -eq ([int]-1)` and `0xFFFFFFFFFFFFFFFF -eq ([long]-1)`, but suffixing `u` creates `int.MaxValue` and `long.MaxValue`, respectively, instead.\r\n* Sign bits higher than this are accepted for bigint-suffixed numerals:\r\n    * Hex: Bigint-suffixed hex treats the high bit of any literal with a length multiple of 8 as the sign bit\r\n    * Binary: Bigint-suffixed binary accepts sign bits at 96 and 128 chars, and from there on every 8 characters.\r\n    * Prefixing the literal with a 0 will bypass this and be treated as unsigned, e.g. `0b011111111`\r\n* Specifying an `u`nsigned suffix (or combination suffix that includes `u`) ignores sign bits, similar to how parsing a hex string using `[Convert]::ToUint32()` would do so.\r\n* Supports negating literals using `-` prefix. This can result in positive numbers due to sign bits being permitted, just like hex literals.\r\n\r\n---\r\n\r\n### Refactored numeric tokenizer parsing\r\n\r\n**New flow:**\r\n\r\n1. Check for `real` (`.01`, `0.0`, or `0e0` syntaxes)\r\n    1. If the decimal suffix is present, TryParse directly into decimal. If the TryParse fails, TryGetNumberValue returns `false`.\r\n    2. TryParse as `Double`, and apply multiplier to value. If the TryParse fails, TryGetNumberValue returns `false`.\r\n        1. Check type suffixes and attempt to cast into appropriate type. This will return `false` if the value exceeds the specified type's bounds.\r\n        2. Default to parsing as `double` where no suffix has been applied.\r\n2. Check number format.\r\n    * If binary, manually parse into BigInteger using optimized helper function to directly construct the BigInteger bytes from the string.\r\n    * If hex, TryParse into `BigInteger` using some special casing to retain original behaviours in int/long ranges.\r\n    * If neither binary nor hex, TryParse normally as a `BigInteger`.\r\n3. Apply multiplier value before attempting any casts to ensure type bounds can be appropriately checked without overflows.\r\n4. Check type suffixes.\r\n    * If a specific type suffix is used, check type bounds and attempt to parse into that type.\r\n      * If the value exceeds the type's available values, the parse fails. Otherwise, a straight cast is performed.\r\n5. If no suffix is used, the following types are bounds-checked, in order, resulting in the first successful test determining the type of the number. \r\n    * `int`\r\n    * `long`\r\n    * `decimal` (base-10 literals only)\r\n    * `double` (base-10 literals only)\r\n    * ~~`BigInteger` for binary or hex literals.~~ If the value is outside `long` range (for hex and binary) or `double` range (for base 10), the parse will fail; higher values must be explicitly requested using the `n`/`N` BigInteger suffix.\r\n\r\n---\r\n\r\n*This is a breaking change* as binary literals are now read as numbers instead of generic tokens which could potentially have been used as function / cmdlet names or file names.\r\n\r\nNotes:\r\n* Binary literal support was approved by the committee in #7557 \r\n* ~~The same issue is still under further discussion for underscore support in numeric literals and whether BigInteger parsing ought to be exposed to the user at all.~~\r\n    * ~~Supporting underscore literals is a further breaking change causing some generic tokens like `1_000_000` to be read as numerals instead.~~ Per @SteveL-MSFT's [comment](https://github.com/PowerShell/PowerShell/pull/7993#issuecomment-442651543) this proposal was rejected.\r\n    * ~~Removing underscore support or preventing standard parsing from accepting BigInteger ranges is a relatively trivial matter. It is my personal opinion that there is no particular reason *not* to hand the user a BigInteger when they enter a sufficiently large literal, but I will defer to the PowerShell Committee's judgement on this.~~\r\n\r\n## PR Checklist\r\n\r\n- [X] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [X] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [ ] ~[Change is not breaking]~(https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)\r\n- [X] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [X] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` to the beginning of the title and remove the prefix when the PR is ready.\r\n- **User-facing changes**\r\n    - [ ] Not Applicable\r\n    - **OR**\r\n    - [X] User-facing [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [X] Issue filed - Issue link: https://github.com/PowerShell/PowerShell-Docs/issues/2965\r\n- **Testing - New and feature**\r\n    - [ ] Not Applicable or can only be tested interactively\r\n    - **OR**\r\n    - [X] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n        - [ ] [Add `[feature]` if the change is significant or affects feature tests](https://github.com/PowerShell/PowerShell/blob/master/docs/testing-guidelines/testing-guidelines.md#requesting-additional-tests-for-a-pr)\r\n\r\n/cc @iSazonov , @SteveL-MSFT as it pertains to the tagged-for-further-discussion #7557 ",
+  "closed_at": "2019-04-03T22:10:03Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "These are the benchmarks @HumanEquivalentUnit and I performed whilst working on this binary parser. Top notch work from him, frankly astonishing.  The two intermediary methods were some of the better solutions of the 10 or 20 iterations of this code that we examined.\r\n\r\nhttps://gist.github.com/vexx32/852cd1d0ddc3e1a93f77b90ab23cfe3d\r\n\r\nNote that all cases were tested within ranges that Convert.ToIntX() methods are available, but the current method (labelled `BigEndianBinaryOr` in this table) generalises seamlessly to arbitrary-length binary strings.",
+      "created_at": "2018-10-11T14:18:21Z",
+      "updated_at": "2018-10-11T14:19:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 I'd prefer to see small PR - with `0b` only. We could more fast review.",
+      "created_at": "2018-10-11T14:35:28Z",
+      "updated_at": "2018-10-11T14:35:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I understand your viewpoint, but in order to permit `0b` parsing a majority of these changes are required -- *or* a significant amount of redundant code would need to be in place, because `TryParse()` methods are not capable of parsing binary.\r\n\r\nI think the alternative would leave you guys with a lot more to review, only to possibly pull it out later. Also, it would make any further PRs significantly more complex. I felt it best to simplify the code paths as much as possible, in order to prevent the tokenizer becoming a complex morass of unmaintainable code.\r\n\r\nThe only parts I could really strip out for you guys to simplify them is the underscore literal support, and that is... not a lot. :(",
+      "created_at": "2018-10-11T14:38:14Z",
+      "updated_at": "2018-10-11T14:42:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Underscore and I suffix is not approved in related issue. So we have to wait.",
+      "created_at": "2018-10-11T16:01:16Z",
+      "updated_at": "2018-10-11T16:01:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Rebased to pick up CI fixes. \ud83d\ude04 ",
+      "created_at": "2018-10-12T00:27:23Z",
+      "updated_at": "2018-10-12T00:27:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 I have no more ideas than to occupy your time :-) - thanks for great work! We are waiting PowerShell Committee.",
+      "created_at": "2018-10-17T13:48:40Z",
+      "updated_at": "2018-10-17T13:48:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Appreciate you taking the time to help us make it better, Ilya! \ud83d\ude04 \r\n\r\nI might rebase once more to tidy the commit history a little if I get a moment, but otherwise I don't mind waiting till the Committee makes a decision here. ",
+      "created_at": "2018-10-17T14:06:04Z",
+      "updated_at": "2018-10-17T14:06:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Please don't rebase until maintainers ask you.",
+      "created_at": "2018-10-17T14:08:50Z",
+      "updated_at": "2018-10-17T14:08:50Z"
+    },
+    {
+      "author": "stale[bot]",
+      "author_association": "NONE",
+      "body": "This PR has been automatically marked as stale because it has not had activity in the last 30 days. It will be closed if no further activity occurs within 10 days.\nThank you for your contributions.\nCommunity members are welcome to grab these works.\n",
+      "created_at": "2018-11-23T11:18:32Z",
+      "updated_at": "2018-11-23T11:18:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83e\udd14 might be an idea to have stalebot exempt things tagged with `Review - Committee` perhaps... anyway. Let me know when you guys have a decision and I'll get it all sorted out. \ud83d\ude04 ",
+      "created_at": "2018-11-23T21:07:11Z",
+      "updated_at": "2018-11-23T21:07:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this with the associated issue, we do not accept the underscore delimiter syntax nor rolling over into BigInt.",
+      "created_at": "2018-11-28T23:53:09Z",
+      "updated_at": "2018-11-28T23:53:09Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Thank you @SteveL-MSFT & committee! I'll make sure the code reflects that decision.\r\n\r\nJust need one more decision from you fellows, then, which is: \r\n\r\n* How do we want to handle binary and/or hex parsing in general? Whether it is to respect sign bits or not, and if so _which_ bits are acceptable to be used as sign for both binary and hexadecimal literals. \ud83d\ude04 ",
+      "created_at": "2018-11-29T01:02:07Z",
+      "updated_at": "2018-11-29T01:02:19Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Please update the PR description (only don't remove expired text - cross out it)\r\n\r\nAlso please look CodeFactor issues - we is near to merge.",
+      "created_at": "2018-11-29T17:50:47Z",
+      "updated_at": "2018-11-29T17:51:46Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov Updated description! MacOS failing test _seems_ to be unrelated. \ud83d\ude04 ",
+      "created_at": "2018-11-29T18:11:38Z",
+      "updated_at": "2018-11-29T18:12:20Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 my recommendation is to split off the signing as a separate item as not block this PR on committee review since we're a bit backlogged on the number of issues/PRs that are waiting to be reviewed",
+      "created_at": "2018-11-29T21:52:06Z",
+      "updated_at": "2018-11-29T21:52:06Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Roger that, sounds like a good plan!\r\n\r\nThen I'll make a final pass on the logic and make sure the PR description reflects any quirks in the implementation at higher ranges.\r\n\r\nAaaand I think that ought to do it. \ud83d\ude04 ",
+      "created_at": "2018-11-29T21:56:30Z",
+      "updated_at": "2018-11-29T22:04:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Rebased to fix merge conflict. Should be ready to go. \ud83d\ude04 ",
+      "created_at": "2018-12-03T17:34:54Z",
+      "updated_at": "2018-12-03T17:34:54Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "~~O-kay... that was unexpected. That's definitely beyond my changes, as far as I can tell. What's going on there?~~\r\n\r\nThat should do it. Guess I didn't see that using statement while I was resolving the merge conflict \ud83d\ude15 ",
+      "created_at": "2018-12-03T18:15:41Z",
+      "updated_at": "2018-12-03T18:23:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT @daxian-dbw @TravisEz13 Please review the PR. I do not see what can be done better.",
+      "created_at": "2018-12-04T05:52:22Z",
+      "updated_at": "2018-12-04T05:52:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Did a final pass to make sure I'm happy with the code style everywhere I've touched, I think this is about as good as it'll get. \ud83d\ude04 \r\n\r\nI've also revised the PR description because I found it messy and confusing to read. Hopefully this is much better. \ud83d\ude09 ",
+      "created_at": "2018-12-07T03:36:22Z",
+      "updated_at": "2018-12-07T03:36:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Give me a holler if you'd like me to rebase and handle the merge conflict, otherwise I'll wait till we get through your reviews and rebase at the end. \ud83d\ude04 ",
+      "created_at": "2018-12-20T19:00:41Z",
+      "updated_at": "2018-12-20T19:01:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "You could resolve the merge conflict without rebase.",
+      "created_at": "2018-12-20T19:32:22Z",
+      "updated_at": "2018-12-20T19:32:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "EDIT: Yep, that seems to work out OK. \ud83d\ude04 ",
+      "created_at": "2018-12-20T19:35:23Z",
+      "updated_at": "2018-12-20T20:34:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw If you have a time please review the PR.",
+      "created_at": "2018-12-21T12:41:32Z",
+      "updated_at": "2018-12-21T12:41:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @daxian-dbw \r\n\r\nI know there's a lot going on, so pinging you so this doesn't get buried too far down to find. Would appreciate your review if you're able. \ud83d\udc96 ",
+      "created_at": "2019-01-22T16:13:00Z",
+      "updated_at": "2019-01-22T16:13:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@TravisEz13 I guess we're still waiting on review? Let me know if there's anything I can do to help you guys out. \ud83d\ude0a ",
+      "created_at": "2019-01-30T13:16:15Z",
+      "updated_at": "2019-01-30T13:16:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Please address my last 2 comments and I'll finish (I hope :-) ) review tomorrow. ",
+      "created_at": "2019-01-30T14:55:53Z",
+      "updated_at": "2019-01-30T14:55:53Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov I think that ought to do it! Also added a couple test cases to a should -throw section for completeness",
+      "created_at": "2019-01-30T16:39:35Z",
+      "updated_at": "2019-01-30T16:39:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Looks all good again... the Linux failure is... something. Not sure what that's about, but it looks like something went awry in the build module itself.",
+      "created_at": "2019-01-30T21:42:52Z",
+      "updated_at": "2019-01-30T21:42:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 I reviewed again and I don't see tests for hex like 0xFFFFu.",
+      "created_at": "2019-01-31T15:02:13Z",
+      "updated_at": "2019-01-31T15:02:13Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov thought I'd got those, but I guess I must have overlooked them. Adding them now. \ud83d\ude04 ",
+      "created_at": "2019-01-31T16:04:52Z",
+      "updated_at": "2019-01-31T16:04:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT @TravisEz13 @daxian-dbw Please review the PR.",
+      "created_at": "2019-02-01T05:41:37Z",
+      "updated_at": "2019-02-01T05:41:37Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@TravisEz13 are we just pending Dongbo to get back from his well-deserved vacation and review?\r\n\r\nAny chance this will make it for 6.2, or should I expect it to wait till after that is released? :slight_smile:",
+      "created_at": "2019-02-11T22:25:25Z",
+      "updated_at": "2019-02-11T22:26:01Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@vexx32 \tI'd like to get someone to review this that has some experience in the area. Or at least one more person from the PowerShell team.",
+      "created_at": "2019-02-11T22:52:28Z",
+      "updated_at": "2019-02-11T22:52:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@TravisEz13 Seems like CI got stuck here, sorry; could you kick it for me when you get some time? Cheers! \ud83d\ude0a ",
+      "created_at": "2019-02-12T04:53:25Z",
+      "updated_at": "2019-02-12T04:53:25Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@vexx32 The jobs never started.  I cannot restart them without closing the PR and re-opening it.  I've seen in a few cases where you have `force-pushed` that the PR cannot be reopened.  The easiest way is to force push again.  For example, make a whitespace change to one of your commit messages and push.",
+      "created_at": "2019-02-12T17:13:44Z",
+      "updated_at": "2019-02-12T17:13:44Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Because this is a breaking change, I'm scheduling it to be merged first thing during 6.3.  ",
+      "created_at": "2019-02-13T04:27:23Z",
+      "updated_at": "2019-02-13T04:27:23Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@TravisEz13 Do you guys need anything more from me before you merge? \ud83d\ude42 ",
+      "created_at": "2019-04-02T18:04:05Z",
+      "updated_at": "2019-04-02T18:04:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps @daxian-dbw could find something :-)",
+      "created_at": "2019-04-03T05:13:53Z",
+      "updated_at": "2019-04-03T05:13:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Thanks for the great improvement!\r\n",
+      "created_at": "2019-04-04T03:14:10Z",
+      "updated_at": "2019-04-04T03:14:10Z"
+    }
+  ],
+  "created_at": "2018-10-11T14:06:22Z",
+  "number": 7993,
+  "state": "closed",
+  "title": "Add Binary Parsing Support & Refactor TryGetNumberValue & ScanNumberHelper",
+  "updated_at": "2019-04-04T20:53:44Z"
+}

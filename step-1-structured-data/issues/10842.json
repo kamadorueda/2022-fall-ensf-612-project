@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10842",
+  "author": "mklement0",
+  "body": "Note that this applies to calling external programs, including PowerShell's CLI, _from within_ PowerShell \r\n\r\nPassing a _single script block_ containing the _entire command_ to the PowerShell executable is a convenient way to pass a command from within PowerShell (a) without having to worry about quoting and (b) actually getting deserialized _objects_ back (not just _text_).\r\n\r\n```powershell\r\nPS> pwsh -noprofile { 'hi' }  #  -Command implied.\r\n\r\nhi   # OK\r\n```\r\n\r\nBehind the scenes, the script block is Base64-encoded and the command line is transformed to using the `-EncodedCommand` parameter with the encoded script block (along with parameters ` '-`-inputFormat xml` and `-outputFormat xml`)\r\n\r\nHowever, this transformation is mistakenly also applied if you attempt to pass a script block as an individual argument to a `-File` command:\r\n\r\n**_Update_: More generally, the inappropriate argument transformation is applied when invoking _any_ external program, and a script block is used as _any_ of its arguments; e.g., `/bin/echo { 'hi' }`**\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nDescribe \"Pass a script block as an argument with -File\" {\r\n  BeforeAll {\r\n    Push-Location testdrive:\\\r\n    # Test script that simply echoes its arguments.\r\n    '$args' > test.ps1\r\n  }\r\n  It \"Passes the script block as a string.\" {\r\n    # The script block should be stringified and therefore be passed\r\n    # as ' hi '\r\n    pwsh -noprofile -file ./test.ps1 { 'hi' } | Should -Be ' hi '\r\n  }\r\n  AfterAll {\r\n    Pop-Location\r\n  }\r\n}\r\n```\r\n\r\n\r\n# Expected behavior\r\n\r\nThe test should pass.\r\n\r\n# Actual behavior\r\n\r\nThe test fails:\r\n\r\n```none\r\nExpected ' hi ', but got \r\n@('-encodedCommand', 'IAAnAGgAaQAnACAA', '-inputFormat', 'xml', '-outputFormat', 'xml').\r\n```\r\n\r\nNote how the script-block argument - meant to be an argument to the script passed to `-File` - was inappropriately translated into the `-encodedCommand ...` arguments _and passed to the target script_.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.4\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "1. - It's practically impossible to pass a scriptblock as an argument unless it's encoded because embedding the *raw text* will result in all sorts of parse errors.\r\n2. - Passing a scriptblock to -`File` makes no sense as the parameter requires a file name. \r\n3. - The calling PowerShell process doesn't try to infer anything about the parameter processing of the child process.  This comes from the \"minishell\" era where there would be a bunch of powershell hosts exposing parameters with a variety of parameters that take scriptblocks. ",
+      "created_at": "2019-10-21T19:41:01Z",
+      "updated_at": "2019-10-21T19:41:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @BrucePay  - how does any of this (especially 2.) relate to this bug report, which is about an obvious _mis-application_ of the base64-encoding-behind-the-scenes technique?\r\n\r\nTo recap from the OP:\r\n\r\n> However, this transformation is mistakenly also applied if you attempt to pass a script block as an individual argument to a -File command:\r\n\r\nOnce we agree that this is a bug (which seems pretty obvious to me), we can talk about what the _correct_ behavior should be in this - exotic - scenario:\r\n\r\nGiven:\r\n\r\n```\r\nPS> /bin/echo @{ foo = 1 }\r\nSystem.Collections.Hashtable\r\n```\r\n\r\ni.e., simple `.ToString()` stringification is _normally_ applied, so the same should apply to script blocks:\r\n\r\n```\r\nPS> /bin/echo { 'foo = 1' }\r\n 'foo = 1'\r\n```\r\n\r\nThat is, the literal contents of the script block should be passed - that this may break due to PowerShell's broken quoting for external programs is a separate issue.\r\n\r\nJust to demonstrate that the current behavior doesn't make sense (actually a simpler repro than in the OP):\r\n\r\n```\r\nPS> /bin/echo { 'foo = 1' }\r\n-encodedCommand IAAnAGYAbwBvACAAPQAgADEAJwAgAA== -inputFormat xml -outputFormat text\r\n```\r\n\r\nOops.\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-21T19:56:44Z",
+      "updated_at": "2019-10-21T19:58:39Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "> stringification is normally applied, so the same should apply to script blocks:\r\n\r\nThat is explicitly not true for scriptblocks.  The current behaviour is entirely by design. Whenever a scriptblock is passed, it is *always* passed encoded so the following can work:\r\n```powershell\r\nPS[1] (69) > $data = powershell {\r\n>> foreach ($i in 1..10)\r\n>> {\r\n>>     $i * 2\r\n>> }\r\n>> }                                                                                                                                                  PS[1] (70) > \"$data\"                                                                                                                                  2 4 6 8 10 12 14 16 18 20\r\n```\r\n",
+      "created_at": "2019-10-22T23:00:33Z",
+      "updated_at": "2019-10-22T23:00:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\n>  it is always passed encoded so the following can work:\r\n\r\nThat makes perfect sense when calling the _PowerShell_ CLI - and there only if the encoded command makes up _everything_ to execute.\r\n\r\nIt makes no sense when calling other external programs - and that is the bug.\r\nTo recap (on macOS and Linux):\r\n\r\n```\r\nPS> /bin/echo { 'foo = 1' }\r\n-encodedCommand IAAnAGYAbwBvACAAPQAgADEAJwAgAA== -inputFormat xml -outputFormat text\r\n```\r\n\r\nPassing these arguments to the `/bin/echo` Unix utility is self-evidently pointless.",
+      "created_at": "2019-10-22T23:52:15Z",
+      "updated_at": "2019-10-22T23:54:52Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Since PowerShell is hostable, there is no way to know all of the executables that could take script block so we do it for everything.  Conversely, there is no reason to try to pass scriptblocks to anything but a powershell host so why does it matter?\r\n\r\n> Passing these arguments to the /bin/echo Unix utility is self-evidently pointless.\r\n\r\nEven if it wasn't encoded it would be pointless so why would you do it?",
+      "created_at": "2019-10-24T19:25:57Z",
+      "updated_at": "2019-10-24T19:25:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\nLet's  start with an external program that we _know_ to host PowerShell:\r\n\r\n```powershell\r\n# Create a test .ps1 file that simply echoes its arguments ,\r\n# invoke it with -File and pass it a script block.\r\nPS> '\"$args\"' > temp:/test.ps1; pwsh -noprofile -file (Convert-Path temp:/test.ps1) { 'hi' }\r\n\r\n-encodedCommand IAAnAGgAaQAnACAA -inputFormat xml -outputFormat text\r\n```\r\n\r\nIt clearly doesn't make sense to expect arbitrary script file `test.ps1` to know how to to interpret these arguments, which are solely meaningful to PowerShell's own CLI.\r\n\r\nEven if we - unwarrantedly - assume that _all_ external programs host PowerShell, there is no no reason to assume that they speak _this_ particular flavor of CLI syntax - that is not a requirement for programs hosting PowerShell.\r\n\r\nIn short: Translating script blocks to `-encodedCommand ... -inputFormat xml -outputFormat text` _only_ ever makes sense:\r\n\r\n* if `pwsh[.exe]` or `powershell.exe` is the external program being invoked\r\n* _and_ the script block is the - one and only - `-c` / `-Command` argument.\r\n\r\nThat this was the - incompletely implemented - _original intent_  can be gleaned from the error message emitted by the following:\r\n\r\n```\r\nPS> pwsh -noprofile -c foo bar { 'hi' }\r\n\r\npwsh : ScriptBlock should only be specified as a value of the Command parameter.\r\n```\r\n\r\nAny other application of this argument translation is pointless and a bug worth fixing - see OP.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-25T02:19:55Z",
+      "updated_at": "2019-10-25T02:19:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for when people may want to pass script blocks to non-PowerShell commands:\r\n\r\nScript blocks are often - treacherously - repurposed to serve as _string literals_ that make embedded quoting easier.\r\n\r\n(It is treacherous, because a command then wrongly suggests that a _piece of PowerShell code_ is being passed, whereas the stringification simply uses the _verbatim_ content, without expansion of variables / expressions; this ill-advised use is what created the [AD filter debacle](https://stackoverflow.com/a/44184818/45375), but at this point it is hard to eradicate).\r\n\r\nThat is, user _do_ craft commands such as the following:\r\n\r\n```powershell\r\n# The .ToString() value of the script block is bound to -ArgumentList\r\nStart-Process -Wait bash { -c \"echo hi\" }\r\n```\r\n\r\nThe above works, because `Start-Process` is a cmdlet, not an external program, so the misapplication of the `-EncodedCommand` argument transformation doesn't kick in - but there is no reason why\r\n\r\n```powershell\r\nbash { -c \"echo hi\" }\r\n```\r\n\r\nshouldn't work the same (however ill-advised).\r\n",
+      "created_at": "2019-10-28T17:24:01Z",
+      "updated_at": "2019-10-28T17:24:21Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "This behavior also causes problems calling commands that expect strings that happen to look like a scriptblock, e.g.\r\n\r\n```powershell\r\nbcdedit /default {18472fcd-c28f-11e8-9869-8f778f73c317}\r\n```\r\n\r\nI feel reasonably sure this isn't the only such tool, but I can't recall specific examples.",
+      "created_at": "2019-10-28T20:47:44Z",
+      "updated_at": "2019-10-28T20:47:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @lzybkr, though if we consistently apply `.ToString()` stringification to what are syntactically script-block arguments in string contexts (which by definition includes external-program arguments), `bcdedit` would only see `18472fcd-c28f-11e8-9869-8f778f73c317`, which is not the intent - though a failure should still be easier to diagnose than the appearance of completely unexpected arguments.\r\n\r\nThis takes us back to venerable #1761 \r\n\r\nMy vote is again not to special-case the external-program behavior.",
+      "created_at": "2019-10-28T20:59:06Z",
+      "updated_at": "2019-10-28T21:22:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just realized that this is ultimately a duplicate of #5187.\r\n",
+      "created_at": "2020-08-09T02:11:01Z",
+      "updated_at": "2020-08-09T02:11:01Z"
+    }
+  ],
+  "created_at": "2019-10-19T14:15:29Z",
+  "number": 10842,
+  "state": "open",
+  "title": "CLI: script blocks as external program arguments break the command",
+  "updated_at": "2020-08-21T11:45:16Z"
+}

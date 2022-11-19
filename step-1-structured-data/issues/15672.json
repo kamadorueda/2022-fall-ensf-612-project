@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15672",
+  "author": "SeeminglyScience",
+  "body": "### Steps to reproduce\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition 'public record Person(string Name);'\r\n\r\n$person = [Person]::new('Ted')\r\n$person | Get-Member\r\n$person.'<Clone>$'()\r\n```\r\n\r\n### Expected behavior\r\n\r\nI honestly don't know.  Aside from actually implementing a similar `with` syntax, I don't know what the engine should do about this. Hide the method all together? Pretend it's actually called `Clone`?\r\n\r\nBut it seems odd for such a big C# feature to have such awkward usage and completion results in PowerShell.  If nothing else it should probably be documented somewhere.\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\nTypeName: Person\r\n\r\nName        MemberType Definition\r\n----        ---------- ----------\r\n<Clone>$    Method     Person <Clone>$()\r\nDeconstruct Method     void Deconstruct([ref] string Name)\r\nEquals      Method     bool Equals(System.Object obj), bool Equals(Person other), bool IEquatable[Person].Equals(Person other)\r\nGetHashCode Method     int GetHashCode()\r\nGetType     Method     type GetType()\r\nToString    Method     string ToString()\r\nName        Property   string Name {get;set;}\r\n\r\nName : Ted\r\n```\r\n\r\n\r\n### Environment data\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0-preview.7\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0-preview.7\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Also related is #13819 as all record properties are init only.",
+      "created_at": "2021-06-25T16:26:21Z",
+      "updated_at": "2021-06-25T16:26:21Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "powershell should hide the method `<Clone>$` from `Get-Member` by default (and thus from tab completion), but allow it to be called normally at run time. The method should be shown when running `Get-Member -Force`.\r\n\r\nImplementation wise, we can it similarly as the `hidden` member of a PowerShell class, see an example below:\r\n```\r\n> class bar { hidden [void] PrintName() { Write-Host \"Name\" } }\r\n> $b = [bar]::new()\r\n> $b | gm\r\n\r\n   TypeName: bar\r\n\r\nName        MemberType Definition\r\n----        ---------- ----------\r\nEquals      Method     bool Equals(System.Object obj)\r\nGetHashCode Method     int GetHashCode()\r\nGetType     Method     type GetType()\r\nToString    Method     string ToString()\r\n\r\n> $b | gm -Force\r\n\r\n   TypeName: bar\r\n\r\nName        MemberType   Definition\r\n----        ----------   ----------\r\npstypenames CodeProperty System.Collections.ObjectModel.Collection`1[[System.String, System.Private.CoreLib, Version=5.0.0.0, Culture=neutral, Publi\u2026\r\npsadapted   MemberSet    psadapted {GetType, ToString, Equals, GetHashCode}\r\npsbase      MemberSet    psbase {GetType, ToString, Equals, GetHashCode}\r\npsextended  MemberSet    psextended {}\r\npsobject    MemberSet    psobject {BaseObject, Members, Properties, Methods, ImmediateBaseObject, TypeNames, get_BaseObject, get_Members, get_Proper\u2026\r\nEquals      Method       bool Equals(System.Object obj)\r\nGetHashCode Method       int GetHashCode()\r\nGetType     Method       type GetType()\r\nPrintName   Method       void PrintName()     ## <==== the hidden member\r\nToString    Method       string ToString()\r\n\r\n> $b.PrintName()\r\nName\r\n```\r\n\r\nOne thing I'm not very clear is how the method `<Clone>$` gets hidden by C# intellisense. I cannot find anything in IL that indicates it's hidden, and my theory is that C# compiler just treats any member start with `<` and ends with `>$` as a hidden members. Filtering based on `<` prefix and `>$` suffix would be a breaking change, but should fall in the bucket 3.",
+      "created_at": "2021-07-09T20:49:49Z",
+      "updated_at": "2021-07-09T20:49:49Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> One thing I'm not very clear is how the method `<Clone>$` gets hidden by C# intellisense. I cannot find anything in IL that indicates it's hidden,\r\n\r\nYeah there's nothing in the metadata that would help. It would have been great if they just slapped a `EditorBrowsable` on it at the very least but no such luck :/\r\n\r\n> and my theory is that C# compiler just treats any member start with `<` and ends with `>$` as a hidden members. Filtering based on `<` prefix and `>$` suffix would be a breaking change, but should fall in the bucket 3.\r\n\r\nHard to nail down the exact code in roslyn responsible but the best I can tell is it ignores anything it considers \"uncallable\". Pretty much \"does this contain any character which isn't in our identifier token pattern\" which is a lot more strict then PowerShell's standards.\r\n\r\nI think your plan is probably the best bet.  They use the same pattern for top level statements as well (`<Program>$.<Main>$()`) so it should hopefully catch future additions.",
+      "created_at": "2021-07-21T15:13:26Z",
+      "updated_at": "2021-07-21T15:13:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "We discussed this in the Engine working group meeting (2021/07/22). We agree that these members should be hidden by default. Given that they're accessible from reflection, we also agree that it doesn't make sense to actively prevent users from invoking them if they choose to do so; the syntax of the method is sufficiently unusual that it's unlikely to be hit by accident, especially if we hide it from tab completion. \r\n\r\nMarking this issue up for grabs for the time being, as none of us are actively working on it.",
+      "created_at": "2021-07-23T02:02:23Z",
+      "updated_at": "2021-07-23T02:03:40Z"
+    }
+  ],
+  "created_at": "2021-06-25T13:59:38Z",
+  "number": 15672,
+  "state": "open",
+  "title": "Compiler reserved method name surfaced for record types",
+  "updated_at": "2021-07-23T02:03:40Z"
+}

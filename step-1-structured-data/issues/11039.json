@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11039",
+  "author": "rjmholt",
+  "body": "```powershell\r\n$script:Num = 0\r\nfunction Alert\r\n{\r\n  param($Name)\r\n\r\n  Write-Host \"${Name}: $script:Num\"\r\n  [void]$script:Num++\r\n}\r\n\r\nfunction Do($Val)\r\n{\r\n  Write-Output $Val\r\n  Alert \"Write\"\r\n}\r\n\r\nfunction Process\r\n{\r\n  param([Parameter(ValueFromPipeline)]$V)\r\n\r\n  process\r\n  {\r\n    foreach ($val in $V)\r\n    {\r\n      Alert \"Process\"\r\n    }\r\n  }\r\n}\r\n\r\n$null = Invoke-Expression \"(Do 1 && Do 2) && Do 3\" | Process\r\n```\r\n\r\n## Expected:\r\n\r\n```\r\nWrite: 0 \r\nWrite: 1\r\nWrite: 2\r\nProcess: 3\r\nProcess: 4\r\nProcess: 5     \r\n```\r\n\r\n## Actual\r\n\r\n```\r\nWrite: 0\r\nWrite: 1\r\nProcess: 2\r\nProcess: 3\r\nProcess: 4\r\nWrite: 5\r\n```\r\n\r\n## Note\r\n\r\nPerforming this without `Invoke-Expression` you get a different result:\r\n\r\n```powershell\r\n((Do 1 && Do 2) && Do 3) | Process\r\n```\r\n\r\noutputs:\r\n\r\n```\r\nWrite: 0\r\nWrite: 1\r\nWrite: 2\r\nProcess: 3\r\nProcess: 4\r\nProcess: 5\r\n```",
+  "closed_at": "2019-12-05T01:55:59Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting:\r\n```powershell\r\n $null = Invoke-Expression \"(Do 1) && (Do 2 && Do 3)\" | Process\r\nWrite: 0\r\nProcess: 1\r\nWrite: 2\r\nWrite: 3\r\nProcess: 4\r\nProcess: 5\r\n```",
+      "created_at": "2019-11-12T07:57:26Z",
+      "updated_at": "2019-11-12T07:57:26Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I suspect this might actually be by design. It's quite specific to `Invoke-Expression`. Here's a repro without pipeline chains:\r\n\r\n```powershell\r\n$i = 0; function process { process { $_; $i } }; Invoke-Expression '. { \"a\"; $i++; \"b\" }' | process\r\n```\r\n\r\nOutputs:\r\n```\r\na\r\n0\r\nb\r\n1\r\n```",
+      "created_at": "2019-11-13T20:33:22Z",
+      "updated_at": "2019-11-13T20:37:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> this might actually be by design\r\n\r\nMaybe @mklement0 can add more info about Write-Host. It seems we have some related issues.",
+      "created_at": "2019-11-14T03:16:19Z",
+      "updated_at": "2019-11-14T03:16:19Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I think these are related but slightly different. @JamesWTruher saw a similar thing with `Start/Stop-Transcript` recently. In that case (and in the case of `Write-Host` I suspect), what's written to the pipeline always occurs in a clear order, but what's written to the host depends on formatting and stringification. So interleaving `Write-Output` with `Write-Host` for example, can print all the `Write-Host` output first in some cases, since `Write-Host` immediately displays the input when called, whereas `Write-Output` writes to the pipeline and the output is only *displayed* when that pipeline's contents hit an `Out-Default` that writes to the console.\r\n\r\nIn this case however, there's actual interleaving of pipeline writing from within and without `Invoke-Expression`. Basically `Invoke-Expression` is not an eager invocation, but instead creates a steppable iterator where the downstream pipe consumes the output on demand.",
+      "created_at": "2019-11-14T19:02:33Z",
+      "updated_at": "2019-11-14T19:02:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> instead creates a steppable iterator where the downstream pipe consumes the output on demand.\r\n\r\nIn this case, it is hardly possible to correct this output and probably not worth it.\r\nPerhaps this will be a problem if there are really big expressions in a script in interactive session alternating with the Write-Host output.\r\n",
+      "created_at": "2019-11-15T03:43:33Z",
+      "updated_at": "2019-11-15T03:43:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Workaround is simple :smile:\r\n```powershell\r\nInvoke-Expression \"(Do 1 && (Do 2 && Do 3))\" | Process\r\n```",
+      "created_at": "2019-11-15T03:47:33Z",
+      "updated_at": "2019-11-15T03:48:42Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Closing this as by design",
+      "created_at": "2019-12-05T01:55:59Z",
+      "updated_at": "2019-12-05T01:55:59Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "`Invoke-Expression \"(Do 1 && Do 2) && Do 3\" | Process` shows the same behavior as in directly running `(Do 1 && Do 2) && Do 3` in interactive console:\r\n```\r\nPS:10> (Do 1 && Do 2) && Do 3\r\nWrite: 0\r\nWrite: 1\r\n1\r\n2\r\n3\r\nWrite: 2\r\n```\r\n\r\nThis is because the paren-expression `()` collects output, so the output from `Do 1 && Do2` are not streamed to `out-default`, that's why `write-host` got the `write: xx` text printed out first.\r\nBut when it comes to `&& Do 3`, the output is streamed to `out-default`, and thus `out-default` prints out `3` before `write-host` for `Do 3`.\r\n\r\nThe chain operator is not needed to reproduce this behavior. It repros with `$(& Do 1; & Do 2); & Do 3` (or `Invoke-Expression '$(& Do 1; & Do 2); & Do 3' | process`) as well:\r\n\r\n```\r\nPS:23> $(& Do 1; & Do 2); & Do 3\r\nWrite: 31\r\nWrite: 32\r\n1\r\n2\r\n3\r\nWrite: 33\r\n```\r\nThis behavior is by design.",
+      "created_at": "2021-09-08T18:33:32Z",
+      "updated_at": "2021-09-08T18:37:06Z"
+    }
+  ],
+  "created_at": "2019-11-11T22:34:04Z",
+  "number": 11039,
+  "state": "closed",
+  "title": "Strange behaviour with Invoke-Expression and pipeline chains",
+  "updated_at": "2021-09-08T18:37:06Z"
+}

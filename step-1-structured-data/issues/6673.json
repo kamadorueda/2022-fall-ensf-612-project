@@ -1,0 +1,482 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6673",
+  "author": "SteveL-MSFT",
+  "body": "Was discussing with @jpsnover a concern that if a cmdlet opens a resource (like a database connection) in Begin, and later in the pipeline an exception is thrown, End is not called to dispose of the connection.\r\n<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\n- Windows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://github.com/PowerShell/PowerShell/blob/master/docs/KNOWNISSUES.md).\r\n- Fill out the following repro template:\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nfunction a {\r\n    [cmdletbinding()]\r\n    param()\r\n\r\n    begin { \"a:begin\" }\r\n    process { 1 }\r\n    end { \"a:end\" }\r\n}\r\n\r\nfunction b {\r\n    [cmdletbinding()]\r\n    param([parameter(ValueFromPipeline=$true)]$a)\r\n\r\n    begin { \"b:begin\" }\r\n    process { $a; throw 'oops' }\r\n}\r\n\r\na | b\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nb:begin\r\na:begin\r\na:end\r\noops\r\nAt /Users/steve/test/end_not_called.ps1:15 char:19\r\n+     process { $a; throw \"oops\" }\r\n+                   ~~~~~~~~~~~~    + CategoryInfo          : OperationStopped: (oops:String) [], RuntimeException\r\n    + FullyQualifiedErrorId : oops\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nb:begin\r\na:begin\r\noops\r\nAt /Users/steve/test/end_not_called.ps1:15 char:19\r\n+     process { $a; throw \"oops\" }\r\n+                   ~~~~~~~~~~~~    + CategoryInfo          : OperationStopped: (oops:String) [], RuntimeException\r\n    + FullyQualifiedErrorId : oops\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.1.0-preview.1\r\nOS                             Darwin 17.5.0 Darwin Kernel Version 17.5.0: Mon Mar  5 22:24:32 PST 2018; root:xnu-4570.51.1~1/RELEASE_X86_64\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2022-02-14T03:53:33Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT I had some further discussions with @jpsnover. Basically EndProcessing isn't called if there is an exception because it's not a destructor. EndProcessing is just part of the normal processing. Consider a counter function `function count {begin {$c=0} process {$c++} end {$c}}` . An exception should terminate function execution not resume execution at `end`.  If it ran `end` then whatever was in `$c` would be incorrectly emitted to the pipeline. As far as clean-up goes, for compiled cmdlets, we call `Dispose` on the cmdlet which allows for clean-up. For scripts, we don't expose `Dispose` in a useful way so perhaps we should add a \"cleanup { }\" block for functions  scripts. (IIRC our thinking wrt scripts was that scripts call cmdlets and cmdlets get disposed therefore most things in a script will be disposed. Things that don't get disposed that way will eventually be disposed by the garbage collector/finalizer q.e.d there was no need for a cleanup block.)",
+      "created_at": "2018-04-18T12:32:32Z",
+      "updated_at": "2018-04-18T13:31:46Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Seems reasonable",
+      "created_at": "2018-04-18T14:51:26Z",
+      "updated_at": "2018-04-18T14:51:26Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "I don't like the idea of waiting on garbage collection to close a database connection. There is a need for a `Cleanup {}` or `Finally {}` block for the exact scenario outlined. \r\n\r\nI wrote an \"advanced function\" that opens a `DataReader` connection in the `Begin {}` block so that it could pass the record to other cmdlets to do stuff. I could never figure out how to properly close it if a terminating error happened anywhere in the pipeline. Adding a new block would solve that problem.",
+      "created_at": "2018-04-18T18:08:54Z",
+      "updated_at": "2018-04-18T18:08:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting how cmdlet dispose local variables? We could add a script property (or something like that) with code to mandatory execute a dispose code.",
+      "created_at": "2018-04-19T05:00:27Z",
+      "updated_at": "2018-04-19T05:00:27Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Reusing this issue to consider having a `Finally{}` type block for cleanup",
+      "created_at": "2018-04-19T05:53:12Z",
+      "updated_at": "2018-04-19T05:53:12Z"
+    },
+    {
+      "author": "aetos382",
+      "author_association": "CONTRIBUTOR",
+      "body": "Please consider providing syntax like C# using block.",
+      "created_at": "2018-04-19T06:11:18Z",
+      "updated_at": "2018-04-19T06:15:32Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov\r\n>Interesting how cmdlet dispose local variables? We could add a script property (or something like that) with code to mandatory execute a dispose code.\r\n\r\nCompiled cmdlets can just implement `IDisposable` and PowerShell engine properly call it to do cleanup.",
+      "created_at": "2018-04-19T08:28:25Z",
+      "updated_at": "2018-04-19T08:28:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I meant\r\n```powershell\r\n$con = OpenDatabase\r\n$con.SetDisposeScriptBlock( { $using:con.Close() } )\r\n```",
+      "created_at": "2018-04-19T09:01:49Z",
+      "updated_at": "2018-04-19T09:01:49Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@aetos382 This is a slightly different scenario where a resource _internal to the command_ is opened in `Begin`, used in `Process` and then closed in `End`. A `using`-style statement isn't applicable since there are three separate blocks and you don't want to dispose the resource when a block completes, only when _all_ blocks have completed.   Now you could wrap each of the blocks in a `try/catch` statement\r\n```\r\ntry\r\n{\r\n      ... do stuff with resource....\r\n}\r\ncatch {\r\n      ... close the resource\r\n}\r\n```\r\nNote that you want to use `catch` instead of `finally` because you only want to close the resource if there's an exception. In the normal flow, the resource would be released in the `end` block.\r\n\r\nWRT the `finally {}` cmdlet block @SteveL-MSFT, proposes, I expect that it would be run when the command is disposed by the pipeline processor. (Consequently, one might argue that it should be called `Dispose` instead of `Finally`. Another name might be `trap { }` in which case we would have to think about  `break` and `continue`  semantics.\r\n \r\n\r\n",
+      "created_at": "2018-04-20T08:35:35Z",
+      "updated_at": "2018-04-20T08:35:35Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov How/when would the dispose scriptblock get called? The pipeline processor has a list of all of its commands so it can dispose them but it doesn't have a list of the variables. I suppose it could grab all of the variables in the current scope but that could cause problems with objects being returned. Maybe we should have a `Register-ForDispose` cmdlet to tell the pipeline processor what variables to dispose? And is a scriptblock really necessary? In what scenarios do you think we'll need it? Maybe it could be optional?",
+      "created_at": "2018-04-20T09:00:32Z",
+      "updated_at": "2018-04-20T09:00:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">when would the dispose scriptblock get called?\r\n\r\nWe could consider local variables for the feature (or cmslet local).\r\n\r\n>Maybe we should have a Register-ForDispose cmdlet to tell the pipeline processor what variables to dispose?\r\n\r\nIf we'll use syntax like $connection.SetDisposeScriptBlock() - the method could do the registration.\r\n\r\n>  And is a scriptblock really necessary?\r\n\r\nHow close the DB connection without explicit code?\r\n\r\n\r\n",
+      "created_at": "2018-04-20T10:58:37Z",
+      "updated_at": "2018-04-20T10:58:37Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay In your mind, would `trap {}` only run in an exception scenario? \r\n\r\nIMO, `Dispose {}` would be best and Ideally it would always run when the pipeline disposes the command, Code in this block might not be exception code, just cleanup code ensured to run when the pipeline completes regardless of presence or lack of exception.\r\n\r\n`Trap {}` would infer to me that it only runs when there is an exception. I think that should be handled with the \"ubiquitous error handling\" instead, however that ends up being implemented. ",
+      "created_at": "2018-04-20T11:38:02Z",
+      "updated_at": "2018-04-20T11:38:02Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Some other considerations for consistency: \r\n\r\nSupport for `Dispose {} ` in scripts, ScriptBlock, and advanced functions. I'm not sure there is any difference in implementation, or not just want to ensure consistency and easily modifying code to be any of the, Users should easily be able to take the same code and use it as a ScriptBlock, Function, or Script. \r\n\r\nAlso, possibly exposing the same `Dispose {}` inside .psm1 to run on `Remove-Module` (shortcut to `$MyInvocation.MyCommand.ScriptBlock.Module.OnRemove`) .\r\n\r\nIs this something that should also be considered for `Configuration {}`? Perhaps there is some cleanup that needs to be done there as well like the block querying a database for config data or something.",
+      "created_at": "2018-04-20T11:43:01Z",
+      "updated_at": "2018-04-20T11:43:01Z"
+    },
+    {
+      "author": "guitarrapc",
+      "author_association": "NONE",
+      "body": "I would propose `defer` block for naming as of other languages already use for similar use case.\r\nOr.... processDefer, endDefer would be....?",
+      "created_at": "2018-04-21T16:47:34Z",
+      "updated_at": "2018-04-21T16:50:59Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Another option - annotate the variable assignment somehow - e.g. a type annotation or a `use` statement like [F#](https://docs.microsoft.com/en-us/dotnet/fsharp/language-reference/resource-management-the-use-keyword):\r\n\r\n```powershell\r\nfunction foo {\r\n    # Attribute\r\n    [Dispose()]$v = Get-Connection\r\n    # or statement\r\n    use $v = Get-Connection\r\n}\r\n```\r\n\r\nSemantics: Dispose is called when the scope of the variable is disposed.\r\n\r\nThis is important when the script/function is dot sourced. The script/function may complete, but the variable is now in scope.\r\n\r\nIf going with a block instead of an annotation - it's important to consider dot sourcing when determining when the block is called, possibly disallowing dot sourcing if such a block exists.",
+      "created_at": "2018-04-22T04:33:55Z",
+      "updated_at": "2018-04-22T04:33:55Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Variables don't (currently) implement IDisposable. Unless you changed something, as far as I they just get GC'd (of course we could change this). Anyway, your proposal is essentially what I was proposing as `Register-ForDispose` which would register an object (not a variable) for disposal once the command/scope exits. Do you see there being an implementation advantage to making it a language element or attribute over a command?\r\n\r\n@iSazonov \r\n> How close the DB connection without explicit code?\r\nAssuming the object implements `IDisposible`, simply adding it to a list of objects to dispose on scope (or command) exit is all that would be needed.\r\n\r\n@markekraus In commands today, it's normal to dispose resources in the `end` block. If we just wanted to handle the exception case, then having a `trap` block makes sense. But perhaps changing the pattern to _always_ deal with disposable resources in the `Dispose` block would be better.\r\n\r\n@guitarrapc The pattern in .NET is `IDisposable` so naming the block `Dispose` aligns with existing practise. Also, to my mind, `Dispose` not quite the same semantic as Golang's [`defer`](https://blog.golang.org/defer-panic-and-recover).",
+      "created_at": "2018-04-22T22:19:49Z",
+      "updated_at": "2018-04-22T22:19:49Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "FWIW I have [a proof-of-concept](https://gist.github.com/alx9r/a52d1432f443672eeb2cd99707a076d7) that seems to ensure disposal using out-of-the-box PowerShell control flow.  It seems to be robust to downstream `throw`, `break`, `continue`, `$PSCmdlet.ThrowTerminatingError()`, and Ctrl-C.  Usage is described in [the `usingObject {}` section of this stackoverflow answer](https://stackoverflow.com/a/49141823/1404637). \r\n\r\n There's also a variant I've been calling `Afterward {}` that can be used to perform arbitrary cleanup from a scriptblock for things that don't implement `IDisposable`.\r\n\r\nI don't mean to dissuade language support for this sort of thing.  Rather, I'd like to suggest that whatever language support is added should probably be an improvement over what is already possible with a library function and design pattern.\r\n",
+      "created_at": "2018-04-23T01:55:50Z",
+      "updated_at": "2018-04-23T02:01:03Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@alx9r But how to call it with pipeline command? Your code imply only one uninterrupted block of user code, but that is not true when command accept pipeline input. ",
+      "created_at": "2018-04-23T02:13:32Z",
+      "updated_at": "2018-04-23T02:13:32Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r This scenario is for when a resource _internal_ to the command is opened in `Begin`, used in `Process` and then closed in `End`. The resource is not externally visible so you can't use a `using-object` approach to wrap the command from the outside. From the inside, you'd have to wrap the code inside each block introducing another scriptblock dispatch for every begin/process/end call which is significant overhead. Having a `Dispose` block is just simpler and more efficient. That said, having a `Using-Object` cmdlet is clearly a good idea that we just never got around to. Perhaps you can open a separate issue to track adding this? Thanks.",
+      "created_at": "2018-04-23T02:22:32Z",
+      "updated_at": "2018-04-23T02:23:02Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@BrucePay @PetSerAl \r\n\r\nI think I understand the distinction now.\r\n\r\nI think you are describing this sort of function\r\n\r\n```PowerShell\r\nclass d : System.IDisposable {\r\n    Dispose() { Write-Host 'Dispose' }\r\n}\r\n\r\nfunction f {\r\n    param ([Parameter(ValueFromPipeline)]$x)\r\n    begin {\r\n        $d = [d]::new() # d should be disposed in every case\r\n                        # when this function goes out of scope\r\n    }\r\n    process {\r\n        # use $d with $x here...\r\n    }\r\n    end {\r\n        # and/or here\r\n    }\r\n}\r\n```\r\n\r\nused like this\r\n\r\n```PowerShell\r\n1,2 | f | UsesBreakKeyword\r\n```\r\n\r\nin a scenario like the command line where you can't easily refactor to\r\n\r\n```PowerShell\r\nusingObject { [d]::new() } {\r\n   1,2 | f $_ | UsesBreakKeyword\r\n}\r\n```\r\n\r\nIs that correct?",
+      "created_at": "2018-04-23T03:03:18Z",
+      "updated_at": "2018-04-23T03:03:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">How close the DB connection without explicit code?\r\n>> Assuming the object implements IDisposible, simply adding it to a list of objects to dispose on scope (or command) exit is all that would be needed.\r\n\r\nQuestion is just how an user can implement this `IDisposible` in script? If this already implemented internally in the object  it is enough for us to have ` $localdisposable:conn`. Otherwise the user should attach a script block with a dispose code to the variable.\r\n\r\n```powershell\r\nBEGIN {\r\n    $localdisposable:conn = New-Object System.Data.SqlClient.SqlConnection\r\n    $con.Dispose = { $this.Close() }\r\n}\r\n\r\nEND {\r\n    # Implicitly $conn.Dispose() \r\n}\r\n```\r\n",
+      "created_at": "2018-04-23T03:29:58Z",
+      "updated_at": "2018-04-23T03:29:58Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'd like to point out that not all things in PowerShell that required cleanup in these situations are objects/types that have a `Dispose` method. There area many modules out there where the session state is handled inside the module that exports the command the user is calling.\r\n\r\n```powershell\r\nfunction Get-Foo {\r\n    [CmdletBinding()]\r\n    param ()\r\n    \r\n    begin {\r\n        Connect-Foo\r\n    }\r\n    process {\r\n        <# doo stuff with foo #>\r\n    }\r\n    end {\r\n        Disconnect-Foo\r\n    }\r\n}\r\n```\r\n\r\nIn that case, there is no object to dispose but the connection still lingers if an exception kills the pipeline.\r\n\r\n@BrucePay That's what I was thinking. The `End {}` block would become a place for completing `Process {}` operations (for example, when the pipeline is collected to perform operations such as measure) and the `Dispose {}` block would become the de facto place to close connections and perform cleanup as its ensured to run. \r\n\r\nWhat is not clear to me is how to handle output and errors from the `Dispose {}`. I'm inclined to think output in the `Dispose {}` block should be ignored (similar to how PowerShell Class methods are not leaky). I definitely don't think the output from this block should sent to the output stream, but I'm sure this will cause confusion. I'm also certain users will want to be able to collect output from this block somehow. Perhaps a `-DisposeVariable` common parameter could be added to allow for collection of output from the `Dispose {}` block, similar to `-OutVariable`. And, I'm not sure if Errors/exceptions in the Dispose block should be populated in `-ErrorVariable`.\r\n",
+      "created_at": "2018-04-23T09:32:28Z",
+      "updated_at": "2018-04-23T09:32:28Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@BrucePay - I don't think `PSVariable` should implement `IDisposable` - but as an implementation detail, maybe `SessionStateScope` would.\r\n\r\nA language construct offers a stronger promise than a command, e.g. it can't be overridden, it could enable better code generation.\r\n\r\n@markekraus - The disposable pattern isn't used in PowerShell today because it doesn't really work. I think the correct question to ask is - is another pattern needed **if** PowerShell had clean support for disposable objects?\r\n\r\nThe right answer might be - you need two things - better disposable support **and** a way to register arbitrary cleanup code - this would be analogous to C# `using` and `finally` statements.",
+      "created_at": "2018-04-23T17:46:58Z",
+      "updated_at": "2018-04-23T17:46:58Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr That's a fair point.\r\n\r\nI think that given the history, the pattern of not returning Disposable objects will continue and it would certainly persist in older code. I can update my code to make use of disposable objects, but I may not be able to update someone else's code I depend on. I'd be left with same situation if only better support for disposable objects was added.\r\n\r\nOne benefit of adding a new pattern would be the ability to wrap 3rd party code. I suppose that could still be done by warping 3rd party functions in PowerShell classes that implement IDisposable. However, my experience is that the majority of PowerShell users are not comfortable with or interested in using PowerShell classes. (I make it a habit to ask if people are using classes, why/why not, and what for). I suspect the comfort level with a `Dispose {}` would be higher, but that is just my guess.\r\n\r\nI agree, though, it probably does need both.",
+      "created_at": "2018-04-23T18:19:15Z",
+      "updated_at": "2018-04-23T18:19:15Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "I'm wondering what should happen if `.Stop()` is called on the runspace during the obtain-and-assign step for the resource.  Using @lzybkr's hypothetical `[Dispose()]`, for example:\r\n\r\n```PowerShell\r\nfunction foo {\r\n    [Dispose()]$v = Get-Connect # what if .Stop() is invoked during this call?\r\n}\r\n```\r\n\r\nIs `Get-Connect`'s execution allowed to continue on `.Stop()` until the assignment is complete?  I _think_ the repro in #7155 demonstrates that, currently, an unfortunately-timed `.Stop()` can allow resources to be allocated without the scope that would do the cleanup ever getting a handle to it.  Could that be overcome by `[Dispose()]` too?",
+      "created_at": "2018-06-24T15:35:03Z",
+      "updated_at": "2018-06-24T17:32:06Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If `Stop` is called while `Get-Connect` is running, then `Get-Connect` is responsible for cleaning up anything not written to the pipeline. Once the object is written to the pipeline, the downstream command or script takes on the responsibility.\r\n\r\nThere is a window where pipeline objects live only in the pipeline - in which case it's the engine's responsibility to dispose and should not require a new feature to properly dispose - it should just happen, but it sounds like that doesn't actually work. I don't recall the history of that code to know if it was a design decision or an oversight, my guess is the later.",
+      "created_at": "2018-06-25T19:46:47Z",
+      "updated_at": "2018-06-25T19:46:47Z"
+    },
+    {
+      "author": "mattpwhite",
+      "author_association": "NONE",
+      "body": "I believe that addressing this would be extremely valuable.  IMHO it is one of the roughest edges on the language and I don't believe a real solution is possible without language support.  \r\n\r\nEven trying to explain all of the considerations involved to someone without a fairly deep knowledge of PowerShell is quite difficult.  Experienced C# developers often struggle just as much as beginners with little programming experience because you have to think about all of the ways a function might stop executing, terminating vs. non-terminating errors, etc.\r\n\r\nI'd vote for a new named scriptblock that was guaranteed to execute regardless of how the command stopped.  I could imagine some kind of defer-like thing where you pushed scriptblocks onto a stack as a solution, but that seems more race-y, verbose and error prone.\r\n\r\nI'd also love some using-like sugar to cut down on the boilerplate involved in handling cleanup in general (even worse with strict mode on), but that is something that might be doable without explicit language support.\r\n\r\nOne scenario that I don't think has been explicitly called out is a desire to do conditional cleanup.  In many cases, I want to have a \"convenience\" ParameterSet that takes something like a computername or a path and an \"optimized\" ParameterSet that takes some existing connection/handle/thing that requires cleanup.  In the convenience case, it's the function's responsibility to create the necessary disposable and then deterministically clean it up when it's done.  In the optimized case, the function does not take ownership of the disposable, it just uses it and is expected to leave it open.  The convenience set is for use in a shell or one-shot operations, the optimized path is used to amortize the setup cost for the disposable in more complex scenarios where it might be used for multiple things.\r\n\r\nSome of the suggestions (like an attribute) seem less compatible with this scenario.  Here's a contrived  example, don't read too much into this being a CimSession:\r\n\r\n```\r\nfunction Get-Example {\r\n    [CmdletBinding(DefaultParameterSetName = 'ByComputerName')]\r\n    param(\r\n        [Parameter(Position = 0, ParameterSetName = 'ByComputerName')]\r\n        [string]\r\n        $ComputerName = $env:ComputerName,\r\n\r\n        [Parameter(Mandatory = $true, ParameterSetName = 'ByCimSession')]\r\n        [CimSession]\r\n        $CimSession\r\n    )\r\n\r\n    try {\r\n        # Normalize things so the rest of the body can assume/work with $CimSession \r\n        if ($PSCmdlet.ParameterSetName -eq 'ByComputerName') {\r\n            $CimSession = New-CimSession -ComputerName $ComputerName -ErrorAction Stop\r\n        }\r\n\r\n        Get-CimInstance -ClassName Win32_ComputerSystem -CimSession $CimSession\r\n    }\r\n    catch {\r\n        # Using a catch as a glorified goto to handle a terminating error initializing the CimSession\r\n        Write-Error -ErrorRecord $_\r\n    }\r\n    finally {\r\n        # If we \"own\" the CimSession, clean it up.\r\n        if ($CimSession -and $PSCmdlet.ParameterSetName -ne 'ByCimSession') {\r\n            Remove-CimSession -CimSession $CimSession\r\n        }\r\n    }\r\n}\r\n```",
+      "created_at": "2018-06-28T02:39:20Z",
+      "updated_at": "2018-06-28T02:39:20Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "Correct me if I'm wrong but C# Cmdlets don't have this issue because `StopProcessing()` is called when  a terminating error is encountered or the user presses <kbd>CTRL</kbd>+<kbd>C</kbd>? If that is the case advanced functions should have a `stop` block added to the existing `begin`, `process`, `end` code blocks for feature parity with C# Cmdlets.\r\n\r\n```csharp\r\n[Cmdlet(VerbsCommon.Get, \"Foo\")]\r\npublic class GetFoo : Cmdlet\r\n{\r\n    protected override void BeginProcessing()\r\n    {\r\n      // open connection\r\n    }\r\n\r\n    protected override void ProcessRecord()\r\n    {\r\n      // do stuff\r\n    }\r\n\r\n    protected override void EndProcessing()\r\n    {\r\n      // close connection\r\n    }\r\n\r\n    protected override void StopProcessing()\r\n    {\r\n      // close connection\r\n    }\r\n}\r\n```\r\n\r\n```powershell\r\nfunction Get-Foo {\r\n    [CmdletBinding()]\r\n    param ()\r\n    \r\n    begin {\r\n        # open connection\r\n    }\r\n    process {\r\n        # do stuff\r\n    }\r\n    end {\r\n        # close connection\r\n    }\r\n    stop {\r\n        # close connection\r\n    }\r\n}\r\n```",
+      "created_at": "2018-12-29T19:27:46Z",
+      "updated_at": "2018-12-29T19:28:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think it would be preferable to have something else. That would lead to a *lot* of duplicated code, since StopProcessing isn't called during normal operation.\r\n\r\nA proper `finally{}` type block would be a much better implementation in this instance, I think.",
+      "created_at": "2018-12-29T19:31:20Z",
+      "updated_at": "2018-12-29T19:31:20Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@tnieto88 AFAIK, `StopProcessing` is usually called in different thread, so that it can send interrupt signal to the work in the main pipeline thread. Cleaning up resources here can easily cause concurrent access problem, if main thread is not yet done with them. Also, PowerShell's `Runspace` is single-threaded, so defining behavior of PowerShell's variant of `StopProcessing` is not trivial task.",
+      "created_at": "2018-12-29T19:58:02Z",
+      "updated_at": "2018-12-29T19:58:02Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 I don't think there would be any major amount of duplicated code if the author placed the close connection logic into a helper function called by both the `end` and `stop` block. It would also allow the author to handle normal post processing and a stopped cmdlet differently.\r\n\r\nCorrect me if I'm wrong but your recommendation is to have the `finally` block in a `try/catch` get executed even though the cmdlet is told stop. If that assumption is correct I believe that would require the connection to be built and torn down on each pipeline object creating unnecessary overhead. It would remove the ability to have the connection created in the `begin` block. Interact with the resource one or many times in the `process` block. Then close the connection in the `end` block.\r\n\r\n```powershell\r\nfunction Get-Foo {\r\n    [CmdletBinding()]\r\n    param ()\r\n\r\n    begin { }\r\n    process {\r\n        try {\r\n            # open connection\r\n            # interact with resource\r\n        }\r\n        catch {\r\n            # do something\r\n        }\r\n        finally {\r\n            # gets called even if cmdlet is stopped\r\n            # close connection\r\n        }\r\n    }\r\n    end { }\r\n}\r\n```",
+      "created_at": "2018-12-30T00:22:27Z",
+      "updated_at": "2018-12-30T00:35:29Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "So you want a helper function... For a function. Potentially every function that needs to deal with resources that may require disposal work other cleanup steps. Call me crazy, but that's still far too much duplicated code.\r\n\r\nAnd no, I'm not talking about try/finally. The reason we're discussing these kinds of solutions is precisely because that's insufficient. Whatever you wanted to *name* it, it would need to effectively be a finally-type black that effectively wraps the whole function. If at any point in the function a terminating error is thrown or StopProcessing is called, it would be triggered.",
+      "created_at": "2018-12-30T00:56:29Z",
+      "updated_at": "2018-12-30T00:56:29Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "I haven't put a lot of thought into it, but my gut reaction would be to oppose mirroring C#'s `StopProcessing` facility in PowerShell script, because TL;DR: `StopProcessing` is annoying.\r\n\r\nThe trouble with `StopProcessing` was already touched on by PetSerAl: you can't call any commands that interact with the pipeline in `StopProcessing`. If you did, for example by calling Write-Verbose, a) it would throw, b) if it were fixed to just be ignored, it would be unexpected (you can already envision the Issues that would be filed: \"`Write-Verbose` inexplicably does nothing when called from StopProcessing\"). So your shared function would have to have a switch to enable `StopProcessing`-safe operation... which seems terrible, given that the shared function might want to call other shared functions, etc., until you've poisoned whole libraries.\r\n\r\nIn production code that I've written where I really, really needed to be able to properly handle cancellation and cleanup, I went to the length of using C# and P/Invoke to intercept <kbd>Ctrl</kbd>+<kbd>c</kbd> signals and completely handled cancellation myself (the limitations of `StopProcessing` were too onerous for me).\r\n",
+      "created_at": "2018-12-30T22:59:20Z",
+      "updated_at": "2018-12-30T22:59:20Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "~~This was called out very early in the thread, but regarding [this comment from earlier on this thread](#issuecomment-382478291), is `Dispose` the right name to use here?~~\r\n\r\n~~For some people, the `Dispose` name might imply that the script block would be run with garbage collection. In C#, `Dispose` methods are automatically invoked as part of garbage collection, or manually if you don't want to wait. In PowerShell, the `Dispose` block would be automatically invoked on command completion, never manually, and never as part of garbage collection. Would that inconsistency cause some confusion? Maybe not, but coming from C#, that name originally made me wonder how to invoke it manually if I didn't want to wait for garbage collection, which made me wonder if it would cause confusion for users going from PowerShell to C# as well.~~\r\n\r\n~~Using `Dispose` also means that the new parameter name added to ForEach-Object to provide the same functionality would be named `DisposeScript` instead of just `Dispose`, since you cannot create a property with the same name as a method in the underlying C# class (although it would be possible to extend the Parameter attribute to allow for a name that is different than the underlying property name if it was wanted badly enough). Regardless, that's not a huge issue, but I wanted to mention it here.~~\r\n\r\n~~I don't have a great alternative name, but I wanted to ask the question to avoid potential confusion with C#'s Dispose method anyway.~~\r\n\r\n~~A few of the names we tossed around when discussing this on Slack are: `Cleanup`, `Finalize` (could be confused with `finally`), `Close` (but there is no `Open`).~~",
+      "created_at": "2019-05-28T15:43:44Z",
+      "updated_at": "2019-05-29T17:04:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Personally I think `dispose` is the best option, maybe `cleanup` as a close second (really that's just \"describing what it _does_\" vs \"describing what it's _for_\"). I think I prefer `dispose` as it refers to what the pipeline processor _does_ with it, same as `begin`, `process`, and `end`.\r\n\r\nHowever, I think that whatever name is picked, it's only a matter of time before \"it was always that way\" and the actual name will end up being essentially unimportant, as long as it's distinctive.",
+      "created_at": "2019-05-28T15:53:08Z",
+      "updated_at": "2019-05-28T15:53:08Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I think `dispose` implies the right intent.  It's important to note that because this block will *always* execute, it should be reserved for only *critical* clean up.  If that isn't communicated properly then commands that essentially ignore <kbd>Ctrl</kbd> + <kbd>C</kbd> could become more common.",
+      "created_at": "2019-05-29T12:45:41Z",
+      "updated_at": "2019-05-29T12:45:41Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "> Dispose name might imply that the script block would be run with garbage collection\r\n\r\nWhen the `Dispose` pattern was added to C#/.NET back in the early days, it was because folks wanted a way to clean up unmanaged resources themselves.  They did not want to rely on non-deterministic garbage collection.  \r\n\r\nI think the confusion about this arises because both the `IDisposable.Dispose()` method and a type's finalizer typically call a shared bit of code with the name/sig `Dispose(bool disposing)`.   It is a type's finalizer that is invoked directly by the garbage collector.",
+      "created_at": "2019-05-29T16:04:11Z",
+      "updated_at": "2019-05-30T01:17:28Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks guys. Question about the naming withdrawn.",
+      "created_at": "2019-05-29T17:03:44Z",
+      "updated_at": "2019-05-29T17:03:44Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I have a working implementation of this that I can PR as soon as the PRs for the formatting changes in the associated files go in. \ud83d\ude42 \r\n\r\nI've done some pretty thorough manual testing, currently the only thing remaining broken is tab completion for command parameters inside a dispose{} block. Not sure why, still looking at that.\r\n\r\nBeyond that, just gotta write up some pester tests for it and it'll be about ready to go. :sparkles:\r\n\r\nEDIT: @SeeminglyScience helped me figure out what the heck was up with tab completion. Pester tests are all that remain.",
+      "created_at": "2019-05-29T17:41:16Z",
+      "updated_at": "2019-05-30T02:40:48Z"
+    },
+    {
+      "author": "fullenw1",
+      "author_association": "NONE",
+      "body": "I just watched the PowerShell Community Call from April, 16th 2020.\r\nThere seems to be a concern about users who wants to stop a command line immediately, without having to wait for a cleanup to be done.\r\nWhy not just create a new shortcut association for the stop&cleanup?\r\nFor example:\r\n- keeping CTRL  + C for \"I want it to stop right now\"\r\n- CTRL + SHIFT + C for \"Stop after making some cleanup\"",
+      "created_at": "2020-04-18T16:20:50Z",
+      "updated_at": "2020-04-18T16:20:50Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@fullenw1 if there is such a desire, it isn't related to this intrinsically; if it's something that's important to you, I'd suggest opening a new issue.\r\n\r\nEven without this being implemented, there are a great many scenarios in PowerShell where the user is unable to cancel an operation. @SeeminglyScience and I mentioned a few of those in the [RFC discussion](https://github.com/PowerShell/PowerShell-RFC/pull/207#discussion_r393935727).\r\n\r\nIf we would like something like that to be implemented, it would need to be implemented at a much wider scope than this suggestion applies.\r\n\r\nTo play devil's advocate for a moment, I would generally advise against allowing users to cancel every operation. Some operations are safe to cancel; cancelling others may cause memory leaks, unstable behaviour, or lead to the shell crashing completely.\r\n\r\n_That_ is why a dispose{} block is needed in the first place; without it, script module authors have to accept that their code may at any time become unstable, or find obscure and complicated workarounds to ensure that users can't cancel critical cleanup operations.\r\n\r\nSome operations are safe to cancel, others... may result in instability. \ud83d\ude42 ",
+      "created_at": "2020-04-18T17:17:39Z",
+      "updated_at": "2020-04-18T17:18:01Z"
+    },
+    {
+      "author": "fullenw1",
+      "author_association": "NONE",
+      "body": "Hi @vexx32,\r\n\r\nPersonally, I am one of those people who can patiently wait a few minutes, and even more, for the system to give me the hand back :)\r\n\r\nI was just trying to help you because you raised the question during the community call about this long-standing feature request...\r\n\r\nHowever, @joeyaiello replied from [33'10\" \"to 34'15\"](https://youtu.be/q3Wx7MCpXnk?t=1990) that there could be some concern regarding users who want CTRL + C to stop the process immediately as it has always done.\r\n\r\nWhile we can be technically accurate (like you @vexx32), we must also remember (like @joeyaiello) the wast majority of users.\r\nBecause they never read release notes and don't follow any rich PowerShell blog (like yours), they will suddenly think that this new version of PowerShell is constantly freezing because it doesn't give the hand back immediately as former versions did.\r\nThus, they will probably always kill the host instead of waiting for the Dispose block to finish its work while cursing this new version.\r\n\r\nThis is why I made this suggestion, which could be a possible compromise and accelerate the progress of this feature request...\r\n\r\nBut let's not waste more time on this. Your solution is perfect for an eager to learn and a patient guy like me :)",
+      "created_at": "2020-04-20T18:45:40Z",
+      "updated_at": "2020-04-20T18:45:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The solution I'm proposing won't suddenly add delays to everything, so my apologies if I gave that impression. Any such delays would already be happening. As script authors pick up the feature, some small amount of delays may start to crop up depending on how they choose to implement their disposal routines, if they choose to add any. \r\n\r\nI think for the most part there won't be a noticeable added delay in the vast majority of cases, even when authors do start to make use of it. There will, of course, always be the odd exception from time to time, I'm sure. \ud83d\ude42 ",
+      "created_at": "2020-04-20T19:20:15Z",
+      "updated_at": "2020-04-20T19:20:15Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Because they never read release notes and don't follow any rich PowerShell blog (like yours), they will suddenly think that this new version of PowerShell is constantly freezing because it doesn't give the hand back immediately as former versions did.\r\n\r\nThey are *significantly* more likely to run into an existing C# cmdlet that forgot to implement `StopProcessing` or a PowerShell function that's blocking on a dotnet API call.\r\n\r\nHonestly the majority of cases where a `dispose` block will take a lot of time, it'll be because they are using a dotnet API and that API call is blocking.  If that's the case, there's no solution.  The only place that a extra \"really cancel\" function would do anything positive is if the writer was explicitly running an infinite loop in `dispose` for some reason.  In all other cases it's just a race condition that will occasionally leave resources open to save a few milliseconds.",
+      "created_at": "2020-04-20T19:20:31Z",
+      "updated_at": "2020-04-20T19:20:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "this term \"Dispose\" should be replaced with a more \"powershelly\" one.\r\nThe main idea of \u200b\u200bPowerShell is following English to help beginners. How can they understand \"dispose\"? I tried to translate to Russian and get some useless cases including \"allocation\"! This term will mislead beginners. I found that translations for \"CleanUp\" and \"Finally\" are much better. I guess for English men too.",
+      "created_at": "2020-04-21T11:26:00Z",
+      "updated_at": "2020-04-21T11:26:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`finally` is an existing keyword that I would very much hesitate to override. It also doesn't really communicate the actual purpose of the feature.\r\n\r\n`Cleanup` is closer and could perhaps be used, but personally I feel it's more appropriate to introduce the existing concept of `Dispose` rather than to confuse those already familiar with that with a different term.\r\n\r\nEither way, this concept is going to be a little unfamiliar to folks who've lived primarily in PowerShell land.  I would prefer to bring those familiar and unfamiliar closer together rather than further apart, and any gaps that need to be filled will be filled with documentation. Either way, we'd need to get some documentation written; I'd think it best that it teach the existing concept properly rather than introduce a wholly new idea that more or less mirrors an existing concept anyway.",
+      "created_at": "2020-04-21T13:03:58Z",
+      "updated_at": "2020-04-21T13:03:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> finally is an existing keyword that I would very much hesitate to override.\r\n\r\nIt is another context. No conflicts at all. (If you think so, then you should be more worried about `$begin = 1` \ud83d\ude04 )\r\n\r\nI remind you of the __fundamental PowerShell concept__ and the references to \"documentation\" and \"teach\" are not correct in the context.\r\n",
+      "created_at": "2020-04-21T14:19:34Z",
+      "updated_at": "2020-04-21T14:19:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This concept is something that has largely been ignored in PowerShell up till now.\r\n\r\nThere isn't anything comparable to pull from. This is going to be a new concept for PowerShell folks. We're better off following established patterns in .NET than trying to create an entirely new concept that can be confused with the existing ones already established in the .NET ecosystem.\r\n\r\nAs a very timely example, I'll just quote Immo here:\r\n\r\nhttps://twitter.com/terrajobst/status/1252504713762766848\r\n\r\n> Naming conventions for APIs shouldn\u2019t be innovated in. Otherwise you create a mess. You get one shot in V1. If you fucked it up, too bad.",
+      "created_at": "2020-04-21T14:43:13Z",
+      "updated_at": "2020-04-21T14:45:53Z"
+    },
+    {
+      "author": "mattpwhite",
+      "author_association": "NONE",
+      "body": "I don't feel strongly, but I might suggest picking a keyword like `cleanup` specifically because it is different.  PowerShell is already full of keywords that look like those in other languages but behave a bit differently.  Having something look familiar to a C# developer and then making it behave differently doesn't do anyone any favors (see try/catch).\r\n\r\nAs for delays, there's a million things you can do already that will hang your shell and cause it not to respond to a ctrl+c.  This seems fairly unlikely to make that much worse.  `Dispose()` methods that block for a meaningful amount of time are not that common.",
+      "created_at": "2020-04-21T21:58:14Z",
+      "updated_at": "2020-04-21T21:58:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mattpwhite I don't agree myself, but I've been know to be stubborn. Could you add that feedback to the rfc discussion? It might be worth discussing more thoroughly :slightly_smiling_face: https://github.com/PowerShell/PowerShell-RFC/pull/207#discussion_r393935727",
+      "created_at": "2020-04-21T22:02:09Z",
+      "updated_at": "2020-04-21T22:02:09Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": " ![dispose](https://www.gstatic.com/onebox/dictionary/etymology/en/mobile/b886c11fe0be376c1f1e2327a8dec6a303dc830edafed05da6d65330d9fb94d4.png)\r\n\r\n\r\nFrench dictionnary has 7 definitions for the verb, one is to prepare someone to death.",
+      "created_at": "2020-04-22T06:04:47Z",
+      "updated_at": "2020-04-22T06:04:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 For PowerShell scripts UX our common approach is always to priority PowerShell concepts over C#.\r\n\r\n>  one is to prepare someone to death\r\n\r\nOh... It could fall under MSFT compliance requirements. ",
+      "created_at": "2020-04-22T06:29:50Z",
+      "updated_at": "2020-04-22T06:29:50Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "@iSazonov no, it's a common word used for a lot of meaning. i spoke only about one usage in french, i dont know for english. It depends of the context. Like Prepare an object to be destroyed as a final goal. In restaurant, they 'dispose' the table because the final goal is to serve the customer. \r\n",
+      "created_at": "2020-04-22T07:48:57Z",
+      "updated_at": "2020-04-22T07:48:57Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov \r\n\r\n> @vexx32 For PowerShell scripts UX our common approach is always to priority PowerShell concepts over C#.\r\n\r\nAs I said:\r\n\r\n> This concept is something that has largely been ignored in PowerShell up till now.\r\n\r\nThis concept is not something that PowerShell (currently) has any tangible reference to. The closest you can find is directly calling `Dispose()` methods on disposable resources. Unless there's a truly pressing reason (outside of personal preferences and nice-to-haves) to change the name of the existing concept, I see no reason for PowerShell to be a special snowflake here.",
+      "created_at": "2020-04-22T12:04:56Z",
+      "updated_at": "2020-04-22T12:04:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The idea was expressed by @BrucePay, then in another form @lzybkr, then @alx9r.\r\nI would not want to lose this idea and put it in https://github.com/PowerShell/PowerShell-RFC/pull/250\r\n",
+      "created_at": "2020-05-13T12:40:49Z",
+      "updated_at": "2020-05-13T12:40:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov appreciate the writeup!\r\n\r\nI had a bit of a read just a little bit ago, but it seems to me the concept is flawed from the beginning. Automatic resource management is effectively trying to predict what users want from the code, which IMO is never a great way to try to create a reliable experience for users.\r\n\r\nI'll add more detailed comments to the RFC itself.",
+      "created_at": "2020-05-13T12:48:59Z",
+      "updated_at": "2020-05-13T12:48:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 The RFC comes from the fact that I like when PowerShell makes _smart_ things :-) \r\n\r\n> it seems to me the concept is flawed from the beginning\r\n\r\nAs joke - it seems to you :-) Do you really deny the garbage collector in C#?!",
+      "created_at": "2020-05-13T13:03:47Z",
+      "updated_at": "2020-05-13T13:03:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Not at all. But I think us attempting to re-create a garbage collector when there's already one available in .NET is a bit of wasted effort, frankly. Can we improve how we work with it? To a point, sure! But trying to do too much there is liable to create an incredibly confusing UX.",
+      "created_at": "2020-05-13T13:11:19Z",
+      "updated_at": "2020-05-13T13:13:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We need to look script examples where it could be a problem.",
+      "created_at": "2020-05-13T13:15:55Z",
+      "updated_at": "2020-05-13T13:15:55Z"
+    },
+    {
+      "author": "essentialexch",
+      "author_association": "NONE",
+      "body": "There is nothing that says both of these cannot be done.\r\n\r\nI'd really (speaking as someone who prefers language to change slowly!!) prefer to not wait another year or two to have a dispose-type capability in PowerShell. It's an enormously powerful concept especially for network, database, and file-system (i.e., most) scripts that are long-running and robust.\r\n\r\nSo I'd hate for @vexx32 's implementation to get derailed by a similar-but-not-identical resource-tracking proposal from @iSazonov .",
+      "created_at": "2020-05-13T13:35:31Z",
+      "updated_at": "2020-05-13T13:35:31Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I don't necessarily see a problem with scope based disposal, but it's gotta be explicit.  For instance, a nested/non-public function that creates a database connection for use in a larger function/module is gonna break.",
+      "created_at": "2020-05-13T13:48:42Z",
+      "updated_at": "2020-05-13T13:49:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> For instance, a nested/non-public function that creates a database connection for use in a larger function/module is gonna break.\r\n\r\nIt is developer duty to make this correctly. If it is a module developer should set \"DisposeKind.AtModuleUnload\" for the connection object. Now consumer gets PowerShell magic - automatically closing the connection.\r\nI would not want us to dive into the implementation details - it is clear that this is not easy.\r\n",
+      "created_at": "2020-05-13T15:43:13Z",
+      "updated_at": "2020-05-13T15:43:13Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, I'm not sure I see a lot of value in making this a \"magic\" sort of implementation. If there is desire for that kind of functionality on module unload, authors can already register tasks for module unload. I wonder if we'd be perhaps better off making that functionality more easily accessible in general rather than for a specific targeted purpose you're suggesting..",
+      "created_at": "2020-05-13T15:46:36Z",
+      "updated_at": "2020-05-13T15:47:12Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> It is developer duty to make this correctly. If it is a module developer should set \"DisposeKind.AtModuleUnload\" for the connection object. Now consumer gets PowerShell magic - automatically closing the connection.\r\n\r\nIf I do this:\r\n\r\n```powershell\r\n$rs = & {\r\n    $temp = [runspacefactory]::CreateRunspace()\r\n    $temp.Open()\r\n    $temp\r\n}\r\n```\r\n\r\nHow am I as a script writer supposed to know that `$rs` is now closed.  Even as someone who would be well aware of the change, it would be incredibly difficult to troubleshoot.\r\n\r\nPlus, you can assign objects you don't own to variables:\r\n\r\n```powershell\r\n$currentRunspace = [runspace]::DefaultRunspace\r\n```\r\n\r\n> I would not want us to dive into the implementation details - it is clear that this is not easy.\r\n\r\nYeah psuedo code is fine of course.  To be clear though, if automatic disposal is **opt-out** then this would be an incredibly large breaking change.",
+      "created_at": "2020-05-13T15:58:24Z",
+      "updated_at": "2020-05-13T15:58:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe PowerShell can be smart enough to understand that an object is published in pipeline and shouldn't be destroyed. Can? :-) It is mentioned in RFC too. In fact, we can come up with any scenario and find a way to get around it or vice versa to fix it.\r\n\r\n",
+      "created_at": "2020-05-13T17:08:23Z",
+      "updated_at": "2020-05-13T17:08:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I believe PowerShell can be smart enough to understand that an object is published in pipeline and shouldn't be destroyed.\r\n\r\nIt's not going to be that easy, you'd need full escape analysis\r\n\r\n1. Saved to a property\r\n1. Passed as a method argument\r\n1. Saved to an array\r\n1. Passed as a command argument\r\n1. Saved to a parent scope\r\n\r\nPlus you'd have to intimately familiar with all of those restrictions, if not then troubleshooting why your object breaks in script A but works great in script B will be very difficult.\r\n\r\nI don't see why it has to be automatic.  Adding another use to the `using` keyword for assignments ala `using $b = [runspacefactory]::CreateRunspace()` seems like the move to me.  If you don't explicitly request disposal, waiting until it hits the finalizer is probably fine.  If not, it's the developers duty to quickly mark the assignment with `using`.",
+      "created_at": "2020-05-13T17:37:09Z",
+      "updated_at": "2020-05-13T17:37:09Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I believe this was implemented with https://github.com/PowerShell/PowerShell/pull/15177, feel free to correct me if I'm wrong.",
+      "created_at": "2022-02-13T23:57:45Z",
+      "updated_at": "2022-02-13T23:57:45Z"
+    }
+  ],
+  "created_at": "2018-04-18T09:15:44Z",
+  "number": 6673,
+  "state": "closed",
+  "title": "Add new `Dispose {}` type block so script cmdlets have opportunity to cleanup",
+  "updated_at": "2022-02-14T03:53:33Z"
+}

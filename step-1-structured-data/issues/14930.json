@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14930",
+  "author": "rjmholt",
+  "body": "I'm writing a cmdlet that takes in paths of scripts and then executes them from the filesystem.\r\n\r\nIn PowerShell script this would be trivial &mdash; `& $path` &mdash; but from a .NET cmdlet, I can only find hacky ways of doing this rather than a proper API for it.\r\n\r\n## Current methods\r\n\r\nFor the sake of documentation here are the methods I've got so far:\r\n\r\n### Escape the path as a PowerShell string and execute it as a command\r\n\r\nPerhaps the most straightforward way to do this is to just use PowerShell to invoke it:\r\n\r\n```csharp\r\nstring wrapperScript = $\"& '{Path.Replace(\"'\", \"''\")}'\";\r\nInvokeCommand.InvokeScript(wrapperScript);\r\n```\r\n\r\nThis works, but:\r\n\r\n- We now need to generate PowerShell script on the fly and execute it. This could be especially problematic in scenarios where security and trust are in play\r\n- If an error occurs, our script stack trace is polluted\r\n- We're forced to run a whole parse/execute flow just to get to the file, so it's not just hacky but also very inefficient\r\n\r\n### Override `PSRemotingCmdlet`\r\n\r\nTrying to work out the \"right\" way to do this, I looked at `Invoke-Command`, since that's a cmdlet we ship that can invoke script files directly from the filesystem.\r\n\r\nThis inherits from `PSRemotingCmdlet`, which contains a lot of code for remote execution, but which also exposes this protected method:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/c5955a5c0de50295e509dbc10928147b33d5cbea/src/System.Management.Automation/engine/remoting/commands/PSRemotingCmdlet.cs#L2012-L2046\r\n\r\nIn `Invoke-Command`, this is used to execute a script file like this:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/c5955a5c0de50295e509dbc10928147b33d5cbea/src/System.Management.Automation/engine/remoting/commands/InvokeCommandCommand.cs#L1178-L1185\r\n\r\nAs far as I can tell, this is as close as we get to having a public API for executing a PowerShell script file directly. But there are several issues:\r\n\r\n- `PSRemotingCmdlet` implements things like `BeginProcessing()`, so to safely reuse it we're forced to override all its virtual cmdlet methods, and any parameters it defines we're stuck with -- however we could possibly just create a new instance of the cmdlet internally and call this method on it without giving it to the PS runtime...\r\n- `PSRemotingCmdlet` is also just a lot of code that we shouldn't have to touch or think about to execute a script file, and inheriting from it means we can't inherit from other cmdlet implementations in our code base\r\n- `InvokeUsingCmdlet()` is internal and has a number of internally typed parameters, so it's hard to call. This means we must choose another invocation method for the scriptblock. Executing it is still very possible, but naturally this deviates from how PowerShell does it natively.\r\n\r\n### Use reflection to create an `ExternalScriptInfo` object and call that\r\n\r\nLooking through things, I think this is basically the \"right\" way to do things, but a number of steps have no public way to perform and we are required to resort to reflection on APIs that aren't guaranteed not to break (even though they're pretty core APIs that probably aren't going to change any time soon &mdash; but never say never).\r\n\r\nThe steps are essentially:\r\n\r\n- Create an `ExternalScriptInfo` object. This is a public type, but has no public constructors and I wasn't able to find another way to construct one\r\n- Pass that to `PowerShell.Create().AddCommand()`, which accepts a `CommandInfo` object\r\n- Execute that `PowerShell` object\r\n\r\nThe issues here are that:\r\n\r\n- `ExternalScriptInfo` has no public constructor, and the correct constructor requires the internal type `ExecutionContext`\r\nhttps://github.com/PowerShell/PowerShell/blob/c5955a5c0de50295e509dbc10928147b33d5cbea/src/System.Management.Automation/engine/ExternalScriptInfo.cs#L24-L55\r\n- So we also need to use reflection to (1) get the `ExecutionContext` instance from our cmdlet and (2) efficiently pass it into the invocation of the constructor (by which I mean that compiling a `Func<ExternalScriptInfo>` around this is made harder because one of the inputs must be cast to a statically-unknown type)\r\n- Again, the way PowerShell itself uses this is to run `InvokeUsingCmdlet()`, which is also still internal. The silliest part here is that we just used an `ExecutionContext` to construct the `ExternalScriptInfo` and now invoking it from a cmdlet will just replace that `ExecutionContext`. Instead the simplest way to go is going to be `ScriptBlock.Invoke()` or the `PowerShell.Create(RunspaceMode.CurrentRunspace).AddCommand(externalFileInfo).Invoke()` method, both of which use more implicit magic around runspace and context.\r\n- While we can use a `CommandInfo` object for `PowerShell.AddCommand()`, we can't use it for `PSCommand.AddCommand()` safely with older PowerShell versions because of https://github.com/PowerShell/PowerShell/issues/12297.\r\n\r\n## A better way?\r\n\r\nSo first off, others might have a better way to do this today, and if so we should definitely discuss it here. Ideally we can get scenarios like this documented nicely in some developer-oriented documentation.\r\n\r\nBut also, my ideal for this scenario would be new methods in particular places that allow a filepath to be passed in:\r\n\r\n- `CommandInvocationIntrinsics.InvokeScriptFile(string filePath, ...)`, which would allow anything with a `CommandInvocationIntrinsics` object to just run a scriptfile\r\n- `PowerShell.AddFile(string filePath, ...)`/`PSCommand.AddFile(string filePath, ...)`, to allow the same using the usual `PowerShell` API\r\n- A public `ExternalScriptInfo` constructor or `Create()` method that allows for the creation of a `CommandInfo` object that directly describes a scriptfile, for parity with `CmdletInfo`. `FunctionInfo` might also be worth doing this for, although `ScriptBlock.Create()` essentially fills this role today.",
+  "closed_at": "2021-05-19T21:56:57Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Note that  the SDK's  `.AddCommand()` method already accepts a file path _string_ directly:\r\n\r\n```powershell\r\n'\"hi from test.ps1: $foo\"' > test.ps1\r\n\r\n$foo = 'value from this runspace'\r\n\r\n$ps = [powershell]::Create('CurrentRunSpace')\r\n\r\n$ps.AddCommand((Convert-Path test.ps1)).Invoke()\r\n```\r\n\r\nThe name `.AddCommand()` doesn't make that capability obvious, however, and the `.AddScript()` method, which accepts a script _block_'s _text_, i.e. a source-code _string_ rather than a file path, adds to the confusion.\r\n\r\n",
+      "created_at": "2021-03-03T01:32:34Z",
+      "updated_at": "2021-03-03T01:32:54Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> The name `.AddCommand()` doesn't make that capability obvious, however, and the `.AddScript()` method, which accepts a script _block_'s _text_, i.e. a source-code _string_ rather than a file path, adds to the confusion.\r\n\r\nYeah... the name makes sense in the context of implementation detail, but boy is it hard to explain outside of it.\r\n\r\nThe tl;dr of it is: if you can run `Get-Command X` and get a result, `X` probably works in `AddCommand`.  If you can't, then it probably needs to be parsed and compiled/interpreted.",
+      "created_at": "2021-03-03T17:03:46Z",
+      "updated_at": "2021-03-03T17:03:46Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Oh also if this is about PSES, I'm pretty sure the only reason it doesn't use `AddCommand` for that is command history. But `AddCommand` does have an overload for `createLocalScope`, at least on `PSCommand`.",
+      "created_at": "2021-03-03T17:06:55Z",
+      "updated_at": "2021-03-03T17:06:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Yeah... the name makes sense in the context of implementation detail, but boy is it hard to explain outside of it.\r\n\r\nGood point.\r\n\r\nWhat would at least help is if the SDK documentation covered this better. It is generally very terse, but in this particular case [the parameter name itself - `cmdlet`](https://docs.microsoft.com/en-US/dotnet/api/system.management.automation.powershell.addcommand?view=powershellsdk-7.0.0#System_Management_Automation_PowerShell_AddCommand_System_String_)  - actively suggests much more restrictive behavior than what is actually supported:\r\n\r\n```csharp\r\npublic System.Management.Automation.PowerShell AddCommand (string cmdlet);\r\n```\r\n\r\nIt is accompanied by the following (non-)explanation: \"A string representing cmdlet.\"\r\n\r\n",
+      "created_at": "2021-03-03T17:26:19Z",
+      "updated_at": "2021-03-03T17:26:19Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The term cmdlet never really had consistent usage. Recently (well sometime in the last two years, I have no concept of time anymore) the PowerShell team officially redefined it to mean more or less the same \"command\".  So coincidentally, it works now kind of.",
+      "created_at": "2021-03-03T17:32:48Z",
+      "updated_at": "2021-03-03T17:34:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think this terminology unification only applies to _binary_ vs. _written-in-PowerShell_ cmdlets (cmdlet-like scripts and functions, formerly called \"scriptlets\", then \"advanced functions\"), and doesn't include the following, all of which `.AddCommand()` supports:\r\n\r\n* simple functions and scripts (without `[CmdletBinding()]`, including `filter` functions)\r\n* aliases\r\n* external executables\r\n\r\n\"Command\" actually _is_ the proper umbrella term for all these, but that would require proper documentation and parameter names to that effect.\r\n\r\n",
+      "created_at": "2021-03-03T17:39:45Z",
+      "updated_at": "2021-03-03T17:41:48Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rjmholt A script on disk is just a type of command and so can be executed by doing:\r\n```powershell\r\n[PowerShell]::Create(\"CurrentRunspace\").AddCommand(\"c:\\foo\\bar\\baz.ps1\").Invoke()\r\n```\r\n",
+      "created_at": "2021-03-15T02:07:52Z",
+      "updated_at": "2021-03-15T02:07:52Z"
+    },
+    {
+      "author": "adityapatwardhan",
+      "author_association": "MEMBER",
+      "body": "Closing as it seems it is answered. Please re-open if you think there is information still missing.",
+      "created_at": "2021-05-19T21:56:57Z",
+      "updated_at": "2021-05-19T21:56:57Z"
+    }
+  ],
+  "created_at": "2021-03-02T21:03:51Z",
+  "number": 14930,
+  "state": "closed",
+  "title": "API for executing a PowerShell script file from C#?",
+  "updated_at": "2021-05-19T21:56:58Z"
+}

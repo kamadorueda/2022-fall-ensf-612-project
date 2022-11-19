@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10347",
+  "author": "msftrncs",
+  "body": "Apparently there is some special meaning to the DashDash token when it is used in command mode, but I couldn't seem to uncover it.   While trying to understand the tokenizer and parser I ran in to these two issues:\r\n\r\n1.  A DashDash token causes further Parameter tokens to be flagged as CommandName, which can be confusing with PSReadLine if PSReadLine if changed to prioritize the highlighting of CommandName over Parameter (https://github.com/PowerShell/PSReadLine/pull/989).\r\n2.  A DashDash token can be accepted as a command, when used with the invoke operators, but it does not get flagged with CommandName, and so causes PSReadLine to highlight it as a operator.  Even when it is accepted as a command, the behavior in point 1 still occurs.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n& -- -NowACommandNameFlaggedToken\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "`--` signals the end  of parameter processing for a command. Any remaining tokens are parsed as arguments. PowerShell adopted this from the Unix shells we used as our models: [What does \u201c--\u201d double-dash mean?](https://unix.stackexchange.com/questions/11376/what-does-double-dash-mean-also-known-as-bare-double-dash) There is another form of this `--%` that turns off all processing for the rest of the command: [About Parsing](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-6)",
+      "created_at": "2019-08-13T18:10:16Z",
+      "updated_at": "2019-08-13T18:10:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Right, but then shouldn't all the arguments be flagged as _arguments_ and not as additional command names during tokenizing?",
+      "created_at": "2019-08-13T18:13:42Z",
+      "updated_at": "2019-08-13T18:13:42Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Since @msftrncs  seemed unclear, I just wanted to point out that there is, in fact, a very specific meaning to `--` (and `--%`).",
+      "created_at": "2019-08-13T21:42:39Z",
+      "updated_at": "2019-08-13T21:42:39Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I could tell from the code that the `--` (DashDash) caused any further 'parameters' to be considered arguments (in the AST), but still find it surprising that they are flagged as 'CommandName'.  Without modification, PSReadLine will continue to highlight them as parameters, but if changed to prioritize CommandName flagged tokens highlighting as command, it would be alarming to a user.\r\n\r\nI also think its an error, but maybe the 'nix shells do the same thing, that the `--` (DashDash) can be accepted as a command name at the same time it triggers further parameters to be ignored.  This would be similar to a redirect being accepted both as a command name, and redirection at the same time.\r\n\r\nI did test changes to the parser to change this behavior.  I had to add a couple `when` clauses to a couple of switch case statements to cause the 'command' `--` to not trigger this behavior and to be properly marked as a command name, when the context of the parser was 'CommandName' or 'CommandNameAfterInvocationOperator'.  I haven't determined what the correct change would be for the parameter's being marked as command names though.\r\n\r\nThere also still seems to be no documentation on the topic, as it relates to PowerShell.  Is it a recent addition, or in there from day one?  Looking at the code, I'd be willing to bet its relatively recent addition and it was added hastily on the end of a section that normally found parameters that were meant to be command names \u2026  unfortunately I cannot trace the blame (it was a new file when the code first appeared, so its been here since 6.0, which I can prove it was in Windows PowerShell 5.1).\r\n\r\nOnly showing the section of importance:\r\nhttps://github.com/PowerShell/PowerShell/blob/5974afaa8daf9ed6fc45077eff899088a650e1e2/src/System.Management.Automation/engine/parser/Parser.cs#L6281-L6289\r\n\r\nI am thinking the fix here it to use a when clause for `!sawDashDash` on the case statement, it seems to do the trick.\r\n\r\n",
+      "created_at": "2019-08-14T02:49:13Z",
+      "updated_at": "2019-08-14T02:49:13Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "There happens to be some inconvienence from the `--` (DashDash) token stopping parameter processing.  While one might assume that all remaining arguments will now be processed according to standard argument rules, they are not.  Parameter tokens are never expandable, even when they are treated as arguments past the `--` (DashDash) token. (this also becomes true of a parameter token that is consumed as a command name by an invocation operator)\r\n\r\n(`echo` used for example only)\r\n```PowerShell\r\n# these two are not equivelent\r\necho -- -hello$a\r\necho \"-hello$a\"\r\n\r\n# however this quickly produces desired result\r\necho `-hello$a\r\n```\r\n",
+      "created_at": "2019-08-14T03:40:49Z",
+      "updated_at": "2019-08-14T03:44:42Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've investigated Bash on Ubuntu.  Bash accepts `--` as a command, and does not treat it as the 'stop processing parameters' for itself.  However, Bash's dot-source operator `.` does allow parameters to itself before a filename is specified, so it allows the `--` token to 'stop processing parameters' but it only applies to the parameters being applied to the `.` operator, the command itself that is specified must be further specified to stop processing parameters.   Since PowerShell's `.` operator doesn't accept any parameters, the behavior for `--` as a command name should not trigger the 'stop processing parameters' logic.\r\n\r\nIn Bash\r\n```Bash\r\n. -- -- -- --help\r\n#< dot source operator\r\n# ^^ stop processing parameters for dot source\r\n#    ^^ command name\r\n#       ^^ stop processing parameters for command\r\n#           ^^^^^^ argument value\r\n```\r\n\r\nBecause I originally brought this issue up for the purpose of PSReadLine and highlighting of commands, I could commit a demonstration of changes for this issue in https://github.com/PowerShell/PowerShell/pull/10295.\r\n",
+      "created_at": "2019-08-31T04:15:04Z",
+      "updated_at": "2019-08-31T04:15:04Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I also see this happening for the `--%` verbatim argument syntax.\r\n\r\n```PowerShell\r\n& --% this is now one large argument verbatim\r\n```\r\nwhere `--%` is actually a command name, but the rest of the command line is one single verbatim argument.",
+      "created_at": "2019-09-19T06:00:13Z",
+      "updated_at": "2019-09-19T06:00:13Z"
+    }
+  ],
+  "created_at": "2019-08-13T04:02:32Z",
+  "number": 10347,
+  "state": "open",
+  "title": "DashDash token causing remaining parameter tokens to be flagged as CommandName",
+  "updated_at": "2019-09-19T06:00:13Z"
+}

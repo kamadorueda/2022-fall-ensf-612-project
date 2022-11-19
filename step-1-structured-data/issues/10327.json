@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10327",
+  "author": "Jaykul",
+  "body": "When dealing with VT terminals I need to be able to Read-Host from the terminal input, without waiting for {Enter}, and on Windows, we use `$Host.UI.RawUI.ReadKey(\"NoEcho\")` for that, but it's failing elsewhere.\r\n\r\n# Steps to reproduce\r\n\r\nOn Windows, the following allows me to read responses from the terminal (without having them show up):\r\n\r\n```posh\r\nfunction Read-Terminal {\r\n[CmdletBinding()]\r\nparam([string]$EscSequence)\r\n  $Host.UI.Write($EscSequence)\r\n  -join $(while ($Host.UI.RawUI.KeyAvailable) { \r\n    $Host.UI.RawUi.ReadKey(\"NoEcho,IncludeKeyDown\").Character\r\n  })\r\n} \r\n```\r\n\r\nSo for instance, the CSI code 6n causes the terminal to report the cursor location, and we can read our X, Y from the terminal like this:\r\n\r\n```posh\r\n$answer = Read-Terminal \"`e[6n\"\r\n\"Row {0}, Column {1}\" -f @($answer -split ';' -replace '\\D')\r\n```\r\n\r\nWill get something like:\r\n```none\r\nRow 29, Column 1\"\r\n```\r\n# Actual behavior\r\n\r\nBut when I try to run the same code on linux (even in the WSL terminal) the `$Host.UI.RawUI` seems to echo no matter what I do, so the terminal's response is completely unsuppressable.\r\n\r\n```none\r\nPS /root> cls; $answer = Read-Terminal \"`e[6n\"\r\n^[[1;1R\r\n````\r\n\r\nI would be remiss not to point out that in addition to this being unreadable, the escape sequence is being shown as ^[ instead of the expected `e\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.2\r\nPSEdition                      Core\r\nGitCommitId                    6.2.2\r\nOS                             Linux 4.4.0-18362-Microsoft #1-Microsoft Mon Mar 18 12:02:00 PST 2019\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just for context, using the `read` built-in with bash (wsl or native linux), we'd use something like `read < <(echo -e -n \"\\e[6n\"); echo \"The reply is ${REPLY}\"` \r\n\r\n(`REPLY` is the default token when you don't specify one in `read`)",
+      "created_at": "2019-08-08T23:14:46Z",
+      "updated_at": "2019-08-08T23:14:46Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> But when I try to run the same code on linux (even in the WSL terminal) the $Host.UI.RawUI seems to echo no matter what I do, so the terminal's response is completely unsuppressable.\r\n\r\nBefore core 3.0, terminal input echo was always enabled on Unix, unless `ReadKey(intercept: true)` was running.  We had a similar issue in PowerShellEditorServices, so I stripped out the native code corefx uses to disable echo (and otherwise prep `termios`) and put it in the [UnixConsoleEcho](https://github.com/SeeminglyScience/UnixConsoleEcho) package.  That works, but I'd recommend just requiring PowerShell 7 instead, shipping native binaries isn't fun. Plus you have to be *very* careful about reverting, because it'll affect child processes.\r\n\r\nNote that the problem isn't `$Host.UI.RawUI.ReadKey`, it's that `ReadKey` isn't running when input is pressed.  Since you're waiting until a key is available to read it, input will still be enabled at the time of the key press.\r\n\r\nAlso, can't text on *nix atm, but avoiding `KeyAvailable` should work:\r\n\r\n```powershell\r\n$Host.UI.Write(\"$([char]27)[6n\")\r\n$chars = while (($key = $Host.UI.RawUI.ReadKey('NoEcho, IncludeKeyDown')).Character -ne 'R') {\r\n    $key.Character\r\n}\r\n\r\n$y, $x = -join $chars.Where($null, 'Skip', 2) -split ';'\r\n```",
+      "created_at": "2019-08-09T13:40:04Z",
+      "updated_at": "2019-08-09T13:40:04Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "Nice workaround Patrick. Pity about needing to know about a terminating character. I suppose another alternative would be to make it timeout based, but spinning up threads while blocking on input causes hell on corefx on windows. I tried to make psreadline's argumentcompleters more robust by having them timeout some years ago but it was deadlock prone and flaky AF.",
+      "created_at": "2019-08-09T15:44:48Z",
+      "updated_at": "2019-08-09T15:44:48Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I suppose another alternative would be to make it timeout based, but spinning up threads while blocking on input causes hell on corefx on windows.\r\n\r\nThat has some fun side effects on unix too \ud83d\ude04  ([More info](https://github.com/PowerShell/PSReadLine/pull/626#issue-165255865))\r\n",
+      "created_at": "2019-08-09T17:14:48Z",
+      "updated_at": "2019-08-09T17:14:48Z"
+    }
+  ],
+  "created_at": "2019-08-08T20:24:34Z",
+  "number": 10327,
+  "state": "open",
+  "title": "There's no reliable way to read and suppress terminal output",
+  "updated_at": "2019-08-09T17:14:48Z"
+}

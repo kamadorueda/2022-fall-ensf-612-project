@@ -1,0 +1,223 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3901",
+  "author": "PaulHigin",
+  "body": "Update:\r\n--------\r\nThe technique is to now use sigaction to create an SSH client process that ignores SIGINT signals.  It remains in the PowerShell process group and has access to the terminal, which means it can prompt on the command line as before.  So SSH_ASKPASS dependency is not needed.\r\n\r\n-------\r\n\r\nThis change addresses Issue #2321.  The original idea for this fix was to follow what I did in Windows and create the SSH process in its own process group.  That way a Ctrl+C typed signal in PowerShell (the parent process) wouldn't be handled by the child SSH process (causing it to end), and instead would allow PowerShell to handle it through its protocol (PSRP).\r\n\r\nBut this ended up disabling the /dev/tty terminal for the SSH process so it could not prompt the user for a password, if that was how SSH was set up.\r\n\r\nIt turns out that SSH will detect if there is no tty available and fall back to using SSH_ASKPASS program if available.  This will happen if the SSH child process is created in its own session.  So this change does that, it creates the SSH process (used for SSH remoting) in its own session.\r\n\r\nThe downside to this is that now the SSH_ASKPASS program needs to be installed if we want to support any SSH prompting.  We will need to make sure it gets installed with Enable-SSHRemoting (a separate issue/work item).\r\n\r\nCreating a Linux process in its own session does not seem like a common need and so I felt it was not necessary to add this functionality to DotNet CoreFx.  Instead I pulled some of the UNIX process creation code over to PowerShell and added the ability to create in a separate session.  So this change has a fair amount of native and platform interop code.\r\n\r\nI will update the license document to indicate that PowerShell is using this DotNet CoreFx code under the MIT license.\r\n",
+  "closed_at": "2017-06-14T22:56:57Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@PaulHigin Please add reviewers for your PR and assign it to an appropriate maintainer.",
+      "created_at": "2017-06-01T01:13:45Z",
+      "updated_at": "2017-06-01T01:13:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I leave a [comment in the original Issue](https://github.com/PowerShell/PowerShell/issues/2321#issuecomment-305687171)",
+      "created_at": "2017-06-02T04:34:44Z",
+      "updated_at": "2017-06-02T04:34:44Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov Please put comments here rather than providing a link.  The SSH -t option to create a pseudo tty prevents using subsystems which is needed to host PowerShell for SSH remoting.  So it won't work here as far as I can tell.  If there was some way to create and use the child SSH process such that it is not part of the process group (so that it doesn't get Ctrl+C signals) but still can use a tty for user prompt, then that would be great.  But I don't currently see a way to do this.  However, I am definitely open to any ideas as this would be preferable to using SSH_ASKPASS!",
+      "created_at": "2017-06-02T18:41:39Z",
+      "updated_at": "2017-06-02T18:41:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin I don't read in depth but it is interesting https://unix.stackexchange.com/questions/266866/how-to-prevent-ctrlc-to-break-ssh-connection",
+      "created_at": "2017-06-02T19:20:10Z",
+      "updated_at": "2017-06-02T19:20:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Oh, I think about a remote session all the time, but the problem is on the local side, isn't it? If so there is a simple test:\r\n1. run Bash\r\n2. run stty intr undef\r\n3. run PowerShell and test Ctrl-C in remote connection\r\n\r\nIf this works well we can make the same internally in PowerShell - disable ISIG by means of [TERMIOS(3)](http://man7.org/linux/man-pages/man3/termios.3.html) at startup time.\r\n",
+      "created_at": "2017-06-03T19:55:18Z",
+      "updated_at": "2017-06-03T19:55:18Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This looks interesting, but I don't understand what the fix would be.  I don't want to disable the ISIG for the PowerShell /dev/tty but instead want to keep the child SSH process from getting it.  I only want PowerShell to handle it.  It is not clear to me that disabling ISIG via termios can be done per process.  But if so that would certainly solve our problem!\r\n\r\nBTW I did look at your previous link as a way to turn off ISIG processing on the server side, but I wasn't able to get it to work.  \"set -m\"  didn't seem to do anything.",
+      "created_at": "2017-06-05T16:32:18Z",
+      "updated_at": "2017-06-05T16:32:18Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm, sigaction() looks interesting.  It should be possible to suppress a signal on a specific process.  I'll look into it.\r\n",
+      "created_at": "2017-06-05T17:56:24Z",
+      "updated_at": "2017-06-05T17:56:24Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Sigaction() works great and obviates the need for SSH_ASKPASS since the SSH process can be created in its parent group/session but still be made to ignore interrupt signals (SIGINT).\r\n\r\nI have updated the PR to use sigaction().",
+      "created_at": "2017-06-05T21:53:38Z",
+      "updated_at": "2017-06-05T21:53:38Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Assign this PR to @mirichmo because he would have more context as one of the reviewers.",
+      "created_at": "2017-06-06T05:09:56Z",
+      "updated_at": "2017-06-06T05:09:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Good catch!  I reread the discussion and it looks that `sigaction`  is exactly what we wanted. \r\n\r\nI believe we should consider [sigprocmask](http://man7.org/linux/man-pages/man2/sigprocmask.2.html) \r\n\r\nBefore the code review I still have thoughts how make it easy. Because we search just a workaround for Unix we can: \r\n1. Use simple wrapper to run \"ssh\" like [this](https://stackoverflow.com/questions/4515274/externally-disabling-signals-for-a-linux-program) \r\n2. Ask OpenSSH team to add new option for ignoring SIGINT.\r\n3. If none of the preceding is satisfied we continue the PR as is.\r\n\r\nI'd rather not complicate the code and use (1) option.\r\n\r\n",
+      "created_at": "2017-06-06T09:08:42Z",
+      "updated_at": "2017-06-06T09:08:42Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov Thanks for you help!\r\nI don't want to use \"mask\" because the documentation indicates that it masks signals for the entire process group.  Instead I just want the SSH process to ignore the signal.\r\n1. That is what this fix is!  The only difference is that we configure the SSH process start to ignore the signal instead of having the SSH process do it.\r\n2. Or do you mean to move the fix from PowerShell into OpenSSH?  I agree that we should pursue this in the long term but there are a couple of problems:\r\n - The change may not be accepted or it may take a long time to get accepted as the OpenSSH group must think about wider consequences and compatibility issues.\r\n - Even if we get the change approved it will still leave many systems with older versions of OpenSSH and without the needed fix.  Fixing this in PowerShell ensures it will just work after installing PowerShell.\r\n\r\nThe nice thing about open source is that the code can be refactored by anyone if/when a better idea comes along.  But for now I feel this is the best solution.",
+      "created_at": "2017-06-06T16:14:48Z",
+      "updated_at": "2017-06-06T16:14:48Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Removing \"breaking change\" tag since SSH_ASKPASS is no longer needed and behavior remains the same.",
+      "created_at": "2017-06-06T17:30:53Z",
+      "updated_at": "2017-06-06T17:30:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin \r\nI agree that the old OpenSSH versions will not solve the problem even though new versions get new option to mask SIGINT, but I should have said this option. :-)\r\n\r\nI don't see in docs that sigprocmask masks signals for the entire process group - it seems it affects only the [current process](http://man7.org/linux/man-pages/man2/sigprocmask.2.html):\r\n>A child created via fork(2) inherits a copy of its parent's signal\r\n       mask; the signal mask is preserved across execve(2).\r\n\r\nNow your code is doing what we need. I suggest to discuss an option that is dear to the Unix world:\r\n- bring the code to external wrapper  `SSHrunner`: to fork - sigprocmask - execvp - ssh\r\n- use our statdard process call to run the wrapper\r\n\r\nI believe it's much simpler than use internally CoreFX code. What do you think?\r\n",
+      "created_at": "2017-06-07T04:30:10Z",
+      "updated_at": "2017-06-07T04:30:10Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I agree with @iSazonov that a wrapper may be simpler than having a copy of the dotnet code.  Should we reuse powershell.exe for this purpose?",
+      "created_at": "2017-06-07T04:55:56Z",
+      "updated_at": "2017-06-07T04:55:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Should we reuse powershell.exe for this purpose?\r\n\r\nI think yes, we can add new \"secret\" switch for that `powershell -startSSH`.",
+      "created_at": "2017-06-07T05:04:01Z",
+      "updated_at": "2017-06-07T05:04:01Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Have two processes to run SSH?  This seems like a waste of processes to me.  For fan-out scenarios it means having twice as many processes on the client for each supported session.  This does not sound like a good design to me.  The code to create a new process is quite small and can be made much smaller if it is meant to be SSH specific.  I just copied the dotNet general process creation code but we don't need all of it.  And I really dislike using powershell.exe to be a process host wrapper since it is pretty heavy weight with the CLR.  I'll work at making the launch code smaller and specific but I feel we should stick with the current process launch design.",
+      "created_at": "2017-06-07T05:18:45Z",
+      "updated_at": "2017-06-07T05:18:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">Have two processes to run SSH? \r\n\r\nNo, we run a wrapper - (1) fork and (2) fork to SSH - so we have one parent process - PowerShell, and one child process - SSH. It is not Windows, It is Unix and it is fast and best practice for Unix.\r\n\r\n>I really dislike using powershell.exe to be a process host wrapper since it is pretty heavy weight with the CLR\r\n\r\nI agree but we can fork in Main(string[] args) before PowerShell initialization code. So it should be fast.",
+      "created_at": "2017-06-07T05:40:32Z",
+      "updated_at": "2017-06-07T05:40:32Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, but there is no reason to do it.  Even if the wrapper doesn't \"run\" it takes up resources, and I assume the scheduler has to account for it.  Also std pipes must be routed.  Why do this when we can easily create a single process?",
+      "created_at": "2017-06-07T14:29:05Z",
+      "updated_at": "2017-06-07T14:29:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">Also std pipes must be routed\r\n\r\nFork inherits its.\r\n\r\nI have no more thoughts and PG can make an conclusion.",
+      "created_at": "2017-06-07T14:41:48Z",
+      "updated_at": "2017-06-07T14:41:48Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Nevertheless my position remains \"why do it when it is not necessary?\".  Its funny but I just watched some presentations about performance yesterday.  A big theme from the presenter was that best practices and accepted patterns were many times poor choices performance wise.  One of the top things the presenter looked for when investigating performance problems was unnecessary work such as memory allocations, thread creation, uses of locks, and other system resource usage.  So after that the idea of creating an unneeded process when it is just as easy to create a single process seems undesirable.",
+      "created_at": "2017-06-07T14:56:27Z",
+      "updated_at": "2017-06-07T14:56:27Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Very interesting discussion here and I believe calling `sigactions` before `execve` is the best solution.\r\n\r\nI changed to code in `ForkAndExecProcess` a bit on CoreFx to fix issue https://github.com/dotnet/corefx/issues/13447, I think you should use the latest code instead. I will leave a comment there.",
+      "created_at": "2017-06-08T00:30:12Z",
+      "updated_at": "2017-06-08T00:30:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin @daxian-dbw I want to get clarify about  `sigactions` vs `sigprocmask`. I still belive we can use sigprocmask after fork so OS will not trigger the sigactions empty SIGINT handler in SSH process.",
+      "created_at": "2017-06-08T07:22:10Z",
+      "updated_at": "2017-06-08T07:22:10Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I see this in the man page of [`SIGPROCMASK`](http://man7.org/linux/man-pages/man2/sigprocmask.2.html)\r\n> The use of sigprocmask() is unspecified in a multithreaded process;\r\n\r\nThis makes me feel safer to use `sigactions`. ",
+      "created_at": "2017-06-08T18:29:14Z",
+      "updated_at": "2017-06-08T18:29:37Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@PaulHigin Could you please update the PR description? A great discussion happened in this PR that led to a better solution. So the original description is out-dated and we'd better capture the solution of using `SIGPROCMASK` in the PR description.",
+      "created_at": "2017-06-09T00:52:35Z",
+      "updated_at": "2017-06-09T00:52:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "LGTM.\r\n\r\nSorry for the long discussion - my last code for Unix was exactly 20 years ago. I'm glad I can remember just something. \ud83d\ude04 ",
+      "created_at": "2017-06-09T03:30:25Z",
+      "updated_at": "2017-06-09T03:30:25Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov Thank you for your help on this.",
+      "created_at": "2017-06-12T15:20:20Z",
+      "updated_at": "2017-06-12T15:20:20Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov can you formally approve if you're good with the changes?  Thanks!",
+      "created_at": "2017-06-12T17:12:15Z",
+      "updated_at": "2017-06-12T17:12:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Approved.",
+      "created_at": "2017-06-12T17:37:15Z",
+      "updated_at": "2017-06-12T17:37:15Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@mirichmo Is there any reason why this cannot be merged?",
+      "created_at": "2017-06-14T20:11:05Z",
+      "updated_at": "2017-06-14T20:11:05Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@mirichmo  Thanks!",
+      "created_at": "2017-06-14T21:53:41Z",
+      "updated_at": "2017-06-14T21:53:41Z"
+    }
+  ],
+  "created_at": "2017-05-31T23:25:34Z",
+  "number": 3901,
+  "state": "closed",
+  "title": "Linux platform SSH process creation for remoting",
+  "updated_at": "2017-06-15T15:16:23Z"
+}

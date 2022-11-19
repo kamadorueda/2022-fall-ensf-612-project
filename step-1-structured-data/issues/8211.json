@@ -1,0 +1,202 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8211",
+  "author": "mklement0",
+  "body": "<sup>Note: `cmd.exe`'s `rd /s` and .NET's  `[System.IO.Directory]::Delete()` are equally affected: see [here](https://github.com/Microsoft/console/issues/309) and [here](https://github.com/dotnet/corefx/issues/33603).</sup>\r\n\r\nNote: The problem occurs only on _Windows_ (and there also on _Windows PowerShell_).\r\n\r\n---\r\n\r\n_Update_: \r\n\r\n**Starting with Windows 10 version `1909`, (at least) build `18363.657` (I don't know that Windows _Server_  version and build that corresponds to; run `winver.exe` to check your version and build), the `DeleteFile` Windows API function now exhibits _synchronous_ behavior, which implicitly solves the  problems with PowerShell's `Remove-Item` and .NET's `System.IO.File.Delete` / `System.IO.Directory.Delete` (but, curiously, _not_ with `cmd.exe`'s `rd /s`).** \r\n\r\nThus, only older Windows 10 versions and older Windows versions in general are affected.\r\n\r\n---\r\n\r\n**The Windows API functions  `DeleteFile()` and  `RemoveDirectory()` functions are _inherently asynchronous_** (emphasis added):\r\n\r\n> The DeleteFile function **marks a file for deletion** on close. Therefore, the file **deletion does not occur until the last handle to the file is closed**. Subsequent calls to CreateFile to open the file fail with ERROR_ACCESS_DENIED.\"\r\n\r\n> The RemoveDirectory function **marks a directory for deletion on close**. Therefore, the directory is **not removed until the last handle to the directory is closed.**\"\r\n\r\nPowerShell fails to account for this asynchronous behavior, which has two implications:\r\n\r\n* Problem (a): **Trying to delete a nonempty directory (which invariably requires recursive deletion of its _content_ first) may _fail_** - infrequently, but it does happen.\r\n\r\n* Problem (b): **Trying to _recreate_ a successfully deleted directory or a file _immediately afterwards_ may fail** - intermittently (easier to provoke than the other problem, but a more exotic use case overall).\r\n   * Note: You could argue that it's not PowerShell's responsibility to create a synchronous experience in this case, given that the underlying system API is asynchronous; however, it certainly makes for more robust, predictable scripting if synchronicity is ensured.\r\n\r\nAs an aside: `cmd.exe`'s `rd /s` exhibits the same problem, [as does .NET Core's `[System.IO.Directory]::Delete()`](https://github.com/dotnet/corefx/issues/33603) (which PowerShell does _not_ use).\r\n\r\nProblem (a) is due to using depth-first recursion without accounting for the asynchronous deletion behavior; the problem, along with the solution, is described in [this YouTube video](https://youtu.be/uhRWMGBjlO8?t=455) (starts at 7:35).\r\n\r\nImportant: \r\n\r\n* The repros below use the functions defined at the bottom, which must be defined first.\r\n* The tests created temp. dir. `$HOME/tmpdir` - remove it manually afterwards, if still present.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nSetup: Paste and submit the function definitions below at the prompt.\r\n\r\nProblem (a):\r\n\r\n```powershell\r\nAssert-ReliableDirRemoval ps\r\n```\r\n\r\nProblem (b):\r\n\r\n```powershell\r\nAssert-SyncDirRemoval ps\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nThe functions should loop _indefinitely_ (terminate them with `Ctrl+C`), emitting a `.` in each iteration.\r\n\r\nActual behavior\r\n---------------\r\n\r\n**_Eventually_** - and that there is no _predictable_ time frame is indicative of the problem - an error will occur, on the **order of _minutes_ or even longer**.\r\n\r\nProblem (a):\r\n\r\n```none\r\nReliable dir-tree-removal test: Repeatedly creating and removing a directory subtree, using ps for removal.\r\n.........Remove-Item : Directory C:\\Users\\jdoe\\tmpDir\\sub\\sub cannot be removed because it is not empty.\r\n```\r\n\r\nThat is, recursive removal of the target dir's _content_ failed due to async timing issues.\r\n\r\nProblem (b):\r\n\r\n```none\r\nSynchronous dir-removal test: Repeatedly creating and removing a directory, using ps for removal.\r\n.................New-Item : An item with the specified name C:\\Users\\jdoe\\tmpDir already exists.\r\n```\r\n\r\nThat is, recreating the target dir failed, because the prior removal hadn't yet completed.\r\n\r\n\r\nAux. function definitions:\r\n-----------------------\r\n\r\n###  Functions `Assert-ReliableDirRemoval` and `Assert-SyncDirRemoval`\r\n\r\nYou can paste the entire code at the prompt in order to define these functions.\r\n\r\n```powershell\r\nfunction Assert-ReliableDirRemoval {\r\n  param([parameter(Mandatory)] [ValidateSet('cmd', '.net', 'ps')] [string] $method)\r\n  Write-Host \"Reliable dir-tree-removal test: Repeatedly creating and removing a directory subtree, using $method for removal.\"\r\n  # Treat all errors as fatal.\r\n  $ErrorActionPreference = 'Stop'\r\n  Set-Location $HOME  # !! Seemingly, a dir. in the user's home dir. tree reproduces the symptom fastest - $env:TEMP does not.\r\n  # Remove a preexisting directory first, if any.\r\n  Remove-Item -EA Ignore -Recurse tmpDir\r\n  While ($true) {\r\n    Write-Host -NoNewline .\r\n    # Create a subdir. tree.\r\n    $null = New-Item -Type Directory tmpDir, tmpDir/sub, tmpDir/sub/sub, tmpDir/sub/sub/sub\r\n    # Fill each subdir. with 1000 empty test files.\r\n    \"tmpDir\", \"tmpDir/sub\", \"tmpDir/sub/sub\", \"tmpDir/sub/sub/sub\"| ForEach-Object {\r\n      $dir = $_\r\n      1..1e3 | ForEach-Object { $null > \"$dir/$_\" }\r\n    }\r\n    # Now remove the entire dir., which invariably involves deleting its contents\r\n    # recursively first.\r\n    switch ($method) {\r\n      'ps'  { Remove-Item -Recurse tmpDir }\r\n      '.net' { [System.IO.Directory]::Delete((Convert-Path tmpDir), $true) }\r\n      'cmd'  { cmd /c rd /s /q tmpDir; if ($LASTEXITCODE) { Throw } }\r\n      # !! If rd /s fails during recursive removal due to async issues, it emits a stderr line, but \r\n      # !! does NOT report a nonzero exit code. We detect this case below.\r\n    }\r\n    # Does the dir. unexpectedly still exist?\r\n    # This can happen for two reasons:\r\n    #  - The removal of the top-level directory itself has been requested, but isn't complete yet.\r\n    #  - Removing the content of the top-level directory failed quietly.\r\n    while (Test-Path tmpDir) {\r\n      if ($output = Get-ChildItem -EA Ignore -Force -Name tmpDir) { # Still has content?\r\n        Throw \"Deletion failed quietly or with exit code 0, tmpDir still has content: $output\"\r\n      } else {\r\n        # Top-level directory removal isn't complete yet.\r\n        # Wait for removal to complete, so we can safely recreate the directory in the next iteration.\r\n        # This loop should exit fairly quickly.\r\n        Write-Host -NoNewline !; Start-Sleep -Milliseconds 100\r\n      }      \r\n    }    \r\n  }\r\n}\r\n\r\nfunction Assert-SyncDirRemoval { \r\n  param([parameter(Mandatory)] [ValidateSet('cmd', '.net', 'ps')] [string] $method)\r\n  Write-Host \"Synchronous dir-removal test: Repeatedly creating and removing a directory, using $method for removal.\"\r\n  # Treat all errors as fatal.\r\n  $ErrorActionPreference = 'Stop'\r\n  Set-Location $HOME  # !! Seemingly, a dir. in the user's home dir. tree reproduces the symptom fastest - $env:TEMP does not.\r\n  While ($true) {\r\n    Write-Host -NoNewline .\r\n    # Remove the test dir., which invariably involves deleting its contents recursively first.\r\n    # Note: This could itself fail intermittently, but with just 10 files and no subdirs. is unlikely to.\r\n    if (Test-Path tmpDir) {\r\n      switch ($method) {\r\n        'ps' { Remove-Item -Recurse tmpDir }\r\n        '.net' { [System.IO.Directory]::Delete((Convert-Path tmpDir), $true) }\r\n         'cmd'  { cmd /c rd /s /q tmpDir; if ($LASTEXITCODE) { Throw } }\r\n         # !! If rd /s fails during recursive removal due to async issues, it emits a stderr line, but \r\n         # !! does NOT report a nonzero exit code. We detect this case below.\r\n      }\r\n    }\r\n    # (Re-)create the dir. with 10 empty test files.\r\n    # If the previous removal hasn't fully completed yet, this will fail.\r\n    # Note: [System.IO.Directory]::Delete() could have quietly failed to remove the contents of the dir.\r\n    #       due to async timing accidents, but, again, this is unlikely with 1- files and \r\n    try {\r\n      $null = New-Item -Type Directory tmpDir\r\n    } catch {\r\n      # Handle the case where removal failed\r\n      # quietly due to async vagaries while removing the dir's *content*, which\r\n      # can happen with [System.IO.Directory]::Delete().\r\n      # Note that if removal succeeded but is pending - the scenario we're trying to\r\n      # get to occur - Get-ChildItem reports an access-denied error, which we ignore\r\n      # in favor of reporting the original error from the dir. re-creation attempt.\r\n      if ($output = Get-ChildItem -EA Ignore -Force -Name tmpDir) { # Still has content?\r\n        Write-Warning \"Ignoring failed content removal, retrying...\"\r\n        # Simply try again\r\n        Start-Sleep -Milliseconds 500; Remove-item tmpDir -Recurse\r\n        continue\r\n      }\r\n      # Re-creation failed due to async removal.\r\n      Throw $_\r\n    }\r\n    1..10 | ForEach-Object { $null > tmpDir/$_ }\r\n  }\r\n}\r\n```\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```none\r\nPowerShell Core 6.2.0-preview.1 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.165)\r\nWindows PowerShell v5.1.17134.228 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.345)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Is this potentially a problem with when the file system itself decides to flush?",
+      "created_at": "2018-11-08T18:17:49Z",
+      "updated_at": "2018-11-08T18:17:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Seems like it, @SteveL-MSFT.\r\n\r\nI'm still looking into this, but it seems that the WinAPI `RemoveDirectory()` function is inherently asynchronous, which is why .NET and `cmd` are equally affected.\r\n\r\nFrom the [docs](https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-removedirectoryw):\r\n\r\n> \"The RemoveDirectory function marks a directory for deletion on close. Therefore, the directory is not removed until the last handle to the directory is closed.\"\r\n\r\nSo it may come down to the following choice for us:\r\n\r\n* Live with the behavior (as `cmd` and .NET do) and and _document_ it (which `cmd` and .NET have _not_ done).\r\n\r\n* As a courtesy - _if  technically feasible and reasonable_ - implement the synchronous behavior ourselves.\r\n\r\nI'm looking into the latter option, as it seems preferable.",
+      "created_at": "2018-11-08T18:23:33Z",
+      "updated_at": "2018-11-08T18:23:33Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 is this something you hit on a regular basis outside of your synthetic test?",
+      "created_at": "2018-11-08T22:04:07Z",
+      "updated_at": "2018-11-08T22:04:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: As I now realize, the problem is actually more fundamental and more insidious, due to its intermittent, unpredictable nature: \r\n\r\nBecause _file_ deletion is equally asynchronous, `Remove-Item -Recurse` _itself_ fails intermittently - see https://serverfault.com/q/199921/176094\r\n\r\nAnd, yes, I have seen such failures in the wild.",
+      "created_at": "2018-11-08T23:04:56Z",
+      "updated_at": "2018-11-08T23:06:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: Please see the updated initial post: `Remove-Item -Recurse` is not only unexpectedly asynchronous overall (which is what I originally reported), _it fails intermittently_, due to inherently flawed design.\r\n\r\n",
+      "created_at": "2018-11-19T04:50:16Z",
+      "updated_at": "2018-11-19T22:56:44Z"
+    },
+    {
+      "author": "AikenBM",
+      "author_association": "NONE",
+      "body": "I've also seen something similar happen in the wild.  Again, it was rather intermittent, but it happened often enough that I've changed some scheduled scripts.  One of the ways I worked around it was:\r\n\r\n    Get-ChildItem $Path -Recurse | Sort-Object -Property FullName -Descending | Remove-Item\r\n\r\nThe sorting simply ensures that children are passed before parents and leafs before containers.  That makes the `-Recurse` parameter on Remove-Item irrelevant. I don't know if this creates a side effect where the asynchronous issue simply doesn't come up, but it has been the most successful pattern I've found in my limited experience.\r\n\r\nAnd, more rarely, I've done something like this:\r\n\r\n    Get-ChildItem $Path -Recurse -File | Remove-Item\r\n    Get-ChildItem $Path -Directory | ForEach-Object { $_.Delete($true) }\r\n\r\nFor whatever reason, recursively removing only directories seems to work without any difficulty in my cases.  \r\n\r\nI should note that in both cases this is usually on network shares, which might make it a separate issue.\r\n",
+      "created_at": "2018-11-21T14:23:22Z",
+      "updated_at": "2018-11-21T14:23:22Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 I appreciate the research into this, but I don't see a solution here if the native APIs have this behavior.  We can't make the cmdlet synchronous as the delete may never complete if something has an open handle to it and the cmdlet will be deadlocked.",
+      "created_at": "2018-11-21T15:35:14Z",
+      "updated_at": "2018-11-21T15:35:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Is it possible to handle the case where deletion of a directory fails due to remaining file(s) and have it retry any failing directory deletions after all file deletions have been processed? If that still fails, it can emit a much more friendly and useful error message \"cannot delete folders x, y, and z because files A and B could not be removed\" or some such.",
+      "created_at": "2018-11-21T16:54:46Z",
+      "updated_at": "2018-11-21T16:54:46Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 that's a good suggestion since the user explicitly indicated their intent",
+      "created_at": "2018-11-21T18:29:34Z",
+      "updated_at": "2018-11-21T18:29:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @AikenBM: I think your workarounds _decrease_ the likelihood of running into timing issues, by putting more time between deletion of a file and its container, but they may still arise.\r\n\r\nThanks, @vexx32: Retrying would be an improvement, but is still not guaranteed to work in all cases.\r\nThe linked video contains a robust solution that doesn't require retrying, summarized in this image:\r\n\r\n![image](https://user-images.githubusercontent.com/588825/48985532-6b613380-f0d6-11e8-977a-a49e47ae1dfe.png)\r\n\r\nI don't think we should do 5., because encountering a legitimately _locked_ file should cause the operation to abort with an error message. \r\n\r\nNote that `%TEMP` in the image doesn't literally refer to `%TEMP%` / `$env:TEMP`, but any writable location _on the same volume_ as the directory being removed.\r\n\r\nThe technique relies on _moving_ / _renaming_ apparently being _synchronous_ if performed on the same volume, i.e., the original directory entry is guaranteed to have disappeared on returning from the move/rename.\r\n(Note that files opened with `FILE_SHARE_DELETE` will live on in their temporary form until their last handle is closed - this is also an improvement over the current behavior, which fails to delete a directory containing such files).\r\n\r\nHowever, there are challenges:\r\n\r\n* The speaker in the video recommends using the _parent_ directory of the directory being removed.\r\nHowever, while you _typically_ would expect that directory to be writable too, that's not guaranteed.\r\n\r\n* I'm unclear on how deleting files / directories from network shares fits into the picture.\r\n\r\n\r\n",
+      "created_at": "2018-11-25T22:41:03Z",
+      "updated_at": "2018-11-25T22:41:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've implemented the above algorithm in a custom PowerShell function named `Remove-FileSystemItem` in [this SO answer](https://stackoverflow.com/a/53561052/45375), and it passes the two tests above.\r\n\r\nIt uses .NET methods for better performance, but still won't be a speed demon, but it could be considered a proof of concept for a proper cmdlet solution.\r\n\r\nOn Unix, where the timing problem doesn't exist, it simply defers to `Remove-Item`.\r\n\r\nCaveats:\r\n \r\n* As discussed, it uses the parent directory of the target directory to temporarily move the items being deleted to.\r\n\r\n* It bases the decision on whether to apply the workaround solely on the host OS, so that on Window it is also applied to _network drives_ there, even though there may be no need. Not sure if there's an easy way to infer from the properties of a shared drive whether file deletion on it will be asynchronous or not.\r\n\r\n",
+      "created_at": "2018-12-01T13:55:27Z",
+      "updated_at": "2018-12-01T13:55:27Z"
+    },
+    {
+      "author": "GSPP",
+      "author_association": "NONE",
+      "body": "The documentation states that the directory is deleted when the last handle is closed. It does *not* state that deletion is asynchronous.\r\n\r\n> Seemingly, a dir. in the user's home dir. tree reproduces the symptom fastest - $env:TEMP does not.\r\n\r\nWhy would that matter? My theory is that the failures demonstrated by this script are because other programs such as indexing programs very briefly access the file system items in question. This can then indeed delay the deletion until *their* handle is closed.\r\n\r\nI tried to reproduce this. The only way I can reproduce it is if I access the files in question. Even navigating with Windows Explorer into the test directory is enough to reproduce it. But it does not occur on its own for me.\r\n\r\nI have seen the talk about file system fragility. So far I have not seen a lot of evidence that deletion is actually asynchronous. The talk does not have any evidence, just a claim.\r\n",
+      "created_at": "2018-12-03T12:12:44Z",
+      "updated_at": "2018-12-03T12:12:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@GSPP: \r\n\r\n> deleted when the last handle is closed. It does not state that deletion is asynchronous.\r\n\r\nOnly getting deleted when the last handle is closed _is_ being asynchronous, even if that _word_ isn't being used in the docs.\r\n\r\nWhat matters is: by the time the call returns, you cannot know whether deletion has completed yet or not. I call that asynchronous. What would you call it?\r\nIrrespective of what we call it: it's a problem.\r\n\r\n>  My theory is that the failures demonstrated by this script are because other programs such as indexing programs very briefly access the file system items in question\r\n\r\nProbably, yes.\r\n\r\n> the only way I can reproduce if I access the files in question. \r\n> So far I have not seen a lot of evidence that deletion is actually asynchronous\r\n\r\nThe first sentence shows that you _have_ seen the evidence.\r\n\r\nSince File Explorer isn't _locking_ files, it shouldn't prevent deletion of a directory (for what should and shouldn't prevent deletion, see [this SO answer](https://stackoverflow.com/a/53561052/45375) of mine).\r\nIndexing programs shouldn't prevent reliable deletion of a directory.\r\n\r\nIn short: the unpredictable behavior of directory removal has been causing problems for years (here's [another example](https://serverfault.com/q/199921/176094)), and I think it's time to fix it.\r\n\r\n",
+      "created_at": "2018-12-03T12:33:04Z",
+      "updated_at": "2018-12-10T17:24:14Z"
+    },
+    {
+      "author": "GSPP",
+      "author_association": "NONE",
+      "body": "> by the time the call returns, you cannot know whether deletion has completed yet or not.\r\n\r\nIf there are no other handles to that file (e.g. from other programs) then the deletion will be completed at the time the call completes. It's entirely deterministic. At least I see no evidence to the contrary. I am not trying to twist words here.\r\n\r\nBut I now understand that you are interested in the behavior if other programs interfere. It seems we agree that if the program controls all access then there is no issue. I agree that Windows has unfortunate behavior here in case of concurrent operations.",
+      "created_at": "2018-12-03T14:15:04Z",
+      "updated_at": "2018-12-03T14:15:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let's talk a little more about terminology here, because a shared understanding always helps further discussion:\r\n\r\n* The file removal APIs are _always_ _deterministic_: that is, if the function call succeeds, the file _will_ be deleted - you just don't know _when_, and for that reason they deserve to be called _asynchronous_.\r\n\r\n> I agree that Windows has unfortunate behavior here in case of concurrent operations.\r\n\r\nGlad to hear it. Note that this unfortunate behavior is the _typical_ scenario, because in real life you _do_ have File Explorer windows open, background indexing, filesystem watchers, ...\r\n\r\nIt would be entirely unreasonably to expect callers to ensure that no other processes have open handles to items in the target dirs. (apart from _locking_ handles, in which case removal _should fail_).\r\n\r\nMore importantly, there is _no reason_ to require that, because deletion is still possible - it's only the timing issues that cause intermittent, unpredictable failures.\r\n\r\nMy PoC in the linked SO answer shows that a synchronous solution is possible, which brings predictable and reliable behavior.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-12-03T15:34:48Z",
+      "updated_at": "2018-12-03T15:34:48Z"
+    },
+    {
+      "author": "RomBrz",
+      "author_association": "NONE",
+      "body": "I'm having problems with using \"Remove-Item - Recurse - Force\" that sometimes work, sometimes not.\r\nSo, i have two questions about that, after reading everything:\r\n1) How is the right way to remove a folder and it's contents with Powershell?\r\n2) Considering that this didn't exists, why don't create a new parameter or function (to avoid \"breaking changes\" for everyone that maybe like this behavior) that just... emulate... the DELETE key?\r\nBecause i'm sure that if i went to a folder and press DELETE key, i didn't have problems removing a folder, no matter what's inside. If one file it's open, i have a message telling that.. \r\n\r\nSo why not just create one Powershell function that do the same thing that happens when i press DELETE? If nothing is opened, just remove entire folder and it's content without the need of any parameter. Maybe one parameter \"-Force\" emulating the \"SHIFT + DELETE\" keys to not send to Recycle Bin, and if some file or folder was being used, return an error or warning telling what's open.\r\n\r\nI don't know what actually DELETE does at system level (maybe the Windows documentation have this in details) but i know that this just work.",
+      "created_at": "2020-02-04T22:57:32Z",
+      "updated_at": "2020-02-04T22:57:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "On windows, pressing `Delete` often doesn't delete anything; it'll usually move things to the Recycle Bin instead. Remove-Item doesn't handle that and must instead handle proper file deletion. Unfortunately, guaranteeing a file is deleted on Windows can sometimes be complicated, as this issue shows.\r\n\r\nIn general, `Remove-Item -Recurse` will do the job. In large / complex directory structures, it could potentially fail in some cases to remove everything due to how Windows itself handles file deletion. The purpose of this issue is to discuss ways we can attempt to handle that and seek a more thorough solution.",
+      "created_at": "2020-02-04T23:40:19Z",
+      "updated_at": "2020-02-04T23:40:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To add to @vexx32's comments:\r\n\r\n* Ideally, the problem will at some point be solved at the WinAPI level, which, unfortunately, [may or may not be coming](https://github.com/dotnet/runtime/issues/27958#issuecomment-544712332).\r\n\r\n* As an interim solution,  the aforementioned solution in [this Stack Overflow answer](https://stackoverflow.com/a/53561052/45375) may work for you.",
+      "created_at": "2020-02-05T00:09:50Z",
+      "updated_at": "2020-02-05T00:09:50Z"
+    },
+    {
+      "author": "RomBrz",
+      "author_association": "NONE",
+      "body": "@vexx32 i understand that \"Delete\" just move to Recycle Bin, but \"Shift + Delete\" at the end remove everything the way i think that \"Remove-Item -Recurse\" just have to do, or i'm wrong?\r\n\r\nSo the question is: What \"Shift + Delete\" do that \"Remove-Item -Recurse\" still cannot do?\r\n\r\nDon't get me wrong, please, i'm really very curious about that, as i read the thread and a lot of other links pointing that \"it's not an easy thing\" and i really want to understand what \"Shift + Del\" do that works 100% of times (except with files being used) and Powershell cannot make it happen.\r\n\r\nIn my tests almost 50% of time i ran \"Remove-Item -Recurse\" i have an error to \"folder not empty\". (I make a Powershell script to put in TFS/DevOps release deployment, to test if the destination folder exists, if not, create and publish; if exists, remove everything, recreate and than publish).\r\n\r\nSeems like TFS/DevOps has some functions like \"empty folder before publishing\" that seems like to work 100% of times, so maybe could be a source of a solution.. i didn't stopped to see what's being made.",
+      "created_at": "2020-02-05T00:18:35Z",
+      "updated_at": "2020-02-05T00:18:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> what \"Shift + Del\" do that works 100% of times (except with files being used)\r\n\r\nI don't think it does, and I'd be surprised if it did; anecdotally (only), I can tell that you that it can fail as well - it's just that you're likely to invoke it less frequently compared to an _automated_ process.\r\n\r\n> i'm really very curious about that\r\n\r\nFirst, I get the frustration: wanting a robust solution is what caused me to open this issue in the first place.\r\n\r\nThe bottom line is:\r\n\r\n* Incredibly, the Windows API has always been and still is inherently asynchronous with respect to file / folder deletion.\r\n\r\n* _All_ shells / APIs that build on the Windows API can therefore intermittently fail: PowerShell, cmd, .NET.\r\n\r\n* Trying to compensate for the Windows API's asynchronous behavior is a nontrivial undertaking that cannot be fully accomplished due to technical limitations.\r\n\r\n* Fortunately, filesystem APIs in the _Unix_ world _are_ synchronous, so the problem doesn't arise there.\r\n\r\n----\r\n\r\nPragmatically speaking:\r\n\r\n* Speaking in no official capacity: Based on the above, it is understandable that the PowerShell team doesn't want to expend the effort to (incompletely) compensate for the lack of synchronicity in the Windows API.\r\n\r\n* While there are _no_ robust built-in solutions currently available, implementation details seems to affect how _likely_ the problem is to occur; _seemingly_, `cmd.exe /c rd /s` fails _less_ frequently than `Remove-Item -Recurse`, so you may want to give that a try.\r\n\r\n* The aforementioned custom solution should work reliably within the constraints stated, but the obvious downside is that it isn't built in.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-02-05T02:14:24Z",
+      "updated_at": "2020-02-05T02:14:24Z"
+    },
+    {
+      "author": "GSPP",
+      "author_association": "NONE",
+      "body": "It seems that recent versions of Windows offer the ability to immediately delete \"POSIX style\": https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex\r\n\r\nThe MSVC STL implementations does that: https://github.com/BillyONeal/STL/blob/ece92443331ad03eb70ee1824dad87165b410e97/stl/src/filesystem.cpp#L655\r\n\r\nThere is a fallback for situations in which this deletion style is not supported. According to https://github.com/microsoft/STL/pull/407 it seems that ReFS does not support this.\r\n\r\nHere is a discussion of a case where this feature was used to delete something that otherwise could not be deleted at all: https://community.osr.com/discussion/286551\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex\">_FILE_DISPOSITION_INFORMATION_EX (ntddk.h) - Windows drivers</a></strong></div><div>The FILE_DISPOSITION_INFORMATION_EX structure is used as an argument to the ZwSetInformationFile routine and indicates how the operating system should delete a file.</div></blockquote>\r\n<blockquote><img src=\"https://avatars2.githubusercontent.com/u/1544943?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/BillyONeal/STL\">BillyONeal/STL</a></strong></div><div>MSVC's implementation of the C++ Standard Library. - BillyONeal/STL</div></blockquote>",
+      "created_at": "2020-02-23T11:49:21Z",
+      "updated_at": "2020-02-23T11:51:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's great news, @GSPP, thanks for the research.\r\n\r\nNow we need to get this functionality into .NET Core, so that PowerShell can use it.\r\n\r\nTherefore, can you please post the same information at https://github.com/dotnet/runtime/issues/27958?\r\n\r\nThe question is whether  changing the _default_ behavior to the POSIX semantics will be considered acceptable, given that it doesn't just mean synchronous deletion, but behaves differently with respect to processes that have an open handle to the file at hand.\r\n\r\nAt the very least, though, there should be an _opt-in_ at the .NET level, either by parameter or distinct method name.\r\n\r\n",
+      "created_at": "2020-02-23T14:33:38Z",
+      "updated_at": "2020-02-23T14:33:38Z"
+    },
+    {
+      "author": "GSPP",
+      "author_association": "NONE",
+      "body": "I have opened https://github.com/dotnet/runtime/issues/32737.",
+      "created_at": "2020-02-24T12:25:02Z",
+      "updated_at": "2020-02-24T12:25:02Z"
+    },
+    {
+      "author": "jantari",
+      "author_association": "NONE",
+      "body": "I just want to say that I've been running into this error ( \"Directory C:\\something\\something cannot be removed because it is not empty. \") *A LOT* on Windows and PowerShell 7.0/7.1\r\n\r\nI think it's particularly easy to trigger when deleting git repositories, maybe because of the amount of small files in the `.git` subdirectory.\r\n\r\nAnyway, I have absolutely never had a problem deleting directory structures, including git repositories, with:\r\n\r\n    CMD /C RMDIR myRepo /S /Q\r\n\r\nso `RMDIR` must do something right, or at least way way better than `Remove-Item -Recurse -Force`.\r\n\r\nIt might be worth it to P/Invoke and reimplement exactly what `RMDIR` is doing because this is a pretty fundamental probem (not being able to delete directories).\r\n\r\nEDIT: Also, while [this comment](https://github.com/dotnet/runtime/issues/27958#issuecomment-723248657) suggests the underlying APIs have been changed in Windows 10 Version 1909+, I want to mention that I am on 20H2 ( Build 19042.572 ) and I still have this exact problem in PowerShell ...",
+      "created_at": "2020-11-11T17:52:51Z",
+      "updated_at": "2020-11-11T17:58:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jantari, it was I who posted the comment you linked to, and I meant to post it here as well.\r\n\r\nThe short of it: The claim that this was resolved at the level of the Windows API was based on:\r\n\r\n* re starting with  W10 1909 / 18363.657: based on [this Stack Overflow post](https://stackoverflow.com/a/60512798/45375).\r\n\r\n* re verifying on W10 20H2 /  19042.630: based on my own tests, letting `Assert-ReliableDirRemoval ps` (see function definition in the OP) run for a long time without failure (for much longer than it would previously take to fail).\r\n\r\nWhile it's true that _before_ the API became synchronous `cmd /c rmdir` worked _more_ reliably than the .NET method and `Remove-Item`, it would still fail _on occasion_. In an ironic reversal, `cmd /c rmdir` _still_ fails (if you let `Assert-ReliableDirRemoval cmd` run long enough; see https://github.com/microsoft/terminal/issues/309#issuecomment-723251895) - unlike the .NET method and `Remove-Item`.",
+      "created_at": "2020-11-11T21:34:43Z",
+      "updated_at": "2020-11-11T21:34:43Z"
+    },
+    {
+      "author": "jantari",
+      "author_association": "NONE",
+      "body": "I'm not sure what you mean by:\r\n\r\n> `cmd /c rmdir` still fails [...] **unlike** the .NET method and `Remove-Item`\r\n\r\nto me that wording implies that the .NET method and `Remove-Item` are reliable now that the API became synchronous.\r\nBut like I said in my previous post, I am running Windows 10 20H2 (The October 2020 Update) and PowerShell 7.1 and it still fails for me (while `cmd /c rmdir` succeeds, but that's not the the main point)\r\n\r\nI did not run any scripts to analyze statistical failure rates under artificial conditions, this is jut me trying to remove a directory on my laptop and PowerShell failing me. **With** the API changes from 1909 onward.",
+      "created_at": "2020-11-12T12:08:21Z",
+      "updated_at": "2020-11-12T12:08:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jantari:\r\n\r\nYes, I meant to imply that my conclusion is that the issue _is_ resolved for `[System.IO.File]::DeleteFile/Directory` and `Remove-Item` (it is _not_ resolved for `cmd`'s `rmdir`, _presumably_ because it doesn't use the  `DeleteFile` Windows API function, which is the one now acting synchronously).\r\n\r\nThe conclusion is based on what I've stated in my previous comment.\r\nIt would be nice to have _first-hand confirmation_, but, in its absence, the third-party sources and the `Assert-ReliableDirRemoval` and `Assert-SyncDirRemoval` tests  are the best we have so far.\r\n\r\nThese tests delete and re-create directory (trees) in an infinite loop, failing only if asynchronous behavior is detected.\r\nOn older Windows 10 versions these tests failed for me within _minutes_ at the most, whereas they now run without failure for _hours_, even when I put additional stress on the file-system by running `Get-ChildItem C:\\ -Recurse` in parallel  (on Windows 10 20H2 / 19042.630; the claim that the first version where it started working was 1909 / 18363.657 is from third-party sources).\r\n\r\nSaying that something on your laptop doesn't work is worth investigating, but in itself not evidence to the contrary (the failure may be unrelated, for instance - without having a reproducible scenario, we can't know).\r\n\r\n> under artificial conditions\r\n\r\nAll tests are by definition _artificial_ - what matters is whether they successfully emulate real-world conditions.\r\n\r\nI invite you to:\r\n\r\n* Study the methodology of the `Assert-ReliableDirRemoval` and `Assert-SyncDirRemoval` (see OP)  to see if it they fall short with respect to emulating real-world scenarios.\r\n\r\n* Run the tests yourself (with argument `ps`), for hours - _they should run indefinitely_, implying that removal is now synchronous; conversely, a failure indicates lack of synchronicity.\r\n\r\n* Additionally, based on the failure you observe on your laptop, try to construct a test that reproducibly fails (_eventually_ - the _intermittent, unpredictable_ nature of the behavior is what makes it so insidious), so that others can verify the failure and help investigate.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-11-12T14:35:20Z",
+      "updated_at": "2020-11-12T16:14:09Z"
+    }
+  ],
+  "created_at": "2018-11-08T15:10:13Z",
+  "number": 8211,
+  "state": "open",
+  "title": "On Windows, Remove-Item fails intermittently with -Recurse and is unexpectedly asynchronous itself",
+  "updated_at": "2021-11-29T17:38:40Z"
+}

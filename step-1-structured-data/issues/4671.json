@@ -1,0 +1,195 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4671",
+  "author": "mklement0",
+  "body": "On both Windows and Unix platforms, `Start-Process -UseNewEnvironment` results in an environment that is missing crucial standard environment variables, making the new environment virtually useless, while not providing a mechanism to define a new environment:\r\n\r\n* On Windows, `-UseNewEnvironment` defines _only_ the variables that are _explicitly_ defined, as displayed in System Properties (`sysdm.cpl`), with crucial, usually automatically defined variables such as `$env:ProgramFiles` missing, and `$env:USERNAME` unexpectedly containing `SYSTEM`.\r\n\r\n     * This even prevents another `powershell` instance from being started this way - see https://github.com/PowerShell/PowerShell/issues/3545#issuecomment-320699488 and below.\r\n\r\n* On Unix, an _empty_ environment is essentially passed (with _no_ environment variables defined at all, except `$env:PSModulePath`).\r\n\r\n    * This even prevents invoking any executable by filename only, given that `$env:PATH` is undefined - see below.\r\n\r\n    * While this behavior is similar to POSIX [`env -i`](http://pubs.opengroup.org/onlinepubs/9699919799/utilities/env.html) on Unix platforms, the `env` utility notably includes a mechanism to provide a _new_ environment via `name=value` pairs, which `Start-Process` lacks.\r\n\r\n---\r\n\r\nPossible solutions:\r\n\r\n* Repurpose `-UseNewEnvironment` to not start with a blank slate / crucial variables missing, but to provide the same environment that a shell would see when directly launched by the system (in other words: any environment-variable modifications made by the calling shell would be ignored).\r\n\r\n* Additionally, provide a way to pass a custom environment, applied _on top_ of the current or pristine (`-UseNewEnvironment`) environment:\r\n\r\n   * E.g., a new `-Environment <hashtable>`  / `-Environment <Collections.DictionaryEntry[]>` parameter could be used.\r\n\r\n    * If someone truly wanted an _empty_ environment, they could start with `$emptyEnv = (Get-ChildItem env:); $emptyEnv | % { $_.Value = $null }` and pass `-Environment $emptyEnv`.\r\n\r\n---\r\n\r\nThe `-Environment` feature would allow for an - incomplete - approximation of the convenient ad-hoc, command-scoped environment-variable definition feature that POSIX-like shells such as `bash` offer, where you can prepend one or more `name=value` pairs to a command:\r\n\r\n```sh\r\n# Bash (any POSIX-compatible shell)\r\n# Defines $env:FOO as 'bar', but *only for the some-utility child process*.\r\nFOO=bar some-utility 666\r\n```\r\n\r\n_Update_: #3316 suggests emulating this syntax in PowerShell, which would be the best solution.\r\n\r\nThe PS approximation would be:\r\n\r\n```powershell\r\nStart-Process -Wait  -Environment @{ FOO = 'bar' } some-utility -Args 666\r\n```\r\n\r\nThat said, a crucial limitation is that use of `Start-Process` makes the external utility operate outside PowerShell's streams, so the only way to provide input / collect output is via the `-Redirect*` parameters, which requires _auxiliary files_.\r\n\r\n\r\n\r\nCurrent behavior\r\n------------------\r\n\r\n```powershell\r\nStart-Process -UseNewEnvironment -Wait -NoNewWindow pwsh -args '-Command', 'gci env:; whoami'\r\n```\r\n\r\n* On Windows: PowerShell refuses to start - see #3545; note that adding `-LoadUserProfile` makes no difference.\r\n\r\n```none\r\nInternal Windows PowerShell error.  Loading managed Windows PowerShell failed with error 8009001d.\r\n```\r\n\r\n* On Unix: PowerShell starts, lists `$env:PSModulePath` as the _only_ environment variable - with a seemingly temporary user account's module directory prepended -  and the `whoami` invocation fails, because it cannot be located in the absence of a suitable `$env:PATH`.\r\n\r\n```none\r\n\r\nName                           Value                                                                                                                           \r\n----                           -----                                                                                                                           \r\nPSModulePath                   /tmp/ba38e79f-40c2-440e-ae08-7cf32e0708e1/.local/share/powershell/Modules:/usr/local/share/powershell/Modules:/opt/microsoft/...\r\nwhoami : The term 'whoami' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path \r\nwas included, verify that the path is correct and try again.\r\nAt line:1 char:21\r\n+ Get-ChildItem env:; whoami\r\n+                     ~~~~~~\r\n    + CategoryInfo          : ObjectNotFound: (whoami:String) [], CommandNotFoundException\r\n    + FullyQualifiedErrorId : CommandNotFoundException\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.5 on macOS 10.12.6\r\nPowerShell Core v6.0.0-beta.5 on Ubuntu 16.04.3 LTS\r\nPowerShell Core v6.0.0-beta.5 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.483 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "On Windows, you should use `CreateEnvironmentBlock` function to create a complete block of environment variables for a specified user.\r\n\r\nThere is another issue on `UseNewEnvironment`. When combined with `Credential`, it currently starts the subprocess in the **new user's** context, but with the **current user's** environment variables, which is surely a bad thing to do. If instead, you turn off `UseNewEnvironment` and supply `Credential`, the subprocess will use the default environment block for the specified user, which is likely what the user wants.",
+      "created_at": "2018-06-18T16:00:42Z",
+      "updated_at": "2018-06-18T16:03:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To provide some more insight into what, specifically, is wrong (in addition to the _conceptual_ flaw that @GeeLaw mentions with respect to combining `-UseNewEnvironment` with `-Credential`; almost sounds like that combination should be disallowed):\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/5fcab21111be1551d723bbd3cf2701d79e44fa94/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs#L1867-L1872\r\n\r\nOn Unix-like platforms, the `LoadEnvironmentVariable()` calls are effective _no-ops_, because `Environment.GetEnvironmentVariables(EnvironmentVariableTarget.Machine)` and `Environment.GetEnvironmentVariables(EnvironmentVariableTarget.User)` quietly(!) return an _empty_ hashtable in Unix, where these targets aren't supported (see https://github.com/dotnet/corefx/issues/32685).\r\n\r\nIn short, `LoadEnvironmentVariable()` shouldn't even be called to begin with on non-Windows platforms.\r\n\r\nAs for _Windows_:\r\n\r\n* The original post mentions that crucial built-in variables are missing from the resulting process, which results from the approach of first _clearing_ all variables with\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/5fcab21111be1551d723bbd3cf2701d79e44fa94/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs#L1869\r\n\r\nand then only restoring those variables whose definitions are _registry-based_.  \r\nHowever, there are a number of crucial variables such as `%USERPROFILE%` that are _not_ registry-based, so they end up missing altogether - see below.\r\n\r\n* Also, loading a default `$env:PATH` value is broken in `LoadEnvironmentVariable()`, because key access is _case-sensitive_ and the variable name is mistakenly tested for with all-uppercase name `PATH`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/5fcab21111be1551d723bbd3cf2701d79e44fa94/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs#L2077\r\n\r\n---\r\n\r\nFor the record, here are the built-in, system-defined environment variables that are _not_ registry-based:\r\n\r\n```none\r\nALLUSERSPROFILE\r\nAPPDATA\r\nCommonProgramFiles\r\nCommonProgramFiles(x86)\r\nCommonProgramW6432\r\nCOMPUTERNAME\r\nHOMEDRIVE\r\nHOMEPATH\r\nLOCALAPPDATA\r\nLOGONSERVER\r\nProgramData\r\nProgramFiles\r\nProgramFiles(x86)\r\nProgramW6432\r\nPUBLIC\r\nSESSIONNAME\r\nSystemDrive\r\nSystemRoot\r\nUSERNAME    # !! There is a *machine-level* definition with value 'SYSTEM', but there is no *user-level* definition - that is added by the system to the process.\r\nUSERDOMAIN\r\nUSERDOMAIN_ROAMINGPROFILE\r\nUSERPROFILE\r\n```\r\n\r\nCommand that generated the list above (with the exception of USERNAME)\r\n\r\n```powershell\r\ngci env: | % name | ? { -not [environment]::GetEnvironmentVariable($_, 'Machine') -and -not [environment]::GetEnvironmentVariable($_, 'User')}\r\n```\r\n\r\n\r\n",
+      "created_at": "2018-10-12T16:03:52Z",
+      "updated_at": "2018-10-12T16:03:52Z"
+    },
+    {
+      "author": "FranklinYu",
+      "author_association": "NONE",
+      "body": "I put the \"possible solution 2\" in #8352. Even if this issue is fixed by implementing solution 1, I believe solution 2 has other use-cases.\r\n\r\nUpdate: that's a dupe of #3316.",
+      "created_at": "2018-11-28T21:27:45Z",
+      "updated_at": "2018-11-29T14:50:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I'd deprecate UseNewEnvironment (make alias?) and introduce ClearEnvironment\r\nI like new Environment parameter but can we explicitly say that we _add/change_ variable? Maybe `-SetEnvironmentVariable`?",
+      "created_at": "2019-10-03T17:30:35Z",
+      "updated_at": "2019-10-03T17:30:35Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "On GitHub, there's a [small amount of usage of -UseNewEnvironment](https://github.com/search?l=PowerShell&q=-usenewenvironment&type=Code).  I believe the intent of this switch is you would start a process from PowerShell as though you just started a new PowerShell process (not from the current PowerShell process).  We just have to evaluate if we would break any existing usage (seems unlikely).\r\n\r\nAs for specifying an environment, I think `-Environment @{}` is good.",
+      "created_at": "2019-10-04T20:30:30Z",
+      "updated_at": "2019-10-04T20:30:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed re intent, @SteveL-MSFT, so if we wanted to fix this feature (and also make it work on Unix), we could cache a copy of the environment-variable block on PowerShell startup (before reading profiles), and use that.\r\n\r\n@iSazonov: I agree that `-SetEnvironmentVariable` is more descriptive, but it's a bit unwieldy. I think with proper documentation `-Environment` will do, as Steve says.\r\n\r\n`-ClearEnvironment` wouldn't quite capture the intent of the feature, which mustn't _clear all_ variables - that it currently does so on Unix is what prompted this report.\r\n",
+      "created_at": "2019-10-04T20:52:55Z",
+      "updated_at": "2019-10-04T20:52:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think really we need three operation:\r\n1. ClearEnvironment [optional hash with new variables to set]\r\n2. RemoveEnvironment <mandatory string array with names to remove>\r\n3. SetEnvironment <mandatory hash with variables to add/update to current environment>\r\n\r\nUseNewEnvironment we could deprecate and hide.",
+      "created_at": "2019-10-05T17:48:06Z",
+      "updated_at": "2019-10-05T17:48:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I don't think there is a need for this complexity:\r\n\r\nRe 1 and 2: \r\n\r\nYou rarely want to start with _no environment variables at all_ - you'll wipe out vital _OS_-defined variables too (which is the current problem on Unix-like platforms).\r\n\r\nIt is far more common to _build on_ an existing environment,  either:\r\n\r\n* the current one\r\n\r\n* \"pristine\" one, without any in-session changes, but with the usual OS-defined ones present - that's what `-UseNewEnvironment` _should do_.\r\n\r\nRe 3:\r\n\r\n**Combining the hashtable  `-Environment` parameter with `-UseNewEnvironment` then covers all use cases:**\r\n\r\nAs a user, I then:\r\n\r\n* decide which environment to start with: the current one (no switch) or a \"pristine\" one (`-UseNewEnvironment`)\r\n\r\n* then use `-Environment` to _modify_ that starting environment, by:\r\n  * adding new variables \r\n  * modifying the values of existing variables\r\n  * removing variables\r\n\r\nThe first 2 modifications are most common, but a single, hashtable-based environment variable also supports _removing_ variables, given that assigning `$null` or the _empty string_ to environment variables _deletes_ them; e.g., `-Environment @{ FOO='bar'; BAR=$null }` would _create or update_ env. var `FOO` and _remove_ (or not define) env. var. `BAR`",
+      "created_at": "2019-10-05T18:37:16Z",
+      "updated_at": "2019-10-05T19:03:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I don't think there is a need for this complexity:\r\n\r\nHistorically environment variables is manipulated by one \"Set\" operation, even in C# API https://docs.microsoft.com/en-us/dotnet/api/system.environment.setenvironmentvariable?view=netframework-4.8#System_Environment_SetEnvironmentVariable_System_String_System_String_\r\nBut a question is can we get PowerShell magic benefits having explicit operations like *-Variables?\r\n```powershell\r\nCommandType     Name \r\n-----------     ----\r\nCmdlet          Clear-Variable\r\nCmdlet          Get-Variable\r\nCmdlet          New-Variable\r\nCmdlet          Remove-Variable\r\nCmdlet          Set-Variable\r\n```\r\nEarlier we actively discussed Environment provider/drive. We found this very interesting. Obviously the API will has these operations explicitly. Should we keep consistency with the API in the issue too (also taking in account hosting scenario)?\r\n\r\nI do not like changing `UseNewEnvironment` for 4 reasons: unlikely but breaking change, the name confuses me, not clear why we need the rare scenario and implementation will slow down startup that is very bad. I believe this is not worth the effort until there is a real important business scenario. Moreover, PowerShell actually only changes PSModulePath, and this can be solved in #10300.\r\n\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/api/system.environment.setenvironmentvariable\">Environment.SetEnvironmentVariable Method (System)</a></strong></div><div>Creates, modifies, or deletes an environment variable. </div></blockquote>",
+      "created_at": "2019-10-07T05:35:51Z",
+      "updated_at": "2019-10-07T05:37:40Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The `*-Variable` cmdlets are narrowly focused on _shell_ variables (PowerShell's own, in-session only variables).\r\n\r\nHowever, extending the `Environment` PS provider to also support managing _persisted_ environment variables, at least on Windows, makes perfect sense to me, and it is what I've proposed [here](https://github.com/PowerShell/PowerShell-RFC/pull/92#issuecomment-429464051).\r\n\r\nI don't see a problem with having that coexist with the `-Environment <hashtable>` parameter proposed here, or even with the syntax discussed in #3316.\r\n\r\n> I do not like changing UseNewEnvironment for 4 reasons: unlikely but breaking change\r\n\r\nNothing _meaningful_ can be broken, given the currently useless behavior.\r\n\r\n> the name confuses me\r\n\r\nI think the name is fine, but we could implement an alias, if there's consensus on a better name.\r\n\r\n> not clear why we need the rare scenario and implementation will slow down startup that is very bad\r\n\r\nThat is a valid concern - I can't speak to the real-world impact.\r\n\r\n>  I believe this is not worth the effort until there is a real important business scenario.\r\n\r\n_Personally_, I won't miss the feature, but I can see how it is desirable in certain situations.\r\n\r\n> Moreover, PowerShell actually only changes PSModulePath\r\n\r\nThat's not the point, though. The point is that _you yourself_ or third-party code may have modified the environment in multiple ways that you don't want external processes to see, lest it interfere with their proper operation.\r\n\r\n",
+      "created_at": "2019-10-07T19:15:52Z",
+      "updated_at": "2019-10-07T19:15:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> That's not the point, though. The point is that you yourself or third-party code may have modified the environment in multiple ways that you don't want external processes to see, lest it interfere with their proper operation.\r\n\r\nInteresting, has Windows or Unix an API to directly implement the scenario? (I mean this is too unbelievable scenario)",
+      "created_at": "2019-10-08T05:27:11Z",
+      "updated_at": "2019-10-08T05:27:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Windows has `Start-Process -UseNewEnvironment` :) - though it is partially broken, as I've pointed out. However, I've always understood the _intent_ of that feature to be what I've proposed.\r\n\r\nUnix has the `env` utility with the `-i` option (ignore the inherited environment, and only define the variables passed as the other arguments);\r\n\r\nOn closer examination, however, this appears to be more like a `-ClearEnvironment` switch, and the only reason it results in a usable shell if you call `bash` is that `bash` - unlike PowerShell - apparently sets _default_ values for variables such as `$env:PATH`.\r\n\r\nAs a cross-platform shell, however, we'd be looking for standardized behavior, so IF we keep the switch, implementing the proposed behavior makes the most sense to me.\r\n\r\nAgain, I personally wouldn't miss `-UseNewEnvironment`, and I can see that it is probably rarely needed overall (as at least historically indicated by @SteveL-MSFT's GitHub search).\r\nI think that's all I have to say on this particular aspect of this debate, and I'll let others decide.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-08T13:17:29Z",
+      "updated_at": "2019-10-08T13:17:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems `UseNewEnvironment` doesn't work on Unix. \ud83d\ude15 ",
+      "created_at": "2019-10-08T14:42:51Z",
+      "updated_at": "2019-10-08T14:42:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Well, like `env -i`, I think it radically clears the environment, though that is  _accidental_ behavior (the current attempts to read persisted env.-var definitions are quiet no-ops on Unix-like platforms, as explained [above](https://github.com/PowerShell/PowerShell/issues/4671#issuecomment-429376491)).\r\n\r\nHowever, there's more going on, because `env -i bash --norc` results in a functional shell, whereas the seemingly equivalent `Start-Process -UseNewEnvironment bash --norc` exhibits very strange behavior with the default terminal apps on macOS 10.14 and and Ubuntu 18.04.\r\n\r\nOnly with `iTerm` on macOS could I get `Start-Process -UseNewEnvironment bash --norc` to work, and then call `export` to see what env. variables are defined: you'll see that they're only _Bash-defined_ ones (as with `env -i bash --norc`), implying that an _empty_ environment was passed, and Bash seemingly furthermore declares _shell-only_ variables (you can see these among the output from `set`) of the same name as vital OS env. variables such as `PATH` and `TERM` so as to provide at least a minimal level of functioning.\r\n\r\nOn both platforms, trying to launch `pwsh` this way _always_ results in broken behavior, because PowerShell does not anticipate and compensate for the absence of vital environment variables.\r\n",
+      "created_at": "2019-10-08T15:12:55Z",
+      "updated_at": "2019-10-08T15:14:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This code is This code is somewhat confusing (in CoreFX too) \ud83d\ude15 \r\n\r\nThis works in WSL (may be useful for tests):\r\n```powershell\r\nStart-Process -UseNewEnvironment -ArgumentList \"set\" bash\r\n```",
+      "created_at": "2019-10-09T04:45:53Z",
+      "updated_at": "2019-10-09T04:45:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We need to take in account #6489 Again slow down :-( \r\nIf we look Process.ProcessStartInfo.Environment - it force us to copy Dictionary and it again slow down.\r\n\r\nThis is not so important to start a process but it can be sensitive for startup scenario.\r\n",
+      "created_at": "2019-10-09T05:44:21Z",
+      "updated_at": "2019-10-09T05:44:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for the test command: You're missing `-c`, and it's better to also suppress loading of `.bashrc` with  `--norc`; `set` shows you a _mix_ of shell-only and environment variables, so it's better to use `export`; thus:\r\n\r\n``` powershell\r\nStart-Process  -UseNewEnvironment  -ArgumentList '--norc', '-c', 'export'  bash\r\n```\r\n\r\nIf you're experimenting with passing _multiple_ commands to `-c`, remember the `Start-Process` bug with respect to spaces (#5576), so embedded quoting is needed:\r\n\r\n```powershell\r\nStart-Process  -UseNewEnvironment  -ArgumentList '--norc', '-c', '\"export; set\"'  bash\r\n```",
+      "created_at": "2019-10-09T07:36:15Z",
+      "updated_at": "2019-10-09T07:36:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also, I don't think we need to worry about #6489 for simply making a copy of the startup environment.\r\n\r\nAs for the dictionary: are you referring to `[environment]::GetEnvironmentVariables()`? `[System.Diagnostics.Process]::GetCurrentProcess().StartInfo` is `$null` in a PowerShell session.\r\n\r\nWhat `[environment]::GetEnvironmentVariables()` returns already _is_ a copy of the environment, returned as a case-sensitive `[hashtable]` (`IDictionary`) whose later manipulation has no effect on the underlying environment variables.\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-09T07:48:44Z",
+      "updated_at": "2019-10-09T07:48:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Also, I don't think we need to worry about #6489 for simply making a copy of the startup environment.\r\n\r\nPerhaps we can catch a problem if original set contains duplicate variables: we have to set them one-by-one and last will win. Although we use P/Invoke on Windows and this could allow to get around this.\r\n\r\n> [System.Diagnostics.Process]::GetCurrentProcess().StartInfo is $null in a PowerShell session.\r\n\r\nIt is not property in Process object. So we can use only [environment]::GetEnvironmentVariables().\r\n\r\n> Start-Process  -UseNewEnvironment  -ArgumentList '--norc', '-c', 'export'  bash\r\n\r\nIt does not work for me on WSL. Folow works:\r\n`Start-Process  -UseNewEnvironment  -ArgumentList '--norc', '-c', 'printenv'  bash`\r\n\r\nI hope we can use this on all Unix-s and MacOs.",
+      "created_at": "2019-10-09T09:47:31Z",
+      "updated_at": "2019-10-09T09:47:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, `printenv` is also preinstalled on macOS (it isn't a POSIX-mandated utility, however), so this should work; I'm baffled that `export` wouldn't work, though, given that it is a Bash _builtin_ (an internal command).",
+      "created_at": "2019-10-09T13:17:38Z",
+      "updated_at": "2019-10-09T13:17:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I just discovered the `cmd.exe`-internal `start` command's `/I` switch, which was presumably the model for PowerShell's `-UseNewEnvironment` switch (in intent, not in effect, due to the flawed current implementation); from `start /?` (lightly edited):\r\n\r\n> / I    ...       The new environment will be the original environment passed\r\n                to the cmd.exe and not the current environment.",
+      "created_at": "2019-10-09T13:59:54Z",
+      "updated_at": "2019-10-09T13:59:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Thanks! I pulled PR - please review.",
+      "created_at": "2019-10-09T14:20:09Z",
+      "updated_at": "2019-10-09T14:20:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Since we had PowerShell Committee conclusion in https://github.com/PowerShell/PowerShell/pull/10745#issuecomment-542923823 we can continue here to discuss a desired behavior.\r\nFrom my understanding the conclusion was to implement on all platforms behavior like @rjmholt made for login shell on Unix - with UseNewEnvironment subprocess gets environment like we get with `sh -l` on Linux and `zsh -l` on macOS. I don't know can we do the same on Windows.\r\n@SteveL-MSFT @mklement0 Thoughts?",
+      "created_at": "2019-10-17T03:50:50Z",
+      "updated_at": "2019-10-18T04:21:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov; I think you meant to link to https://github.com/PowerShell/PowerShell/pull/10745#issuecomment-542923823 - given that specific points were made there, let me respond there.\r\n\r\n",
+      "created_at": "2019-10-17T19:45:53Z",
+      "updated_at": "2019-10-17T19:45:53Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov on Windows, the current code clears the env block, then fills it from the system profile (hence username is system) and then the user profile overwriting any that exist in the system.  Hence Path is incomplete.  It seems the fix here is to merge Path (append user PATH to end of machine PATH).  USERNAME should be special cased to the user.  The test is to start a new cmd.exe from Windows shell, run `set` and have the env vars match if using `-UseNewEnvironment`.",
+      "created_at": "2019-10-17T20:23:03Z",
+      "updated_at": "2019-10-17T20:23:03Z"
+    },
+    {
+      "author": "SteveALee",
+      "author_association": "NONE",
+      "body": "A slight;y different use case is for -UseNewEnvironment to use the default environment when somehting like the path has changed in another procerss.\r\n\r\nSpecifically I'm using curl to download python and the script to initiate the install and want to start a shell with python on the path.\r\n\r\nMy original script is windows cmd but as there was no way to do this I looked at PowerShell and got excited by -UseNewEnvironment, only to find it is broken as per this bug.\r\n\r\nI guess security might be a consideration though. \r\n\r\nPS I'm another Steve Lee :)",
+      "created_at": "2021-12-01T10:48:48Z",
+      "updated_at": "2021-12-01T10:51:01Z"
+    }
+  ],
+  "created_at": "2017-08-25T14:06:50Z",
+  "number": 4671,
+  "state": "open",
+  "title": "Start-Process -UseNewEnvironment provides an environment that is missing crucial standard environment variables while not supporting passing a new environment",
+  "updated_at": "2021-12-01T10:51:01Z"
+}

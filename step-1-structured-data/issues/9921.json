@@ -1,0 +1,167 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9921",
+  "author": "rjmholt",
+  "body": "From https://github.com/PowerShell/vscode-powershell/issues/2008.\r\n\r\nRelated to https://github.com/PowerShell/PowerShell/issues/6850.\r\n\r\nWhen using a RunspacePool (common in hosted and remote contexts), the PSModulePath gets reset whenever a runspace is opened.\r\n\r\nThis occurs because `ModuleIntrinsics` sets the module path at constructor time:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/66c628f1b0992312e66830a6f660e1fe99129863/src/System.Management.Automation/engine/Modules/ModuleIntrinsics.cs#L41-L47\r\n\r\nas if it were a process-singleton.\r\n\r\nEvery time a runspace is opened in PowerShell, the whole process gets its PSModulePath reset, which is a problem for things like EditorServices where we use a runspace to run analysis in the background, but users expect to be able to modify the PSModulePath in the IntegratedConsole.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "I just ran into this too.  Here is a repro:\r\n\r\n# Repro\r\n\r\n```PowerShell\r\n$userPath = '\\some\\path'\r\n$ENV:PSModulePath = $ENV:PSModulePath+\";$userPath\"\r\n$ENV:PSModulePath.Split(';')[-1] -eq $userPath\r\n$runspace = [runspacefactory]::CreateRunspace()\r\n$ENV:PSModulePath.Split(';')[-1] -eq $userPath\r\n$runspace.Open()\r\n$ENV:PSModulePath.Split(';')[-1] -eq $userPath\r\n```\r\n\r\n# Expected Behavior\r\n\r\n```\r\ntrue\r\ntrue\r\ntrue\r\n```\r\n\r\n# Actual Behavior\r\n\r\n```\r\ntrue\r\ntrue\r\nfalse\r\n```",
+      "created_at": "2019-06-28T15:31:29Z",
+      "updated_at": "2019-06-28T15:31:29Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@rjmholt Do you think I should expect that, in the long term, each runspace will have its own instance of PSModulePath?  Or is there some competing interest that favors a single process-wide PSModulePath?",
+      "created_at": "2019-06-28T18:41:05Z",
+      "updated_at": "2019-06-28T18:41:05Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> in the long term, each runspace will have its own instance of PSModulePath? Or is there some competing interest that favors a single process-wide PSModulePath?\r\n\r\nThat's a very good question, and one I think needs more design thought.\r\n\r\nMy thinking is:\r\n- The PSModulePath has always been an env var and in PS 6+ can be configured in the powershell.config.json file. The first is process-wide, the second is PowerShell-install-wide (i.e. even wider, since all PowerShell processes started from that pwsh.exe will have that PSModulePath)\r\n- Changing that would be a pretty big breaking change, so undesirable\r\n- But as an env var, different runspaces shouldn't reset it -- it should be initialized once, possibly by the default runspace\r\n- Runspace pool implementors should only mutate PSModulePath with care, and ideally just load modules directly anyway",
+      "created_at": "2019-06-28T20:35:08Z",
+      "updated_at": "2019-06-28T20:35:08Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Those are all good points.  I'll advocate for each runspace having its own PSModulePath for a bit:\r\n\r\n* user code can mutate $PSModulePath\r\n* such user code could be invoked from any runspace within the process\r\n* when mutation of PSModulePath occurs in one runspace it affects the PSModulePath visible from other runspaces\r\n* runspaces can run concurrently so errors resulting from the mutation will be difficult to reason about\r\n\r\nThis suggests to me that the process-wide PSModulePath singleton should continue to exist, but access to it from each runspace should be copy-on-write.  That way each runspace sees the same, correct, initial value, but mutation from that runspace does not affect other runspaces.",
+      "created_at": "2019-06-28T21:54:10Z",
+      "updated_at": "2019-06-28T22:14:03Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That does sound like the best solution, and would be mimicking PS's own scope behaviour of variables as well, so would generally be intuitively understood reasonably well I think.",
+      "created_at": "2019-06-28T22:09:49Z",
+      "updated_at": "2019-06-28T22:09:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The Issue will be resolver with #9957. In short PowerShell Committee conclusion is that PowerShell Core will do not modify `$env:PSModulePath`.",
+      "created_at": "2019-06-29T05:45:00Z",
+      "updated_at": "2019-06-29T05:45:00Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@isazanov Can you elaborate on how #9957 will resolve this issue?  #9957 seems to only contemplate the management of PSModulePath across process boundaries whereas this issue is about the management of PSModulePath across runspace boundaries within a process.",
+      "created_at": "2019-06-29T13:24:10Z",
+      "updated_at": "2019-06-29T13:24:10Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "I'm seeing this problem manifest in my implementation of Invoke-Parallel.  For others facing this, here is a summary of the least-bad still-a-half-measure workaround I've found:\r\n\r\n* Cache the value of PSModulePath prior to opening _any_ other runspaces (henceforth startingPSModulePath).  Note that at least the Runspace, RunspacePool, and PowerShell classes can lead to opening a runspace, so it can be a bit of an undertaking to root out all such calls.\r\n* Immediately overwrite PSModulePath with startingPSModulePath each time a runspace is opened.\r\n* There will still be a (usually short) period when PSModulePath is in the reset state while the runspace is being opened, but before the overwrite has a chance to occur.\r\n* If a call to Import-Module (or a second call to Runspace.Open() for that matter) coincides with that period then module importing can fail.\r\n* The failed module importing manifests intermittently because it depends on the coincidental timing of opening runspaces and importing modules.\r\n* This dramatically reduces the occurrence of failed module imports in multiple runspace scenarios which means development on such projects can continue.  But such failures are still a statistical certainty with a likelihood that is probably higher than what most organizations can tolerate for production.\r\n\r\n",
+      "created_at": "2019-06-29T13:55:12Z",
+      "updated_at": "2019-06-29T13:55:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r My current plan is to implement a global cache s_psModulePath. We will only read $env:PSModulePath, not reset. I think it will resolve the issue and some others.\r\nThere can be an edge case - runspace needs to add/set a private path(s). I guess this is incredible. But if it appears, there are several ways to solve it.",
+      "created_at": "2019-06-29T16:48:02Z",
+      "updated_at": "2019-06-29T16:48:02Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">My current plan is to implement a global cache s_psModulePath. We will only read $env:PSModulePath, not reset. I think it will resolve the issue and some others.\r\n\r\n@iSazonov OK I think understand now.  Thank you.\r\n\r\n>There can be an edge case - runspace needs to add/set a private path(s). I guess this is incredible. But if it appears, there are several ways to solve it.\r\n\r\nI expect that issue will appear.  Currently `$ENV:PSModulePath` is mutable, so any user code could mutate it.  I've certainly encountered such code.  It will be very easy to unknowingly invoke such code in a multi-threaded runspace scenario.  But I suppose that's a different issue from this one. :relaxed: ",
+      "created_at": "2019-06-29T17:30:44Z",
+      "updated_at": "2019-06-29T17:30:44Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11057, which has now been successfully released as `v7.0.0-preview.6`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.6)\n",
+      "created_at": "2019-11-21T22:36:06Z",
+      "updated_at": "2019-11-21T22:36:06Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I'm not sure why this issue was closed in #11057, since the code still indicates that instantiating a new ModuleInstrinsics object resets the PSModulePath:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/0c46e3e71d628b96833da0299890be89fae430bf/src/System.Management.Automation/engine/Modules/ModuleIntrinsics.cs#L42-L48",
+      "created_at": "2019-12-10T23:02:45Z",
+      "updated_at": "2019-12-10T23:02:45Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Does it reset it though? `SetModulePath()` is likely going to use the existing process scope `PSModulePath` value, not?",
+      "created_at": "2019-12-10T23:51:37Z",
+      "updated_at": "2019-12-10T23:51:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It's refresh PSModulePath based on current PSModulePath and computer and user scope configs.",
+      "created_at": "2019-12-11T06:51:43Z",
+      "updated_at": "2019-12-11T06:51:43Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I see the logic is more nuanced than I gave it credit for.\r\n\r\nMy worry though is that mutating the module path at all across runspaces creates a hidden race condition.\r\n\r\nIn the PowerShell extension, we embed PSScriptAnalyzer, which uses a runspace pool behind the scenes (and we can't pull it out). If a user sets the module path in their prompt, we have no way to guarantee that that gets used anywhere before it's tampered with by PowerShell.\r\n\r\nBasically having something that constructs a new ModuleInstrinsics object makes PSModulePath unpredictable. On first startup it makes sense that we set the module path, but when a create a new runspace, I don't see any upsides to mutating the module path again. I also feel that we ought to not do it using a complex series of methods in a parameterless constructor.",
+      "created_at": "2019-12-11T18:29:44Z",
+      "updated_at": "2019-12-11T18:29:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt That you ask can be resolved only if we do not write back to PSModulePath environment variable. I proposed the design and pulled PR but PowerShell Committee conclusion was \"write back\".",
+      "created_at": "2019-12-11T18:53:18Z",
+      "updated_at": "2019-12-11T18:53:18Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I do think PowerShell should only set the `PSModulePath` environment variable only once per process. The environment path mutation should probably be done in the static constructor of `ModuleInstrinsics`, but need to check back to the code to see if the current approach is \"by design\" somehow.",
+      "created_at": "2019-12-11T20:27:05Z",
+      "updated_at": "2019-12-11T20:27:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "And after that we get feedback \"I changed PSModulePath but PowerShell ignore this.\"\r\nFor me it is the same history as cwd - system and Core have a cwd but every runspace has their own cwd.\r\nPSModulePath is used for module discovering and loading but PowerShell load modules per runspace so it should have $PSModulePath per runspace and use PSModulePath env  only at startup and runspace initialization.",
+      "created_at": "2019-12-12T17:16:31Z",
+      "updated_at": "2019-12-12T17:16:31Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov What you proposed was a too big breaking change that we cannot afford to accept.",
+      "created_at": "2019-12-12T21:45:27Z",
+      "updated_at": "2019-12-12T21:45:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw I did not understand why this is \"a too big breaking change\" because no one indicated which applications will not work. It looks like a habit :-).\r\nI see only one real scenario where we could populate PSModulePath env - every time we run subprocess with Start.Process() we can add actual PSModulePath env by ProcessInfo.\r\n",
+      "created_at": "2019-12-13T06:59:46Z",
+      "updated_at": "2019-12-13T06:59:46Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as fixed and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2019-12-14T12:00:12Z",
+      "updated_at": "2019-12-14T12:00:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The issue from vscode-powershell repo obviously says that we shouldn't write PSModulePath back, PowerShell must only read PSModulePath but not change.",
+      "created_at": "2020-02-01T12:58:39Z",
+      "updated_at": "2020-02-01T12:58:39Z"
+    }
+  ],
+  "created_at": "2019-06-18T00:50:09Z",
+  "number": 9921,
+  "state": "open",
+  "title": "RunspacePool mutates the PSModulePath",
+  "updated_at": "2021-01-15T10:44:14Z"
+}

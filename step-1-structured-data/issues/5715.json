@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5715",
+  "author": "TylerLeonhardt",
+  "body": "Steps to reproduce\r\n------------------\r\non macOS:\r\n```powershell\r\nStart-Process http://localhost:8080\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nopens browser to http://localhost:8080\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nStart-Process : No such file or directory\r\nAt line:1 char:1\r\n+ Start-Process http://localhost:8080\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [Start-Process], Win32Exception\r\n+ FullyQualifiedErrorId : System.ComponentModel.Win32Exception,Microsoft.PowerShell.Commands.StartProcessCommand\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-rc.2\r\nOS                             Darwin 16.7.0 Darwin Kernel Version 16.7.0: Thu Jun 15 17:36:27 PDT 2017; root:xnu-3789.70.16~2/RELEASE_X86_64\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nI tested this on Windows with PSCore 6 and it opened the browser correctly.\r\n\r\nFWIW, on macOS, I can run `open http://localhost:8080` and it works.",
+  "closed_at": "2018-07-02T19:50:19Z",
+  "comments": [
+    {
+      "author": "ffeldhaus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I just encountered the same problem. As it is quite common to open the Web Browser from a script and `Start-Process $Uri` seems to be a common way, this should be supported.\r\n\r\nOn the other hand it seems a bit weird that `Start-Process -FilePath $Url` opens a webbrowser as a Url is not a FilePath, but a FilePath can be an Url. Maybe there is a better way or a better Cmdlet can be made available to allow opening a Web Browser.",
+      "created_at": "2018-01-16T07:07:38Z",
+      "updated_at": "2018-01-16T07:07:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Indeed: since URLs aren't executables, there is no standardized, cross-platform way in which they can be invoked.\r\n\r\nHere's a cross-platform function wrapper that relies on native utilities (none needed on Windows, `open` on macOS, `xdg-open` on Linux distros with freedesktop.org-compliant  desktops):\r\n\r\n```powershell\r\n<#\r\n.SYNOPSIS\r\nOpens one or more URIs (URLs).\r\n\r\n.DESCRIPTION\r\nOpens one or more URIs (URLs) in the system's default web browser,\r\nasynchronously.\r\n\r\n.PARAMETER Uri\r\nOne or more URIs to open; accepts pipeline input - either as strings, or\r\nvia objects that have a .Uri property.\r\nIf a value doesn't start with a protocol specifier, http:// is assumed.\r\n\r\n.NOTES\r\nOn Linux systems, this function equires the xdg-open utility, \r\nwhich comes with distros with freedesktop.org-compliant (X11-based) desktops,\r\nsuch as Ubuntu and Fedora.\r\n\r\n.EXAMPLE\r\n'http://example.org', 'unixepoch.com' | Open-Uri\r\n#>\r\nfunction Open-Uri {\r\n  param(\r\n    [Parameter(Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName)]\r\n    [string[]] $Uri\r\n  )\r\n  begin {\r\n    $allUris = @()\r\n  }\r\n  process {\r\n    $allUris += switch -regex ($Uri) {\r\n      '^[a-z]+:' { $_ } # protocol scheme present, use as-is\r\n      default { 'http://' + $_ } # default to http://\r\n    }\r\n  }\r\n  end {   \r\n    if ($env:OS -eq 'Windows_NT') { # use Start-Process\r\n      # Note: Start-Process accepts neither pipeline input nor multiple\r\n      #       paths to start.\r\n      $allUris | ForEach-Object { Start-Process -FilePath $_ }\r\n    } elseif ((uname) -eq 'Darwin') { # macOS: use native `open` CLI\r\n      open $allUris\r\n    } else { # Linux: assume that xdg-open is available\r\n      xdg-open $allUris\r\n    }\r\n  }\r\n}\r\n```\r\n",
+      "created_at": "2018-06-25T22:17:00Z",
+      "updated_at": "2018-06-26T03:30:48Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It might be ok if the file path doesn't exist, we try open/xdg-open, but need to understand any potential side effects.",
+      "created_at": "2018-06-25T23:39:44Z",
+      "updated_at": "2018-06-25T23:39:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: Looking at the name and the parameters of `Start-Process`, my sense is that it's not worth trying to incorporate cross-platform URI-opening functionality - despite the fact that opening URIs with `Start-Process` happens to work on Windows (perhaps inspired by the `cmd.exe`-internal, more abstractly named `start` command).\r\n\r\nI can't think of any `Start-Process` parameters (such as `-Wait`, `-Credential`, ...) that make sense in the context of opening URIs across platforms, not least because the underlying native utilities don't have standardized functionality.\r\n\r\nIn short: I think a separate `Start-Uri` (or `Open-Uri`) cmdlet is called for.",
+      "created_at": "2018-06-26T03:06:33Z",
+      "updated_at": "2018-06-26T03:06:33Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "If corefx supports `ShellExecute` for non-Windows, we should just get this for \"free\".",
+      "created_at": "2018-06-26T17:46:54Z",
+      "updated_at": "2018-06-26T17:46:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT:\r\n\r\nThat's a good point.\r\n\r\nIn fact, it already works in PowerShell Core v6.1.0-preview.3:\r\n\r\n```powershell\r\n[System.Diagnostics.Process]::Start([System.Diagnostics.ProcessStartInfo] @{ FileName = 'http://example.org'; UseShellExecute = $True })\r\n```\r\n\r\nIt looks like CoreFx too uses `open` and `xdg-open` behind the scenes.\r\n\r\nOne option is to surface this feature via `Start-Process`, similar to how it works in Windows PowerShell, but the question is how, specifically:\r\n\r\n* In Windows PowerShell,  the equivalent of  `.UseShellExecute` (the `ShellExecute()` WinAPI function) is used by default behind the scenes, unless certain parameters (`-NoNewWindow`, `RedirectStandard*`, `-Credential`, `-LoadUserProfile`, `-UseNewEnvironment`) are used, which forces use of the `CreateProcess()` WinAPI function instead.\r\n   * This behind-the-scenes logic has a troubling inconsistency with respect to locating executables, as @PetSerAl demonstrates in [this SO answer](https://stackoverflow.com/a/35114544/45375).\r\n\r\n* On Unix-like platforms, the logic will have to be different:\r\n  * The decision as to whether or not to set `.UseShellExecute` to `true`  will have to be based solely on the following:\r\n     * If `-ArgumentList` is bound, `.UseShellExecute` cannot be used, because, the way it is implemented it only accepts a single file path / URI.\r\n    * Similarly, combining `.UseShellExecute` with any of the other parameters doesn't seem to make much sense (many of which currently simply crash the session as of PowerShell Core v6.1.0-preview.3).\r\n \r\n   * With compatible parameters present (read: `-FileName` argument only), `Start-Process` would have to determine whether the argument refers to an executable or not, and only in the latter case set `.UseShellExecute` to `true`.\r\n\r\nAll in all, existing Windows PowerShell behavior notwithstanding, cramming the features of:\r\n\r\n* (a) opening data files with whatever GUI application is registered to handle them\r\n\r\n* (b) opening URIs with whatever GUI application  is registered to handle them\r\n\r\ninto `Start-Process` seems like an awkward fit.\r\nNote that both `open` and `xdg-open` are focused on _just_ (a) and (b), and nothing else.\r\n\r\n`Invoke-Item` already does (a) on all platforms, but not (b).\r\n\r\nAs an aside, `Invoke-Item` is seemingly _only_ implemented for the _filesystem_ provider, where it is _asynchronous_ and should therefore have been named `Start-Item`.\r\n\r\nSo I wonder if (b) should be folded into `Invoke-Item` / `Start-Item`  for conceptual clarity.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-06-27T23:05:45Z",
+      "updated_at": "2018-06-27T23:05:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "On second thought:\r\n\r\nEven the conflation of (a) and (b) above is somewhat arbitrary, so, from a purely conceptual perspective, the following division of labor makes sense to me:\r\n\r\n* Use `Start-Process` to launch _executables_, using a variety of options (asynchronous or not, different credentials, hidden, ...)\r\n\r\n* Use `Start-Item` (`Invoke-Item`) to open _documents_ (including directories), asynchronously, using whatever GUI application is registered to handle them by default\r\n\r\n* Use `Start-Uri` to open _URIs_, asynchronously, using whatever using whatever GUI application is registered to handle them by default\r\n",
+      "created_at": "2018-06-27T23:57:06Z",
+      "updated_at": "2018-06-28T02:19:57Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 I would agree with you if we didn't already have existing semantics with `Start-Process` and `Invoke-Item`.  Since those already exist with expected behavior, it seems unnecessary to break that contract.  Since corefx supports `UseShellExecute` on non-Windows, we can simply enable it as I see in the code, we explicitly set it to false if we detect we're not on Windows Desktop.",
+      "created_at": "2018-06-28T00:37:15Z",
+      "updated_at": "2018-06-28T00:37:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: \r\n\r\nWe don't necessarily have to _break_ the contract:\r\n\r\n* Nothing would need to change with respect to `Invoke-Item`, except perhaps to add a `Start-Item` alias.\r\n\r\n* On _Windows_, you can enable the same behavior as in Windows PowerShell for a consistent experience on that platform.\r\n\r\n* On _Unix_, you cannot blindly default to `.UseShellExecute = true`, and the `-Verb` parameter makes no sense - see below.\r\n\r\nOn top of that we could introduce a `Start-Uri` cmdlet, as proposed,  and document the clean division of labor proposed above as the way forward.\r\n\r\n---\r\n\r\nAs for your PR / taking advantage of `.UseShellExecute` on Unix-like platforms:\r\n\r\n* Enabling the `-Verb` parameter makes no sense, because only the default action (comparable to the `Open` verb on Windows) is supported, and the `.Verb` property is effectively _ignored_ (and `.Verbs` returns a empty string array).\r\n\r\n* Defaulting to `.UseShellExecute = true` solely based on the condition that _no arguments_ were passed is ill-advised, because `open` and `xdg-open`, similar to `Invoke-Item`, do not look for `.FileName` values that happen to be _executables_ in the PATH and `xdg-open` doesn't even support _executing_ such files, even if specified by full path; `open` does execute them (if specified by full path), but in the case of terminal programs in a _new terminal window_, unlike current `Start-Process` behavior.  \r\nThis would amount to a breaking change that would prevent launching `gedit` with `Start-Process gedit` on Linux, for instance.\r\n\r\n   * As stated, if you wanted to use `.UseShellExecute` on demand, behind the scenes, on Unix, you would have to determine whether `.FileName` refers to an executable in the PATH or not, and use `.UseShellExecute = true` only if _not_.\r\n\r\n",
+      "created_at": "2018-06-28T03:06:53Z",
+      "updated_at": "2018-06-28T03:21:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 That is a good point on checking if `FileName` is an actual file and use `UseShellExecute` when it isn't to keep a consistent experience.  Agree that `-Verb` doesn't make sense outside of Windows, but my PR doesn't make it enabled for non-Windows.  It still throws an error if you try to use it on non Windows Desktop.  I think adding new cmdlets should be a separate issue since this one was originally about opening uri's with `Start-Process`",
+      "created_at": "2018-06-28T04:51:08Z",
+      "updated_at": "2018-06-28T04:57:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Agree that -Verb doesn't make sense outside of Windows, but my PR doesn't make it enabled for non-Windows.\r\n\r\nSorry - I misinterpreted the source code.\r\n\r\n> I think adding new cmdlets should be a separate issue since this one was originally about opening uri's with Start-Process\r\n\r\nGood point - please see #7201.\r\n\r\n",
+      "created_at": "2018-06-28T16:06:16Z",
+      "updated_at": "2018-06-28T16:06:16Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89 Yay! ",
+      "created_at": "2018-07-02T20:04:34Z",
+      "updated_at": "2018-07-02T20:04:34Z"
+    }
+  ],
+  "created_at": "2017-12-19T17:20:18Z",
+  "number": 5715,
+  "state": "closed",
+  "title": "Start-Process http://localhost:8080 fails to open browser on macOS",
+  "updated_at": "2018-07-03T05:53:08Z"
+}

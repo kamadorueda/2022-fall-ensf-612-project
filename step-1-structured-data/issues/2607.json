@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2607",
+  "author": "Jaykul",
+  "body": "If a module (A) specifies the version of it's dependencies (the way it should), like:\r\n\r\n```posh\r\nRequiredModules = @(@{ModuleName='B'; ModuleVersion='1.0'; })\r\n```\r\n\r\nAnother module which takes the same dependency, and _also_ depends on A will cause **incorrect** cyclic dependency errors.\r\n\r\n## Background\r\n\r\nWe recently split up a module into a few smaller modules, and created a meta-module to load them, such that a module \"QMHelper\" became: QM.Assembly, QM.Database, QM.Configuration, QM.Security, and ... QMHelper\r\n\r\nEach of these modules depends on a few others, in a strictly linear fashion. E.g.:\r\n\r\nQM.Assembly has no dependencies, but everything depends on it.\r\nQM.Database depends only on QM.Assembly\r\nQM.Configuration depends on QM.Database (and QM.Assembly)\r\n...\r\nQMHelper, of course, depends on every module, since it exists purely as an easy way to install them and import everything to maintain backwards compatibility.\r\n\r\nEach of these dependencies is documented in the module's manifest with the minimum version and GUID. E.g. `@{ModuleName='QM.Database';      ModuleVersion='1.0'; GUID='0b8a2968-ea14-4e63-9961-d1dbee54faa5'}`\r\n\r\nWe believed that this was the **right way** to design large modules so that they can be installed easily, but only the parts that you need must be imported.\r\n\r\n## Bug Report:\r\n\r\nA user script which had a `#requires -modules QMHelper` in it failed to run. The error says that QMHelper was not loaded, but they can't figure out why. If they `Import-Module QMHelper` first, it imports fine, and the script will run with no problems.\r\n\r\nIt turns out that a `#requires` statement counts as a level of dependency (just like RequiresModule), and when there are module versions involved, PowerShell gives up after just a few levels. Specifically, 5?\r\n\r\nIn our case, we were _just_ under the limit, and everything worked fine as long as you explicitly called Import-Module -- but if you used a `#requires -modules` statement, or added our top-level module to your `RequiredModules`, it would refuse to import, and give a confusing and **incorrect** error message.\r\n\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nI wrote [a script](https://gist.github.com/Jaykul/8ba1fa42111438a802983d0f36ad38da) to generate samples in a lot of different ways, but the simplest repro case is this:\r\n\r\n```\r\n$Env:PSModulePath += \";$pwd\"\r\n$last = @();\r\nforeach($module in mkdir Test1, Test2, Test3, Test4, Test5 -Force) {\r\n   New-ModuleManifest ($module.Name + \"\\\" + $module.Name + \".psd1\") -RequiredModules $last\r\n   $global:last += @{ ModuleName = $Module.Name; ModuleVersion = '1.0' }\r\n}\r\nImport-Module Test5\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nImport-Module should work, since the dependencies are simply linear.\r\n\r\nActual behavior\r\n---------------\r\n\r\nYou'll get an error like this:\r\n\r\n```\r\nThe required module 'Test3' is not loaded. \r\nThe module 'Test3' has a requiredModule 'Test2' in its module manifest \r\n'C:\\ModuleTestFolder\\Test3\\Test3.psd1' that points to a cyclic dependency.\r\n```\r\n\r\nThere is, of course, **no cyclic dependency**, and just changing the RequiresModules hashtable to a simple module name will clear up the error. \r\n\r\n```\r\n$last = @();\r\nforeach($module in mkdir Test1, Test2, Test3, Test4, Test5 -Force) {\r\n   New-ModuleManifest ($module.Name + \"\\\" + $module.Name + \".psd1\") -RequiredModules $last.ModuleName\r\n   $global:last += @{ ModuleName = $Module.Name; ModuleVersion = '1.0' }\r\n}\r\nImport-Module Test5\r\n```\r\n\r\nWithout specifying the ModuleVersion in the manifest, you can go hundreds of layers deep.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value                   \r\n----                           -----                   \r\nPSVersion                      5.1.14393.206           \r\nPSEdition                      Desktop                 \r\nBuildVersion                   10.0.14393.206          \r\nCLRVersion                     4.0.30319.42000         \r\nWSManStackVersion              3.0                     \r\nPSRemotingProtocolVersion      2.3                     \r\nSerializationVersion           1.1.0.1                 \r\n```\r\n",
+  "closed_at": "2017-05-01T00:59:33Z",
+  "comments": [
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I have to say, the error message when trying to run a script which has a dependency, like \n\n``` posh\n$last = @();\nforeach($module in mkdir Test1, Test2, Test3, Test4 -Force) {\n   New-ModuleManifest ($module.Name + \"\\\" + $module.Name + \".psd1\") -RequiredModules $last\n   $global:last += @{ ModuleName = $Module.Name; ModuleVersion = '1.0' }\n}\n```\n\nNote that only three of those actually have dependencies, and only 2 of them actually need to have ModuleSpec to cause the problem.\n\nGiven a script `test.ps1` like this:\n\n``` posh\n#requires -modules Test4\nGet-Module Test*\n```\n\nRunning it produces a completely unhelpful error (and **two** entries in `$Error`) -- I'm considering changing our guidance to say that we recommend **never** using `#requires -module` to import modules. Thoughts?\n\n``` text\n.\\test.ps1 : The script 'test.ps1' cannot be run because the following modules that are specified by the \"#requires\"\nstatements of the script are missing: Test4.\nAt line:7 char:1\n+ .\\test.ps1\n+ ~~~~~~~~~~\n    + CategoryInfo          : ResourceUnavailable: (test.ps1:String) [], ParentContainsErrorRecordException\n    + FullyQualifiedErrorId : ScriptRequiresMissingModules\n```\n",
+      "created_at": "2016-11-03T22:59:47Z",
+      "updated_at": "2016-11-03T22:59:47Z"
+    },
+    {
+      "author": "f0rt",
+      "author_association": "NONE",
+      "body": "I can confirm the issue. I have the following setup:\r\n- Manifests with more than 1 dependencies \r\n- Dependency level of 5+\r\n- Dependencies in the full format like @{ ModuleName = \"\"; ModuleVersion = \"\" }\r\n\r\nNote that if I leave only 1 dependency in the manifest files it works fine.\r\n",
+      "created_at": "2017-02-14T14:37:59Z",
+      "updated_at": "2017-02-14T14:37:59Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "This breaks some production PowerShellGet module dependency traversal scenarios and is definitely needed for `6.0.0-beta` at the latest. ",
+      "created_at": "2017-02-16T21:51:38Z",
+      "updated_at": "2017-02-16T21:51:38Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Resolved via #3594",
+      "created_at": "2017-05-01T00:59:33Z",
+      "updated_at": "2017-05-01T00:59:33Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "Is there any chance that this fix will be patched to Windows PowerShell (5.x)?",
+      "created_at": "2017-05-13T05:15:42Z",
+      "updated_at": "2017-05-13T05:15:42Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Jaykul I doubt it; but @SteveL-MSFT or @joeyaiello might have more info on this.",
+      "created_at": "2017-05-15T21:18:56Z",
+      "updated_at": "2017-05-15T21:18:56Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "By the way, big 'thank you' to @Jaykul and @f0rt for this very detailed bug report and specifically repro steps. This saved a lot of time when working on the fix.",
+      "created_at": "2017-05-15T21:23:07Z",
+      "updated_at": "2017-05-15T21:23:07Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul at this time, there is no plan to port this to Windows PowerShell v5.1",
+      "created_at": "2017-05-17T17:17:53Z",
+      "updated_at": "2017-05-17T17:17:53Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I just want to come back here and point at AzureRM and **_scream_**.  \r\n\r\nDid you realize that AzureRM (the \"meta module\" we all use to install all the Azure modules) doesn't have _any_ `RequiredModules` specified in it's manifest? Instead, it has to use `Import-Module` about 50 times to load specific versions of each of it's dependencies. \r\n\r\nBecause, you know, if they used RequiredModules they would run into this bug.\r\n\r\n## And they are *NEVER* going to be able to stop doing that.\r\n\r\nNot only do I not have any metadata about the dependencies of AzureRM (which is, basically, the **entire reason** for the existence of this module), but the Azure team is actually having to *bypass* the PowerShellGet module to publish to the gallery every time: they're adding the dependency information to the NuGet package even though it's not in the module.\r\n\r\nAs a PowerShell scripter, there's no way for me to figure out that _AzureRm.profile_ **3.4** is what shipped as part of _AzureRm_ **4.4**, and that _AzureRm.profile_ **4.0** wasn't included until _AzureRm_ version **5.0.0** -- except to query the **gallery** metadata\r\n\r\nAs a PowerShell module author, I'm going to have to duplicate their hack to build metamodule nuspec files that don't reflect my module manifest...",
+      "created_at": "2017-12-06T20:18:49Z",
+      "updated_at": "2017-12-06T20:18:49Z"
+    },
+    {
+      "author": "sanderweltje",
+      "author_association": "NONE",
+      "body": "Is there any workaround for PowerShell 5.1",
+      "created_at": "2019-11-30T14:26:39Z",
+      "updated_at": "2019-11-30T14:26:39Z"
+    },
+    {
+      "author": "PrzemyslawKlys",
+      "author_association": "NONE",
+      "body": "Can this be ported back 5.1 - we're going to be stuck with 5.1 for years and it's just poor experience. ",
+      "created_at": "2020-06-26T08:09:10Z",
+      "updated_at": "2020-06-26T08:09:10Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Stuck with the same issue in ADMF\r\nReally would love seeing this fixed in 5.1\r\n\r\n@sanderweltje : The only thing you can do right now is not declare the dependency and handle it internally (e.g. with warning during import or maybe even automatically installing it if missing - the latter being risky if you want to give your code to others, who may try it out in an offline scenario.",
+      "created_at": "2020-09-13T11:00:57Z",
+      "updated_at": "2020-09-13T11:00:57Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yeah. This bug forces anyone with a slightly complex chain of modules to do what the Azure team does. Compare the [Az.psd1 source](https://github.com/Azure/azure-powershell/blob/master/tools/Az/Az.psd1) to [Az.psd1 as published](https://www.powershellgallery.com/packages/Az/4.6.1/Content/Az.psd1).\r\n\r\n1. Publish a cleaned .psd1 [with no RequiredModules or NestedModules](https://github.com/Azure/azure-powershell/blob/master/tools/PublishModules.psm1#L312)\r\n2. Use `Import-Module` instead -- see [New-ModulePsm1](https://github.com/Azure/azure-powershell/blob/master/tools/UpdateModules.psm1#L48).\r\n3. Basically, you have to hack together your own publishing (or see [PSPublishModule](https://github.com/markekraus/PSPublishHelper)) to let you generate your nuspec by hand and add the dependencies there.",
+      "created_at": "2020-09-15T03:31:45Z",
+      "updated_at": "2020-09-15T03:31:45Z"
+    }
+  ],
+  "created_at": "2016-11-03T22:35:27Z",
+  "number": 2607,
+  "state": "closed",
+  "title": "Using ModuleSpec syntax in RequiredModules causes incorrect \"cyclic dependency\" failures",
+  "updated_at": "2020-09-15T03:31:45Z"
+}

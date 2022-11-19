@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15100",
+  "author": "GeeLaw",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nA developer might have created some custom type that aims to behave like a primitive or built-in type, but PowerShell does not provide a way to let the developer precisely control formatting of custom types. In particular, the handling of `string` is very special --- it implements `IEnumerable<char>`, but will not be enumerated (into a stream of `char`s) when formatted. There is no way for a custom type to be handled like a `string`.\r\n\r\n**Another example.** Currently, `System.Text.Rune` does not have special handling, and the default formatting is `Format-List` instead of `ToString()`. Arguably, `ToString()` is more appropriate. For a custom type, the only way to force `ToString()` formatting is to apply `System.Management.Automation.HiddenAttribute` to all instance fields and properties. However, this comes with the downside of referencing PowerShell in the assembly containing the type, but the assembly should be usable even in an environment without PowerShell (and you don't want to load PowerShell assemblies if you aren't using it anyway).\r\n\r\nThe closest we can get for `Rune` (or any other custom type not implementing `IEnumerable` nor `IEnumerator`) is to give it a `Custom` view, but it will add blank lines when outputting. Not ideal...\r\n\r\n![image](https://user-images.githubusercontent.com/4462444/112418084-13f32280-8ce6-11eb-98ba-87299715ed00.png)\r\n\r\nThis issue aims to generate discussion on creating mechanisms to have fine-grained control over (default) formatting of a type. Related #9538.\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nHere is a simple proposal.\r\n\r\n- Decouple `Out-Default` into `Format-Default` and `Out-Host`. Today's PowerShell handles `Out-Default` monolithically. It chooses `Format-Table` or `Format-List` or `ToString()`-formatting, depending on the number of non-hidden public fields and properties, and then applies `Out-Host`.\r\n- In `Format.ps1xml`, allow a new type of `NativeControl`. It specifies a **type name**, which, if found in loaded assemblies, is used to format the object.\r\n- `Format-Default` chooses the format as follows:\r\n  1. If there is a view defined for this type, use the first available view (which does not have to be `NativeControl` view). However, if `NativeControl` formatter was used to produce the object being formatted (formatting is recursive for `NativeControl` views), then `NativeControl` is skipped.\r\n  2. Otherwise, use today's default formatting choice. (Special handling for `string`; use `ToString()` if there is no non-hidden public fields or properties; use `Format-Table` if there are only a few; use `Format-List` if there are many.)\r\n\r\nMake the types in `Microsoft.PowerShell.Commands.Internal.Format` public, so people can create custom format objects. Provide a new abstract class:\r\n\r\n```csharp\r\n// or another namespace?\r\nnamespace System.Management.Automation\r\n{\r\n  // The derived class must be stateless, so that\r\n  // only one instance is created per PowerShell runspace.\r\n  public abstract class NativeFormatter\r\n  {\r\n    // The returned object is recursively formatted,\r\n    // but cannot be sent to the same formatter again.\r\n    public abstract object FormatObject(object obj);\r\n  }\r\n}\r\n```\r\n\r\nFor example, suppose we have a custom string class `AsciiString`, then we can create\r\n\r\n```csharp\r\npublic sealed class AsciiStringFormatter : NativeFormatter\r\n{\r\n  public override object FormatObject(object obj) { return ((AsciiString)obj).ToString(); }\r\n}\r\n```\r\n\r\nThis will format an `AsciiString` into a `string`, which will then be handled by PowerShell natively.\r\n\r\nIt's also possible to return `IEnumerable` from `FormatObject`, which will be expanded by PowerShell, and each resulting object is formatted by their own formatter. Those expanded object could be what is `Microsoft.PowerShell.Commands.Internal.Format.GroupEntryData` today.\r\n\r\n**Why it is important that we implement formatting in another class.**\r\n\r\n- First, we don't want the main assembly (e.g., the assembly containing `AsciiString`) to be tied to PowerShell. By allowing it to be implemented in another class, the author can implement the formatter in a separate assembly dedicated for scripting (a kind of add-on to the main assembly).\r\n- Second, users (non-developers of the main assembly) can develop their own native formatter if they so wish.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I may not have the full picture, but at least the `System.Text.Rune` example can be implemented by combining a `CustomControl` entry with the `OutOfBand` element, as follows:\r\n\r\n```powershell\r\n@'\r\n<Configuration>\r\n<ViewDefinitions>\r\n      <View>\r\n          <Name>RuneFormat</Name>\r\n          <OutOfBand />\r\n          <ViewSelectedBy>\r\n              <TypeName>System.Text.Rune</TypeName>\r\n          </ViewSelectedBy>\r\n          <CustomControl>\r\n              <CustomEntries>\r\n                  <CustomEntry>\r\n                     <CustomItem>\r\n                          <ExpressionBinding>\r\n                              <ScriptBlock>\r\n                              <![CDATA[\r\n  $_.ToString()\r\n                              ]]>\r\n                              </ScriptBlock>\r\n                          </ExpressionBinding>\r\n                      </CustomItem>\r\n                  </CustomEntry>\r\n              </CustomEntries>\r\n          </CustomControl>\r\n      </View>\r\n</ViewDefinitions>\r\n</Configuration>\r\n'@ > ($tmpFile = [IO.Path]::GetTempPath() + \"$PID.ps1xml\")\r\n\r\n# Load the format data and remove the temp. file.\r\nUpdate-FormatData -PrependPath $tmpFile; Remove-Item $tmpFile\r\n```\r\n\r\nNow you get the desired single-line representation with no surrounding blank lines:\r\n\r\n```powershell\r\nPS> [System.Text.Rune]::new(123)\r\n{\r\n```\r\n\r\nTo get a standard view, use `-Force`:\r\n\r\n```powershell\r\nPS> [System.Text.Rune]::new(123) | Format-List -Force\r\n\r\nIsAscii             : True\r\nIsBmp               : True\r\nPlane               : 0\r\nUtf16SequenceLength : 1\r\nUtf8SequenceLength  : 1\r\nValue               : 123\r\n\r\n```\r\n",
+      "created_at": "2021-03-27T17:30:29Z",
+      "updated_at": "2021-03-27T17:30:29Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@mklement0 Thanks for the pointer! I didn't know `OutOfBand` (looks like this feature is little documented). This definitely solves the problem for non-enumerable types. Yet the issue for enumerable types still stand.\r\n\r\nCurrently, it's not possible to prevent enumeration unless the type is `string` or the enumeration depth is exhausted.\r\n\r\n```powershell\r\n@'\r\n<Configuration><ViewDefinitions><View>\r\n<Name>MyHashTableFormat</Name>\r\n<OutOfBand />\r\n<ViewSelectedBy><TypeName>System.Collections.Hashtable</TypeName></ViewSelectedBy>\r\n<CustomControl><CustomEntries><CustomEntry><CustomItem><ExpressionBinding><ScriptBlock>\r\nConvertTo-Json -InputObject $_ -Compress\r\n</ScriptBlock></ExpressionBinding></CustomItem></CustomEntry></CustomEntries></CustomControl>\r\n</View></ViewDefinitions></Configuration>\r\n'@ > ($tmpFile = [IO.Path]::GetTempPath() + \"$PID.ps1xml\");\r\nSet-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope CurrentUser -Force;\r\nUpdate-FormatData -PrependPath $tmpFile;\r\nRemove-Item $tmpFile;\r\n\r\n$ht = @{'a' = 1; 'b' = 'c'};\r\n$array1 = [object[]]@(0);\r\n$array2 = [object[]]@(0);\r\n$array1[0] = $ht;\r\n$array2[0] = $array1;\r\n\r\n$array1; # $ht is enumerated\r\n$array2; # uses the custom format\r\n```",
+      "created_at": "2021-03-27T17:46:50Z",
+      "updated_at": "2021-03-27T17:46:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's a good point, though I wonder if this should be considered a _bug_: why should a type's explicitly assigned format _not_ be honored - situationally, no less - just because it implements `IEnumerable`?\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-27T18:11:41Z",
+      "updated_at": "2021-03-27T19:59:53Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Most likely just because the pipeline enumerates before the formatter ever gets a look at it.",
+      "created_at": "2021-03-27T20:15:45Z",
+      "updated_at": "2021-03-27T20:15:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, that's what seems to be happening _de facto_, but my point was that if you register formatting data for a type explicitly, it should arguably _always_ be honored, whether the type is enumerable or not. As @GeeLaw's example shows, the fact that it is _situationally_ honored - when no enumeration happens to be in the picture - suggests that this is more of a fallout from the implementation than by intentional design.",
+      "created_at": "2021-03-27T20:21:52Z",
+      "updated_at": "2021-03-27T20:21:52Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "After a second thought, it really is about controlling whether a type should be perceived as enumerable, not just for formatting. Suppose someone implements `AsciiString`, then you want `[AsciiString]$myAsciiString | foreach { <# blah #> }` to not enumerate `$myAsciiString`.\r\n\r\nBy some reverse-engineering on how PowerShell handles `string`, I came up with this horrifying hack (**not intended for production use**): https://gist.github.com/GeeLaw/45d87803847195f9ba0f0155e00493e9\r\n\r\nThe snippet makes `ArrayList` mostly non-enumerable.\r\n- Inject a rule into `PSEnumerableBinder` to make the enumerator of `ArrayList` the dummy `NonEnumerableObjectEnumerator`.\r\n- Inject a rule into `PSPipeWriterBinder` to make `ArrayList` pass through the pipe without being enumerated.\r\n- Inject a rule into `LanguagePrimitives.GetEnumerable` to make it appear non-enumerable.\r\n\r\nI'm not sure how to interpret the result of `Write-Host`. When passed by pipe, the result is `ToString()`. When passed via `InputObject`, the result is joined enumerated items (perhaps due to non-overridden `ToString`?). And certainly Windows PowerShell 5.1 has some weird behavior...\r\n\r\nI think the issue should be changed to a feature request of controlling enumeration behavior of custom types.\n\n<blockquote><img src=\"https://github.githubassets.com/images/modules/gists/gist-og-image.png\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> Gist</div><div><strong><a href=\"https://gist.github.com/GeeLaw/45d87803847195f9ba0f0155e00493e9\">Make ArrayList (mostly) non-enumerable for PowerShell.</a></strong></div><div>Make ArrayList (mostly) non-enumerable for PowerShell. - Use-NonEnumerableArrayList.ps1</div></blockquote>",
+      "created_at": "2021-03-27T21:25:57Z",
+      "updated_at": "2021-03-27T21:25:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think these are two aspects to consider independently:\r\n\r\n* [This may be what you have in mind] Should there be a way to signal to PowerShell that a given type that implements `IEnumerable` should _not_ be treated as such _in the pipeline_?\r\n   * Currently, this decision is _hard-coded_, comprising exceptions that both _exclude_ (`String`, `IDictionary`, `XmlNode`) and _include_ (`DataTable`)\r\n\r\n* Should formatting data associated with a given type _always_ be honored, irrespective of whether it is enumerable or not? (I think so)\r\n",
+      "created_at": "2021-03-27T21:51:01Z",
+      "updated_at": "2021-03-27T23:00:54Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "According to [the docs](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/out-host?view=powershell-7.1), every line of command is equivalent when appended with `| Out-Host`, so if an object is enumerable, it will only be treated as the enumerated items, not itself.\r\n\r\nWhen scripting, there really isn't much difference between `List<byte>` and `byte[]` (and even `object[]` with all items being boxed `byte`s). I wouldn't expect a cmdlet/function that happens to use `List` as its intermediate storage and direct return value to be formatted differently. But there is a crucial difference between `AsciiString : IEnumerable<byte>` and `byte[]`. I would lean towards implementing the first aspect, and leaving the second as-is (an enumerable type cannot be formatted, unless the enumeration depth is exhausted).",
+      "created_at": "2021-03-28T05:28:00Z",
+      "updated_at": "2021-03-28T05:28:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  leaving the second as-is (an enumerable type cannot be formatted, unless the enumeration depth is exhausted).\r\n\r\nI find this situational inconsistency troubling - if someone wants to use custom-formatting for an enumerable, they should be able to do so, not just when PowerShell happens not to preempt it - but it's probably not much of a real-world concern.\r\n\r\nEither way, to get the behavior you want it sounds like two things are needed:\r\n\r\n* Provide a way to tell PowerShell that a given `IEnumerable` type is not to be enumerated _in the pipeline_, as _data_.\r\n\r\n  * Perhaps an _attribute_ to decorate such types is the best solution, say `[PSNoDefaultEnumeration] public class AsciiString : IEnumerable<byte> { ... }`\r\n\r\n* Make PowerShell's _output formatting system_  respect this attribute too and then _always_ apply any formatting data associated with such a type.\r\n\r\nThat the _data_ and the _formatting_ behaviors are already distinct is evidenced by the `[hashtable]` example: this type is _not_ enumerated in the pipeline, but _is_ enumerated for formatting.\r\n\r\n\r\n",
+      "created_at": "2021-03-28T13:40:05Z",
+      "updated_at": "2021-03-28T13:40:05Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "We discussed this today in the Engine Working Group.\r\n\r\nI think we agree with @mklement0's above summary here that there are fundamentally a couple of different issues converging here:\r\n\r\n1. Whether IEnumerable/IEnumerable<T>-implementing types are enumerated by default is currently baked in to the core engine logic and cannot be customized.\r\n1. The formatting system also typically enumerates records on its own, historically so that it can display the contents of a dictionary (etc).\r\n\r\nFor preventing enumeration of additional types, we think allowing some method of annotating a type so that it's not enumerated in the pipeline may be of interest. We all agreed that we'd need to see some more concrete real-world examples of where the current behaviour is insufficient and how adding this kind of feature would improve things. Whether this should take the form of an attribute, or a cached list of types which can be updated via an Add/Remove method, or some other form, we're not entirely sure.\r\n\r\n@rjmholt noted that he's raised a similar suggestion in the past, and it was at that point rejected, but we agree that it may still be worth considering. Given that this logic operates in `LanguagePrimitives` there may be performance concerns associated with modifying the logic, so we'd prefer to see some more real-world examples of how this is impacting users before we commit to adding functionality here.\r\n\r\nFor the formatting enumeration issue itself, the performance impact is less stringent, so I think perhaps implementing an attribute to disable enumeration when an object hits the formatter might be considered, but we'd need need to see a prototype or at least a suggested API surface before we can make a clear call on that side of things.\r\n\r\nI think at this point it might make sense to split this issue into two more focused issues?",
+      "created_at": "2021-06-25T02:29:06Z",
+      "updated_at": "2021-06-25T02:29:06Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Apparently the formatting system already supports specifying a type as not enumerable.  This doesn't control pipeline enumeration, but still it's one part of the puzzle that already works:\r\n\r\n```powershell\r\nSet-Content ./DontEnumerateHashtable.format.ps1xml -Value '\r\n<Configuration>\r\n    <DefaultSettings>\r\n        <EnumerableExpansions>\r\n            <EnumerableExpansion>\r\n                <EntrySelectedBy>\r\n                    <TypeName>System.Collections.Hashtable</TypeName>\r\n                </EntrySelectedBy>\r\n                <Expand>CoreOnly</Expand>\r\n            </EnumerableExpansion>\r\n        </EnumerableExpansions>\r\n    </DefaultSettings>\r\n</Configuration>'\r\n\r\nUpdate-FormatData -PrependPath ./DontEnumerateHashtable.format.ps1xml\r\n@{ test = 'test' }\r\n# Returns:\r\n# System.Collections.Hashtable\r\n```",
+      "created_at": "2021-08-06T15:33:57Z",
+      "updated_at": "2021-08-06T15:33:57Z"
+    }
+  ],
+  "created_at": "2021-03-25T04:15:54Z",
+  "number": 15100,
+  "state": "open",
+  "title": "Allow more control on custom type formatting",
+  "updated_at": "2021-08-06T15:33:57Z"
+}

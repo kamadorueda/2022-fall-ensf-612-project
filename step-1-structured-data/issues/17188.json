@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17188",
+  "author": "mklement0",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\nBinding full file-system item paths to `Select-String`'s `-LiteralPath` parameter (via its alias name, `-PSPath`) based in input objects' `.PSPath` property values works via provider-decorated `System.IO.FileInfo` instances, such as `Get-ChildItem`, but not with `[pscustomobject]` instances, for example:\r\n\r\n```powershell\r\n'zzz' > ($tmpFile = New-TemporaryFile) # Create temp. file with sample content.\r\n\r\n$o = [pscustomobject] @{ PSPath = $tmpFile.FullName }\r\n\r\n# OK: Get-Content binds the .PSPath property to -LiteralPath, as expected.\r\n$o | Get-Content\r\n\r\n# !! BROKEN: Select-String doesn't bind to -LiteralPath and instead searches the\r\n# !!                  stringified object.\r\n$o | Select-String .\r\n\r\nRemove-Item $tmpFile # cleanup\r\n```\r\n\r\n\r\n### Expected behavior\r\n\r\n```console\r\nzzz\r\n\r\n/path/to/tmpfile.tmp:1:zzz\r\n```\r\n\r\n### Actual behavior\r\n\r\n```console\r\nzzz\r\n\r\n@{PSPath=/path/to/tmpfile.tmp}\r\n```\r\n\r\nThat is, `Select-String` unexpectedly searched the `.ToString()` representation of the input object that was bound to `-InputObject`.\r\n\r\n### Error details\r\n\r\n_No response_\r\n\r\n### Environment data\r\n\r\n```powershell\r\nPowerShell Core 7.3.0-preview.3\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n_No response_",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "https://github.com/PowerShell/PowerShell/blob/7dc4587014bfa22919c933607bf564f0ba53db2e/src/Microsoft.PowerShell.Commands.Utility/commands/utility/MatchString.cs#L1208-L1224\r\n\r\nInterestingly Select-String _does_ appear to have the correct `PSPath` alias defined for its `LiteralPath` parameter. I'm unsure what would cause this, in that case, perhaps a bug in the parameter binder?",
+      "created_at": "2022-04-24T21:17:00Z",
+      "updated_at": "2022-04-24T21:17:33Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I'm thinking it's the argument transformation attribute. Curious how that interacts with `ValueFromPipelineByPropertyName`.",
+      "created_at": "2022-04-25T19:26:33Z",
+      "updated_at": "2022-04-25T19:26:33Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> I'm thinking it's the argument transformation attribute. \r\nI'd put money on that.  Specifically I'd bet that it transforms the path of a FileInfo object but an identical member of (in this case) a PSCustom object. And if the object just goes through a normal string conversion you'd get the reported string. \r\n",
+      "created_at": "2022-04-26T02:45:27Z",
+      "updated_at": "2022-04-26T02:45:27Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yes I suspect that as well. Should be fixed in `Select-String` either way you slice it.\r\n\r\nThat said, still should be left open to engine to decide if that's the correct order for parameter binding. Should argument transformation overtake `ValueFromPipelineByPropertyName` completely? Or should the property value be passed to the transformation attribute.",
+      "created_at": "2022-04-26T03:30:50Z",
+      "updated_at": "2022-04-26T03:30:50Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Yes I suspect that as well. Should be fixed in `Select-String` either way you slice it.\r\n> \r\n> That said, still should be left open to engine to decide if that's the correct order for parameter binding. Should argument transformation overtake `ValueFromPipelineByPropertyName` completely? Or should the property value be passed to the transformation attribute.\r\n\r\nAgree on the first part.  On the second I think the order should go, \r\n\r\n- Get the value from the parameter or the Pipeline\r\n- Then apply any transformation\r\n- Finally apply any validation\r\n\r\nand it probably does already, because anything that means some input _is_ successfully transformed when supplied as a command line argument but _isn't_ when it comes down the pipeline appears perverse, which was I think was the original point :-)  Here we think the point is the transformer is badly written rather than a problem with the order. If the transformer is used in other cmdlets there may be other cases waiting to be discovered.\r\n\r\n\r\n",
+      "created_at": "2022-04-26T14:50:05Z",
+      "updated_at": "2022-04-26T14:50:05Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The engine WG discussed this yesterday. We're marking this issue as up for grabs *specifically* for fixing the argument transformation attribute. If the `FileInfo` type check fails but it is a `PSObject` it should simply check for the property.\r\n\r\nOn the subject of changing how `ArgumentTransformationAttribute` works, we feel there is a lot of risk in changing it's current behavior, and could very easily break any folks who have already worked around it. A change to it's behavior would not be accepted.",
+      "created_at": "2022-05-27T15:25:57Z",
+      "updated_at": "2022-05-27T15:25:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "There `FileinfoToStringAttribute` attribute works and it returns unchaged `inputData` if it is not `FileInfo`. This returns us at start position - how `ValueFromPipelineByPropertyValue` interacts with `PSPath` alias processing. Also perhaps  a root of the issue is that `LiteralPath` has `string[]` array (not singleton) type while `PSPath` is a singleton.",
+      "created_at": "2022-05-28T05:58:37Z",
+      "updated_at": "2022-05-28T05:58:37Z"
+    }
+  ],
+  "created_at": "2022-04-24T16:03:15Z",
+  "number": 17188,
+  "state": "open",
+  "title": "ValueFromPipelineByPropertyValue not working for Select-String's -LiteralPath parameter",
+  "updated_at": "2022-05-28T05:58:37Z"
+}

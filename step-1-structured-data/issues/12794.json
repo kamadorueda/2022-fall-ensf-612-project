@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12794",
+  "author": "Willem-J-an",
+  "body": "<!--\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n@('a','b','c') |\r\nForeach-Object `\r\n  -Begin {Write-Host \"Begin round 1\"} `\r\n  -End {Write-Host \"End round 1\"} `\r\n  -Process {Write-Host $_; $_} |\r\nSort-Object -desc |\r\nForeach-Object `\r\n  -Begin {Write-Host \"Begin round 2\"} `\r\n  -End {Write-Host \"End round 2\"} `\r\n  -Process {$_ }\r\n```\r\n\r\n# Expected behavior\r\n\r\n```\r\nBegin round 1\r\na\r\nb\r\nc\r\nEnd round 1\r\nBegin Round 2\r\nc\r\nb\r\na\r\nEnd round 2\r\n\r\n```\r\n\r\n# Actual behavior\r\n\r\n```\r\nBegin round 1\r\nBegin Round 2\r\na\r\nb\r\nc\r\nEnd round 1\r\nc\r\nb\r\na\r\nEnd round 2\r\n\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.1\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": "2020-05-26T14:05:40Z",
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "This is correct \r\nAll the begin blocks run \r\nThen all the items come down the pipeline and the process blocks run\r\nFinally all the end blocks run. \r\n\r\nIt is not Command1 runs to completion with its output stored\r\nCommand2 takes command1's output and runs to completion storing its output \r\nCommand3 takes command2's output\r\n\r\nThis has a number of benefits, notably if the last step won't be able to run its begin block can stop the other commands doing anything saving time, and potentially saving preventing losing the output of change which can't [easily] be redone to generate the same output. \r\n",
+      "created_at": "2020-05-26T11:08:36Z",
+      "updated_at": "2020-05-26T11:08:36Z"
+    },
+    {
+      "author": "Willem-J-an",
+      "author_association": "NONE",
+      "body": "I understand this is the case, but sometimes this behavior (Run to completion with output stored) does occur, for example, when using the Sort-Object; all objects will gather there for sorting, and stream into the next Foreach-Object when they are done sorting. That's when I would expect the -Begin block of the second Foreach-Object to start, as that is literally before the objects start streaming into it.\r\n\r\nI can imagine some cases where the -Begin block running too early in this case gives problems, for example when you are working from a certain Azure Context, and need one context in the first, and another context in the second process block. The second -Begin block would run too early, causing objects in the first process block to be processed in the wrong context. You also do not want to set the context in the -Process block, as it would keep setting the context over and over again.",
+      "created_at": "2020-05-26T11:24:18Z",
+      "updated_at": "2020-05-26T11:24:18Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> I understand this is the case, but sometimes this behavior (Run to completion with output stored) does occur, for example, when using the Sort-Object; all objects will gather there for sorting, and stream into the next Foreach-Object when they are done sorting. That's when I would expect the -Begin block of the second Foreach-Object to start, as that is literally before the objects start streaming into it.\r\n\r\nYes, you won't be the only person to expect that, but if the last command writes to a file and the file is locked or must logon and credentials are bad, or ... how does the last command stop the first generating any data if nothing in it can run before the first one has sent at least the first of its output ? \r\n\r\n> \r\n> I can imagine some cases where the -Begin block running too early in this case gives problems, for example when you are working from a certain Azure Context, and need one context in the first, and another context in the second process block. The second -Begin block would run too early, causing objects in the first process block to be processed in the wrong context. You also do not want to set the context in the -Process block, as it would keep setting the context over and over again.\r\n\r\nIn that case you can't run as one pipeline and need\r\n```\r\n$temp = Command1 <context1>\r\ncommand2 -input <$temp> <context2>\r\n```\r\nOr in at least one case I know of, but the \"begin\" code in the process block with a flag to say it has been run before and should be skipped after the first object. \r\nThe advantages of  the way it is implemented outweigh the disadvantages, but as you've said there are cases where someone might prefer the other way.\r\n",
+      "created_at": "2020-05-26T11:54:02Z",
+      "updated_at": "2020-05-26T11:54:02Z"
+    },
+    {
+      "author": "Willem-J-an",
+      "author_association": "NONE",
+      "body": "There would be workarounds for any of the cases we can come up with.\r\n\r\nIs the second Begin block supposed to run when the first object comes through the pipeline(1), or as soon as the pipeline starts at all(2)? Right now it seems the second case is true, based on the output I'm seeing.\r\n1. In the first case, this wouldn't break anything in the way I would consider this to work. As soon as any object hits the Foreach-Object, run the -Begin block, that should work for both the 'streaming' pipeline, and the 'batch' pipeline.\r\n2. In the last case this wouldn't solve the issue of needing data to check if the first script block should keep running, also it seems more intuitive to just place the Begin logic of the second Foreach-Object in the -Begin block of the first Foreach-Object.\r\n\r\nWith this all said, now that I know this behavior I can take it into account. It is rather simple to make it work the way I need; adding parentheses around the first block is enough.\r\n``` pwsh\r\n(@('a','b','c') |\r\nForeach-Object `\r\n  -Begin {Write-Host \"Begin round 1\"} `\r\n  -End {Write-Host \"End round 1\"} `\r\n  -Process {$_;Write-Host $_} |\r\nSort-Object -desc) |\r\nForeach-Object `\r\n  -Begin {Write-Host \"Begin round 2\"} `\r\n  -End {Write-Host \"End round 2\"} `\r\n  -Process {$_ }\r\n```",
+      "created_at": "2020-05-26T12:17:11Z",
+      "updated_at": "2020-05-26T12:17:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, this is by design. All cmdlets in the pipeline execute their `begin {}` or `BeginProcessing()` or (in ForEach-Object's case) `-Begin { }` code before any `process {}` block is run. \r\n\r\nCould it be changed? Hm. Maybe? Is it worth doing so? Probably not, unless there's a really good reason to. Keep in mind PS has worked this way pretty much since v1, way back in the Windows XP days. Would need to be a fairly compelling reason to change something fundamental like this since it'd alter the behaviour in pretty subtle but potentially very impactful ways.",
+      "created_at": "2020-05-26T12:46:00Z",
+      "updated_at": "2020-05-26T12:46:00Z"
+    },
+    {
+      "author": "Willem-J-an",
+      "author_association": "NONE",
+      "body": "Unfortunately I would have to agree with you. Thanks @jhoneill and @vexx32!",
+      "created_at": "2020-05-26T14:05:40Z",
+      "updated_at": "2020-05-26T14:05:40Z"
+    }
+  ],
+  "created_at": "2020-05-26T09:49:20Z",
+  "number": 12794,
+  "state": "closed",
+  "title": "-Begin scriptblock of additional Foreach-Objects run too early in the pipeline",
+  "updated_at": "2020-05-26T14:05:41Z"
+}

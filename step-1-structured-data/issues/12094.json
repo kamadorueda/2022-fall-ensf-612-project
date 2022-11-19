@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12094",
+  "author": "szikk",
+  "body": "# Steps to reproduce\r\n\r\nPSVersion : 6.2.4\r\nPSEdition : Core\r\nGitCommitId : 6.2.4\r\nOS : Microsoft Windows 10.0.18363\r\nPlatform : Win32NT\r\nPSCompatibleVersions  : {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion : 2.3\r\nSerializationVersion  : 1.1.0.1\r\nWSManStackVersion  : 3.0\r\n\r\n`helm search stable -l -r \"?.kafka\" |  ForEach-Object { $_.Split(\"\",[StringSplitOptions]\"RemoveEmptyEntries\")[1] }`\r\n\r\nOutput is empty\r\n\r\n\r\n# Expected behavior\r\n\r\nPSVersion : 5.1.18362.628\r\nPSEdition : Desktop\r\nPSCompatibleVersions : {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion : 10.0.18362.628\r\nCLRVersion : 4.0.30319.42000\r\nWSManStackVersion : 3.0\r\nPSRemotingProtocolVersion : 2.3\r\nSerializationVersion : 1.1.0.1\r\n\r\n`helm search stable -l -r \"?.kafka\" |  ForEach-Object { $_.Split(\"\",[StringSplitOptions]\"RemoveEmptyEntries\")[1] }`\r\n\r\nCHART\r\n2.3.0\r\n2.2.1\r\n2.2.0\r\n2.1.6\r\n2.1.5\r\n2.1.4\r\n2.1.3\r\n1.1.3\r\n1.1.2\r\n1.1.1\r\n1.1.0\r\n1.0.0\r\n\r\n\r\n\r\n# Actual behavior\r\n\r\nWhen doing the split by `\"\"` in PS core it no longer not takes into consideration a non-printable characters as it does in PS 5.1\r\nI checked the hash of the non-printable characters and they are the same in both cases (PS 5.1 and PS core)\r\n\r\n\r\n",
+  "closed_at": "2020-03-12T07:58:56Z",
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Could you give an example of the outputs of `helm search stable -l -r \"?.kafka\"` -- we need to be able to reproduce without `helm` installed.\r\n\r\nIt looks like the behavioural change you're experiencing may be occurring in the `String.Split()` method, which would indicate a .NET rather than a PowerShell change, meaning it's likely something we're unable to fix.\r\n\r\nHowever, we may be able to come up with a technique for mitigating the change.",
+      "created_at": "2020-03-10T15:46:42Z",
+      "updated_at": "2020-03-10T15:46:42Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Also, if you can, try this in PowerShell 7.0 to confirm which behaviour you're seeing.",
+      "created_at": "2020-03-10T15:47:41Z",
+      "updated_at": "2020-03-10T15:47:41Z"
+    },
+    {
+      "author": "szikk",
+      "author_association": "NONE",
+      "body": "@rjmholt \r\n\r\nThe issue is also reproducible with PS Version 7.0 \r\nThe output might be a little bit tricky to send in here because of the format. \r\nTherefore I attached the output in in Plain Text and in Hex in order to preserve the raw format of the output. \r\n[Hex.txt](https://github.com/PowerShell/PowerShell/files/4313875/Hex.txt)\r\n[PlainText.txt](https://github.com/PowerShell/PowerShell/files/4313876/PlainText.txt)\r\n\r\n\r\nPlease let me know if this helps you. \r\n\r\n\r\n\r\n",
+      "created_at": "2020-03-10T17:34:34Z",
+      "updated_at": "2020-03-10T17:34:34Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah that PlainText.txt file reproduces it nicely.\r\n\r\nThis might actually be a break in the way we find overloads in PowerShell, or it might be that .NET Core introduced a new overload that we're now resolving.\r\n\r\nYou can get the old behaviour with this:\r\n\r\n```powershell\r\ngc 'C:\\Users\\Robert Holt\\Desktop\\PlainText.txt' | ForEach-Object { $_.Split([char[]]@(), [StringSplitOptions]\"RemoveEmptyEntries\")[1] }\r\n```\r\n\r\n/cc @daxian-dbw ",
+      "created_at": "2020-03-10T20:24:43Z",
+      "updated_at": "2020-03-10T20:24:43Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> or it might be that .NET Core introduced a new overload that we're now resolving\r\n\r\nActually I think it may well be this: https://github.com/dotnet/runtime/issues/14483.",
+      "created_at": "2020-03-10T20:27:02Z",
+      "updated_at": "2020-03-10T20:27:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Indeed, this has come up several times before, and the bottom line is:\r\n\r\n* New overloads in the CLR can break PowerShell scripts at any time, because PowerShell is late-bound, and new overloads may be selected due to being a better type fit than a previous one.\r\n  \r\n* For long-term stability, stick with PowerShell-native features or be sure to use casts to precisely match the types of the invoked .NET method's parameters.\r\n\r\n   * `$_.Split([char[]] \"\", \"RemoveEmptyEntries\")` would give you the old behavior, as @rjmholt notes.\r\n\r\nSee https://github.com/PowerShell/PowerShell/issues/11720#issuecomment-579866445\r\n\r\n\r\n\r\nIn the case at hand, a PowerShell-native solution is also much more concise, using the unary form of the `-split` operator, which treats runs of whitespace as a single separator (and also ignores leading and trailing whitespace):\r\n\r\n```powershell\r\n'stable/kafka-manager\t2.3.0        \t1.3.3.22   \tA tool for managing Apache Kafka.',\r\n'stable/kafka-manager\t2.2.1        \t1.3.3.22   \tA tool for managing Apache Kafka'  | \r\n  ForEach-Object { (-split $_)[1] }\r\n```\r\n\r\nThe above  yields `2.3.0` and `2.2.1`.",
+      "created_at": "2020-03-11T03:05:28Z",
+      "updated_at": "2020-03-11T03:12:30Z"
+    },
+    {
+      "author": "szikk",
+      "author_association": "NONE",
+      "body": "Thanks for feedback guys I will close the issue since the new behaviour its coming from .Net Core and not from PS.",
+      "created_at": "2020-03-12T07:58:56Z",
+      "updated_at": "2020-03-12T07:58:56Z"
+    }
+  ],
+  "created_at": "2020-03-10T14:48:05Z",
+  "number": 12094,
+  "state": "closed",
+  "title": "Different behaviour of  \"$_.Split(\"\",[StringSplitOptions]\"RemoveEmptyEntries\")\" in powershell 5.1 vs 6.0 core",
+  "updated_at": "2020-03-12T07:58:56Z"
+}

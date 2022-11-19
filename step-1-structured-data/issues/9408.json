@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9408",
+  "author": "vexx32",
+  "body": "Someone mentioned something curious about [`ForEach-Object`](https://github.com/PowerShell/PowerShell/blob/759c4abde811aff1490dec92e438d61e341c3181/src/System.Management.Automation/engine/InternalCommands.cs#L63) and I went to take a look at it.\r\n\r\nWhat the heck is going on in there? Do we really have known and supported script patterns like this?\r\n\r\n```powershell\r\n$val | ForEach-Object { <# begin #> } { <# process 1 #> } { <# process 2 #> } { <# process 3 #> } { <# end #> }\r\n```\r\n\r\nIs there some history here that influences this? Do we really need to tax the parameter binder trying to bind *n* script blocks? \r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/759c4abde811aff1490dec92e438d61e341c3181/src/System.Management.Automation/engine/InternalCommands.cs#L103-L120\r\n\r\nDo we really need `-RemainingScripts`? I'd really love to hear if there's a rationale behind it I'm missing; I can't really see a whole lot of reasons to allow this kind of input myself.\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/759c4abde811aff1490dec92e438d61e341c3181/src/System.Management.Automation/engine/InternalCommands.cs#L145-L160\r\n\r\n## Proposal\r\n\r\nI don't know _all that much_ about the parameter binder, but it seems to me like this would be _significantly_ more effective with a small handful of parameter sets, and 3 script block inputs, maximum.\r\n\r\n`ForEach-Object` is considered **really** slow by many advanced users, and I can't help but think that this is a fairly large part of it.\r\n\r\nCan we simplify this parameter binding by adding a couple of sets? (Don't think there's a whole lot of utility allowing `-Process`-less? Let me know if I'm mistaken!)\r\n\r\n- ~~`BeginOnly`~~ \r\n- `BeginAndEnd`\r\n- `ProcessOnly` (Default in the case of a single script block.)\r\n- `BeginAndProcess`\r\n- `ProcessAndEnd` (Default in the case of by-position entry for two blocks.)\r\n- `EndOnly`\r\n- `AllBlocks`\r\n\r\n\\* combinations that include `-End` without `-Process` might be able to utilise `$input`? I'm not sure if that's hooked up, or if it could be.\r\n\r\n### Subtractions\r\n\r\nThis would remove the ability to provide more than 3 script blocks to the command, a capability that I've personally never seen and didn't know about. I've also never heard anyone even really mention it was _possible_ until recently. \r\n\r\nI don't think this is a huge negative, really; anything you can do with the current behaviour, you can do in only 3 scriptblocks anyway.\r\n\r\n### Additions\r\n\r\nHopefully a good deal of speedup?\r\n\r\n(And yes, I'm more than happy to sift through this myself and submit a PR, I just want to know if there's context I need to take into account / am missing, before I spend a good couple hours rewriting this.)",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If I understand right we do binding for every input object. In the case the proposal is too narrow.  _I would consider improving the performance of pipelines as a whole._ For example, we could do the binding once for collections of objects of the same type (that is actually a general case). This can be implemented in several ways.",
+      "created_at": "2019-04-19T09:50:55Z",
+      "updated_at": "2019-04-19T09:50:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@isazonov that may be an effective way to improve the overall speed of pipelines, but that kind of solution may have its own drawbacks, especially as it's not always possible to guarantee that the same type of object will always be sent down a pipeline.\r\n\r\nIt is possibly worth investigating, but I think that should go in its own issue. :)",
+      "created_at": "2019-04-19T10:26:39Z",
+      "updated_at": "2019-04-19T10:26:56Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> If I understand right we do binding for every input object.\r\n\r\nOnly for `InputObject`, none of these parameters accept input.  Binding is only done once for named/positional parameters:\r\n\r\n```powershell\r\nPS> Trace-Command -Name ParameterBinding -PSHost { 0, 1 | ForEach-Object { $_ } }\r\n\r\nDEBUG: ParameterBinding Information: 0 : BIND NAMED cmd line args [ForEach-Object]\r\nDEBUG: ParameterBinding Information: 0 : BIND POSITIONAL cmd line args [ForEach-Object]\r\nDEBUG: ParameterBinding Information: 0 :     BIND arg [ $_ ] to parameter [Process]\r\nDEBUG: ParameterBinding Information: 0 :         Binding collection parameter Process: argument type [ScriptBlock], parameter type\r\n[System.Management.Automation.ScriptBlock[]], collection type Array, element type [System.Management.Automation.ScriptBlock], no\r\ncoerceElementType\r\nDEBUG: ParameterBinding Information: 0 :         Creating array with element type [System.Management.Automation.ScriptBlock] and 1 elements\r\nDEBUG: ParameterBinding Information: 0 :         Argument type ScriptBlock is not IList, treating this as scalar\r\nDEBUG: ParameterBinding Information: 0 :         Adding scalar element of type ScriptBlock to array position 0\r\nDEBUG: ParameterBinding Information: 0 :         BIND arg [System.Management.Automation.ScriptBlock[]] to param [Process] SUCCESSFUL\r\nDEBUG: ParameterBinding Information: 0 : MANDATORY PARAMETER CHECK on cmdlet [ForEach-Object]\r\nDEBUG: ParameterBinding Information: 0 : CALLING BeginProcessing\r\nDEBUG: ParameterBinding Information: 0 : BIND PIPELINE object to parameters: [ForEach-Object]\r\nDEBUG: ParameterBinding Information: 0 :     PIPELINE object TYPE = [System.Int32]\r\nDEBUG: ParameterBinding Information: 0 :     RESTORING pipeline parameter's original values\r\nDEBUG: ParameterBinding Information: 0 :     Parameter [InputObject] PIPELINE INPUT ValueFromPipeline NO COERCION\r\nDEBUG: ParameterBinding Information: 0 :     BIND arg [0] to parameter [InputObject]\r\nDEBUG: ParameterBinding Information: 0 :         BIND arg [0] to param [InputObject] SUCCESSFUL\r\nDEBUG: ParameterBinding Information: 0 : MANDATORY PARAMETER CHECK on cmdlet [ForEach-Object]\r\nDEBUG: ParameterBinding Information: 0 : BIND PIPELINE object to parameters: [ForEach-Object]\r\nDEBUG: ParameterBinding Information: 0 :     PIPELINE object TYPE = [System.Int32]\r\nDEBUG: ParameterBinding Information: 0 :     RESTORING pipeline parameter's original values\r\nDEBUG: ParameterBinding Information: 0 :     Parameter [InputObject] PIPELINE INPUT ValueFromPipeline NO COERCION\r\nDEBUG: ParameterBinding Information: 0 :     BIND arg [1] to parameter [InputObject]\r\nDEBUG: ParameterBinding Information: 0 :         BIND arg [1] to param [InputObject] SUCCESSFUL\r\nDEBUG: ParameterBinding Information: 0 : MANDATORY PARAMETER CHECK on cmdlet [ForEach-Object]\r\nDEBUG: ParameterBinding Information: 0 : CALLING EndProcessing\r\n```",
+      "created_at": "2019-04-19T11:54:27Z",
+      "updated_at": "2019-04-19T11:54:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I fully agree that the current syntax is confusing, and that the utility of multiple `-Process` blocks is questionable.\r\n\r\nCan't speak to how much performance would improve due to such a cleanup, but `ForEach-Object` could definitely use a speed boost;  related in that respect: #7700\r\n\r\n",
+      "created_at": "2019-04-19T15:22:49Z",
+      "updated_at": "2019-04-19T15:22:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Oh yeah, I only didn't mention that in this issue because I remembered there was another issue for that one.\r\n\r\nThe logic for member resolution in ForEach-Object is really in need of some love there. I skimmed through that, and about 1/3rd of it is giant block comments, and the rest of it (which is at least three to four times as long as the scriptblock-handling code) could really use a rewrite. \r\n\r\nProbably I'd look to have those done in separate PRs, though. \ud83d\ude04 ",
+      "created_at": "2019-04-19T16:06:46Z",
+      "updated_at": "2019-04-19T16:06:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @vexx32 - can you please post these insights also at #7700?",
+      "created_at": "2019-04-20T12:40:50Z",
+      "updated_at": "2019-04-20T12:40:50Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "But the point of `ForEach-Object` is syntax and flexibility, not speed.\r\n\r\nIt doesn't really _do_ anything, except invoke code with pipeline inputs, so while you're obviously right that you can do _almost_ all of the things it can do with less parameters (or even without a cmdlet at all, using the call `&` or dot `.` operator) ... the syntax for that is extremely nasty. You might want to mug someone with it...\r\n\r\nHere's a trivial example you cannot do with a `ForEach-Object` that only takes three blocks:\r\n\r\n```PowerShell\r\n$userProvidedScript = { if($_ -eq 5) { Write-Error \"TWO\" -ea silentlycontinue } }\r\n$validationScript = { if (!$?) { Write-Host \"The user provided script did not work with ${_}\" } }\r\n\r\n1..10 | ForEach-Object $null,\r\n$UserProvidedScript, \r\n$validationScript, \r\n$null\r\n```\r\n\r\nAutomatic variables are (re)set between each scriptblock, so `$PSItem` and the other automatic variables like `$?` are (re)set, but otherwise, all the blocks share scope. You can set variables in one, read them in another, and always trust that `$_` or `$input` or `$PSItem` will be what came in from the pipeline...\r\n\r\nAnyway. My point is: you're talking about breaking backward compatibility (of a feature which granted, may be rarely used) on the hypothetical that you can make it faster. \r\n\r\nEven if you were saying that you've made it 2x faster, and this is the down-side, I think I'd still be saying: maybe that should be a new command - it's not worth breaking this one (which has been like this for 12 years) to make it _slightly_ faster, when there are so many ways to write things that are **much, much faster**.\r\n\r\nHow about, instead, we make the (exponentially faster, and less complex) `&` call operator and the dot-source operator take three scriptblocks instead of just one as an alternative syntax (i.e. `& {} {} {}` could be the same as ` &{ begin{} process{} end{} }`)\r\n\r\nHeck, how about we just make `&` be a `filter` instead of a `function`, where the default block is the `process` block. Problem solved, at 5-10x speed",
+      "created_at": "2019-04-22T04:02:39Z",
+      "updated_at": "2019-04-22T04:17:34Z"
+    }
+  ],
+  "created_at": "2019-04-18T20:46:39Z",
+  "number": 9408,
+  "state": "open",
+  "title": "ForEach-Object: Wat",
+  "updated_at": "2020-05-07T12:30:52Z"
+}

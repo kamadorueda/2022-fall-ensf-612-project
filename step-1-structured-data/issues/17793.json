@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17793",
+  "author": "bjompen",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\n```PowerShell\r\nGet-ChildItem -Path $null\r\n```\r\n\r\n### Expected behavior\r\n\r\nSome kind of error similar to other *Item CmdLets when Path is $null\r\n\r\n```PowerShell\r\nRemove-Item -Path $null\r\nRemove-Item: Cannot bind argument to parameter 'Path' because it is null.\r\n```\r\n\r\nLooking at [the source](https://github.com/PowerShell/PowerShell/blob/7dc4587014bfa22919c933607bf564f0ba53db2e/src/Microsoft.PowerShell.Commands.Management/commands/management/GetChildrenCommand.cs#L218) this is not unexpected, but it can have some unexpected consequences.\r\n\r\nConsider the following:\r\nI have two folders setup like this:\r\n\r\n```PowerShell\r\nC:\\temp\\saveeverythinghere> Get-ChildItem\r\n\r\n    Directory: C:\\temp\\saveeverythinghere\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a---          2022-07-28    15:08              0 SaveEverythingHere1.txt\r\n-a---          2022-07-28    15:08              0 SaveEverythingHere2.txt\r\n-a---          2022-07-28    15:08              0 SaveEverythingHere3.txt\r\n\r\nC:\\temp\\saveeverythinghere> Get-ChildItem ..\\deleteme\\\r\n\r\n    Directory: C:\\temp\\deleteme\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a---          2022-07-28    15:08              0 DeleteMe1.txt\r\n-a---          2022-07-28    15:08              0 DeleteMe2.txt\r\n-a---          2022-07-28    15:08              0 DeleteMe3.txt\r\n```\r\nNow run this code:\r\n\r\n```PowerShell\r\n$ScanExtensions = '.ps3'\r\n$PathToDeleteFilesFrom = 'C:\\temp\\deleteme'\r\n\r\n# This whill return 0 files\r\n$ScanFiles = Get-ChildItem $PathToDeleteFilesFrom -File -Recurse | Where-Object -Property Extension -in $ScanExtensions\r\n\r\n# This will now remove _all_ files in $PWD\r\nGet-ChildItem $ScanFiles.FullName | Remove-Item\r\n```\r\n\r\n(In this very hypothetical scenario we can solve it using `Set-StrictMode -Version 7.2` to get `$ScanFiles.FullName` to throw an error, but I still think it's unexpected.)\r\n\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\nGet-ChildItem -Path '.'\r\n```\r\n\r\n\r\n\r\n### Environment data\r\n\r\n```powershell\r\nPSVersion                      7.2.5\r\nPSEdition                      Core\r\nGitCommitId                    7.2.5\r\nOS                             Microsoft Windows 10.0.22622\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n![image](https://user-images.githubusercontent.com/17783007/181513530-8e79903f-4f63-42cc-a02e-15a37dfe922c.png)\r\n",
+  "closed_at": "2022-08-10T09:01:22Z",
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "**Unlike** `remove-item`  (`rm` / `del`)  and `copy-item` (`cp` / `copy`)  The  `Get-item` and `Get-ChildItem`  commands (`dir` / `ls`) work without any parameters so inside the command path being null/empty selects the current directory. \r\n\r\nThis does not, of itself, prevent the `Path` parameter from rejecting null/empty input.  However there will be many things out there which look like this \r\n\r\n```powershell \r\nfunction myfn  {\r\n    param (\r\n        #omit for current directory\r\n        [String]$MyPathParmeter\r\n    )\r\n\r\n    # blah blah blah \r\n    Get-ChildItem $MyPathParameter\r\n# blah blah blah\r\n}\r\n```\r\nBy not rejecting null/empty values Get-ChildItem saves whoever writes that script from having to either default `$MyPathParmeter` to $pwd, or change how Get-ChildItem is called depending on whether the parameter is passed.  I would expect many scripts to rely on this behaviour.  \r\nOf course if the line is   `Get-ChildItem $MyPathParameter | remove-item`  the way of working we have requires the script author to check that the value isn't null or empty. \r\n\r\n\r\n\r\n",
+      "created_at": "2022-07-28T16:12:17Z",
+      "updated_at": "2022-07-28T16:12:17Z"
+    },
+    {
+      "author": "fflaten",
+      "author_association": "CONTRIBUTOR",
+      "body": "It's a breaking change. `ls $nonExistingVar` in bash and `dir \"\"` (not entirely the same) in cmd behaves the same.",
+      "created_at": "2022-07-28T16:12:58Z",
+      "updated_at": "2022-07-28T16:13:56Z"
+    },
+    {
+      "author": "MartinGC94",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jhoneill I'm sure someone has done it intentionally but I doubt it's common.  \r\nMost built-in Get commands don't allow you to provide a null value to the \"target\" parameter, Get-Disk, Get-Process, Get-Service, Get-NetAdapter, Get-Vm all fail if you try to use null. I honestly can't think of any command besides `Get-ChildItem` that has this odd behavior.  \r\nWhen basically every other command forces the user to validate, or set a default value in their function I would expect most users to develop a habit of doing it like this.  \r\nIMO it's more likely that someone is negatively impacted by this due to a variable typo or whatever than someone intentionally wanting/expecting it to default to $pwd when given a null value.",
+      "created_at": "2022-07-28T17:24:16Z",
+      "updated_at": "2022-07-28T17:24:16Z"
+    },
+    {
+      "author": "bjompen",
+      "author_association": "NONE",
+      "body": "> It's a breaking change. `ls $nonExistingVar` in bash and `dir \"\"` (not entirely the same) in cmd behaves the same.\r\n\r\nI am very much aware of this as it changes a default behaviour. In fact, I do not really expect this behaviour to change or be fixed, but I am _very_ curious as to why this decision was made.\r\n\r\n>  The Get-item and Get-ChildItem commands (dir / ls) work without any parameters so inside the command path being null/empty selects the current directory.\r\n\r\n@jhoneill `Get-Item` not only does not have the same behaviour.\r\nIt also makes a difference between $null and [string]::Empty, something I think Get-ChildItem also _could_ do (Assuming there is a valid reason to list folder contents in a folder with no name for example.)\r\n![image](https://user-images.githubusercontent.com/17783007/181613137-dfab32eb-980b-4ba6-a2ee-0803f4d9793a.png)\r\n\r\n",
+      "created_at": "2022-07-28T18:38:29Z",
+      "updated_at": "2022-07-28T18:38:29Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> @jhoneill `Get-Item` not only does not have the same behaviour. It also makes a difference between $null \r\n\r\nSorry brain fade on my part.  Of course only Get-Childitem works with no path. \r\n\r\nGet-ChildItem  _could_ have been designed to reject null or empty, but it wasn't. And over the last 15 years a decent number of scripts have been written which depend on the present behaviour. So this is breaking change where the benefit is small. (@MartinGC94  we can argue how big the number is but the example I gave of one natural way to write it - i.e. not splatting ps bound params will pass an empty string if the parameter is not specified, and so will be break if empty is rejected, so I think its a breaking change which would have quite a wide effect)\r\n \r\n\r\n",
+      "created_at": "2022-07-28T23:00:40Z",
+      "updated_at": "2022-07-28T23:00:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "WG-Engine discussed this today.\r\n\r\nThe original intent here (if there was any) is not fully remembered, but folks echoed the points raised before here around similarity to `ls` or `dir` commands that behave similarly.\r\n\r\nGiven the change here would be a breaking one, and that it is generally a bit of an edge case, we aren't confident we should go ahead and fix this. It's also _mostly_ a non-issue; it's fairly trivial to do one's own validation in a script before calling Get-ChildItem in most cases, either with an if statement or a Where-Object in a pipeline to discard or otherwise ignore null values.\r\n\r\nWe understand the discomfort for inconsistency and occasional confusion this behaviour can sometimes cause, but our consensus is that the benefit from the change here isn't compelling enough for this breaking change to be acceptable.",
+      "created_at": "2022-08-09T01:07:44Z",
+      "updated_at": "2022-08-09T01:07:44Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as won't fix and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-08-10T09:01:21Z",
+      "updated_at": "2022-08-10T09:01:21Z"
+    }
+  ],
+  "created_at": "2022-07-28T13:15:46Z",
+  "number": 17793,
+  "state": "closed",
+  "title": "Get-ChildItem -Path $null returns current directory",
+  "updated_at": "2022-08-10T09:01:22Z"
+}

@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12036",
+  "author": "alx9r",
+  "body": "The way that PowerShell resolves commands with colliding names seems to have changed sometime between PowerShell 5.1 and 7.  The new behavior is problematic because it introduces the possibility of the following happening:\r\n\r\nInvoking a command in one module can have the side effect that changes the command to which a different name in an unrelated module resolves.\r\n\r\nIn other words, (at least by default in PowerShell 7, it seems) one can never be sure that code invoked in a different module will not inadvertently change the command to which a name in your module will resolve.\r\n\r\nThis seems like something I need to take into careful account when designing modules.  Accordingly, I'm hoping to find answers to the following questions:\r\n\r\n1. Is this the design intent of PowerShell?  If so, how should modules be designed to prevent other modules from inadvertently changing the commands to which names resolve?\r\n2. Is there some way to override this behavior so that a module imported in one module doesn't appear in another?\r\n\r\n---\r\n\r\nOther notes:\r\n\r\n* this emerged from #12014 \r\n\r\n# Steps to reproduce\r\n\r\nCreate the following well-defined module `q`  in `$Env:PSModulePath`:\r\n```PowerShell\r\n# q.psd1\r\n@{\r\n    ModuleVersion     = '0.1.0'\r\n    RootModule        = 'q.psm1'\r\n    FunctionsToExport = 'Get-FileHash','q1'\r\n}\r\n```\r\n```PowerShell\r\n# q.psm1\r\nfunction Get-FileHash {}\r\nfunction q1 {}\r\n```\r\n\r\nInvoke the following:\r\n\r\n```powershell\r\nNew-Module m {\r\n    function m1 {\r\n        [pscustomobject]@{\r\n            Call        = $MyInvocation.MyCommand.Name\r\n            CommandType = Get-Command Get-FileHash | % CommandType\r\n            Module      = Get-Command Get-FileHash | % Module | % {[System.IO.FileInfo]::new($_.Path).Name}\r\n        }\r\n    }\r\n    function m2 {q1} # this call should not alter the Get-FileHash that is visible in module p\r\n} | Import-Module\r\nNew-Module p {\r\n    function p1 {\r\n        [pscustomobject]@{\r\n            Call        = $MyInvocation.MyCommand.Name\r\n            CommandType = Get-Command Get-FileHash | % CommandType\r\n            Module      = Get-Command Get-FileHash | % Module | % {[System.IO.FileInfo]::new($_.Path).Name}\r\n        }\r\n    }\r\n} | Import-Module\r\n\r\nm1\r\np1\r\nm2\r\nm1\r\np1\r\n```\r\n\r\n# Expected behavior\r\n\r\nEither this behavior (which is how PowerShell 5.1 behaves)\r\n\r\n```none\r\nCall CommandType Module\r\n---- ----------- ------\r\nm1      Function q.psm1\r\np1      Function q.psm1\r\nm1      Function q.psm1\r\np1      Function q.psm1\r\n```\r\n\r\nor this behavior\r\n\r\n```none\r\nCall CommandType Module\r\n---- ----------- ------\r\nm1        Cmdlet Microsoft.PowerShell.Utility.psd1\r\np1        Cmdlet Microsoft.PowerShell.Utility.psd1\r\nm1      Function q.psm1\r\np1        Cmdlet Microsoft.PowerShell.Utility.psd1\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nCall CommandType Module\r\n---- ----------- ------\r\nm1        Cmdlet Microsoft.PowerShell.Utility.psd1\r\np1        Cmdlet Microsoft.PowerShell.Utility.psd1\r\nm1      Function q.psm1\r\np1      Function q.psm1\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u0393\u00c7\u00aa}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-04-09T19:32:15Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is expected behavior that latest module exports names in global and overloads previously defined names.",
+      "created_at": "2020-03-05T18:18:30Z",
+      "updated_at": "2020-03-05T18:18:30Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">It is expected behavior that latest module exports names in global and overloads previously defined names.\r\n\r\n@iSazonov Got it.  Do you think I can rely on the shadowing that occurs when `Import-Module` is invoked within a module?  This is the example:\r\n\r\n```PowerShell\r\nNew-Module m {\r\n    Import-Module q\r\n    function m1 {\r\n        [pscustomobject]@{\r\n            Call        = $MyInvocation.MyCommand.Name\r\n            CommandType = Get-Command Get-FileHash | % CommandType\r\n            Module      = Get-Command Get-FileHash | % Module | % {[System.IO.FileInfo]::new($_.Path).Name}\r\n        }\r\n    }\r\n    function m2 {q1}\r\n} | Import-Module\r\nNew-Module p {\r\n    Import-Module Microsoft.PowerShell.Utility\r\n    function p1 {\r\n        [pscustomobject]@{\r\n            Call        = $MyInvocation.MyCommand.Name\r\n            CommandType = Get-Command Get-FileHash | % CommandType\r\n            Module      = Get-Command Get-FileHash | % Module | % {[System.IO.FileInfo]::new($_.Path).Name}\r\n        }\r\n    }\r\n} | Import-Module\r\n\r\nm1\r\np1\r\nm2\r\nm1\r\np1\r\nm1\r\np1\r\n```\r\n\r\nwhich outputs\r\n\r\n```\r\nCall CommandType Module\r\n---- ----------- ------\r\nm1      Function q.psm1\r\np1      Function Microsoft.PowerShell.Utility.psd1\r\nm1      Function q.psm1\r\np1      Function Microsoft.PowerShell.Utility.psd1\r\nm1      Function q.psm1\r\np1      Function Microsoft.PowerShell.Utility.psd1\r\n```\r\n\r\nNote that in this example the command to which each call site is resolved is the same for each call at that site.\r\n",
+      "created_at": "2020-03-05T18:59:26Z",
+      "updated_at": "2020-03-05T19:00:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If you ask about workaround, yes, this is good because you use a module context to avoid name collisions. ",
+      "created_at": "2020-03-05T19:05:27Z",
+      "updated_at": "2020-03-05T19:05:27Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">[Can you give an example where this new behaviour is causing an issue? It would help us pin down the change and the issue](https://github.com/PowerShell/PowerShell/issues/12014#issuecomment-595400081)\r\n\r\n@rjmholt This repro is an abstraction of how this caused an issue.  I've got a repo of 50 or so modules that I'm transitioning from Windows PowerShell.  I'm relying on the 20k or so unit and integration tests from those modules to hopefully get this to happen smoothly.   Under PowerShell 5.1 none of the modules had `Import-Module` calls that corresponded to the modules required.  Instead they seemed to have relied only on the automatic loading resulting from `RequiredModules` in the manifest.  Per my OP here that results in consistent results under PowerShell 5.1 because, it seems, under 5.1 no matter what the order that other code is invoked, from the perspective of each module, command resolution remained the same.  Under PowerShell 7, though, that doesn't hold, and the order that modules auto-load their requirements matters (or matters more?).  \r\n\r\nIn my case I had an inadvertent name collision on `Add-SqlLogin` (between [this implementation](https://docs.microsoft.com/en-us/powershell/module/sqlserver/add-sqllogin?view=sqlserver-ps) and in one of our internal modules.  A third module that called `Add-SqlLogin` either successfully called the internal implementation or failed trying to call the one from [the public SqlServer module](https://docs.microsoft.com/en-us/powershell/module/sqlserver/?view=sqlserver-ps).  The failure depended on whether a command from a fourth module that auto-imports the public SqlServer module was invoked before or after the third module.  That's no fun.\r\n\r\nThe reliance for name resolution by modules on the global scope is, I think, a mistake that happened to not manifest in 5.1.  My task currently is to determine how to ensure name resolution occurs reliably within each module without ever reaching the global scope.  Hopefully I can find such a solution.\r\n\r\nMy intuition is that this will probably be a one-time cleanup with some internal policy changes around importing of required modules.  I think I prefer the new command resolution behavior, but I've still got a bit of work to do to determine whether I can get that to stabilize with our modules.",
+      "created_at": "2020-03-05T20:14:15Z",
+      "updated_at": "2020-03-05T20:14:15Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">...this will probably be a one-time cleanup with some internal policy changes around importing of required modules.\r\n\r\nHere is a summary of the policy I implemented to mitigate this issue.\r\n\r\n### Policy\r\n\r\n1. Each module shall invoke `Import-Module` for each of the modules specified by the `RequiredModules` entry in the module manifest.\r\n2. `Import-Module` in (1) shall be invoked at the top scope of the module's session state.\r\n3. `$PSModuleAutoloadingPreference` shall be `None` during `Import-Module` in (1).\r\n4. During the invokation of automated tests `$PSModuleAutoloadingPreference` shall be `None`.\r\n\r\n### Reasoning\r\n\r\n(1) and (2) [adequately shadow command names](https://github.com/PowerShell/PowerShell/issues/12036#issuecomment-595391659) to ensure name resolution occurs within the module.  (3) and (4) ensure that automated tests will fail for nearly all commands if they are not imported per (1).  \r\n\r\n### Limitations\r\nIf a command that is already imported when PowerShell launches is not imported per (1), then that command is still vulnerable to this issue.",
+      "created_at": "2020-04-07T22:45:21Z",
+      "updated_at": "2020-04-07T22:45:21Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@iSazonov I just reviewed this issue.  I think the key point is this statement you made:\r\n\r\n>It is expected behavior that latest module exports names in global and overloads previously defined names.\r\n\r\nI think then, that the behavior I described in my OP is by design.  If you agree, I'd like to close this issue.  I think #12014 sufficiently covers the outstanding issue with surprising command name resolution.",
+      "created_at": "2020-04-08T23:08:03Z",
+      "updated_at": "2020-04-08T23:08:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Ok, we can reopen in any time if needed.",
+      "created_at": "2020-04-09T06:33:57Z",
+      "updated_at": "2020-04-09T06:33:57Z"
+    }
+  ],
+  "created_at": "2020-03-05T17:53:11Z",
+  "number": 12036,
+  "state": "closed",
+  "title": "Modules containing colliding names causes side-effects that are visible in other modules",
+  "updated_at": "2020-04-09T19:32:15Z"
+}

@@ -1,0 +1,223 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12625",
+  "author": "mklement0",
+  "body": "See also:  #12632, #12644, #12645\r\n\r\nNote: Changing this would be a breaking change. That said, the current behavior is unhelpful, so the suggested change likely falls into [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).\r\n\r\nWhile you can pass a file _path_ to `Get-Command`, _any_ existing file - even if it isn't an executable (let's call it a _document_) - is currently reported as command of type `Application`.\r\n\r\nThe sensible behavior would be the following: Only return a file as a `System.Management.Automation.ApplicationInfo` instance:\r\n\r\n* on Unix-like platforms:  if `test -x` for that file has an exit code of `0`; that is, if the file is an executable from the OS' perspective _and_ is executable by the current user.\r\n\r\n* on Windows: if the file's extension is listed in `$env:PATHEXT`\r\n\r\nOtherwise, a non-terminating error should be reported, as is already done for non-existent commands.\r\n\r\nIt isn't useful to end users to report _any_ file item as a _command_, let alone as a command of type `Application`, as is currently the case (use `Get-Item` to get information about non-executable files).\r\n\r\nConversely, reporting only true executables (files that the OS considers directly executable) is helpful on Unix-like platforms, given that executables typically have no filename extension at all, and even if they do it isn't the extension that determines executability, it is the permission bits.\r\n\r\nIn short: It is helpful to distinguish actual executables (from the OS' perspective) from _documents_ that PowerShell - as a syntactic convenience - allows passing _to_ an executable, implicitly (e.g., `./foo.txt` being the same as `Invoke-Item ./foo.txt`). That PowerShell currently allows invoking _documents_ by _mere file name_ (`foo.txt`) _via `$env:PATH`_ (only), is a related, but separate problem - see #12632.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n'hi' > t.txt\r\n{ Get-Command -ea Stop ./t.txt } | Should -Throw\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe test should pass.\r\n\r\n# Actual behavior\r\n\r\nThe test fails:\r\n\r\n```none\r\nExpected an exception, to be thrown, but no exception was thrown.\r\n```\r\n\r\nThe reason is that the non-executable `t.txt` file was actually reported as type `Application`.\r\n\r\n# Environment data\r\n\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.2\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "It's an odd one. Profile in the example **is** a command of type \"External Script\" so that is ok. \r\n\r\nFoo.xlsx is processable in Excel , and `start Foo.xlsx `has been valid for longer than we have had XLSx files. (I think `start .` worked in the Windows 95 version of command.com, but I don't trust my memory on the point.)  Does working with start serve as a good proxy for  _ is an application_ ?  Typing \r\n`$path = foo.xlsx`\r\nWhen I mean \r\n`$path = 'foo.xlsx'`\r\ntells windows to start foo.xlsx and we take a pause while excel opens, so powershell is treating it as a command to run and the console output (none) goes into $path. \r\n\r\n\"If I can start it, it counts as an application\" might be OK as a rule except that` get-command C:\\windows\\system32\\aadauthhelper.dll` reports an application and you can't start a DLL.  \r\nIdeally there should be another command type for \"launchable data file\" \r\n\r\nTechnically a breaking change because someone might use get-command instead of test-path,  but you could make it less so by returning \"non-executable\" if the input is a path and the path isn't something you can run. \r\n",
+      "created_at": "2020-05-12T11:41:09Z",
+      "updated_at": "2020-05-12T11:41:09Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "As @jhoneill said, that's definitely expected with ps1 files. Also even things that aren't directly executable can still be invoked with `Invoke-Item` (and that is indeed what `& (gcm ./somefile.csv)` does).  It already doesn't turn up non-executable files with a wildcard search, if someone queries the full path that seems like they're pretty explicitly asking for this behavior.",
+      "created_at": "2020-05-12T12:18:32Z",
+      "updated_at": "2020-05-12T12:18:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, sorry about the flawed `$PROFILE` example - I've corrected the OP to use a text file instead.",
+      "created_at": "2020-05-12T13:04:50Z",
+      "updated_at": "2020-05-12T13:04:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "_Executable_ loses all meaning if it applies to _any_ file: It is't the _file itself_ that is executable in the case of `./t.txt`; instead, precisely because it _isn't_ executable, the _system_'s GUI shell _passes it to_ a true executable (typically for opening / viewing, not for carrying out an action).\r\n\r\nThe most sensible definition of command is: something that is _itself_ executable and to which - at lest in principle - _arguments can be passed_.\r\n\r\n>  if someone queries the full path that seems like they're pretty explicitly asking for this behavior.\r\n\r\nWhile that may be true on Windows, it isn't on Unix platforms, and that is indeed what prompted  creation of this issue (see [this Stack Overflow question](https://stackoverflow.com/q/61738967/45375)).\r\n\r\nNotably, given that executables on Unix-like platforms typically have no filename extension at all, you cannot easily tell whether something is executable or not.\r\nAlso, even if it may be executable _in principle_, it may not be executable _by you_, due to lack of permissions.\r\n\r\nThe workaround is currently to use `$(test -x ./t.txt; 0 -eq $LASTEXITCODE)`, but that is neither simple, nor obvious nor PowerShell-like.\r\n\r\nTesting an individual file for executability also calls for adding an `-Executable` switch to `Test-Path`, which only returns `$True` for true executables.\r\n\r\n```powershell\r\n# WISHFUL THINKING\r\n# On Unix-like platforms: does ./foo have the executable permission bits set\r\n# so that I can execute it?\r\nTest-Path -Executable ./foo\r\n```\r\n\r\nHowever, doing so doesn't preclude also fixing `Get-Command` as proposed, especially if you consider the following use case:\r\n\r\n```powershell\r\n# WISHFUL THINKING\r\n# Get (only) all true executables in the current directory.\r\nGet-Command ./*\r\n```\r\n",
+      "created_at": "2020-05-12T13:25:44Z",
+      "updated_at": "2020-05-12T13:26:04Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I like the idea of a separate cmdlet or parameter on something else to test executability.\r\n\r\nI don't think there's anything to fix here though.  It's doing exactly what it says on the tin, getting you a command that can be invoked.  If the cmdlet was called `Get-Executable` I'd be right there with ya, but if it can make a command why wouldn't it?",
+      "created_at": "2020-05-12T13:39:23Z",
+      "updated_at": "2020-05-12T13:39:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Understood and disagreed. I've given your comment the agreed-on thumbs-down, and conclude this aspect of the debate by reiterating: the current definition of _command_ is meaningless, if _any_ file is a command.\r\n\r\nDistinguishing between a true executable, and a not-itself-executable document, on which a GUI shell operation can be performed, is useful.\r\n\r\nAlso note that `./txt` is currently reported as type `Application`(!), and that there's no separate enum value for what \"command type\" `./txt` represents (it would be something like `Document`, which, as the name suggests, makes it a _non-command_).\r\n\r\n",
+      "created_at": "2020-05-12T13:41:57Z",
+      "updated_at": "2020-05-12T13:55:17Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "\r\n\r\n\r\n> Understood and disagreed. I've given your comment the agreed-on thumbs-down, and conclude this aspect of the debate by reiterating:\r\n\r\nIt does sort of lose the original spirit if you also provide a counter point though.  I don't personally mind it however, I think it makes the conversation easier to navigate at a glance.\r\n\r\n> the current definition of _command_ is meaningless, if _any_ file is a command.\r\n\r\nA command in this context is a PowerShell concept.  It means something that PowerShell can invoke.  It doesn't mean an executable file.\r\n\r\n> Distinguishing between a true executable, and a not-itself-executable document, on which a GUI shell operation can be performed, is useful.\r\n\r\nYeah for sure, that'd be a great command.\r\n\r\n> Also note that `./txt` is currently reported as type `Application`(!)\r\n\r\nYeah I'd be a little bit more comfortable if it was of a `CommandType` called `Item`, but that's probably not worth the break or dev time.",
+      "created_at": "2020-05-12T13:59:56Z",
+      "updated_at": "2020-05-12T13:59:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It does sort of lose the original spirit if you also provide a counter point though.\r\n\r\nFair point: the comment started out as just a succinct reiteration of the original point - so as to clarify the gist of the disagreement - but then the spirit moved me to elaborate. And I'm still possessed:\r\n\r\n> A command in this context is a PowerShell concept.\r\n\r\nIt is, but it is a concept that is well-established historically, and  I don't think that PowerShell in fundamental design intent deviates from it - as evidenced by the command-type enumeration members ([`System.Management.Automation.CommandTypes`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.CommandTypes), and as evidenced that something like `./t.txt`, which does _not_ fit in there, is mistakenly  reported as `Application`.\r\n\r\nMy sense is that if you ask the average PowerShell user: Is `t.txt` a command, they would tell you no, it's a document - and sensibly so.\r\n\r\nAgain: The distinction between (a) \"a thing that is designed to carry out an action, typically operating on given input (pipeline, arguments)\" and (b) \"a piece of data stored in a file that can be acted on _if passed to an (a)_\" is an intuitive and useful one.\r\n\r\nConversely: If you want the functionality that `Get-Command` currently exhibits - that is, if you don't care about this distinction - _don't use `Get-Command`, use `Get-Item`_.\r\n\r\n> Yeah I'd be a little bit more comfortable if it was of a CommandType called Item\r\n\r\nTo me that illustrates why such files should _not_ be considered commands: essentially, by returning a type of `Item` what you're saying is: this is a command that isn't a command.\r\n\r\n",
+      "created_at": "2020-05-12T14:24:48Z",
+      "updated_at": "2020-05-12T14:24:48Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Fair point: the comment started out as just a succinct reiteration of the original point - so as to clarify the gist of the disagreement - but then the spirit moved me to elaborate.\r\n\r\nThe whole thing is a trade off though, you give the other side the final word while still making it clear you disagree.  If you want to give a thumbs down and still provide a counter point (or even just a summary), that's still fine obviously (imo), just not related to what we discussed.\r\n\r\n> It is, but it is a concept that is well-established historically, and I don't think that PowerShell in fundamental design intent deviates from it - as evidenced by the command-type enumeration members ([`System.Management.Automation.CommandTypes`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.CommandTypes), and as evidenced that something like `./t.txt`, which does _not_ fit in there, is mistakenly reported as `Application`.\r\n\r\nWell it's more of an implementation detail.  It's processed by the `NativeCommandProcessor` (the command processor for `ApplicationInfo` objects), much in the same way a GUI application is processed.  It'd be nice to have a cosmetic distinction, but it's not a mistake.\r\n\r\n> My sense is that if you ask the average PowerShell user: Is `t.txt` a command, they would tell you no, it's a document - and sensibly so.\r\n\r\nYeah sure, it's not a super well known feature.\r\n\r\n> Again: The distinction between (a) \"a thing that is designed to carry out an action, typically operating on given input (pipeline, arguments)\" and (b) \"a piece of data stored in a file that can be acted on _if passed to an (a)_\" is an intuitive and useful one.\r\n\r\nIt's going to act in mostly the same way as a GUI application.\r\n\r\n> Conversely: If you want the functionality that `Get-Command` currently exhibits - that is, if you don't care about this distinction - _don't use `Get-Command`, use `Get-Item`_.\r\n\r\nIf I'm using `Get-Command` it's because I want it as a `CommandInfo` object.\r\n\r\n> To me that illustrates why such files should _not_ be considered commands: essentially, by returning a type of `Item` what you're saying is: this is a command that isn't a command.\r\n\r\nNope, just a different `CommandType` to signify the type of command it is.",
+      "created_at": "2020-05-12T14:49:09Z",
+      "updated_at": "2020-05-12T14:49:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The whole thing is a trade off though, you give the other side the final word while still making it clear you disagree. If you want to give a thumbs down and still provide a counter point (or even just a summary), that's still fine obviously (imo), just not related to what we discussed.\r\n\r\nPoint taken. I think we agree now that either use of thumbs-down can be useful.\r\n\r\n> Yeah sure, it's not a super well known feature.\r\n\r\nNot only that: As I've just realized, _on invocation_ of a document, it does something that is of questionable utility and likely not what the user intends: see #12632\r\n\r\n> If I'm using Get-Command it's because I want it as a CommandInfo object.\r\n\r\nThat will tell you nothing of interest about `./t.txt` - especially not with respect to what true executable the document will be passed to.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-05-12T15:54:33Z",
+      "updated_at": "2020-05-12T15:54:33Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Not only that: As I've just realized, _on invocation_ of a document, it does something that is of questionable utility and likely not what the user intends: see #12632\r\n\r\nIt may not be what you personally expect, but it is by design.  I use it every day.\r\n\r\n> > If I'm using Get-Command it's because I want it as a CommandInfo object.\r\n> \r\n> That will tell you nothing of interest about `./t.txt` - especially not with respect to what true executable the document will be passed to.\r\n\r\nIt's not about information, `CommandInfo` is invokable with the invocation operators, `FileSystemInfo` isn't.  It's an object that represents a command in more ways than formatting.",
+      "created_at": "2020-05-12T16:05:26Z",
+      "updated_at": "2020-05-12T16:05:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I use it every day.\r\n\r\nI'm genuinely curious: Please give me an example of when you open a document by mere file name (e.g, `ReadMe.txt`) that is located not in the current directory, but in (any) directory in `$env:PATH`, and how do you know remember which one will be opened, if multiple directories contain such a file?\r\n\r\n> It's not about information, `CommandInfo` is invokable with the invocation operators, `FileSystemInfo` isn't. \r\n\r\nFair point. That still doesn't make something that isn't a command but can be _invoked as one_ a command, and supporting something like `Get-Command .\\*` to find the true executables strikes me as far more useful than the ability to wrap a document in a `CommandInfo`.\r\n\r\n\r\n",
+      "created_at": "2020-05-12T16:22:03Z",
+      "updated_at": "2020-05-12T16:22:25Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> > I use it every day.\r\n> \r\n> I'm genuinely curious: Please give me an example of when you open a document by mere file name (e.g, `ReadMe.txt`) that is located not in the current directory, but in (any) directory in `$env:PATH`, and how do you know remember which one will be opened, if multiple directories contain such a file?\r\n\r\nI don't, I do `./path/to/item.txt`.  But to answer your question, the same way you remember which exe will be invoked I suppose.\r\n\r\n> Fair point. That still doesn't make something that isn't a command but can be _invoked as one_ a command\r\n\r\nRemember that the word \"command\" has a very specific meaning in the context of PowerShell.  What you are asking is for engine to **no longer** classify all items as commands.  While I disagree, that's an understandable perspective to have.  That said, your reasoning can't be that it isn't a command, because it already objectively is by design.",
+      "created_at": "2020-05-12T16:52:02Z",
+      "updated_at": "2020-05-12T16:52:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  I do `./path/to/item.txt`\r\n\r\nSo do I, and I wouldn't want to miss it - and I certainly didn't propose changing that.\r\n\r\nTo be clear: I was talking about invocation _by mere file name_ - `item.txt`, in your example.\r\n\r\n> the same way you remember which exe will be invoked I suppose.\r\n\r\nMultiple _executables_ with a given file name in `$env:PATH` directories are the exception, multiple _documents_ - such as `README` - aren't necessarily - which is why I think #12632 is problematic - no one expects to open _documents_ via `$env:PATH`.\r\n\r\n> What you are asking is for engine to no longer classify all items as commands.\r\n\r\nIndeed that's what I'm asking for, but that doesn't preclude sensible use of _syntactic sugar_ such as `./path/to/item.txt`:\r\n\r\nThat is, if an item turns out to be non-executable - a _document_ - implicitly pass it to the `Invoke-Item` _command_, as a courtesy.\r\n\r\nIncidentally, this could be extended to _directory_ paths, so that, say, submitting `/` or `.` by itself would open the root or current folder in the GUI file manager.\r\nOr, to put it differently: directories are items that are currently _not_ considered commands by your conception, even though from the syntactic-sugar perspective it would be useful and provide consistent behavior.\r\n\r\nWith this conception:\r\n\r\n* `Get-Command` is free to no longer mistakenly report non-executable items as type `Application` and to simply _not_ consider them commands.\r\n\r\n* `item.txt` would no longer look for files by that name in `$env:PATH` directories, because `Invoke-Item` sensibly does _not_ do that, so the problem  described in #12632 would go away.\r\n",
+      "created_at": "2020-05-13T02:19:36Z",
+      "updated_at": "2020-05-13T02:19:36Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> _Executable_ loses all meaning if it applies to _any_ file: It is't the _file itself_ that is executable in the case of `./t.txt`; instead, precisely because it _isn't_ executable, the _system_'s GUI shell _passes it to_ a true executable (typically for opening / viewing, not for carrying out an action).\r\n\r\nSplitting hairs here, it doesn't say it is an executable. Long ago I was taught programs divided into _utilities_ like format, sort, etc. and _applications_, word, multiplan, etc. OS programs were all utilities, never applications.  And the _application_ data files were a distinct class from _configuration_ data.  \"App\" has come to mean \"program\" and the distinction has been lost. PowerShell  doesn't distinguish application _program_ and application _data file_ \r\n\r\nIt's not a bad assumption that \"application\" and \"executable\" are the same thing, but it doesn't hold here. Better naming would help.  \r\n\r\n\r\n\r\n",
+      "created_at": "2020-05-13T10:00:13Z",
+      "updated_at": "2020-05-13T10:00:13Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I shortly look the code and it is not a side effect - the code explicitly does this (it seems excluding completor). So I'd said it is \"by-design\". If there are no security problems, I do not see the need to do the breaking change.\r\n",
+      "created_at": "2020-05-13T10:02:18Z",
+      "updated_at": "2020-05-13T10:02:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\nSomething being by design doesn't preclude changing it, if that design turns out to be unhelpful.\r\n\r\n> the code explicitly does this\r\n\r\nThe code explicitly does what?\r\nAgain, something like `./path/to/item.txt` - by way of a _path_ - opening `item.txt` in the default text editor (implicit `Invoke-Item`) is definitely welcome and mustn't change.\r\n\r\n> If there are no security problems\r\n\r\nInvoking _documents_ via `$env:PATH` is not a security problem per se, but dangerous in that you may end up operating on the wrong document; to use a real-world example from Windows 10:\r\n\r\n```powershell\r\nPS C:\\Users\\jdoe> WindowsCodecsRaw.txt\r\n```\r\n\r\nThe above opens `C:\\Windows\\System32\\WindowsCodecsRaw.txt` - just because a file by that name happened to exist in a directory listed in `$env:PATH`.\r\n\r\nOriginally I mistakenly thought that a file by the same name in the current directory would take precedence, but that isn't true (I've also updated #12632) - the behavior is consistent in that not using a path (not using, e.g., `./WindowsCodecsRaw.txt`) _only_ looks in `$env:PATH`, as is the case with executables and scripts.\r\n\r\nStill, I don't think it makes sense to locate and open _documents_ this way. In the best-case scenario, it's an unhelpful feature that one won't use, in the worst-case scenario you'll mistakenly operate on the wrong file.\r\n\r\nNeither does it make sense to report documents as `Application`s, or indeed to have `Get-Command` report them as commands at all.\r\n\r\nIn short: While a breaking change, I think the impact would be minimal (though I haven't try to analyze code out there):\r\n\r\n* It's hard to imagine anyone relying on opening _documents_ via `$env:PATH`.\r\n\r\n* Reporting documents as _commands_ (`Application`) is unhelpful at best - and on Unix-like platforms gets in the way of implementing the proposed useful behavior (see OP).\r\n\r\n  * Incidentally, even currently combining a wildcard _path_ with `-CommandType Application` misbehaves - see #12644.\r\n\r\n---\r\n\r\n@jhoneill \r\n\r\n> Splitting hairs here, it doesn't say it is an executable.\r\n\r\nI should have said \"command\", which is a superset of \"executable\" (as a noun; as an adjective, it is the core quality of a command).\r\n\r\nA simple way of conceptualizing the distinction I'm after: a command is a _verb_ (\"do something\"), a document is a _noun_ (\"a thing\").\r\n\r\nIrrespective of what the original design intent was, observing this distinction is helpful, for the reasons outlined above.\r\n\r\nThe utility (CUI)  vs. application (GUI) terminology has always been blurry on Windows, where the term \"console application\" is common, but I don't think that is relevant here.\r\n\r\nApplication _data files_ are unequivocally what I've called _documents_ above, distinct from the actual application _executables_, i.e., files containing executable code as recognized by the system.\r\n\r\nTherefore, from the perspective of the command / document distinction, documents shouldn't be considered commands at all, and `Get-Command` shouldn't report them.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-05-13T12:03:51Z",
+      "updated_at": "2020-05-13T12:03:51Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 it seems to me the fundamental distinction here is simply one between your perceived definition of \"command\" and the one used in the design of the cmdlet. \r\n\r\nIf you're suggesting changes to the command, it's probably more productive to simply illustrate the precise differences you'd suggest and the practical benefits/losses and any breaking changes rather than getting into the semantics; that discussion is practically guaranteed to be unending.\r\n\r\nThe majority of the discussion here doesn't appear to come to any real resolution; the definition of \"command\" in this context does appear to be a bit looser than some definitions, but as others have pointed out... that is by design currently.",
+      "created_at": "2020-05-13T12:33:48Z",
+      "updated_at": "2020-05-13T12:34:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The OP always contained a concrete proposal, but I've now fleshed it out.\r\n\r\nSimilarly, I hope that the related, but distinct #12632 states its case clearly (and there should be no doubt that #12644 is a bug).\r\n\r\nThe attendant discussion was necessary to make the case for the proposal in the OP, and to suggest a conceptual reframing that I think will ultimately benefit users.\r\n\r\nAgain, that something is by design doesn't preclude changing it - if the impact is small enough, and the benefits are large enough.\r\n\r\n",
+      "created_at": "2020-05-13T13:24:47Z",
+      "updated_at": "2020-05-13T13:24:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've spun out the `Test-Path -Executable` suggestion into #12645.\r\n",
+      "created_at": "2020-05-13T14:00:35Z",
+      "updated_at": "2020-05-13T14:00:35Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Incidentally, this could be extended to _directory_ paths, so that, say, submitting `/` or `.` by itself would open the root or current folder in the GUI file manager.\r\n\r\nWhich, in case of a remote session, would be the immortal **Norton Commander**, I suppose \ud83d\ude1b\r\n\r\nReturning to indicative mode: when we encounter a number or a string, we do not execute any *default action* on it, we just emit it to the pipeline.  If it ever comes back, the default action will be `Write-Host`.  The same should happen with non-executable items we encounter.  That is, `.` by itself should emit a `DirectoryInfo`, whereas `t.txt` should emit a `FileInfo`.",
+      "created_at": "2020-08-05T17:41:38Z",
+      "updated_at": "2020-08-05T17:42:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@yecril71pl \r\n\r\n> when we encounter a number or a string, we do not execute any default action on it,\r\n\r\nNo: An _unquoted_ string triggers _argument-mode_ parsing, where the first argument is interpreted _as a command_ and therefore _executed_.\r\n\r\nThis already happens for, say, `./file.txt` (and for files that require quoting, you use `&` (`& \"./file 1.txt\"`)).\r\n\r\nFor non-executable _files_, this is a convenient shortcut to `Invoke-Item ./file.txt`\r\n\r\nThere is no good reason not to offer the same convenience for _directory_ items, so that executing `C:\\Windows` (or\r\n`& \"c:\\program files\"`), for instance, would similarly act like `Invoke-Item C:\\Windows`, which opens the folder in File Explorer (the host platform's GUI file manager).\r\n\r\nAlso, `.` by itself is currently invariably interpreted as the dot-sourcing operator, but in the absence of any further arguments I think falling back to `Invoke-Item .` would be perfectly reasonable.\r\n\r\n(But keep in mind that all of this still doesn't justify reporting non-executable file-system items as type `Application` by `Get-Command` - this is a separate issue.)\r\n\r\n---\r\n\r\nHow a terminal-only _remote_ session should be dealing with such _GUI_ shell operations is a valid question, but _we already have that problem_; e.g.:\r\n\r\n```powershell\r\n# Currently FAILS QUIETLY - ditto with explicit `Invoke-Item c:\\windows\\system.ini`\r\nicm -cn . { c:\\windows\\system.ini }\r\n```\r\n\r\nI've never considered this case before, but the quiet failure seems problematic.\r\n\r\n\r\n",
+      "created_at": "2020-08-05T18:13:45Z",
+      "updated_at": "2020-08-05T18:18:20Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "When I write *string*, I mean *string*.  When I write *bareword*, I mean *bareword*.   And yes, I would prefer this *convenient shortcut* to cease and desist.",
+      "created_at": "2020-08-05T18:19:48Z",
+      "updated_at": "2020-08-05T18:19:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I see. You should have been talking about _barewords_ then, given that that's what you used in your examples:\r\n\r\n> That is, `.` by itself should emit a DirectoryInfo, whereas `t.txt` should emit a FileInfo.\r\n\r\nOf course, if you truly meant quoted expression-mode _strings_, then the existing behavior mustn't change: `'.'` and `'t.txt'` must output verbatim `.` and `t.txt`, respectively.\r\n\r\nJust to clarify: Are you advocating the _removal of the existing ability_ to use, say, `./file.txt` to open that file in the system's default GUI text editor (even if you're planning to have it do something different)?\r\n\r\nIf that is truly what you want, please open a new issue - though I don't ever see such a change happening (nor do I think there's a good reason for it).\r\n\r\n\r\n\r\n",
+      "created_at": "2020-08-05T18:37:39Z",
+      "updated_at": "2020-08-05T18:41:23Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Re-reading your original comment, I think I now see what you meant:\r\n\r\nHowever, we have currently have an easy-to-grasp dichotomy:\r\n\r\n* A bareword as the first token that can't be interpreted as a number literal triggers argument-mode parsing where that bareword is invariably treated as a _command_ to be _invoked_.\r\n\r\n* In case of a quoted string or a number-literal bareword, the _value_ of that expression is _output to the pipeline_.\r\n\r\nLeaving the breaking nature of your proposal with respect to bareword file paths aside:\r\n\r\nWhat you're proposing  - e.g. `.` emitting a `DirectoryInfo` instance to the pipeline - amounts to a potentially confusing blurring of this distinction.\r\n\r\nIt also doesn't naturally extend to file-system item paths that _require quoting_ or are expressed via variables.\r\n\r\n",
+      "created_at": "2020-08-05T18:56:55Z",
+      "updated_at": "2020-08-05T18:56:55Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "I envisage breaking rule #&zwnj;1, in that PowerShell should consider *whether* the bareword corresponds to a command or not.\r\n  - If it is a command, execute it!\r\n  - If it is an item that is not a command, emit its `FileSystemInfo` to the pipeline!\r\n  - If it cannot be found, handle the error!\r\n\r\nThere are no file-system paths that *require quoting*, so I am not sure what you mean by that.",
+      "created_at": "2020-08-05T19:35:08Z",
+      "updated_at": "2020-08-05T19:35:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> There are no file-system paths that _require quoting_, so I am not sure what you mean by that.\r\n\r\n`C:\\Program Files`, for instance. You cannot use that as a bareword, because it would be interpreted as executing `C:\\Program` with argument `Files`.\r\n",
+      "created_at": "2020-08-05T19:44:08Z",
+      "updated_at": "2020-08-05T19:44:08Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "``C:\\Program` Files\\dotnet\\dotnet.exe`` works like a charm.",
+      "created_at": "2020-08-05T20:20:00Z",
+      "updated_at": "2020-08-05T20:20:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sure, you can _work around_ the problem, but to be _forced_ to do that (not being able to use single- or double-quoting) makes this an awkward solution. Also, it doesn't address _variable-based_ paths; e.g., `$env:ProgramFiles`.\r\n\r\nAside from the conceptual problems with your proposal, let me restate that I think it has little chance of getting implemented for the reason that it'll break existing bareword non-executable file-path behavior alone. I suggest we stop discussing it here. If you really feel strongly enough to push for a breaking change, please open a new issue.\r\n",
+      "created_at": "2020-08-05T20:38:02Z",
+      "updated_at": "2020-08-05T20:38:02Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "Anything you quote becomes a string in PowerShell.  In order to have a bareword with funny characters, you need to escape them.  Quoting is a work-around for people who find escaping too difficult.",
+      "created_at": "2020-08-06T07:06:34Z",
+      "updated_at": "2020-08-06T07:06:34Z"
+    }
+  ],
+  "created_at": "2020-05-11T22:20:57Z",
+  "number": 12625,
+  "state": "open",
+  "title": "Get-Command reports non-executable files (documents) as applications",
+  "updated_at": "2020-08-06T07:06:35Z"
+}

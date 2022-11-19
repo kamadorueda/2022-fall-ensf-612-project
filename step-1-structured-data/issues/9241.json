@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9241",
+  "author": "rmbolger",
+  "body": "I'm honestly not sure whether this is a PowerShell/.NET bug or a bug on the server side because I don't know enough about the underlying specs to say who is right. Essentially, I'm trying to use the new multipart support in `Invoke-RestMethod` to upload a file using the [PaloAlto 8.0 XML API](https://docs.paloaltonetworks.com/pan-os/8-0/pan-os-panorama-api/get-started-with-the-pan-os-xml-api.html). Using curl, the upload works as expected. Using IRM, it returns an HTTP 400 response with the message, \"Bad upload state. Incomplete boundary.\"\r\n\r\nI have Fiddler captures of both requests and the only significant difference I can find is that the `boundary` value in the Content-Type header is surrounded by quotes when using IRM and not when using curl. For example:\r\n\r\n```\r\n# curl\r\nContent-Type: multipart/form-data; boundary=------------------------05c3b7e48217500c\r\n\r\n# Invoke-RestMethod\r\nContent-Type: multipart/form-data; boundary=\"a8174dc8-8c8b-4090-a7fb-678422e73e79\"\r\n```\r\n\r\nIf I use Fiddler to edit the IRM request, remove the quotes, and replay it, the request succeeds which leads me to believe the PAN API interpreter doesn't like the quotes. Whether the quotes are allowed by the relevant specs or not, I have no clue. \r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n# in this example, the file upload is PEM formatted x509 certificate file\r\n$form = @{file=(Get-ChildItem C:\\cert.pem)}\r\n$pankey = '<my auth key>'\r\n$querystring = \"type=import&category=certificate&certificate-name=test&format=pem&key=$pankey\"\r\n# (the Accept header is just to mimic the curl command more closely)\r\nInvoke-RestMethod \"https://pan.example.com/api/?$querystring\" -Method Post -Form $form -Headers @{Accept='*/*'}\r\n```\r\n\r\n# Expected behavior\r\n\r\nAn HTTP 200 response with a parsed version of the following XML body.\r\n\r\n```xml\r\n<response status=\"success\"><result>Successfully imported test into candidate configuration</result></response>\r\n```\r\n\r\n# Actual behavior\r\n\r\nAn HTTP 400 response with the following body.\r\n\r\n```xml\r\n<!DOCTYPE html>\r\n<html><head><title>Document Error: Bad Request</title></head>\r\n<body><h2>Access Error: 400 -- Bad Request</h2>\r\n<p>Bad upload state. Incomplete boundary\r\n</p>\r\n</body>\r\n</html>\r\n```\r\n\r\n# Environment data\r\n\r\nI'm currently testing this on Windows Server 2019 Standard (1809) with both the released PowerShell 6.1.3 package and the preview 6.2.0 RC.1 package.\r\n\r\n```none\r\nPS C:\\> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.3\r\nPSEdition                      Core\r\nGitCommitId                    6.1.3\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nPS C:\\> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    6.2.0-rc.1\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nEdit: Forgot to tag @markekraus \r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @markekraus ",
+      "created_at": "2019-03-28T01:50:21Z",
+      "updated_at": "2019-03-28T01:50:21Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "As I suspected, we are dealing with API endpoints which are not RFC compliant:\r\n\r\nhttps://tools.ietf.org/html/rfc7578#section-4.1\r\n\r\n> it is often necessary to enclose the \"boundary\" parameter values in quotes in the Content-Type header field.\r\n\r\nAPIs _should_ implement support for quoted boundary parameter values. I would suggest this is actually a bug in the API and neither .NET Core or PowerShell. \r\n\r\nThat being said, this is not the first time this has been reported to me personally. Additionally, we already have modified behavior from .NET Core in filenames #6780.\r\n\r\nhttps://stackoverflow.com/questions/30926645/httpcontent-boundary-double-quotes Provides a possible workaround\r\n\r\nUnfortunately, changing this may result in breaking changes for other endpoints. *sigh.",
+      "created_at": "2019-03-28T04:27:40Z",
+      "updated_at": "2019-03-28T04:27:40Z"
+    },
+    {
+      "author": "rmbolger",
+      "author_association": "NONE",
+      "body": "I had a feeling this might be the case. Gotta love poor API implementations. Thanks for the potential workaround though (and all the previous improvements to the web cmdlets). For my particular use-case, I can probably make that work.\r\n\r\nIn the general case, I can definitely see how it's a damned if you do, damned if you don't situation.",
+      "created_at": "2019-03-28T04:48:10Z",
+      "updated_at": "2019-03-28T04:48:10Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus would it be acceptable to retry without the quotes if you get a 400 error?",
+      "created_at": "2019-03-28T06:04:23Z",
+      "updated_at": "2019-03-28T06:04:23Z"
+    },
+    {
+      "author": "rmbolger",
+      "author_association": "NONE",
+      "body": "It's definitely more work than just using `-Form`, but here's a function to generate a `MultiPartFormDataContent` object with the workaround that seems to be working for me:\r\n\r\n```powershell\r\nfunction New-MultipartFileContent {\r\n    [OutputType('System.Net.Http.MultipartFormDataContent')]\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(Mandatory)]\r\n        [System.IO.FileInfo]$File,\r\n        [string]$HeaderName='file'\r\n    )\r\n\r\n    # build the header and make sure to include quotes around Name\r\n    # and FileName like https://github.com/PowerShell/PowerShell/pull/6782)\r\n    $fileHeader = [System.Net.Http.Headers.ContentDispositionHeaderValue]::new('form-data')\r\n    $fileHeader.Name = \"`\"$HeaderName`\"\"\r\n    $fileHeader.FileName = \"`\"$($File.Name)`\"\"\r\n\r\n    # build the content\r\n    $fs = [System.IO.FileStream]::new($File.FullName, [System.IO.FileMode]::Open)\r\n    $fileContent = [System.Net.Http.StreamContent]::new($fs)\r\n    $fileContent.Headers.ContentDisposition = $fileHeader\r\n    $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream')\r\n\r\n    # add it to a new MultipartFormDataContent object\r\n    $mp = [System.Net.Http.MultipartFormDataContent]::new()\r\n    $mp.Add($fileContent)\r\n\r\n    # get rid of the quotes around the boundary value\r\n    # https://github.com/PowerShell/PowerShell/issues/9241\r\n    $b = $mp.Headers.ContentType.Parameters | Where-Object { $_.Name -eq 'boundary' }\r\n    $b.Value = $b.Value.Trim('\"')\r\n\r\n    # return an array wrapped copy of the object to avoid PowerShell unrolling \r\n    return @(,$mp)\r\n}\r\n```\r\n\r\nUsing this function's return value with the `-Body` parameter gets successfully processed by the PAN API now. Though it has the potential to leave the file handles open if you don't actually send the output to `Invoke-RestMethod`. For smaller files, you can use `ReadAllBytes` and `ByteArrayContent` rather than `StreamContent` to avoid leaving file handles open.",
+      "created_at": "2019-03-28T06:35:13Z",
+      "updated_at": "2019-04-02T15:35:49Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT maybe retrying is ok. I'm a bit cautious of retries with Multipart forms. If they contain several large files, we could be duplicating the payload for an issue that may not be related to a quoted boundary parameter.",
+      "created_at": "2019-03-28T14:10:28Z",
+      "updated_at": "2019-03-28T14:10:28Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus my reading of that sentence in the RFC \"...often necessary...\" doesn't mean mandatory.  I wonder if curl always leaves off the quotes in which case it might be best to align with their default.  ",
+      "created_at": "2019-03-28T16:09:08Z",
+      "updated_at": "2019-03-28T16:09:08Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Right. Supplying it is not mandatory. But since it is a possible request, that means an API _should_ implement it. One that doesn't is non-compliant. But the opposite may be true to. I'm just pointing out that if we change the behavior we may end up causing APIs that mistakenly require it (which are also non-compliant) to suddenly break for users. Just laying out the risks of the change. No clue how likely that risk is.",
+      "created_at": "2019-03-28T16:46:15Z",
+      "updated_at": "2019-03-28T16:46:15Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "My general position is that without any data, following curl's lead is more likely to be right than wrong.  ",
+      "created_at": "2019-03-29T01:21:38Z",
+      "updated_at": "2019-03-29T01:21:38Z"
+    }
+  ],
+  "created_at": "2019-03-28T00:55:36Z",
+  "number": 9241,
+  "state": "open",
+  "title": "Multipart upload with Invoke-RestMethod fails due to boundary quoting in Content-Type header",
+  "updated_at": "2019-04-02T15:35:49Z"
+}

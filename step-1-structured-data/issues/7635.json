@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7635",
+  "author": "msftrncs",
+  "body": "Steps to reproduce\r\n------------------\r\nI am describing a wild use case here, but noticed this while reading about_Parsing doc, referring to the stop-parsing symbol.  The doc states that %% environment variable substitution occurs as well, as well as supports the pipe character to end the command.  I quickly determine that double quotes are also included in the parsing past the stop-parsing symbol.  The double quote parsing seems to apply before the variable substitution.\r\n\r\n```powershell\r\n${env:hello\" } = $env:homepath\r\ncmd --% /k %hello\" % | write-host\r\n```\r\n\r\nNever mind the /k, this was so I could see the result and test environment variables in CMD.  Funny thing, CMD destroyed the %CMDCMDLINE% dynamic variable, instead filling it with the error message instead of the command line.\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nI expected CMD to get called, echo my home path, and then powershell would pipe the result back to write-host, all just for an example.  I expect the double-quote in the variable name to be treated only as part of the variable name, and not for string parsing through the rest of the command line.\r\n\r\nActual behavior\r\n---------------\r\n\r\nInstead, CMD tells me that `write-host is not recognized as an internal or external command, operable program, or batch file.`\r\n\r\nTask manager indicates the command line to CMD was `/k echo \\Users\\[user] | write-host`\r\n\r\nThis indicates the double-quote in the environment variable expression was treated as capturing the pipe character.\r\n\r\nI was attempting to provide support for the pipe handling in a fork of VS Code's PowerShell syntax scoping tmLanguage document, but this makes it really difficult to do right.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.4\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.4\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Now, this said, I can understand why what I expect is not what I get, but that doesn't help me not expect it.  \r\n\r\nWhen I first read about the stop-parsing symbol, I had the understanding that no more parsing occurred past it, and that is how VS Code's PowerShell syntax scoping treats it, but now I know that is not the case, and I actually think the --% symbol is worse at providing the solution than the problem it solves, because there is still behavior I cannot always account for.   \r\n\r\nAt least in CMD scripting when I need to MAKE SURE a '%' gets passed, I can use two '%%', and the variable substitution is not conducted, but that doesn't even happen here; instead I got the substitution surrounded with '%'s.  \r\n\r\nAt least using a regular native command construct in PowerShell, I know exactly how to escape it, and I know I have to do it if I move the command from another scripting engine, but the --% stop parsing symbol doesn't assure me that I can just not translate at all, and in some cases, may not even work.\r\n\r\nSo, I am not sure there is anything that can be fixed here, as its much more complicated than it would first seem.\r\n",
+      "created_at": "2018-08-27T04:49:16Z",
+      "updated_at": "2018-08-27T04:49:16Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Looks like this is the behaviour in Windows PowerShell too.\r\n\r\nCompare the following:\r\n```powershell\r\n> $env:banana = \"Hi\"\r\n> cmd /c --% echo %banana% | Write-Output -OutVariable x\r\nHi\r\n> $x\r\nHi\r\n```\r\n\r\nAnd\r\n```powershell\r\n> ${env: \" banana} = \"Hi\"\r\n> cmd /c --% echo % \" banana% | Write-Output -OutVariable x\r\n'Write-Output' is not recognised as an internal or external command, operable program or batch file.\r\n```\r\n\r\nIf you enter this interactively with PSReadLine enabled you can see that the insertion of a quote before the pipe causes the `Write-Output` to not register as a command name, so I'm guessing this is a bug where the tokeniser is still looking for a closing quote rather than being in \"stop-parsing\" mode and looking only for a `|` or a newline.",
+      "created_at": "2018-08-27T05:38:56Z",
+      "updated_at": "2018-08-27T05:38:56Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "If you look in [tokenizer.cs:2017](https://github.com/PowerShell/PowerShell/blob/358e8abefef5973b7e1f9608a38240846f620a59/src/System.Management.Automation/engine/parser/tokenizer.cs#L2017) you will see that '\"' is processed explicitly to allow '|' and '&&' to be included in the args to `cmd.exe`.  So there is still some level of processing going on after `--%`. This is easy enough (but breaking)  to change but is it worth it to lose the ability to use `|` and `&&` in `cmd` cmds in favour of allowing double quotes in variables? (Is that really a common thing?). Certainly this is a docs issue as there is nothing about this behaviour in the docs at all: [about_Parsing](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-6) Overall, the doc'ed behaviour - consumes everything up to a newline might be better. You wouldn't be able to stream the output of the command into a pipeline, but you could still capture it in a variable. And `|` and `&&` would still work for `cmd.exe`.",
+      "created_at": "2018-08-28T18:56:43Z",
+      "updated_at": "2018-08-28T18:56:43Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "I've marked it as Issue-Discussion. Technically it's working as by design. Whether we want to keep that design is an open question. Perhaps this is a candidate for an `Experimental` flag.",
+      "created_at": "2018-08-28T18:58:42Z",
+      "updated_at": "2018-08-28T18:58:42Z"
+    }
+  ],
+  "created_at": "2018-08-27T04:36:59Z",
+  "number": 7635,
+  "state": "open",
+  "title": "stop parsing symbol: double-quotes parse first, before variable substitution",
+  "updated_at": "2018-08-28T18:58:42Z"
+}

@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4576",
+  "author": "mklement0",
+  "body": "In order to pass a parameter _value_ that _looks like_ a parameter _name_ you currently have to use _quoting_ - _sometimes_.\r\n\r\nHowever, if you explicitly precede the value with its parameter _name_ as opposed to passing it _positionally_, no quoting should be necessary.\r\n\r\nEspecially with respect to PowerShell's CLI and all its quoting headaches, this extra quoting requirement should be reconsidered - see #4351\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n'hi'>'-t.txt'; Get-Content '-t.txt'; Get-Content -LiteralPath -t.txt\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nhi\r\nhi\r\n```\r\n\r\nThe two `Get-Content` commands should be equivalent: \r\n\r\n* In the 1st case, the quoting implies that `-t.txt` is a parameter _value_ rather than a _name_. \r\n* In the 2nd case, the explicit use of  parameter `-LiteralPath`, which _requires_ a value, should unambiguously identify the _next_ token as the parameter _value_ - even if it starts with `-` - _whether quoted or not_.\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nhi\r\nGet-Content : Parameter cannot be processed because the parameter name 't' is ambiguous. Possible matches include: -TotalCount -Tail.\r\n...\r\n```\r\n\r\nThat is, despite being preceded by `-LiteralPath`, which _requires_ a parameter value, \r\n _unquoted_ `-t.txt` was _not_ interpreted as that parameter's _value_, but as another parameter _name_.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.5 on macOS 10.12.6\r\nPowerShell Core v6.0.0-beta.5 on Ubuntu 16.04.3 LTS\r\nPowerShell Core v6.0.0-beta.5 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.483 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2017-08-15T20:03:03Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'll weight in that this is not a good idea, IMO.\r\n\r\nFor example:\r\n```powershell\r\nGet-Command -Module -Name Get-Help\r\n```\r\n\r\nWith your proposal in place, looking at that command should it be interpreted as\r\n\r\n```powershell\r\nGet-Command -Module '-Name' -Name 'Get-Help'\r\n````\r\n\r\nor\r\n\r\n```powershell\r\nGet-Command  -Name 'Get-Help' -Module # Missing an argument for parameter 'Module'...\r\n```\r\n\r\nThis could cause unexpected/unpredictable behavior and lead to a bad UX. This also opens a Pandora's box of exceptions like passing string parameters with subexpression operators. Strings that contain special tokens should be quoted while strings without special token can be passed without quoting as a kind of convenient syntactic sugar. Unquoted string parameters should be the exception, not the rule, IMO.",
+      "created_at": "2017-08-15T09:17:29Z",
+      "updated_at": "2017-08-15T09:17:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus:\r\n\r\nI get your concern, but do note:\r\n\r\n* that there's no syntactical ambiguity: in PowerShell, a parameter either _requires_ a value or is a _switch_; so, for any given parameter name specified explicitly, it is unambiguously implied whether the next token is a parameter _value_ or a _different parameter_. \r\n\r\n* that even single-character `-` suffixes - where there's no obvious resemblance to a parameter name - can trigger the problem; e.g., `-n`.\r\n\r\n* that the current behavior is _inconsistent_:\r\n\r\n```powershell\r\n> Write-Output -InputObject -z\r\n-z\r\n\r\n> Write-Output -InputObject -n\r\nWrite-Output : Missing an argument for parameter 'InputObject'. Specify a parameter of type 'System.Management.Automation.PSObject[]' and try again.\r\n```\r\n\r\nAs you can see, `-z`, because it happens not to be the _start of_ a parameter name, is accepted as `-InputObject`'s  parameter _value_.\r\n\r\nBy contrast, because `-n`  happens to be the start of `-NoEnumerate`, it is interpreted as that, and then `-InputObject` has no value, and the command _breaks_.\r\n\r\n---\r\n\r\nI suppose that one way to resolve the problem would be to disallow unquoted values that start with `-`, but my concern would then be PowerShell's _CLI_, where introducing such an additional quoting requirement (e.g., the need to pass a script filename `-t.ps1` _explicitly quoted_) would further aggravate the quoting headaches, e.g., when calling from `bash`:\r\n\r\n```powershell\r\n# Currently works.\r\npowershell -noprofile -file -t.ps1\r\n\r\n# Here's what the need to quote explicitly would entail:\r\n# *2* layers of quoting: an outer layer interpreted by Bash that gets removed before\r\n# PS is passed the value, and the inner layer for PowerShell's benefit.\r\npowershell -noprofile -file \"'-t.ps1'\"\r\n```\r\n\r\nI guess the CLI could continue to operate differently, but such inconsistency is ill-advised.\r\n",
+      "created_at": "2017-08-15T14:44:09Z",
+      "updated_at": "2017-08-15T14:58:10Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": " > that there's no syntactical ambiguity: in PowerShell, a parameter either requires a value or is a switch;\r\n\r\nYes and I'm suggesting this would introduce that ambiguity. In my example you could consider `Get-Help` the positional parameter for `-Name` and `-Name` as the string parameter for `-Module`. That's not what I as a user would expect. I would expect to be told I forgot to provide a value for `-Module`. Instead, I would just get nothing in return assuming I don't have a `Get-Help` command in a `-Name` module.\r\n\r\n> I suppose that one way to resolve the problem would be to disallow unquoted values that start with `-`\r\n\r\nIf any change is made, I would say that this one is the way to go. I didn't even know `-` could begin any unquoted string value. \r\n\r\nAs for the rest, I'm not sure that's the case unless i misunderstand you. It appears you are seeking consistency between parent shells and PowerShell syntax. Trying to make the PowerShell CLI consistent with other Shells is a bit futile.\r\n\r\nWhen PowerShell is the parent shell, you already have to quote `-t.ps1`\r\n\r\n```\r\nPS C:\\> powershell -noprofile -file -t.ps1\r\nProcessing -File '-t' failed because the file does not have a '.ps1' extension. Specify a valid Windows PowerShell script file name, and then try again.\r\n\r\nPS C:\\> powershell -noprofile -file '-t.ps1'\r\n# Executes the contents of -t.ps1\r\n```\r\n\r\nI wouldn't expect PowerShell's argument parsing to be consistent with Bash, CMD, ksh, python REPL, or other interactive CLI. ",
+      "created_at": "2017-08-15T15:39:18Z",
+      "updated_at": "2017-08-15T15:39:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Yes and I'm suggesting this would introduce that ambiguity.\r\n\r\nThere's no ambiguity, because what I'm proposing is state-dependent, _based on the specific syntax of the command in question_:\r\n\r\n* With a clean slate, `-Name` is unambiguously the parameter _name_.\r\n* Once that has been recognized, given that the `-Name` parameter _requires a value_, the _next_ token is unambiguously the parameter _value_ - even if it looks like a _parameter_.\r\n\r\nIt's not that common a pattern in POSIX-like shells, but the equivalent is an _option_ with a _mandatory_ option-argument; for instance, if you want to pass a script filename to `sed` via its `-f` option, the next token is _invariably_ treated as the filename, even if it starts with `-`:\r\n\r\n```sh\r\nsed -f -my_script ...  # -my-script is invariably treated as the option *argument*\r\n```\r\n\r\nAgain, in the case of `Get-Command -Module -Name Get-Help` it is obvious what the _intent_ is, but let's not forget that _relative to the intent_ it is a _syntax error_ - based on a misunderstanding of how the `-Module` parameter works.\r\n\r\nIn other cases, such as in my `-n` example, the intent may be quite different, and since `-InputObject -n` is a syntactically unambiguous way to pass `-n` as a _value_ - because `-InputObject` _requires_ one - it should be treated as such.\r\n\r\n---\r\n\r\n```powershell\r\nPS C:\\> powershell -noprofile -file -t.ps1\r\nProcessing -File '-t' failed because the file does not have a '.ps1' extension. Specify a valid Windows PowerShell script file name, and then try again.\r\n```\r\n\r\nThat this fails from _inside_ PowerShell looks like a bug.\r\n\r\n---\r\n\r\n> I wouldn't expect PowerShell's argument parsing to be consistent with Bash, CMD, ksh, python REPL, or other interactive CLI.\r\n\r\nI didn't mean other shells, I meant the consistency between PowerShell's CLI and parameter passing to cmdlets and functions:\r\n\r\nIf:\r\n\r\n* `powershell -noprofile -file -t.ps1` works (which it should and currently does from `cmd.exe` and `bash` and, as stated, that it doesn't from _inside_ PowerShell should be considered a _bug_), \r\n\r\n* something like `Get-Content -LiteralPath -t.ps1` should work too.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-08-15T16:09:02Z",
+      "updated_at": "2017-08-15T16:13:36Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "> that it doesn't from inside PowerShell should be considered a bug\r\n\r\nI don't think so. It should be considered a difference of syntax between shells. How a shell parses arguments to pass to binary is up to that shell and there are only similarities between shells. PowerShell *as a shell* will have a different method for parsing and passing arguments to binaries then Bash, CMD, etc. that would be expected. What one shell deems an important token another may deem irrelevant. \r\n\r\nInternally, PowerShell is consistent:\r\n\r\n```powershell\r\n#Doesn't work\r\npowershell -noprofile -file -t.ps1\r\nGet-Content -LiteralPath -t.ps1\r\n\r\n# Works\r\npowershell -noprofile -file '-t.ps1'\r\nGet-Content -LiteralPath '-t.ps1'\r\n```",
+      "created_at": "2017-08-15T16:24:05Z",
+      "updated_at": "2017-08-15T16:24:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The _way_ in which it fails tells us that something is amiss - the two commands fail for different reasons:\r\n\r\n* `Get-Content -LiteralPath -t.ps1` fails, because `-t.ps1` is interpreted as a parameter _name_ (the starting point of our discussion - purely _syntactically_, given that `-`-prefixed barewords are allowed, this _should_ work).\r\n\r\n* `powershell -noprofile -file -t.ps1` fails due to an _unrelated bug_, because, even though `-t.ps1` is interpreted as a parameter _value_ in principle, it unexpectedly considers the `.ps1` suffix a _separate argument_, and `-file` only sees filename `-t`, not `-t.ps1`\r\n\r\nThe latter, as I've just discovered, is a generic parsing bug:\r\n\r\n(At least I see no reason why, if `-`-prefixed tokens can be barewords in principle, a `.`-prefixed suffix should cause the bareword to be split into 2 arguments.)\r\n\r\n```powershell\r\n# OK\r\n> Write-Output -InputObject -t\r\n-t\r\n\r\n# BROKEN\r\n> Write-Output -InputObject -t.ps1\r\nWrite-Output : A positional parameter cannot be found that accepts argument '.ps1'.\r\n```\r\n\r\nEssentially, PS parses `Write-Output -InputObject -t.ps1` as if `.ps1` had been passed as a _separate argument_ - `Write-Output -InputObject -t .ps1` - even though I see no good reason for that - `Write-Output -InputObject t.ps1` (value doesn't start with `-`) works just fine, for instance.\r\n\r\n\r\n",
+      "created_at": "2017-08-15T16:49:39Z",
+      "updated_at": "2017-08-15T16:54:46Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Huh.. to add to the weirdness... this is totally possible...\r\n\r\n```powershell\r\n$Variable = 'temp'\r\nWrite-Output -t*+_*^%$variable#@!<>/?\\]=+-\r\nWrite-Output -InputObject -t*+_*^%$variable#@!<>/?\\]=+-\r\n#output: for both:\r\n-t*+_*^%$variable#@!<>/?\\]=+-\r\n```\r\n\r\n`(`,`)`,`'`,`\"`, `[`,`{`,`}` and `.` all break it, but any of the others, including what would normally be a variable, is treated as a literal string.\r\n\r\nI really think the solution is to treat `-` as a reserved prefix for named parameters. I would expect \r\n\r\n```powershell\r\nWrite-Output -NonexistentParameter\r\n```\r\nto throw a `NamedParameterNotFound` exception, and I would expect\r\n\r\n```powershell\r\nWrite-Output -InputObject -NonexistentParameter\r\n```\r\n\r\nTo throw a `MissingArgument` exception. I definitely would not expect either to output `-NonexistentParameter` as a string.",
+      "created_at": "2017-08-15T17:23:17Z",
+      "updated_at": "2017-08-15T17:40:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good find re lack of expansion.\r\n\r\nI've created #4578 to focus on the aspect of `-`-prefixed bareword parsing (and to generally ask the question whether it should be supported).\r\n\r\nI'm with you with respect to `Write-Output -NonexistentParameter`: without a preceding, valid parameter name that requires a value, `-NonexistentParameter` should be parsed as a parameter _name_ (and in order to force interpretation as a _positional value_ the user would have to quoting; e.g.,  \r\n`'-NonexistentParam'` or `` `-NonexistentParam ``)\r\n\r\nI disagree with respect to `Write-Output -InputObject -NonexistentParameter` (as stated, the use of `-InputObject` unambiguously makes the following token its _value_, so `-NonexistentParam` should print, as happens now, but _inconsistently_), but #4578 will hopefully bring clarity.",
+      "created_at": "2017-08-15T18:29:16Z",
+      "updated_at": "2017-08-15T18:29:16Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Feel free to continue discussing, but I'm closing the issue because I can't see adding more complexity to the parameter binder to change this behavior.\r\n\r\nThe \"workaround\" is in my opinion the preferred style - use quotes.\r\n\r\nThere is no confusion to human readers.\r\nThere is no potential ambiguity for the parameter binder to deal with.\r\nThe script is future proof, adding a new parameter that might match some argument won't cause a problem.",
+      "created_at": "2017-08-15T20:03:03Z",
+      "updated_at": "2017-08-15T20:03:03Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 \r\n\r\n> as stated, the use of `-InputObject` unambiguously makes the following token its value, so `-NonexistentParam` should print, as happens now, but inconsistently\r\n\r\nThis may be unambiguous from a code standpoint. But from a user standpoint, that would be really confusing. \r\n\r\n```powershell\r\nRemove-Item -force -Path -wwhatif\r\nRemove-Item -force -Path -whatiff\r\nRemove-Item -force -Path -watif\r\n````\r\n\r\nNow my very important `-wwhatif` file is deleted. :( Maybe I was just trying to test out the command but flubbed the `-whatif` parameter. My expectation as a user would be that I should be told `-Path` is missing its value or that `-wwhatif` is not a valid paramter, not that `-wwhatif` is either deleted or not found.",
+      "created_at": "2017-08-15T20:09:33Z",
+      "updated_at": "2017-08-15T20:09:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus: \r\n\r\nThat's a good example, and I can see how requiring quoting ultimately makes for a user-friendlier solution.\r\n\r\n@lzybkr seems to agree with you, so this means that the unquoted-`-`-prefixed-bareword-as-value loophole should be closed:  #4591\r\n\r\nFor the sake of a sane OUTSIDE _CLI_, however, I hope that something like `powershell -noprofile -file -t.ps1` will continue to work _from outside of PowerShell_.\r\n",
+      "created_at": "2017-08-16T00:17:54Z",
+      "updated_at": "2017-08-16T00:22:24Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "Another workaround would be to use parameter with explicit argument syntax:\r\n```powershell\r\nWrite-Host -Object: -NoNewline\r\n```",
+      "created_at": "2017-08-16T17:51:50Z",
+      "updated_at": "2017-08-16T17:51:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus:\r\n\r\nActually, on further reflection, I do not think that something like\r\n\r\n```powershell\r\nRemove-Item -force -Path -wwhatif\r\n```\r\n\r\nis a good reason to abstain from using the definition of `-Path` determine the syntactic role of `-wwhatif`. An actual filename matching a misspelled `-WhatIf` is too obscure a scenario to drive the decision on how to properly parse such commands.\r\n\r\nBased on the subsequent discussion in #4591, I'm now more than ever convinced that the only predictable way to handle `-`-prefixed barewords is as I've originally proposed, given the desire to retain the ability to use such barewords, in the context of `ValueFromRemainingArguments`.\r\n\r\nPlease see #4624",
+      "created_at": "2017-08-20T16:46:56Z",
+      "updated_at": "2017-08-20T16:46:56Z"
+    }
+  ],
+  "created_at": "2017-08-15T01:22:34Z",
+  "number": 4576,
+  "state": "closed",
+  "title": "Parameter values disambiguated with their explicit parameter names should not require quoting",
+  "updated_at": "2017-08-20T16:46:56Z"
+}

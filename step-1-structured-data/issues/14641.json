@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14641",
+  "author": "awakecoding",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nThis issue is linked to [Native Host using existing PowerShell 7 installation](https://github.com/dotnet/runtime/issues/46652) that was originally opened in [dotnet/runtime](https://github.com/dotnet/runtime). However, all solution paths in the core runtime are now exhausted, leaving only a possible solution implemented on the PowerShell side instead.\r\n\r\nNative applications can interact with PowerShell through the command-line interface (pwsh.exe), but this approach is very limited as opposed to using ([Microsoft.PowerShell.SDK](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.powershell?view=powershellsdk-7.0.0)) in a .NET application. The goal of this feature request is to expose an SDK-like interface to native applications written in C/C++ or Rust using ***only an existing PowerShell 7 installation, loaded and hosted dynamically at runtime, with no additional files outside of PowerShell***.\r\n\r\n[A working proof-of-concept was already completed](https://github.com/awakecoding/pwsh-native-host), but it requires an additional assembly file that needs to be distributed outside of PowerShell. This assembly file contains a single helper function used to load the real Microsoft.PowerShell.SDK native-to-managed function bindings in memory. [Many solution paths were explored with the .NET team in the original issue, but none appears acceptable at this point](https://github.com/dotnet/runtime/issues/46652#issuecomment-759045247). Since the .NET team won't provide a way to load additional assemblies in-memory from the hostfxr APIs, the proposed solution would be to expose the required helper function inside PowerShell.\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nThe PowerShell native host proof-of-concept does the following:\r\n\r\n- Find the PowerShell installation path (directory where pwsh.exe is)\r\n- Find the corresponding hostfxr native library (libhostfxr.so)\r\n- Load the hostfxr library + hostfxr API functions dynamically\r\n- Load the pwsh.dll runtimeconfig.json file with hostfxr APIs\r\n- Load managed assembly containing SDK bindings in memory\r\n- Call PowerShell SDK functions from native code through bindings\r\n\r\nThe loading of the managed assembly containing the SDK bindings is currently done using a helper assembly file containing a single function:\r\n\r\n```\r\n        public static void LoadAssemblyData(IntPtr ptr, int size)\r\n        {\r\n            byte[] bytes = new byte[size];\r\n            Marshal.Copy(ptr, bytes, 0, size);\r\n            Stream stream = new MemoryStream(bytes);\r\n            AssemblyLoadContext.Default.LoadFromStream(stream);\r\n        }\r\n```\r\n\r\nThis LoadAssemblyData function could be exported by any of the PowerShell assemblies, and would be accessible to native applications seeking to load their own bindings in-memory. The hostfxr APIs are relatively small and only allow calls to functions with primitive data types. Native applications can call any managed functions given the proper bindings, but bindings can currently only be loaded from files, making it impossible to embed as resources inside an application or a library.\r\n\r\nOn the native application side, the build process would look like the following:\r\n\r\n- Generate C# bindings\r\n- Generate C/C++/Rust bindings\r\n- Compile native code\r\n- Embed managed bindings\r\n\r\nAt runtime, the native application only has to load its managed bindings in-memory before calling the native wrapper functions that use them. Exposing a function meant to load managed bindings in-memory is preferred over exposing a larger set of native wrappers, because it only has to be done once without modifying PowerShell ever again, making it a very simple, highly decoupled change.\r\n\r\nImagine publishing a \"pwsh_host\" Rust library on crates.io, where any Rust application could magically load and execute PowerShell with no link-time dependencies, this is what this feature would unlock. We're 99% there, I just need a fix for the last step!",
+  "closed_at": "2021-04-28T21:28:41Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> We're 99% there, I just need a fix for the last step!\r\n\r\nI suggest you to pull the PR (with prototype at least).",
+      "created_at": "2021-01-20T15:47:22Z",
+      "updated_at": "2021-01-20T15:47:22Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov it should be a relatively minor change, but it always helps to ask where people would want to see this function added. I think the best place to put it would be inside System.Management.Automation.dll because it would be available in the following use cases:\r\n\r\n- Existing PowerShell installation (the primary goal of this issue)\r\n- Redistribution of Microsoft.PowerShell.SDK from nuget packages\r\n\r\nThe other thing that is subject to discussion besides the assembly file, is the namespace in which to place the native helper functions. The \"LoadAssemblyData\" can be anywhere inside System.Management.Automation.dll as long as it is static.",
+      "created_at": "2021-01-21T18:32:23Z",
+      "updated_at": "2021-01-21T18:32:23Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT @joeyaiello feel free to ask any questions, all I need is that LoadAssemblyData static function inside System.Management.Automation.dll and I can expose PowerShell SDK-like functionality to any native language with zero link-time dependency, loading and hosting it PowerShell entirely at runtime from its install location, no additional installation packages required. It would be trivial to get it all to work as a Rust library, or any other native language that isn't .NET.",
+      "created_at": "2021-01-21T18:34:54Z",
+      "updated_at": "2021-01-21T18:34:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> it always helps to ask where people would want to see this function added\r\n\r\nI guess `public sealed class UnmanagedPSEntry` is for this code. Do you need PowerShell ConsoleHost?",
+      "created_at": "2021-01-21T18:47:03Z",
+      "updated_at": "2021-01-21T18:47:03Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov the only thing I need is this single function, somewhere in the PowerShell DLLs, such that I can load and call it from there using the hostfxr APIs. This LoadAssemblyData function will be used to load my real assembly in-memory containing a much larger set of native-to-managed bindings to the PowerShell SDK functions. Once I can do that, I can make wrappers to pretty much anything available to managed code, so I guess this potentially includes the PowerShell ConsoleHost.",
+      "created_at": "2021-01-21T18:56:11Z",
+      "updated_at": "2021-01-21T18:56:11Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looking at the structure of System.Management.Automation.dll, I'm thinking one place that could make sense would be to expose the native loader helpers alongside the classes dealing with the AssemblyLoadContext:\r\n\r\nhttps://github.com/PowerShell/PowerShell/tree/master/src/System.Management.Automation/CoreCLR\n\n<blockquote><img src=\"https://repository-images.githubusercontent.com/49609581/aad0ad80-cdec-11ea-8248-a37bc0571bfd\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShell\">PowerShell/PowerShell</a></strong></div><div>PowerShell for every system! Contribute to PowerShell/PowerShell development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2021-01-21T19:03:08Z",
+      "updated_at": "2021-01-21T19:03:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShellAssemblyLoadContext is internal :-( Utils.cs too. I suggest to start the prototype with _public_ sealed class UnmanagedPSEntry. Later we can change this if MSFT team points better place.",
+      "created_at": "2021-01-22T08:10:50Z",
+      "updated_at": "2021-01-22T08:10:50Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "> PowerShellAssemblyLoadContext is internal :-( Utils.cs too. I suggest to start the prototype with _public_ sealed class UnmanagedPSEntry. Later we can change this if MSFT team points better place.\r\n\r\nYou mean this class containing the [Start() function inside Microsoft.PowerShell.ConsoleHost.dll](https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.ConsoleHost/host/msh/ManagedEntrance.cs)? \r\n\r\nI'm not so familiar with that part of the code, but is it the only place exposing functions that appear to be meant to be called from unmanaged code specifically? That's the only logical link I can see with the function I need to expose (meant strictly to be called from unmanaged code).",
+      "created_at": "2021-01-22T19:35:13Z",
+      "updated_at": "2021-01-22T19:35:13Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #14652, which has now been successfully released as `v7.2.0-preview.6`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.6)\n",
+      "created_at": "2021-05-27T17:32:29Z",
+      "updated_at": "2021-05-27T17:32:29Z"
+    }
+  ],
+  "created_at": "2021-01-20T14:56:19Z",
+  "number": 14641,
+  "state": "closed",
+  "title": "Loading and hosting existing PowerShell installation dynamically inside native application",
+  "updated_at": "2021-05-27T17:32:29Z"
+}

@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4591",
+  "author": "mklement0",
+  "body": "#4578 shows that you can _sometimes_ use `-`-prefixed bareword as parameter _values_ - namely only if the bareword happens not to (prefix)-match a parameter name of the target command - and when such barewords _are_ recognized as _values_, they don't behave the same way as non-`-`-prefixed barewords with respect to interpolation and being recognized as a single argument.\r\n\r\nThis inconsistency is problematic.\r\n\r\nGiven, @lzybkr's comment at https://github.com/PowerShell/PowerShell/issues/4576#issuecomment-322572999\r\n\r\n> The \"workaround\" is in my opinion the preferred style - use quotes.\r\n\r\nit seems that the desired solution is to _disallow_ `-`-prefixed barewords as _values_ and to _always_ assume that such an _unquoted_ `-`-prefixed token is a parameter _name_.\r\n\r\n```powershell\r\n# Currently interpreted as *value*, because no Write-Output parameter name starts with -z.\r\n# This should no longer be supported.\r\n> Write-Output -InputObject -z\r\n-z\r\n\r\n# Interpreted as *parameter name*, because -n prefix-matches parameter -NoEnumeration\r\n> Write-Output -InputObject -n\r\nWrite-Output : Missing an argument for parameter 'InputObject'. Specify a parameter of type 'System.Management.Automation.PSObject[]' and try again.\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.5\r\n```\r\n",
+  "closed_at": "2017-08-20T16:41:23Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I believe this is very much by design.\r\n\r\nThese parameters as arguments are often parameters themselves, but they are unknown to the cmdlet accepting them.\r\n\r\nHere is a good example:\r\n\r\n```\r\nPS> Get-Command -Syntax Get-ChildItem -Path cert:\r\n\r\nGet-ChildItem [[-Path] <string[]>] [[-Filter] <string>] [-Include <string[]>] [-Exclude <string[]>] [-Recurse] [-Depth <uint32>] [-Force] [-Name] [-UseTransaction] [-CodeSigningCert] [-DocumentEncryptionCert] [-SSLServerAuthentication] [-DnsName <DnsNameRepresentation>] [-Eku <string[]>] [-ExpiringInDays <int>] [<CommonParameters>]\r\n\r\nGet-ChildItem [[-Filter] <string>] -LiteralPath <string[]> [-Include <string[]>] [-Exclude <string[]>] [-Recurse] [-Depth <uint32>] [-Force] [-Name] [-UseTransaction] [-CodeSigningCert] [-DocumentEncryptionCert] [-SSLServerAuthentication] [-DnsName <DnsNameRepresentation>] [-Eku <string[]>] [-ExpiringInDays <int>] [<CommonParameters>]\r\n```\r\n\r\n`Get-Command` accepts it's parameter `ArgumentList` with `ValueFromRemainingArguments`, and in this scenario, values that look like parameters are expected. The use case here is to help determine dynamic parameters (which is why I used `cert:` to show the syntax includes the correct dynamic parameters.)\r\n\r\nI suppose there could be a refinement to `ValueFromRemainingArguments` to specify that parameters are not arguments - that might be useful and avoid confusion in a few cases, but I'm not sure `Write-Object` is such a case as parameters are rarely named with that cmdlet.",
+      "created_at": "2017-08-16T17:29:16Z",
+      "updated_at": "2017-08-16T17:29:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Leaving `ValueFromRemainingArguments` aside for now, which is not that common:\r\n\r\nWhile `Write-Output` was not the best example, there are definitely cmdlets where this inconsistency is more likely to arise:\r\n\r\n`Get-Item -LiteralPath -z` vs. `Get-Item -LiteralPath -p`, for instance.\r\n\r\nThat the _specific content_ of a token (beyond its lexical structure) would decide its _syntactical role_ situtationally sounds iffy to me.\r\n",
+      "created_at": "2017-08-16T23:35:09Z",
+      "updated_at": "2017-08-16T23:35:09Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "For non-cmdlet binding functions or for `ValueFromRemainingArguments`, the current behavior is definitely by design. In other cases, it might be of questionable value, but the behavior is consistent and I guess easy to explain.\r\n\r\nThe parser doesn't interpret the script any differently - you can verify this by looking at the AST, so this is just a parameter binding issue.\r\n",
+      "created_at": "2017-08-16T23:48:45Z",
+      "updated_at": "2017-08-16T23:48:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I suppose there could be a refinement to ValueFromRemainingArguments to specify that parameters are not arguments - that might be useful and avoid confusion in a few cases\r\n\r\nDon't get that, but let me point out how `ValueFromRemainingArguments` is confusing the way it works currently, using a less mind-bending example than `Get-Command`, namely `Join-Path` (as an aside: nothing in `Join-Path -?` tells us that `ValueFromRemainingArguments` is supported):\r\n\r\n```powershell\r\n# OK: non-\"-\"-prefixed tokens\r\n> Join-Path a b c\r\na/b/c\r\n\r\n# OK: quoted \"-\"-prefixed tokens.\r\n> Join-Path '-z' '-z' '-z'\r\n-z/-z/-z\r\n\r\n# BROKEN: not clear what's happening here.\r\n> Join-Path -z -z -z\r\n\r\ncmdlet Join-Path at command pipeline position 1\r\nSupply values for the following parameters:\r\nPath[0]: \r\n\r\n```",
+      "created_at": "2017-08-16T23:48:56Z",
+      "updated_at": "2017-08-16T23:48:56Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Yeah, `ValueFromRemainingArguments` has issues, see https://github.com/PowerShell/PowerShell/pull/2038",
+      "created_at": "2017-08-17T00:05:05Z",
+      "updated_at": "2017-08-17T00:05:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Pragmatically speaking:\r\n\r\n* I know we're talking about edge cases.\r\n\r\n* I know that I can avoid ambiguity by quoting.\r\n\r\nThat said, not having to quote constantly due to uncertainty over how barewords will be interpreted would be nice - after all, use of barewords is a perk of argument mode / shell-like syntax.\r\n\r\n>  the behavior is consistent and I guess easy to explain.\r\n\r\nI'm not trying to be flippant when I say: Please do.\r\n\r\nI'm honestly confused at this point, so if you can give a concise, comprehensive explanation of how `-`-prefixed barewords are _meant_ to be handled in _all_ scenarios - current bugs notwithstanding -  based on rules people can actually keep in their heads, without needing to know how the parameter sausage is made, I'd _personally_ appreciate it, but, as usual, documenting it for the world at large is the right thing to do.\r\n\r\nAlso worth noting that PowerShell already has an unrelated bareword-rules complexity problem - see #3217\r\n",
+      "created_at": "2017-08-17T01:31:51Z",
+      "updated_at": "2017-08-17T01:31:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.: Let's not forget that when a `-<letter>`-prefixed bareword _does_ make it through as a _value_, it is not expanded the same way as  non `-`-prefixed bareword, as originally discussed in #4578:\r\n\r\n```powershell\r\n> Join-Path a b z$HOME\r\na/b/zhome/jdoe\r\n\r\n> Join-Path a b -z$HOME\r\na/b/-z$HOME  # no expansion\r\n```",
+      "created_at": "2017-08-17T01:39:01Z",
+      "updated_at": "2017-08-19T21:48:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've taken a step back; please see #4624",
+      "created_at": "2017-08-20T16:41:23Z",
+      "updated_at": "2017-08-20T16:41:23Z"
+    }
+  ],
+  "created_at": "2017-08-16T00:13:25Z",
+  "number": 4591,
+  "state": "closed",
+  "title": "\"-\"-prefixed barewords in argument mode should always be interpreted as parameter names",
+  "updated_at": "2017-09-04T05:25:06Z"
+}

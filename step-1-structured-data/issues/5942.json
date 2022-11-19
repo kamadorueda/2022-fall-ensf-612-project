@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5942",
+  "author": "alx9r",
+  "body": "I'm looking for a supported way to reduce the namespace repetition I mentioned in #5940.\r\n\r\n[`about_Using`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_using?view=powershell-6) includes the following statement:\r\n\r\n> The `using` statement needs to be the first statement in the script.\r\n\r\nModules customarily dot-source individual .ps1 files from their .psm1.  Pester is [one such example](https://github.com/pester/Pester/blob/0f5aff9fc34323659f9d68c29b3265a7f0d6bf6a/Pester.psm1#L378).  It's not clear to me how the above statement applies in the context of such a module.\r\n\r\nConsider the following files:\r\n\r\n#### UsingTest.psm1\r\n\r\n```PowerShell\r\n@(\r\n    'fileA.ps1'\r\n    'fileB.ps1'\r\n) |\r\n    % { . \"$(Split-Path -Path $MyInvocation.MyCommand.Path)\\$_\" }\r\n\r\nfunction Get1 { [int][MyEnum]::One }\r\n```\r\n\r\n#### fileA.ps1\r\n\r\n```PowerShell\r\nusing namespace UsingTest.A\r\n\r\nAdd-Type @'\r\nnamespace UsingTest { namespace A {\r\n    public enum MyEnum {\r\n        One = 1,\r\n        Two\r\n    }\r\n}\r\n}\r\n'@\r\n\r\nfunction GetA1 { return [int][MyEnum]::One }\r\n\r\n$script:v1 = 1\r\n```\r\n\r\n#### fileB.ps1\r\n\r\n```PowerShell\r\nusing namespace UsingTest.B\r\n\r\nAdd-Type @'\r\nnamespace UsingTest { namespace B {\r\n    public enum MyEnum {\r\n        One = 101,\r\n        Two\r\n    }\r\n}\r\n}\r\n'@\r\n\r\nfunction GetB1 { [int][MyEnum]::One }\r\n\r\nfunction GetV1 { $script:v1 }\r\n```\r\n\r\n1. Is this a supported use of `using`?\r\n2. Is it certain that `GetA1` and `GetB1` will return `1` and `101`, respectively?\r\n3. How does the statement that \"the `using` statement needs to be the first statement in the script\" apply to such a module?\r\n4. Is there some other way large modules should be structured?\r\n\r\n------\r\nEdit: Add `$script:v1` statements.",
+  "closed_at": "2018-02-13T16:31:35Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "1. Sure, I use that pattern in every module I write for 5.1+\r\n\r\n1. Yeah, unless you have both using statements in the psm1 (type resolution state is inherited by child scopes)\r\n\r\n1. Not sure what you mean, that what you quoted is still true in the examples you gave.  It needs to be the first statement in a script file, not an entire session",
+      "created_at": "2018-01-19T12:36:05Z",
+      "updated_at": "2018-01-19T12:36:05Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience \r\n\r\nI've added a few bits to the code in my original post.\r\n\r\n>2. ... (type resolution state is inherited by child scopes)\r\n\r\nI'm not sure exactly what you mean by this.  I have not successfully reproduced type resolution behavior consistent with inheritance when dot-sourcing `.ps1` files from a `.psm1` file.  On the contrary, consider that `Get1` succeeds and outputs `101`.  This suggests that `using namespace UsingTest.B` from the \"child\" `fileB.ps1` file is in effect in the \"parent\" `.psm1` file.\r\n\r\n>3. Not sure what you mean, that what you quoted is still true in the examples you gave. It needs to be the first statement in a script file, not an entire session\r\n\r\nMy apprehension stems from the definition of \"script\".  In particular, what does \"script\" mean in the context of a module.  \"script scope\", for example, as applied to variables seems to mean \"the scope of the entire module\".  `GetV1` outputs `1` despite that the only place `$v1` is set is in a different file that is not a parent.  If \"script\" really meant \"script file\" in the context of dot-sourcing `.ps1` files from a `.psm1`, `GetV1` should output null.",
+      "created_at": "2018-01-19T17:11:26Z",
+      "updated_at": "2018-01-19T17:11:26Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I'm not sure exactly what you mean by this. I have not successfully reproduced type resolution behavior consistent with inheritance when dot-sourcing .ps1 files from a .psm1 file. \r\n\r\nNo, dot sourcing doesn't effect type resolution.  Type resolution state is stored at the scope level, but it doesn't follow the same rules as other session state items like commands or variables. What I meant is if you declare a using statement in the `psm1`, it will be in effect in all child scopes.  For example\r\n\r\n```powershell\r\n# myModule.psm1\r\nusing namespace System.Management.Automation.Language\r\n\r\n& ./myOtherScript.ps1\r\n```\r\n\r\n```powershell\r\n# myOtherScript.ps1\r\n[Ast]\r\n```\r\n\r\nIn that example `[Ast]` would resolve to `System.Management.Automation.Language.Ast`.\r\n\r\n> My apprehension stems from the definition of \"script\". In particular, what does \"script\" mean in the context of a module.\r\n\r\nThat's fair, to be more specific it has to be the first statement in a \"thing\" that is parsed.  Typically this means per file, or input from the command prompt, or a dynamically created script block like `[scriptblock]::Create('using namespace x')`. \r\n\r\n",
+      "created_at": "2018-01-19T21:51:24Z",
+      "updated_at": "2018-01-19T21:51:24Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "> Is it certain that GetA1 and GetB1 will return 1 and 101, respectively?\r\n\r\n@alx9r I can not find this result :\r\n```powershell  \r\nipmo C:\\temp\\UsingTest.psm1\r\nGet1\r\n#101\r\n\r\nGetA1\r\n#101\r\n\r\nGetB1\r\n#1\r\n```\r\nAnd the result of the call to 'Get1' depends on the loading order of the files 'fileA.ps1' and 'fileB.ps1'.\r\n\r\n$PSVersionTable\r\n```powershell\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.1\r\nOS                             Microsoft Windows 6.1.7601 S\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0, 5.0, 5.1.10032.0, 6.0.1}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+      "created_at": "2018-02-06T14:45:24Z",
+      "updated_at": "2018-02-06T14:45:24Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@LaurentDardenne That's an interesting result.  The difference seems to be whether the module is loaded from `$Env:PSModulePath`.\r\n\r\n### Load from `$Env:PSModulePath`\r\n```PowerShell\r\nImport-Module UsingTest; Get1; GetA1; GetB1\r\n```\r\n\r\noutputs\r\n\r\n```none\r\n101\r\n1\r\n101\r\n```\r\n\r\n### Load from `c:\\temp`\r\n\r\n```PowerShell\r\nImport-Module c:\\temp\\UsingTest; Get1; GetA1; GetB1\r\n```\r\n\r\noutputs\r\n\r\n```none\r\n101\r\n101\r\n1\r\n```\r\n\r\n------- \r\n\r\nEdit:  So far I've only been able to reproduce this difference in PowerShell 5.1.  The results seem to be consistent with @LaurentDardenne's post in PowerShell 6.",
+      "created_at": "2018-02-06T19:31:32Z",
+      "updated_at": "2018-02-06T19:37:00Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "I do not know if it helps, but I did these tests out of a module :\r\n```Powershell\r\n. .\\fileA.ps1\r\nGetA1\r\n   #1\r\n  [int][MyEnum]::One\r\n   #1\r\n  [int][UsingTest.A.MyEnum]::One\r\n   #1\r\n \r\n. .\\fileB.ps1\r\nGetB1\r\n   #1\r\n [int][MyEnum]::One\r\n   #101\r\n [int][UsingTest.B.MyEnum]::One\r\n   #101\r\n \r\nGetA1\r\n  #1\r\n```\r\nNew session :\r\n```Powershell\r\n. .\\fileB.ps1\r\nGetB1\r\n  #101\r\n  [int][MyEnum]::One\r\n   #101\r\n  [int][UsingTest.B.MyEnum]::One\r\n   #101\r\n   \r\n. .\\fileA.ps1\r\nGetA1\r\n #101\r\n[int][MyEnum]::One\r\n #1\r\n[int][UsingTest.A.MyEnum]::One\r\n #1\r\n\r\nGetB1\r\n #101",
+      "created_at": "2018-02-07T13:29:51Z",
+      "updated_at": "2018-02-07T13:29:51Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Why are you dot sourcing? A module manifest has e.g. the `ScriptsToProcess` property on it. Does the bug happen when using that as well?",
+      "created_at": "2018-02-11T23:59:16Z",
+      "updated_at": "2018-02-12T21:34:17Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@bergmeister `ScriptsToProcess` creates the class in the global `SessionState` instead of the module's, so it gets exported by default and can't access private functions.  It also leaves a dummy module named after the script file name imported in the global session.  It's more of a sorta dirty work around for class related issues.",
+      "created_at": "2018-02-12T00:13:26Z",
+      "updated_at": "2018-02-12T00:13:26Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">A module manifest has e.g. the ScriptsToProcess property on it. Does the bug happen when using that as well?\r\n\r\nFor reference, `ScriptsToProcess` [\"specifies script files that run in the caller's session state\"](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/new-modulemanifest?view=powershell-6).  The file specified in `RootModule`, on the other hand, is associated with the module SessionState.  `RootModule` is scalar, so it seems that modules composed from multiple .ps1 files must consolidate those from the file that is specified in `RootModule` (ie. by dot-sourcing).\r\n\r\nFor what it's worth, I haven't come across a viable alternative to this dot-sourcing approach for modules with many files.  If there is one, I'd welcome that knowledge.",
+      "created_at": "2018-02-12T20:45:26Z",
+      "updated_at": "2018-02-12T20:45:26Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm not aware of an alternative.\r\n\r\nWhen we added classes, I proposed the property `RootScripts` in the module manifest as an alternative to dot sourcing the `RootModule`, basically codifying the pattern folks use today, but that proposal wouldn't have helped your scenario.\r\n\r\nThe `using` statement does not really mix well with dot sourcing. It was originally meant to be fully static - as in - only affecting the `ps1` file that contains the statement, but the dynamic nature of PowerShell forced tracking the using state at runtime, and that naturally happens in a scope.\r\n\r\nSo mixing `using namespace` and dot sourcing is unfortunately fragile and I don't recommend it, but I believe you could dot source 1 file with all your `using namespace` statements and then not use `using namespace` in any other file in your module - that would behave how you'd like, other than getting good intellisense.",
+      "created_at": "2018-02-12T21:25:52Z",
+      "updated_at": "2018-02-12T21:25:52Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">I believe you could dot source 1 file with all your using namespace statements and then not use using namespace in any other file in your module\r\n\r\nI tried this and it seems to be the least bad option.  It does mean that you have to concern yourself with naming collisions module-wide rather than file-wide, but I'll gladly take that over fragile.\r\n\r\nThank you for the clarity @lzybkr.",
+      "created_at": "2018-02-13T16:31:35Z",
+      "updated_at": "2018-02-13T20:16:28Z"
+    }
+  ],
+  "created_at": "2018-01-18T23:07:57Z",
+  "number": 5942,
+  "state": "closed",
+  "title": "Is dot-sourcing .ps1 files with `using` statements from a .psm1 supported?",
+  "updated_at": "2018-02-13T20:16:28Z"
+}

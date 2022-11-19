@@ -1,0 +1,174 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5797",
+  "author": "mklement0",
+  "body": "**Instances of types that normally serialize to a JSON _scalar_ (basic JSON data type: string, number, Boolean) should not serialize to _objects_ just because  - situationally - NoteProperty and ScriptProperty members may be present - not least because such members may be added _automatically_ by PowerShell.**\r\n\r\nAdditionally, the current behavior is _inconsistent_, possibly related to #5579.\r\n\r\nAlso, with a `ScriptProperty` member present on a `[string]` instance, `ConvertTo-Json` _crashes_ as of PowerShell Core v6.1.0-preview.3 - see #7091\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n[ordered] @{ d1 = [datetime]::now; d2 = get-date  } | ConvertTo-Json\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\n{\r\n  \"d1\": \"2018-01-05T09:25:37.037783+01:00\",\r\n  \"d2\": \"2018-01-05T09:25:37.037783+01:00\",\r\n}\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n{\r\n  \"d1\": \"2018-01-05T09:25:37.037783+01:00\",\r\n  \"d2\": {\r\n    \"value\": \"2018-01-05T09:25:37.037915+01:00\",\r\n    \"DisplayHint\": 2,\r\n    \"DateTime\": \"Friday, January 5, 2018 9:25:37 AM\"\r\n  }\r\n}\r\n```\r\n\r\nNote how the presence of  the `DisplayHint` and `DateTime` members added by `Get-Date` caused the value to no longer serialize as a single string, but as an _object_ with said members (yet not any of the type's regular properties).\r\n\r\nIn some cases, using an intermediate variable makes the problem go away:\r\n\r\n```powershell\r\n$dt = get-date\r\n[ordered] @{ d1 = [datetime]::now; d2 = $dt  } | ConvertTo-Json # OK\r\n```\r\n\r\nThat said, with other objects, such as those with provider-added properties, the problem surfaces even with an intermediate variable:\r\n\r\n```powershell\r\n'hi' > t.txt\r\n$s = Get-Content t.txt\r\n$s | ConvertTo-Json   # !! outputs a JSON object with many provider properties\r\n```\r\n\r\nAgain, what normally serializes as a _string_ is unexpectedly serialized as an _object_  due to the presence of NoteProperty members.\r\n\r\nFinally, when sending an instance with even just a ScriptProperty member _through the pipeline_, the problem surfaces too:\r\n\r\n```powershell\r\n> [datetime]::now | ConvertTo-Json\r\n{\r\n  \"value\": \"2018-01-07T06:18:29.821274+01:00\",\r\n  \"DateTime\": \"Sunday, January 7, 2018 6:18:29 AM\"\r\n}\r\n```\r\n\r\nNote that if the instance is nested inside a hashtable / custom object, the problem does _not_ occur, as demonstrated above.\r\nIt also doesn't occur if you use `-InputObject` instead of the pipeline: `ConvertTo-Json  ([datetime]::now)`\r\n\r\nWorkarounds\r\n-------------\r\n\r\nEither: apply `.psobject.baseobject` to the command producing the object to serialize to JSON:\r\n\r\n```powershell\r\n@{ d = (Get-Date).psobject.BaseObject } | ConvertTo-Json\r\n```\r\n\r\nOr: cast to the expected type (or, with an intermediate variable, type-constrain it):\r\n\r\n```powershell\r\n@{ d = [datetime] (Get-Date) } | ConvertTo-Json\r\n```\r\n\r\nNote: The above workarounds only work if the problematic object is not the input object as a whole.\r\n\r\nIf so, the only workaround I'm aware of is to pass the input object via `-InputObject` rather than the pipeline:\r\n\r\n```powershell\r\nConvertTo-Json ([datetime] (Get-Date))   # OK, due to using -InputObject\r\n\r\n# !! BROKEN, due to using the pipeline, though, curiously, only\r\n# !! the \"DateTime\" ScriptProperty shows up, not the \"DisplayHint\" NoteProperty\r\n[datetime] (Get-Date) | ConvertTo-Json  \r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-rc.2 (v6.0.0-rc.2) on macOS 10.13.2\r\n```\r\n\r\n  \r\n  \r\n  ",
+  "closed_at": "2021-07-12T17:56:33Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I believe this to be by design and desirable. what is undesirable, IMO, is the operation of `get-date`. I have #5676 to address this. This issue is kind of a duplicate of that.",
+      "created_at": "2018-01-05T10:19:20Z",
+      "updated_at": "2018-01-05T10:19:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus: The problem is more generic than that - see my newly added `Get-Content` example and reworked initial post in general.\r\n\r\nAlso note that #5676 doesn't cover the \"DateTime\" ScriptProperty member.\r\n\r\nI suggest closing #5676 in favor of this one.\r\n",
+      "created_at": "2018-01-06T01:04:19Z",
+      "updated_at": "2018-01-06T01:04:19Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I just don't think this is possible or desirebale. \r\n\r\nHow would `ConvertTo-Json` know if what it's getting is a wrapped object result from `get-date` or `get-content` or a PSObject created by a user that looks like one? That's why I think he fix for this needs to be with each command that does some wrapping. I'll keep my issue open because it applies to more than JSON conversion for dates. but i'm not sure what the approach is for this issue. There is always unexpected behavior around PSObject black magic. ",
+      "created_at": "2018-01-06T18:59:57Z",
+      "updated_at": "2018-01-06T18:59:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus:\r\n\r\n> How would ConvertTo-Json know if what it's getting is a wrapped object result from get-date or get-content or a PSObject created by a user that looks like one?\r\n\r\nYou're right, that would be tricky, but I've since realized that the problem can be tackled differently, and I've substantially revised the original post; in a nutshell:\r\n\r\nTypes that normally serializes to a _scalar_ (a basic JSON data type) should _never_ serialize differently based on the situational presence of NoteProperty / ScriptProperty members.\r\n\r\n",
+      "created_at": "2018-01-07T05:07:40Z",
+      "updated_at": "2018-01-07T05:07:40Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I have written up my own ConvertTo-CSON, and in it I use `-is [valuetype]` to catch objects that would be better as just a scalar value.  The `get-date` example falls under this condition.  If the base object is scalar or string, its probably best output as a scalar value.  I have also written a PLIST (XML) converter and it worked the same way, as extra object notation in a PLIST would be undesirable.\r\n\r\nReference: https://github.com/msftrncs/PwshOutCSON",
+      "created_at": "2019-03-12T23:50:17Z",
+      "updated_at": "2019-03-12T23:50:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Conceivably we could do something similar. However, ValueType encompasses _all_ structs and may be an unsuitable reference as JSON only has a handful of standard representations.\r\n\r\nWe can simply refer to the spec and account for each type that it has a scalar value form for, and treat all others as they are normally treated, I would think?",
+      "created_at": "2019-03-13T00:27:19Z",
+      "updated_at": "2019-03-13T00:27:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed, @vexx32. \r\n\r\nSeparately, it's worth considering a new `ConvertTo-Json` switch (`-Raw`, in line with #7855?) that _input-globally_ opts out of serializing ETS properties (except for `[pscustomobject]` instances, which are nothing _but_ ETS properties).\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-04-25T18:15:10Z",
+      "updated_at": "2019-04-25T18:15:10Z"
+    },
+    {
+      "author": "jszabo98",
+      "author_association": "NONE",
+      "body": "Is there a way to alter the string from get-content without losing the hidden properties (for set-content)?\r\n\r\n```powershell\r\nPS C:\\users\\me> (get-content input) | select *\r\n\r\n\r\nPSPath       : C:\\users\\me\\input\r\nPSParentPath : C:\\users\\me\r\nPSChildName  : input\r\nPSDrive      : C\r\nPSProvider   : Microsoft.PowerShell.Core\\FileSystem\r\nReadCount    : 1\r\nLength       : 3\r\n\r\n\r\n\r\nPS C:\\users\\me> (get-content input) -replace 111,222 | select *\r\n\r\nLength\r\n------\r\n     3\r\n```",
+      "created_at": "2019-04-25T18:42:49Z",
+      "updated_at": "2019-04-25T19:06:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jszabo98 While that is an interesting question, it is incidental to this issue, so I encourage you to ask it on stackoverflow.com instead; the short answer is: the ETS properties are lost whenever a new string instance is constructed.",
+      "created_at": "2019-04-25T18:52:52Z",
+      "updated_at": "2019-04-25T18:52:52Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I don't think we can simply strip ETS members automatically as there are cases where you want those included.  Perhaps we can have a `-BaseObject` switch?",
+      "created_at": "2020-11-04T22:48:12Z",
+      "updated_at": "2020-11-04T22:48:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT,  as [argued above](https://github.com/PowerShell/PowerShell/issues/5797#issuecomment-486782181), `-Raw` seems like a better name - see #7855",
+      "created_at": "2020-11-04T22:52:05Z",
+      "updated_at": "2020-11-04T22:52:05Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 sorry, missed that.  I can make this an experimental feature in 7.2 to get more feedback.",
+      "created_at": "2020-11-04T23:18:38Z",
+      "updated_at": "2020-11-04T23:18:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thank you, @SteveL-MSFT.\r\n\r\nThat's definitely the right way to go in general.\r\n\r\nI'm also concerned about `Get-Date`'s output specifically: it uses an _instance_ ETS member, `.DateTime`, whose sole purpose is to inform the _formatting data_ associated with `System.DateTime` - it's hard to imagine that anyone would expect that instance member to be serialized by `ConvertTo-Json` _by default_.",
+      "created_at": "2020-11-04T23:42:04Z",
+      "updated_at": "2020-11-04T23:42:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Although this seems to solve this particular problem, it is doubtful. The appearance of such a Raw parameter indicates that we have a poor understanding of whether we should serialize ETS properties or not. If these properties are required, then why should we exclude them from serialization? If so, is it always? If always and if we are talking about serialization, then _attributes_ are usually used to exclude properties from serialization. This approach is more general and does not require new parameters in cmdlets. If not always, then perhaps we need something like Select-Object -NoETSProperties or new cmdlet Get-PSBaseObject.\r\n\r\n> I don't think we can simply strip ETS members automatically as there are cases where you want those included.\r\n\r\nWhat is cases you mean? Perhaps we could hide some ETS properties by means of the attribute but keep other ETS properties serializable. ",
+      "created_at": "2020-11-05T18:52:41Z",
+      "updated_at": "2020-11-05T18:52:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You're right: we should take a step back:\r\n\r\nLet's revisit at what I proposed in the OP:\r\n\r\n> Instances of types that normally serialize to a JSON scalar (basic JSON data type: string, number, Boolean) should not serialize to objects just because - situationally - NoteProperty and ScriptProperty members may be present\r\n\r\nI still think this is by far the best choice, but it is technically a breaking change.\r\nWhile I'd say this falls into bucket 3 and therefore makes it an acceptable breaking change, if that isn't the consensus then having it as an opt-in, via `-Raw` is the next best choice - and users can decide whether they want ETS members or not.\r\n\r\nIf we deem the breaking change acceptable, and someone really wants to serialize `Get-Date` _with_ the - relevant-for-display-formatting-only - ETS properties - which strikes me as unlikely - they can do:\r\n\r\n```powershell\r\nGet-Date | Select-Object @{n='value'; e={$_.ToString(\"R\")}}, DisplayHint, DateTime | ConvertTo-Json\r\n```\r\n\r\nNote that to-JSON serialization in the vast majority of cases falls into the category of serialization of \"property bag\" types : DTOs (data-transfer objects) that are implemented as `[pscustomobject]` instances, hashtables, or  custom (PS) classes designed specifically for that purpose. Such (often nested) types are ultimately solely composed of data types that serialize as JSON primitives: strings, numbers, Booleans, and dates (which are represented as strings).\r\n\r\nAll other types aren't really suited for JSON serialization (and, as an aside, that fact gave us the unholy depth limit of `2`, to prevent runaway serialization).\r\n\r\nIn short, my vote is for:\r\n\r\n* All types that serialize to JSON primitives, including `[datetime]` and `[datetimeoffset]`, should _always ignore_ ETS properties.\r\n\r\n  * `[datetime]` is the only type where PowerShell itself adds such properties, via `Get-Date`, and _solely for output formatting_, which has nothing to do with serialization.\r\n\r\n  * All such types - comprising strings and .NET primitive(-like) types that are _value types_ - all of which conceptually are and present as as a _single value_, are poor candidates for having ETS properties attached to in general.\r\n\r\n  * In the rare event that someone still wants such ETS properties serialized, they can use the `Select-Object` solution shown above.\r\n\r\n* The above alone will cover the vast majority of use cases. Separately, even though my sense is that it will be rarely, if ever, needed: there's no harm in also giving users a `-Raw` option to opt-out of ETS properties.\r\n\r\n\r\n",
+      "created_at": "2020-11-05T19:33:46Z",
+      "updated_at": "2020-11-05T21:31:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.:\r\n\r\nAs for a `Select-Object -NoETsProperty` (based on #7855 it should be `Select-Object -Raw`) / `Get-PSBaseObject`: \r\n\r\nI don't think that would even work, because of how PowerShell associates ETS properties with instances; e.g., the following does _not_ work as expected: the ETS properties still serialize.\r\n\r\n```powershell\r\n# !! Still includes the ETS properties.\r\nPS> (Get-Date).psobject.BaseObject | ConvertTo-Json\r\n{\r\n  \"value\": \"2020-11-05T16:37:35.555746-05:00\",\r\n  \"DisplayHint\": 2,\r\n  \"DateTime\": \"Thursday, November 5, 2020 4:37:35 PM\"\r\n}\r\n```\r\n\r\nIn other words: you need a solution that is _internal_ to the serialization cmdlet, which is what `ConvertTo-Json -Raw` would be.\r\n\r\n---\r\n\r\nAs for attributes: \r\n\r\nSure, we could hide the `[datetime]` ETS properties from serialization via an attribute, as an alternative to categorically ignoring ETS properties on to-JSON-primitive types.\r\n\r\nThat would leave the door open for users who indeed want to ETS-decorate such types - even though it is generally ill-advised. Also, there's no control over how the value itself is serialized: it is somewhat arbitrarily stuck into a `value` pseudo-property:\r\n\r\n```powershell\r\nPS> $num = 42; $num | Add-Member foo bar; $num | ConvertTo-Json\r\n{\r\n  \"value\": 42,\r\n  \"foo\": \"bar\"\r\n}\r\n```\r\n\r\nAlso, this would make a stronger case for `ConvertTo-Json -Raw`, because it isn't obvious how to _opt-out_ of the ETS properties otherwise; to do it in the above case, you'd need a dummy operation such as `$v + 0 | ConvertTo-Json`.\r\n\r\n---\r\n\r\nAll in all, I think it is sufficient to simply ignore ETS properties on all to-JSON-primitive types.\r\n",
+      "created_at": "2020-11-05T21:49:48Z",
+      "updated_at": "2020-11-05T21:50:21Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hard to sort out the conversation up to this point, so forgive me if this was already asked, but what is being done (if anything) about making something like this capture the ETS \"Manager\" property (as expected, by me anyway):\r\n\r\n```powershell\r\nGet-MgUser -All -ExpandProperty Manager | Add-Member -Force -MemberType ScriptProperty -Name Manager -Value {$this.PSBase.Manager['userPrincipalName']} -PassThru | Select -First 1 | ConvertTo-Json\r\n```\r\n\r\nAs it stands in 7.0.3, the original Manager property gets serialized instead of the ETS Manager script property that was forced on top of it.\r\n\r\nThis example isn't about adding properties that aren't there and looking for them to show up in the JSON output. It's about taking certain properties that do not play nicely with JSON (if you use `-ExpandProperty` when retrieving Graph data, the objects that get expanded are not that easy to work with) and making the more meaningful when serialized.",
+      "created_at": "2020-11-05T22:17:45Z",
+      "updated_at": "2020-11-05T22:18:56Z"
+    },
+    {
+      "author": "kganjam",
+      "author_association": "NONE",
+      "body": "I had the script properties below added to primitive type String in my profile and thus even a simple `\"foo\" | ConvertTo-Json` was causing a stack overflow that literally blue screened both my laptop and server machines. Originally, the ConvertTo-Json call happened to be in a library from another team, so tracking this issue down was very difficult. Blue screen for having script properties added to types seems like a high price to pay. I would very much vote for a solution that:\r\n\r\n1) Detects and stops runaway serialization stack overflow (I also don't like arbitrary serialization depth limits, but perhaps there is a way to detect an infinite cycle of in this case? Is there a way to detect whether the ETS property has been added to the Type?). Displays an appropriate error message on how to fix when this situation is detected.\r\n\r\n2) Doesn't require attributes to be specified to prevent stack overflow. For ETS properties that can lead to overflow, the default of the attribute (when not specified) should be to not serialize or to limit the depth. At the type level there might be an attribute specifying the default for whether properties on the type are serialized. Independent of stack overflow, I like the idea of an attribute on the ETS properties to allow control of serialization behavior. C# has [NotSerializedAttribute]. Add-Member could be extended with a flag to specify the serialization behavior. How does C# prevent runaway serialization? There is at least some cyclic dependency checking (although in this case the graph with ScriptProperties is dynamic rather than static and the circular reference is at the type level rather than object level). Perhaps members added with Update-Type have the attribute Serialize=$false while Add-Member used by Select-Object, etc. defaults to $true? For JSON primitive types like String the type-level default for property serialization when no property attribute is specified might be $false. \r\n\r\n**I think mklement0's suggestion to not expand properties on primitive types is reasonable** assuming it's easy to distinguish ETS properties on PSObject from properties added to PSCustomObject. PowerShell is implicitly upcasting the string returned from the script property to a derived object with properties; C# prevents this recursion risk by never implicitly upcasting primitive types (extension methods are also static on a type, not members on the objects themselves). The simplest fix is probably to skip the need for attributes and just not serialize ETS on primitive types. \r\n\r\nIs there a need for -Raw to be on Select-Object also or is there otherwise a way to cast back to the raw object? Could be more generic than putting -Raw on ConvertTo-Json. Although maybe it's not even possible when you have ETS defined on a type as below?\r\n\r\nOffending line in Profile.ps1:\r\n`Update-TypeData C:\\Users\\$env:username\\OneDrive\\Utilities\\WindowsPowerShell\\My.Types.ps1xml`\r\n \r\n```\r\n10/27/2020 21:03:36 C:\\git> cat C:\\Users\\$env:username\\OneDrive\\Utilities\\WindowsPowerShell\\My.Types.ps1xml\r\n<Types>\r\n    <Type>\r\n        <Name>System.String</Name>\r\n        <Members>\r\n            <ScriptProperty>\r\n                <Name>ToBase64String</Name>\r\n                <GetScriptBlock>\r\n                 [System.Convert]::ToBase64String([System.Text.Encoding]::UNICODE.GetBytes($this))\r\n                </GetScriptBlock>\r\n            </ScriptProperty>\r\n            <ScriptProperty>\r\n                <Name>FromBase64String</Name>\r\n                <GetScriptBlock>\r\n                 [System.Text.Encoding]::UNICODE.GetString([System.Convert]::FromBase64String($this))\r\n                </GetScriptBlock>\r\n            </ScriptProperty>\r\n        </Members>\r\n    </Type>\r\n</Types>\r\n```",
+      "created_at": "2020-11-05T22:47:34Z",
+      "updated_at": "2020-11-06T03:49:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "ETS is a key and very power feature of PowerShell. I believe that any attempts to limit key features will most likely be rejected by the Committee as it has done before. This has been said even for primitive types. And I agree with that. First, it is the current behavior for many years. Second, it's not insurmountable - PowerShell is so flexible that users can always find workarounds, which I understand happens in some of the scenarios mentioned here. We must be absolutely convinced that this behavior blocks important scripts and PowerShell development in order to change it.\r\n\r\nIt is important to note what should be said about _specific_ scenarios. So if a user wants to have a FromBase64String property on a string in a particular scenario, he must create a new runspace and add it there, not in his profile.\r\n\r\nIt also implies that the user wants this property by default everywhere in this scenario, including serialization. If it is not, then we need to provide it with `Add-Member -NoSerializable` (including Types.ps1xml too) (or maybe with `-Hidden` to hide the property everywhere).\r\n\r\nAs for properties coming from providers, I believe this should be a feature of the provider as the provider developer designed. This implies that we should not change the default behavior of existing providers, but could provide the ability for users to change this behavior for specific scenarios.\r\n\r\nAs for properties coming from Engine, I believe it is not best practice coming from limitations of our Formatting system and we should enhance Formatting system (like PSMore). I agree that helper properties added exclusively for Formatting system should be normally hidden but it makes no sense to make a breaking change for the particular serialization  scenario - we should make this only in Formatting system enhancement time.\r\n",
+      "created_at": "2020-11-06T06:53:03Z",
+      "updated_at": "2020-11-06T06:53:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KirkMunro, if I understand your question correctly, you've simply run into a longstanding bug where ETS instance properties that normally shadow type-native properties of the same name are unexpectedly ignored - see #13998 (and note that my proposal only advocated non-serialization of ETS members for a well-defined set of \"primitive\" types - in your case, nothing would change).\r\n\r\n@kganjam, a simple workaround for now - which is arguably conceptually cleaner anyway - is to define your property members as _method_ members (`<ScriptMethod>`, with a `<Script>` child element). But, obviously, runaway serialization should never happen.\r\n\r\n> Is there a need for -Raw to be on Select-Object also or is there otherwise a way to cast back to the raw object? Could be more generic than putting -Raw on ConvertTo-Json.\r\n> Although maybe it's not even possible when you have ETS defined on a type as below?\r\n\r\nYou can't even prevent the reappearance of _instance_ ETS properties, so something like `Select-Object -Raw` won't work, as [argued above](https://github.com/PowerShell/PowerShell/issues/5797#issuecomment-722665862):\r\n\r\n```powershell\r\nPS> ([System.Drawing.Size]::new(1,1) | Add-member -Force -PassThru Height OVERRIDDEN).psobject.BaseObject.Height\r\nOVERRIDDEN\r\n```\r\n\r\n",
+      "created_at": "2020-11-06T15:16:38Z",
+      "updated_at": "2020-11-06T15:16:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let me try to summarize what I think are viable options:\r\n\r\n**If backward compatibility is paramount:**\r\n\r\n* **Option A**:\r\n  * Implement `ConvertTo-Json -Raw`, which is all that is needed:\r\n     * Users can at their discretion opt-out of ETS-property serialization altogether.\r\n     * For control over individual properties, `Select-Object` can be used.\r\n\r\n**If the largely useless serialization of `[datetime]` and `[string]` via `Get-Content` is allowed to change**.\r\n\r\n* **Option B**: Categorically prevent the serialization of ETS properties on those types that become JSON primitives (strings, numbers, Booleans), but provide a way to control ETS property serialization for all other types:\r\n  * Selectively ignore ETS properties for said types.\r\n   * Implement `ConvertTo-Json -Raw`\r\n\r\n* **Option C:** Retain the ability to serialize ETS properties on _all_ types, but selectively _hide_ the _PowerShell-defined_ `[datetime]` and `[string]` ETS members:\r\n    * To solve the problem at hand, this hiding mechanism could be an internal _implementation detail_.\r\n    * However - and this is really a separate issue, which I encourage you, @iSazonov, to spin out into a separate proposal - we could expose this ability to users as well, as @iSazonov suggested, via `Add-Member -Hidden`, `Update-TypeData`, and `.types.ps1xml` files. \r\n        * On a related note, the arguably analogous `hidden` member qualifier for _custom PS classes_ is currently _not_ respected by `ConvertTo-Json`: see #9847\r\n\r\n---\r\n\r\nSeparately, **there's still the problematic inconsistency in the _current_ serialization behavior** with respect to whether a given decorated object is the input object itself or nested inside another object (conversely this means that `ConvertTo-Json -Raw` should apply to the entire object _graph_):\r\n\r\n```powershell\r\n# Add an instance ETS property 'NEWPROP'\r\n$o = [System.Drawing.Size]::new(1,1) | Add-member -PassThru NEWPROP VALUE\r\n\r\n# Serialize it as a whole: instance member is SERIALIZED.\r\nPS> $o | ConvertTo-Json\r\n{\r\n  \"IsEmpty\": false,\r\n  \"Width\": 1,\r\n  \"Height\": 1,\r\n  \"NEWPROP\": \"VALUE\"\r\n}\r\n\r\n# Serialize it nested inside another object: instance member is IGNORED.\r\nPS> @{ foo = $o } | ConvertTo-Json\r\n{\r\n  \"foo\": {\r\n    \"IsEmpty\": false,\r\n    \"Width\": 1,\r\n    \"Height\": 1\r\n  }\r\n}\r\n```\r\n\r\n",
+      "created_at": "2020-11-06T16:12:39Z",
+      "updated_at": "2020-11-06T16:12:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this again, as there is already code within PowerShell to handle ETS properties so we would accept augmentations to that code to special case not serializing `[datetime]` and `[string]` ETS properties.",
+      "created_at": "2020-12-16T23:43:09Z",
+      "updated_at": "2020-12-16T23:43:09Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #15665, which has now been successfully released as `v7.2.0-preview.8`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.8)\n",
+      "created_at": "2021-07-22T21:41:34Z",
+      "updated_at": "2021-07-22T21:41:34Z"
+    }
+  ],
+  "created_at": "2018-01-05T08:29:42Z",
+  "number": 5797,
+  "state": "closed",
+  "title": "ConvertTo-Json: unexpected behavior with objects that have ETS properties (NoteProperty, ScriptProperty)",
+  "updated_at": "2021-07-22T21:41:34Z"
+}

@@ -1,0 +1,34 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14633",
+  "author": "kzu",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nCurrently, if you have a deeply nested JSON object and you want to expand one of those nested properties, \r\nyou need to something like this:\r\n\r\n(this is for a GraphQL query using the GitHub API)\r\n\r\n```ps\r\n$nodes = \r\n    $query | \r\n    ConvertFrom-Json | \r\n    select @{ Name='nodes'; Expression={$_.data.organization.sponsorshipsAsMaintainer.nodes}} | \r\n    select -ExpandProperty nodes\r\n```\r\n\r\nThe alternative \"normal\" way without using `Expression` would be:\r\n\r\n```ps\r\n$nodes = \r\n    $query | \r\n    ConvertFrom-Json | \r\n    select -ExpandProperty data |\r\n    select -ExpandProperty organization |\r\n    select -ExpandProperty sponsorshipsAsMaintainer |\r\n    select -ExpandProperty nodes\r\n```\r\n\r\nSo, when using deeply nested JSON responses from web APIs, a more convenient syntax for \r\nexpanding would be highly desirable to make for more concise code.\r\n\r\n<details><summary>Example JSON $query</summary>\r\n\r\n```json\r\n{\r\n  \"data\": {\r\n    \"organization\": {\r\n      \"sponsorshipsAsMaintainer\": {\r\n        \"nodes\": [\r\n          {\r\n            \"sponsorEntity\": {\r\n              \"id\": \"...\",\r\n            },\r\n            \"tier\": {\r\n              \"monthlyPriceInDollars\": 1\r\n            }\r\n          },\r\n          {\r\n            \"sponsorEntity\": {\r\n              \"id\": \"...\",\r\n            },\r\n            \"tier\": {\r\n              \"monthlyPriceInDollars\": 2\r\n            }\r\n          },\r\n          {\r\n            \"sponsorEntity\": {\r\n              \"id\": \"...\",\r\n            },\r\n            \"tier\": {\r\n              \"monthlyPriceInDollars\": 5\r\n            }\r\n          }\r\n        ],\r\n        \"pageInfo\": {\r\n          \"hasNextPage\": false,\r\n          \"endCursor\": \"asdfasdf\"\r\n        }\r\n      }\r\n    }\r\n  }\r\n}\r\n```\r\n\r\n</details>\r\n\r\n## Proposed technical implementation details\r\n\r\nI can see two potential implementations: \r\n\r\n1. Extend existing `-ExpandProperty` to interpret dotted property name automatically:\r\n\r\n```ps\r\n$nodes = \r\n    $query | \r\n    ConvertFrom-Json | \r\n    select -ExpandProperty data.organization.sponsorshipsAsMaintainer.nodes\r\n```\r\n\r\n2. Introduce a new `-ExpandPropertyExpression` instead:\r\n\r\n```ps\r\n$nodes = \r\n    $query | \r\n    ConvertFrom-Json | \r\n    select -ExpandPropertyExpression data.organization.sponsorshipsAsMaintainer.nodes\r\n```\r\n\r\nBoth would result in `$nodes` containing the expanded sub-property of the graph, just like the equivalent long-form `-ExpandProperty` shown above.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I like the idea, which, in essence, was previously proposed in #6509.\r\n\r\nThe proposal there was flawed in that it suggested an _unconditional_  reinterpretation of `foo.bar` as a property _path_ rather than as a property whose literal _name_ is `foo.bar`, which would amount to a potentially unacceptable breaking change.\r\n\r\nGiven that we at least want to preserve a _choice_ as to how to interpret an argument such as `foo.bar`:\r\n\r\nWe do not want to limit the option to specify a path to just extracting a property _value_ via `-ExpandProperty`, we want to retain the option to attach a _property as a whole_  to a `[pscustomobject]` output object, as happens by default (possibly implied `-Property`).\r\n\r\nTherefore, I see two options:\r\n\r\n* We could introduce a _switch_ such as `-ByNamePath` (name negotiable) to indicate that the name argument(s) passed to `-Property` or `-ExpandProperty` should be interpreted as a property _path(s)_.\r\n\r\n* Preferably, we could consider a [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) change and, conversely, consider a `-ByVerbatimName` switch (name negotiable) to indicate that the arguments should be interpreted as  verbatim property _name(s)_ rather than as path(s) by default.\r\n\r\n  * The alternative is to do without a switch and instead require use of a calculated property / script block for names that contain `.` \r\n  * The appeal of this approach is that this wouldn't require _also_ adding a switch parameter to _other_ cmdlets that too accept property names / expressions, such as `Sort-Object`,  `Group-Object`, and `Compare-Object`.\r\n\r\n\r\n \r\n",
+      "created_at": "2021-01-20T00:04:48Z",
+      "updated_at": "2021-01-20T00:23:29Z"
+    },
+    {
+      "author": "akhansari",
+      "author_association": "NONE",
+      "body": "I think you can also do this:\r\n\r\n```powershell\r\n$nodes = \r\n    $query | \r\n    ConvertFrom-Json | \r\n    % { $_.data.organization.sponsorshipsAsMaintainer.nodes }\r\n```",
+      "created_at": "2022-10-07T18:10:19Z",
+      "updated_at": "2022-10-07T18:10:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@akhansari, that works for a _single_ property _value_; if you're looking to extract _multiple_ properties - hosted in a `[pscustomobject]` instance - the workaround gets verbose and cumbersome; e.g.:\r\n\r\n```powershell\r\n$query | \r\n    ConvertFrom-Json | \r\n    % {\r\n      [pscustomobject] @{ \r\n        nodes = $_.data.organization.sponsorshipsAsMaintainer.nodes \r\n        foo = $_.data.organization.foo\r\n      }\r\n    }\r\n```\r\n\r\nThe [calculated property](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_Calculated_Properties) approach, as shown in the initial post, is similarly noisy.\r\n\r\nIf this proposal gets implemented, the above would simplify to:\r\n\r\n```powershell\r\n# WISHFUL THINKING\r\n$query | \r\n    ConvertFrom-Json | \r\n    Select-Object -ByNamePath data.organization.sponsorshipsAsMaintainer.nodes, data.organization.foo\r\n```\r\n    \r\n",
+      "created_at": "2022-10-07T18:42:07Z",
+      "updated_at": "2022-10-07T18:42:07Z"
+    }
+  ],
+  "created_at": "2021-01-19T20:43:09Z",
+  "number": 14633,
+  "state": "open",
+  "title": "Introduce concise syntax for subproperty expansion via Select-Object ",
+  "updated_at": "2022-10-07T18:42:07Z"
+}

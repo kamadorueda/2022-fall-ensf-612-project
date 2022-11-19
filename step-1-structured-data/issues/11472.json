@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11472",
+  "author": "jantari",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nAdd an `-AsHashTable` parameter to `Invoke-Command`, so that results are \"grouped\" (keyed) by PSComputerName.\r\n\r\nThis would be very helpful to me when querying many computers in parallel,\r\nas indexing into the hashtable like this:\r\n\r\n```\r\n$InvokeCommandResults[\"$ComputerIWant\"]\r\n```\r\n\r\nis neater and faster than using\r\n\r\n```\r\n$InvokeCommandResults.Where{ $_.PSComputerName -eq \"$ComputerIWant\" }\r\n#and \r\nif ($InvokeCommandResults.PSComputerName -contains \"$ComputerIWant\") { <# #> }\r\n```\r\n\r\nit also avoids the performance-trap of users accidentally doing:\r\n\r\n```\r\n$InvokeCommandResults | Where-Object { $_.PSComputerName -eq \"$ComputerIWant\" }\r\n```\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\n\r\n",
+  "closed_at": "2021-06-03T00:00:09Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Does this add significant value above and beyond what you can already get with Group-Object?\r\n```powershell\r\n$results = Invoke-Command -ComputerName $computerList -Scriptblock $command |\r\n    Group-Object -AsHashtable -Property PSComputerName\r\n```",
+      "created_at": "2020-01-02T15:47:34Z",
+      "updated_at": "2020-01-02T15:47:34Z"
+    },
+    {
+      "author": "jantari",
+      "author_association": "NONE",
+      "body": "Ah, this is what I get for submitting feature ideas immediately when I get them, so I don't forget, instead of thinking about it for longer.\r\n\r\nSo, there is not much immediate benefit compared to piping to `Group-Object` - I think.\r\n\r\nThe only thing to consider is the question of whether it makes sense to default to a hashtable or not.\r\n\r\nPersonally, I find it a more ergonomic solution and don't see any usability benefit in the `.PSComputerName` implementation.\r\n\r\nI am however not too familiar with the implementation details, e.g.:\r\n\r\n1. How much CPU time does it cost to add/wrap the PSComputerName property on all returned objects? I imagine sticking them into a Hashtable untouched should be really fast\r\n2. How would memory usage compare between an array of objects with an extra property VS a hashtable?\r\n3. Is the extra property/adding to hashtable done on the client side or the remote computer? Does it matter?\r\n4. Very few PowerShell cmdlets return hashtables - unexpected behavior?\r\n\r\nEDIT: Ok, it is kinda annoying to have to deal with the cmdlet returning a single object of the expected type when run against a single target computer, but a hashtable when it is run against multiple - if it were to return a hashtable even when just targeting one computer, that's a  solid breaking change. I'd still like this behavior though.",
+      "created_at": "2020-01-02T16:54:14Z",
+      "updated_at": "2020-01-02T16:59:40Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Ah, this is what I get for submitting feature ideas immediately when I get them, so I don't forget, instead of thinking about it for longer.\r\n\r\nNothing wrong with that :) much better than never submitting them!\r\n\r\n> The only thing to consider is the question of whether it makes sense to default to a hashtable or not.\r\n> \r\n> Personally, I find it a more ergonomic solution and don't see any usability benefit in the `.PSComputerName` implementation.\r\n\r\nThe main problem with that is formatting.  With how it is now, you can interactively run a command on several machines and then see the full results for each (and from what computer they came from).\r\n\r\n> I am however not too familiar with the implementation details, e.g.:\r\n> \r\n> 1. How much CPU time does it cost to add/wrap the PSComputerName property on all returned objects? I imagine sticking them into a Hashtable untouched should be really fast\r\n> 2. How would memory usage compare between an array of objects with an extra property VS a hashtable?\r\n\r\nThe hashtable scenario might actually be worse (though minimally). The collections that store properties for an object will already be allocated.  The internal array for the collection might need to be resized to fit the extra property, but the `hashtable` and the collections it stores as values will need to be resized probably multiple times.\r\n\r\n> 3. Is the extra property/adding to hashtable done on the client side or the remote computer? Does it matter?\r\n\r\nBoth are or would need to be done on the client side.\r\n\r\n> 4. Very few PowerShell cmdlets return hashtables - unexpected behavior?\r\n\r\nKinda.  Hashtables are formatted with a key column and a value column.  It doesn't handle arrays of complex objects very well in either column.",
+      "created_at": "2020-01-02T17:10:56Z",
+      "updated_at": "2020-01-02T17:10:56Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience \r\n>  It doesn't handle arrays of complex objects very well in either column.\r\n\r\nHi Patrick, I'm curious. Arrays as keys don't work very well but I'm not aware of any issues with using arrays as values. Can you expand on this?\r\n\r\n@jantari \r\nThere's one huge advantage to returning objects with the host name as a property on the object: it allows streaming. In other words, you get objects from remote machines as soon as they are available. Returning something like a hashtable would stall the whole process until the very last record is received from the very last machine. (But if you do want that, you can use `Group-Object` as the others have mentioned.)\r\n\r\nAlso, remote operations return deserialized objects (PSObject) which are essentially a wrapper around a hashtable so adding the hostname as a property doesn't really add significant overhead.",
+      "created_at": "2020-01-02T18:42:47Z",
+      "updated_at": "2020-01-02T18:42:47Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience\r\n> \r\n> > It doesn't handle arrays of complex objects very well in either column.\r\n> \r\n> Hi Patrick, I'm curious. Arrays as keys don't work very well but I'm not aware of any issues with using arrays as values. Can you expand on this?\r\n\r\nAh thank you, yeah that wasn't clear.  They work just fine, I'm only referring to the formatting differences.  Not that there is anything wrong with hashtable's formatting, it definitely makes sense for what it is.  Just less useful as an output type interactively.\r\n\r\n```powershell\r\n$sb = { @([PSCustomObject]@{ Prop = 1; Prop2 = 2 }) * 2 }\r\n\r\nInvoke-Command -ComputerName localhost -ScriptBlock $sb |\r\n    Group-Object -AsHashTable -Property PSComputerName\r\n\r\n# Name                           Value\r\n# ----                           -----\r\n# localhost                      {@{Prop=1; Prop2=2; PSComputerName=localhost; RunspaceId=e6d63fb4-3f84-4144-a277-ad44692bfcee; PSShowComput\u2026\r\n\r\nInvoke-Command -ComputerName localhost -ScriptBlock $sb |\r\n    Format-Table -Property Prop1, Prop2, PSComputerName\r\n\r\n# Prop Prop2 PSComputerName\r\n# ---- ----- --------------\r\n#    1     2 localhost\r\n#    1     2 localhost\r\n```\r\n\r\n",
+      "created_at": "2020-01-02T19:33:35Z",
+      "updated_at": "2020-01-02T19:33:35Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience That's what I expected but I wanted to be sure. Thanks.",
+      "created_at": "2020-01-02T23:51:43Z",
+      "updated_at": "2020-01-02T23:51:43Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-06-03T00:00:09Z",
+      "updated_at": "2021-06-03T00:00:09Z"
+    }
+  ],
+  "created_at": "2020-01-02T15:26:40Z",
+  "number": 11472,
+  "state": "closed",
+  "title": "Make \"Invoke-Command\" return a Hashtable with PSComputerName as the key",
+  "updated_at": "2021-06-03T00:00:09Z"
+}

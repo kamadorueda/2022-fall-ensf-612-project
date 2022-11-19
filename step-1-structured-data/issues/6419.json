@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6419",
+  "author": "alx9r",
+  "body": "I was a bit surprised by the ScriptBlockArgumentNoInput parameter binding restriction.  The special-casing of a `[scriptblock]` argument with a command-line-bound pipeline parameter seems to be implemented in [BindParameter](https://github.com/PowerShell/PowerShell/blob/c1c5344a8897262433141ecbc13bb06ac2c4bbef/src/System.Management.Automation/engine/CmdletParameterBinderController.cs#L1320) and looks rather deliberate.\r\n\r\nThe comments include the following statements:\r\n\r\n>... If the argument is of type ScriptBlock and the parameter takes pipeline input, then the ScriptBlock is saved off in the delay-bind ScriptBlock container for further processing of pipeline input and is not bound as the argument to the parameter.\r\n>...\r\n>Now we need to check to see if the argument value is a ScriptBlock.  If it is and the parameter type is not ScriptBlock and not Object, then we need to delay binding until a pipeline object is provided to invoke the ScriptBlock.\r\n>...\r\n>We treat the parameter as bound, but really the script block gets run for each pipeline object and the result is bound.\r\n>...\r\n\r\nThis suggests there can be some sort of implicit script block invocation happening by way of the parameter binding, but I haven't been able to reproduce that.  Or maybe this is happening in cases but I haven't noticed.\r\n\r\nI'd like to understand what is happening here.  Is there an example that demonstrates this delayed parameter binding and/or implicit scriptblock invocation?\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nAdd-Type '\r\nusing System.Management.Automation;\r\npublic class ConvertibleFromScriptblock\r\n{\r\n    public ScriptBlock ScriptBlock { get; private set; }\r\n\r\n    public ConvertibleFromScriptblock\r\n    (\r\n        ScriptBlock scriptBlock\r\n    )\r\n    {\r\n        ScriptBlock = scriptBlock;\r\n    }\r\n}\r\n'\r\n\r\nfunction f\r\n{\r\n    param\r\n    (\r\n        [Parameter(ValueFromPipeline,Position=1,Mandatory)]\r\n        [ConvertibleFromScriptblock]\r\n        $ScriptBlock\r\n    )\r\n    process\r\n    {\r\n        $ScriptBlock\r\n    }\r\n}\r\n\r\nf ([ConvertibleFromScriptblock]{'a'}) # succeeds\r\n{'b'} | f                             # succeeds\r\nf {'c'}                               # fails\r\n\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nScriptBlock\r\n-----------\r\n'a'       \r\n'b'        \r\n'c'\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nScriptBlock\r\n-----------\r\n'a'        \r\n'b'        \r\nf : Cannot evaluate parameter 'ScriptBlock' because its argument is specified as a script block \r\nand there is no input. A script block cannot be evaluated without input.\r\nAt C:\\Users\\un1\\Desktop\\test.ps1:33 char:3\r\n+ f {'c'}                               # fails\r\n+   ~~~~~\r\n    + CategoryInfo          : MetadataError: (:) [f], ParameterBindingException\r\n    + FullyQualifiedErrorId : ScriptBlockArgumentNoInput,f\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value                                            \r\n----                           -----                                            \r\nPSVersion                      6.0.0                                            \r\nPSEdition                      Core                                             \r\nGitCommitId                    v6.0.0                                           \r\nOS                             Microsoft Windows 6.3.9600                       \r\nPlatform                       Win32NT                                          \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                          \r\nPSRemotingProtocolVersion      2.3                                              \r\nSerializationVersion           1.1.0.1                                          \r\nWSManStackVersion              3.0                                              \r\n```\r\n",
+  "closed_at": "2018-03-21T23:19:53Z",
+  "comments": [
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "Here is example of implicit `ScriptBlock` invocation:\r\n```powershell\r\n1..3 | Select-Object -InputObject { $_*2 }\r\n```\r\nor\r\n```powershell\r\nfilter f {\r\n    param(\r\n        [Parameter(ValueFromPipeline)]\r\n        [PSObject] $p\r\n    )\r\n    $p\r\n}\r\n1..3 | f -p { $_*2 }",
+      "created_at": "2018-03-17T19:48:53Z",
+      "updated_at": "2018-03-17T19:48:53Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "A great use of this feature is with `Rename-Item`:\r\n\r\n```powershell\r\ndir -Recurse *.ps1 | Rename-Item -NewName { $_.Name -replace '.ps1','.ps1.bak' }\r\n```",
+      "created_at": "2018-03-17T21:46:14Z",
+      "updated_at": "2018-03-17T21:46:14Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Thanks @lzybkr and @PetSerAl.  I can see how this enables some more expressive constructions.\r\n\r\n@lzybkr Can you comment on why `[object]` parameters are excluded from this delayed-binding treatment?\r\n\r\nFor example, this produces errors\r\n```PowerShell\r\nfunction f {\r\n    param ([Parameter(ValueFromPipeline)]$x)\r\n    process { \"value: $x\" }\r\n}\r\n\r\n1,2 | f -x {$_ * 2}\r\n```\r\n\r\nwhile replacing `$x` with `[int]$x` succeeds.",
+      "created_at": "2018-03-18T21:45:50Z",
+      "updated_at": "2018-03-18T21:45:50Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If the parameter type was `object` - how should PowerShell bind a `ScriptBlock` argument? In a way, it's ambiguous, maybe you meant a `ScriptBlock` as is, or maybe you meant to use delayed binding.\r\n\r\nFor other parameter types, it's much safer to assume you did not mean to pass a `ScriptBlock`.",
+      "created_at": "2018-03-19T15:44:03Z",
+      "updated_at": "2018-03-19T15:44:03Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Right. If the parameter type is `[object]` or `[scriptblock]`, then the scriptblock can be bound to the parameter. If it's any other type, then you can't bind the scriptblock to the parameter so we use the scriptblock for a computed argument.  @lzybkr 's example with renaming files is the canonical usecase for this feature.",
+      "created_at": "2018-03-19T22:32:47Z",
+      "updated_at": "2018-03-19T22:32:47Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">If the parameter type was `object` - how should PowerShell bind a `ScriptBlock` argument? In a way, it's ambiguous, maybe you meant a ScriptBlock as is, or maybe you meant to use delayed binding.\r\n\r\n@lzybkr I see.  I expected the rule to be \"use delayed binding for `scriptblock` argument values for all parameter types other than `scriptblock`\".  The distinction between a `psobject` and `object` parameter type, for example, seems rather subtle yet the difference in parameter binding behavior for scriptblocks is rather dramatic.\r\n\r\nI see, though, that the built-in commands on this computer seem to use `object` parameter types for pipeline parameters sparingly ([here is the search code I used](https://gist.github.com/alx9r/4773628b99ef3066cafd409b10469bf9)).  I also see that `object` parameter types are discouraged by [SD03](https://msdn.microsoft.com/en-us/library/dd878270(v=vs.85).aspx#SD03).  So binding a scriptblock to an `object` parameter type ought to be a rare occurrence anyway.",
+      "created_at": "2018-03-20T15:35:54Z",
+      "updated_at": "2018-03-20T15:35:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@alx9r: \r\n\r\nThe name given to this feature by Jeffrey Snover in a blog post from 2006 is _ScriptBlock Parameter_.\r\n\r\nUnfortunately, as far as I know, not only is this feature not _named_ in the documentation, it doesn't appear to be documented at all.\r\n\r\nA while ago I've described the current behavior and asked for it to be documented in https://github.com/PowerShell/PowerShell-Docs/issues/2338.\r\n\r\nOn a more general note:\r\n\r\nGiving features names is important for them to catch on.\r\n\r\nA similar case is _member enumeration_: while it _is_ documented, it doesn't have a name  either - except in an [old blog post](https://blogs.msdn.microsoft.com/powershell/2012/06/13/new-v3-language-features/).\r\n",
+      "created_at": "2018-05-05T02:46:46Z",
+      "updated_at": "2018-05-05T02:46:46Z"
+    }
+  ],
+  "created_at": "2018-03-17T18:39:40Z",
+  "number": 6419,
+  "state": "closed",
+  "title": "Why does parameter binding impose the ScriptBlockArgumentNoInput restriction?",
+  "updated_at": "2018-05-05T02:46:46Z"
+}

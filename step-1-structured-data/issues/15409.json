@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15409",
+  "author": "sdwheeler",
+  "body": "## Problem description\r\n\r\nIn `Invoke-RestMethod`, the **PassThru** parameter must be used with the **OutFile** parameter. The intent is that you can write the results to the file and get the output to the pipeline. But the cmdlets only write to the pipeline, not the file.\r\n\r\nThe problem code starts here:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/38d582f038f31acfc1a748d60a5331eb82a3bd28/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/Common/InvokeRestMethodCommand.Common.cs#L387\r\n\r\n```csharp\r\nif (ShouldWriteToPipeline)\r\n{\r\n   ...\r\n}\r\nelse if (ShouldSaveToOutFile)\r\n{\r\n   ...\r\n}\r\n```\r\n\r\nNotice that the logic outputs pipeline and skips the output to the file. Both `ShouldWriteToPipeline` and `ShouldSaveToOutFile` can be true so need to remove the `else`.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nInvoke-RestMethod https://taxonomyservice.azurefd.net/taxonomies/product-uri -PassThru -OutFile C:\\temp\\irm.json\r\n```\r\n\r\n## Expected behavior\r\n\r\nOutput to console and to the file.\r\n\r\n## Actual behavior\r\n\r\nOutput to console only. The output file is not created.\r\n\r\n## Environment data\r\n\r\nThis affects all versions 5.1 and higher.\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "sdwheeler",
+      "author_association": "COLLABORATOR",
+      "body": "After further investigation, removing the `else` does not fix the problem. When the `else` is removed, the outfile is created but empty. The problem is that the stream is consumed by writing to the pipeline. There is no way to rewind the stream so that it can be written to the file as well.\r\n\r\nThe only \"fix\" would be to disallow the parameter combination. That would be a breaking change.",
+      "created_at": "2021-05-27T17:22:25Z",
+      "updated_at": "2021-05-27T17:22:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Why can't we implement this if we can have Tee-Object?",
+      "created_at": "2021-05-27T18:27:58Z",
+      "updated_at": "2021-05-27T18:27:58Z"
+    },
+    {
+      "author": "sdwheeler",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov I suppose we could, but I think that would be a large change to the architecture of the cmdlet. @markekraus may have a better answer.",
+      "created_at": "2021-05-27T18:49:34Z",
+      "updated_at": "2021-05-27T18:49:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "My inclination would be to write the file and then read the data, perhaps \ud83e\udd14 \r\n\r\nOr, alternatively, can we reset the stream's position after writing to the pipeline and then use it to write the file?",
+      "created_at": "2021-05-27T20:59:29Z",
+      "updated_at": "2021-05-27T20:59:29Z"
+    },
+    {
+      "author": "sdwheeler",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Swapping the order does not change the problem. The problem is that the StreamHelper class does not provide a way to rewind the stream. So the helper class needs to change, which is potentially a lot riskier.\r\n\r\nEDIT: Oh, I just realized you are suggesting we write the file first then read the file to output to the pipeline. I still prefer having a way to rewind the stream pointer.",
+      "created_at": "2021-05-27T23:38:38Z",
+      "updated_at": "2021-05-27T23:42:04Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah. For small files, we _could_ cache the file in memory as a memory stream before saving/outputting, since those allow us to rewind the stream.\r\n\r\nTo account for large files, it might make sense to use a MemoryStream (or similar) as a buffer (make it say 1024 bytes or whatever) and:\r\n\r\n- copy X bytes from the StreamHelper into the MemoryStream\r\n- write all those to the pipeline from the stream\r\n- rewind the MemoryStream\r\n- write the bytes to the file\r\n- repeat the process until there's no more data from the StreamHelper",
+      "created_at": "2021-05-28T03:12:48Z",
+      "updated_at": "2021-05-28T03:12:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> @iSazonov I suppose we could, but I think that would be a large change to the architecture of the cmdlet. @markekraus may have a better answer.\r\n\r\nI don't see any complicity to add this - there is only two places there we output.\r\n\r\nAnd we read all in buffer :-) - BufferingStreamReader - and rewind it with `responseStream.Seek(0, SeekOrigin.Begin);`",
+      "created_at": "2021-05-28T05:14:26Z",
+      "updated_at": "2021-05-28T05:14:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If we have a large file download -- say, 10gb -- does that still work? Or will the buffering mean that one or both modes of output will only get partial data? Can we _afford_ to completely rewind a _10gb_ stream or similar and force it to be all kept in memory?\r\n\r\nSeems to me that we should avoid having the entire stream in memory as much as possible.",
+      "created_at": "2021-05-28T15:28:43Z",
+      "updated_at": "2021-05-28T15:29:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> If we have a large file download -- say, 10gb -- does that still work?\r\n\r\n10 Gb for REST? This is not a realistic scenario as far as I'm concerned. Invoke-WebRequest is for downloading large files.",
+      "created_at": "2021-05-28T15:38:17Z",
+      "updated_at": "2021-05-28T15:38:17Z"
+    },
+    {
+      "author": "sdwheeler",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think it will work to try to mix handling of the output together. When you write to the file, it writes the raw data stream. When you write to the pipeline it does a lot of conversion from XML or JSON and creates a PSCustomObject. So pipeline case needs the complete stream before it can transform the data.\r\n\r\nThe real fix to so be able to rewind the stream pointer.  When I talked to @markekraus, he didn't seem to think that was possible with the current StreamHelper class.",
+      "created_at": "2021-05-28T17:15:55Z",
+      "updated_at": "2021-05-28T17:15:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  When you write to the file, it writes the raw data stream.\r\n\r\nWhy would we need a raw data? I'd expect we write to file end objects converted to strings.",
+      "created_at": "2021-05-28T17:37:13Z",
+      "updated_at": "2021-05-28T17:37:13Z"
+    },
+    {
+      "author": "sdwheeler",
+      "author_association": "COLLABORATOR",
+      "body": "When we write to a file we write the raw xml or raw json. It does not get converted to objects like when it is written to the pipeline. Look at the code. You will see the difference.",
+      "created_at": "2021-05-28T22:11:23Z",
+      "updated_at": "2021-05-28T22:11:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It doesn't seem to make sense to write decoded object to pipeline and raw data to output file.\r\n\r\nThen still the question is what kind of behavior do we want:\r\n1. Write decoded object to pipeline and write decoded object to output file\r\n2. Write decoded object to pipeline and write raw data to output file\r\n3. Write raw data to pipeline and write raw data to output file\r\n4. Write raw data to pipeline and write decoded object to output file\r\n\r\nSince there is already buffered stream in one code path any scenario could be implemented.",
+      "created_at": "2021-05-30T15:59:18Z",
+      "updated_at": "2021-05-30T15:59:18Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "Maintainer review: this is a cmdlet definition/functionality issue - reassigned to Area-Cmdlets-Utility.",
+      "created_at": "2021-06-22T21:52:51Z",
+      "updated_at": "2021-06-22T21:52:51Z"
+    },
+    {
+      "author": "JustinWebDev",
+      "author_association": "NONE",
+      "body": "The behavior is indeed strange.  If you pipe it, you get one string that is unusable.  The only way to use the return object is to capture it in a variable then pipe the variable.",
+      "created_at": "2022-03-24T19:34:10Z",
+      "updated_at": "2022-03-24T19:34:10Z"
+    }
+  ],
+  "created_at": "2021-05-14T21:53:35Z",
+  "number": 15409,
+  "state": "open",
+  "title": "Invoke-RestMethod parameter combination of OutFile/PassThru does not write to file as intended",
+  "updated_at": "2022-03-24T19:34:11Z"
+}

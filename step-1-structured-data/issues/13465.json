@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13465",
+  "author": "mklement0",
+  "body": "* Follow-up from #9997, which lacked a clear proposal.\r\n* Related to #11921 (`-is [pscustomobject]`) and #10704 (`-is $null`)\r\n\r\n## Summary of the new feature/enhancement\r\n\r\nEnable the following `-is` test to allow for a PowerShell-idiomatic detection of the `[System.Management.Automation.Internal.AutomationNull]::Value` value that commands that output \"nothing\" technically output.\r\n\r\n```powershell\r\n# `& {}` outputs \"nothing\", which is technically [System.Management.Automation.Internal.AutomationNull]::Value\r\nPS> & {} -is [AutomationNull]   # WISHFUL THINKING\r\nTrue\r\n```\r\n\r\nIn _expression_ contexts `[System.Management.Automation.Internal.AutomationNull]::Value` is treated like `$null`, but there are **contexts where the distinction matters**:\r\n\r\nIn the **pipeline**:\r\n\r\n```powershell\r\n# A true $null is sent through the pipeline. \r\nPS> $null  | % { 'here' }\r\nhere\r\n\r\n# [System.Management.Automation.Internal.AutomationNull]::Value is NOT sent through the pipeline\r\n#  - it is an empty enumeration.\r\nPS> & { }  | % { 'here' }\r\n# NO output\r\n```\r\n\r\nAlso, because the **`switch` statement** treats its operand as an _enumeration_, a `[System.Management.Automation.Internal.AutomationNull]::Value` value causes the statement to be skipped altogether; that is, it is effectively _ignored_:\r\n\r\n``` powershell\r\n$val = & {}\r\n# Because $val contains [System.Management.Automation.Internal.AutomationNull]::Value,\r\n# the switch statement is effectively ignored;\r\nswitch ($val) {\r\n  default { 'hi' }\r\n}\r\n```\r\n\r\n**Operators** behave inconsistently with AutomationNull as the LHS (see #3866):\r\n\r\n```powershell\r\nPS> [System.Management.Automation.Internal.AutomationNull]::Value -match 'foo'\r\n# NO OUTPUT - LHS was interpreted as *collection*\r\n\r\nPS> [System.Management.Automation.Internal.AutomationNull]::Value -eq 'foo'\r\nFalse # LHS was interpreted as a *scalar*\r\n```\r\n\r\nIn short: **Because `[System.Management.Automation.Internal.AutomationNull]::Value` causes observable differences in behavior from `$null`, it must be discoverable.**\r\n\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nNote: Strictly speaking, `[System.Management.Automation.Internal.AutomationNull]::Value` is of type `[System.Management.Automation.PSObject]`, but treating it as an instance of `AutomationNull` would be a helpful \"white lie\", similar to the one `-is` already tells when it reports a `[psobject]` wrapper's `.BaseObject`  value's type as the type.\r\n\r\nHowever, @SeeminglyScience's  [proposed implementation here](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-580743572) would actually resolve this issue, via a new, _public_ `System.Management.Automation.AutomationNull` wrapper, for which an `[AutomationNull]` _type accelerator_ would have to be defined.\r\n\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "briantist",
+      "author_association": "NONE",
+      "body": "I really like this proposal. \r\n\r\nThe differences between `$null` and \"nothing\" confound users who inevitably run into it, and the ones who are curious enough to try to understand why and make clear comparisons end up disappointed and with a view of PowerShell as a \"weird\" language (or at worst one they can't trust). \r\n\r\nTrue story: I worked at a company where the team who used PowerShell the most had as their team's chat description:\r\n> PowerShell obeys the principle of most surprise\r\n\r\nThe concept of a `$null` result vs. \"no result\" is not difficult to understand, but only being able to reason about a result implicitly instead of being able to just _ask the language_ is not a good UX.\r\n\r\n`$value -is [AutomationNull]` is clear and concise.",
+      "created_at": "2020-12-22T00:42:48Z",
+      "updated_at": "2020-12-22T00:42:48Z"
+    },
+    {
+      "author": "CopaceticMeatbag",
+      "author_association": "NONE",
+      "body": "Any chance this is going to be looked at eventually? The current implementation makes zero intuitive sense, and I think the example below is a very a basic and common use case. What's the hold up 2 years on?\r\n```\r\n$CurrentDevices = Get-AudioDevice -List | ? type -eq 'Playback' #no match so returns an Internal.AutomationNull instead of $null\r\n$CurrentDevices -eq $null #prints True\r\nswitch($CurrentDevices){\r\n    $null {write-host \"gotcha! This won't run lol\"}\r\n    default {write-host \"this will never run either because of some obscure non-public value returned that I can't inspect, even though I just compared the variable to $null directly above the switch and was told they were the same. And the official response 2 years later is still just 'lol'\"}\r\n}\r\n```\r\n",
+      "created_at": "2022-10-28T03:50:09Z",
+      "updated_at": "2022-10-28T03:54:01Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@CopaceticMeatbag This issue is about an easier way to detect autonull, not a change in the behavior. That behavior in particular is relied upon heavily so I would not expect it to change.\r\n\r\nOn an unrelated note, this issue is missing a needs triage tag, adding so the Engine WG can discuss it.",
+      "created_at": "2022-10-28T17:20:23Z",
+      "updated_at": "2022-10-28T17:20:23Z"
+    },
+    {
+      "author": "CopaceticMeatbag",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience yes I'm sorry I should've been clearer; I think `$value -is [AutomationNull]` is a great halfway solution and would at least give me an option to work with.\r\n\r\nI read through issue #9997 and don't understand how @bpayette 's comments make sense to nullify the whole discussion. E.g. \"The intent was to make AutomationNull as invisible to script users as possible\". Ok sure, but PS is returning an [AutomationNull] result to me, and I'm trying to confirm that, and the response is \"you're not meant to use that\"? So why return it then if I'm not meant to use it? Feels like the PS team is more than happy shifting the burden onto the end user as a 'fix' for this issue.",
+      "created_at": "2022-11-01T00:26:49Z",
+      "updated_at": "2022-11-01T00:26:49Z"
+    }
+  ],
+  "created_at": "2020-08-17T20:18:26Z",
+  "number": 13465,
+  "state": "open",
+  "title": "Enable simple detection of [AutomationNull]::Value with -is [AutomationNull]",
+  "updated_at": "2022-11-01T00:26:49Z"
+}

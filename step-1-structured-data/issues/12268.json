@@ -1,0 +1,244 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12268",
+  "author": "DHowett-MSFT",
+  "body": "# Steps to reproduce\r\n\r\n1. Use Windows PowerShell 7 and PowerShell 7 in WSL.\r\n2. Launch Windows Powershell in Windows Terminal\r\n3. Launch wsl, `pwsh`\r\n4. Exit Linux powershell\r\n5. Observe the arrow keys\r\n\r\nLinux powershell emits the escape sequence `DECSET` `DECCKM`[1] on startup before it emits the first prompt.\r\n\r\nThis reconfigures the cursor keys, which usually emit `CSI A...D`, to emit `SS3 A...D` instead.\r\n\r\nLinux powershell can handle `SS3` arrow key sequences. This is fine.\r\n\r\nWhen Linux powershell exits, it _does not restore `DECCKM` to its original state_. All applications that manipulate global terminal state are expected to return the terminal to \"normal\" once they are done.\r\n\r\nBecause the state is not restored when you exit Linux powershell, Windows powershell (which doesn't know that the terminal state has been changed) will start to receive `SS3` arrow key sequences.\r\n\r\nWindows powershell _cannot_ handle `SS3` arrow key sequences, and it ignores them, so the arrow keys do not work.\r\n\r\nThis also reproduces when you SSH to a linux machine, but WSL is easier for a self-contained repro.\r\n\r\n# Expected behavior\r\n\r\n`DECCKM` is disabled on exit.\r\n\r\n# Actual behavior\r\n\r\n`DECCKM` remains enabled on exit, downstream applications get confused.\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n(dhowett-sl) ~ % $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n(dhowett-sl) ~ % wsl pwsh -c '\\$PSVersionTable'\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Linux 4.19.84-microsoft-standard #1 SMP Wed Nov 13 11:44:37 UTC 2019\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n[1] Notes about DECCKM\r\n\r\n```\r\nCSI ? Pm h\r\n          DEC Private Mode Set (DECSET).\r\n            Ps = 1  \u21d2  Application Cursor Keys (DECCKM), VT100.\r\n```\r\n\r\nDECCKM reconfigures the arrow keys as follows\r\n\r\n```\r\nKey            Normal     Application\r\n-------------+----------+-------------\r\nCursor Up    | CSI A    | SS3 A\r\nCursor Down  | CSI B    | SS3 B\r\nCursor Right | CSI C    | SS3 C\r\nCursor Left  | CSI D    | SS3 D\r\n-------------+----------+-------------\r\n```\r\n\r\n[2] I've investigated PowerShell, PSReadline and dotnet/runtime, and I cannot determine where DECCKM is being enabled.",
+  "closed_at": "2021-04-01T20:01:32Z",
+  "comments": [
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "Originally filed: https://github.com/microsoft/terminal/issues/5257",
+      "created_at": "2020-04-06T20:56:08Z",
+      "updated_at": "2020-04-06T20:56:08Z"
+    },
+    {
+      "author": "LookoutHill",
+      "author_association": "NONE",
+      "body": "@DHowett-MSFT As a workaround it seems like one could create a script that would emit the appropriate reset sequence. Would you post this sequence in PowerShell string format?",
+      "created_at": "2020-04-06T21:04:45Z",
+      "updated_at": "2020-04-06T21:04:45Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "```\r\n\"`e[?1l\"\r\n```",
+      "created_at": "2020-04-06T21:05:54Z",
+      "updated_at": "2020-04-06T21:05:54Z"
+    },
+    {
+      "author": "LookoutHill",
+      "author_association": "NONE",
+      "body": "Thanks for that. It gave me enough info to interpret this arcane knowledge. That sequence doesn't restore functionality, but the \"Reset to Initial State\" sequence (\"`ec\") does.",
+      "created_at": "2020-04-06T21:26:25Z",
+      "updated_at": "2020-04-06T21:26:25Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "It legitimately looks like it's being stripped out of the output.\r\n\r\nWhen I type this:\r\n\r\n```\r\n(dhowett-sl) ~ % \"a`e[?1lb\"\r\n```\r\n\r\nI get this out of the pty:\r\n\r\n```\r\nab\r\n```\r\n\r\nbut when I run this:\r\n\r\n```\r\n(dhowett-sl) ~ % wsl printf 'a\\\\e[?1lb'\r\n```\r\n\r\nI get\r\n\r\n```\r\na\u241b[?1lb\r\n```\r\n\r\nI wonder why it's being filtered from powershell's output stream. Similar sequences, like \"`e[?2004l\", are not.",
+      "created_at": "2020-04-06T21:35:56Z",
+      "updated_at": "2020-04-06T21:35:56Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "As a workaround, you can do this:\r\n\r\n```\r\n\"`e[?;1l\"\r\n```\r\n\r\nMasking that you're requesting DECRST 1 by placing a `;` before it confuses powershell, but Terminal can understand it.",
+      "created_at": "2020-04-06T21:37:20Z",
+      "updated_at": "2020-04-06T21:37:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  I've investigated PowerShell, PSReadline and dotnet/runtime, and I cannot determine where DECCKM is being enabled.\r\n\r\nWow! \r\n/cc @daxian-dbw who have huge experience in the area.",
+      "created_at": "2020-04-07T05:10:07Z",
+      "updated_at": "2020-04-07T05:10:07Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "Of note, this reproduces without PSReadline available :smile:\r\n\r\n(I tracked down why I can't forcibly print \"`e[?1l\" -- PowerShell isn't using VT input on _Windows_, so that value is technically meaningless to it. Conhost is ignoring it.)",
+      "created_at": "2020-04-08T01:16:49Z",
+      "updated_at": "2020-04-08T01:16:49Z"
+    },
+    {
+      "author": "lukaszroz",
+      "author_association": "NONE",
+      "body": "I have come across this bug when I SSH from Ubuntu to Windows machine. It works when I SSH from Bash without starting PowerShell. To reproduce in PowerShell on Ubuntu in Gnome Terminal:\r\n\r\n```\r\n$ cat #try up/down/right/left arrow, Enter, Ctrl-D\r\n^[[A^[[B^[[C^[[D\r\n\r\n$ pwsh\r\nPowerShell 7.0.3\r\n> ssh user@host\r\nPowerShell 7.0.3\r\n> exit #arrow keys don't work\r\nConnection to host  closed.\r\n> exit\r\n$ cat #try up/down/right/left arrow, Enter, Ctrl-D\r\n^[OA^[OB^[OC^[OD\r\nABCD\r\n```\r\n\r\nAfter some digging I have found dotnet/corefx#6488. The Pull Request fixed a number of bugs related to terminal escape codes handling. It seems to me the DECCKM might be set in System.Console, see [lines 937 - 947](https://github.com/dotnet/runtime/blob/2f1ece19ff8e4a4fe903a8df6ac66f76d2d1dec3/src/libraries/System.Console/src/System/ConsolePal.Unix.cs#L937)",
+      "created_at": "2020-09-01T22:13:21Z",
+      "updated_at": "2020-09-01T22:13:21Z"
+    },
+    {
+      "author": "lukaszroz",
+      "author_association": "NONE",
+      "body": "Found the issue: https://github.com/dotnet/runtime/issues/27626",
+      "created_at": "2020-09-01T22:17:16Z",
+      "updated_at": "2020-09-01T22:17:16Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "Excellent investigation. Thanks!",
+      "created_at": "2020-09-01T23:25:25Z",
+      "updated_at": "2020-09-01T23:25:25Z"
+    },
+    {
+      "author": "tig",
+      "author_association": "NONE",
+      "body": "Tagging @TylerLeonhardt so he's aware of this relative to https://github.com/PowerShell/GraphicalTools\r\n\r\nSpecifically, this is why `out-consolegridview` has issues on Linux where the cursor keys don't work after using it.  Related to https://github.com/PowerShell/GraphicalTools/issues/99.\n\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/11524380?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/GraphicalTools\">PowerShell/GraphicalTools</a></strong></div><div>A module that mixes PowerShell and GUIs! - built on Avalonia and gui.cs - PowerShell/GraphicalTools</div></blockquote>",
+      "created_at": "2020-10-21T16:26:06Z",
+      "updated_at": "2020-10-21T16:26:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> This also reproduces when you SSH to a linux machine\r\n\r\nThere is another case, namely an \"intra-Unix\" one:\r\n\r\nThe cursor keys in `ksh` only work if application-cursor mode  is _off_ (`keypad_local` / `rmkx`)\r\n\r\nSince PowerShell unconditionally turns that mode _on_  (`keypad_transmit` / `smkx`), even a simple call to the PowerShell CLI such as \r\n `pwsh -noprofile -c 'get-date'` \r\nbreaks cursor-key handling in `ksh`.\r\n\r\n(`bash` and `zsh` are _not_ affected, because they work in _either_ mode.)",
+      "created_at": "2020-10-22T21:53:48Z",
+      "updated_at": "2020-10-22T21:53:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "How can we detect whether SS3 mode is on?",
+      "created_at": "2021-01-16T10:22:29Z",
+      "updated_at": "2021-01-16T10:22:29Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "You don\u2019t need to detect it. An application should set the states it needs on startup and _set them back to reasonable defaults for a terminal_ on exit. Nothing to remember, nothing to restore.",
+      "created_at": "2021-01-16T19:44:11Z",
+      "updated_at": "2021-01-16T19:44:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@DHowett, this isn't so much about _terminals_, but about the _shells_ that run in them, and as my previous comment implies, different shells:\r\n\r\n* require different settings\r\n\r\n* seem to rely on commands they invoke _not_ to change these settings.\r\n\r\nFor instance:\r\n\r\n* `ksh` malfunctions if a command turns application-cursor mode _on_ and _leaves it on_.\r\n\r\n* `pwsh` malfunctions if a command turns application-cursor mode _off_ and _leaves it off_.\r\n\r\nTherefore, while it may be a challenge to implement, _restoring_ the previous state seems like the right thing to do.\r\n\r\n",
+      "created_at": "2021-01-17T02:06:57Z",
+      "updated_at": "2021-01-17T02:06:57Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "@mklement0 I'm _also_ not talking about terminals. As the reporter of the issue and engineering owner for a terminal, I'm supposed to be aware of how applications expect to work... so here goes:\r\n\r\nA shell that cannot go from a terminal left in its default state to its required state **is broken**.\r\nA shell that requires a state that is different from the default *must* restore the default when it exits naturally or launches an application that will bootstrap from the default state\u00b9. If it does not do so, **it is broken.**\r\n\r\nIntroducing another back-and-forth call/response to determine the application keypad mode state\u2014ESPECIALLY if you're going to do it every time control returns to the user\u2014is madness. It limits the ability of users to pre-fill the keyboard input queue and the ability for terminals and applications across high-latency links to properly coordinate. There's a default assumption here: applications are started with the terminal in its default state, and applications that start other applications return the terminal to its default state.\r\n\r\n\u00b9 Per the above axiom, this is all applications.",
+      "created_at": "2021-01-17T02:12:22Z",
+      "updated_at": "2021-01-17T02:13:33Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "Your example above indicates that ksh is operating as expected (terminal not in default state => it isn't expected to get to the state it needs when that state is the default state) and that pwsh is broken (it expects a non-default state, but does not request it.)",
+      "created_at": "2021-01-17T02:14:23Z",
+      "updated_at": "2021-01-17T02:14:23Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@DHowett:\r\n\r\nGiven your premise, PowerShell is broken in _two_ respects:\r\n\r\n* (a) Intra-session, it doesn't actively restore application keypad mode after running a command, even though it should expect the mode to _potentially_ have been reset to the default state, i.e., off.\r\n\r\n* (b) On exiting a session, it doesn't reset the terminal to the default state (it doesn't turn application keypad mode off again).\r\n\r\nFixing (a) would require the very back-and-forth you think should be avoided - even though probably only a minority of commands (other shells, CUIs) change the terminal state.\r\n\r\nSo I gather that:\r\n\r\n* the conclusion is that PowerShell shouldn't require application keypad mode to be ON for its own sake, correct?\r\n\r\n* if you have any insight on what such a change would entail technically / if it is feasible at all, please share.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-01-17T02:52:55Z",
+      "updated_at": "2021-01-17T02:52:55Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "So, I do think powershell (or according to an earlier comment, the .NET runtime \ud83d\ude26) is broken here.\r\n\r\nBefore reading user input where it cares about the format of the arrow/line editing keys, it should set the mode it wants. After it's done, it should reset that mode. That's _very cheap_, and it doesn't require any back-and-forth.\r\n\r\nI've observed zsh doing this:\r\n\r\n1. Emit `\\e[?1h` (enable DECCKM)\r\n2. Emit my prompt\r\n3. Accept input\r\n4. On CR/LF, emit `\\e[?1l` (disable DECCKM)\r\n5. Spawn an application\r\n6. Application exits.\r\n7. GOTO 1.\r\n\r\nThere's no querying, just assertion. \"DECCKM should be on now.\" \"DECCKM should be off now.\" It never needs to know the state, because of two things:\r\n\r\n1. If DECCKM is off, `\\e[?1h` turns it on.\r\n2. If DECCKM is on, `\\e[?1h` does nothing.",
+      "created_at": "2021-01-17T03:20:45Z",
+      "updated_at": "2021-01-17T03:20:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@DHowett Many thanks! I think we should ask @SteveL-MSFT to add this in next milestone plan. ",
+      "created_at": "2021-01-19T12:36:08Z",
+      "updated_at": "2021-01-19T12:36:08Z"
+    },
+    {
+      "author": "tig",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT & @TylerLeonhardt - is there a PowerShell issue tracking this?\r\n\r\nThis impacts `Out-ConsoleGridView` pretty significantly: https://github.com/PowerShell/GraphicalTools/issues/134",
+      "created_at": "2021-01-22T17:55:07Z",
+      "updated_at": "2021-01-22T17:55:07Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "![image](https://user-images.githubusercontent.com/189190/105534355-38109400-5ca2-11eb-853c-cce21fb49501.png)\r\n\r\nThis appears to _be_ the PowerShell issue tracking this. o_O",
+      "created_at": "2021-01-22T19:09:05Z",
+      "updated_at": "2021-01-22T19:09:05Z"
+    },
+    {
+      "author": "wez",
+      "author_association": "NONE",
+      "body": "FWIW, this issue also applies to users of powershell on macos, running in any terminal emulator--it's not linux-specific.",
+      "created_at": "2021-03-03T16:28:26Z",
+      "updated_at": "2021-03-03T16:28:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The problem is https://github.com/dotnet/runtime/issues/27626.  Seems like dotnet is not in a hurry to fix as it's in `future` milestone.  We can probably explicitly emit the DECRST 1 seq on exit in the interim.",
+      "created_at": "2021-03-04T14:15:07Z",
+      "updated_at": "2021-03-04T14:21:18Z"
+    },
+    {
+      "author": "wez",
+      "author_association": "NONE",
+      "body": "Please also disable that mode when running child processes!",
+      "created_at": "2021-03-04T15:11:25Z",
+      "updated_at": "2021-03-04T15:11:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@wez Welcome to review #14943. You can download artifacts there and check its locally.",
+      "created_at": "2021-03-04T15:24:02Z",
+      "updated_at": "2021-03-04T15:24:02Z"
+    },
+    {
+      "author": "wez",
+      "author_association": "NONE",
+      "body": "I don't particularly want to dive into the code in powershell; I'm here because https://github.com/cli/cli/issues/3071 was initially reported as a bug in my terminal emulator :-p\r\n\r\nThe test scenario is:\r\n\r\n* on macos\r\n* launch powershell\r\n* inside powershell, run `gh auth login`\r\n* The unexpected cursor key encoding causes that program to crash\r\n\r\n",
+      "created_at": "2021-03-04T15:45:19Z",
+      "updated_at": "2021-03-04T15:45:19Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@wez You can just download the compiled artifacts, tests them in your environment and give a feedback before the PR will be merged.",
+      "created_at": "2021-03-04T16:28:28Z",
+      "updated_at": "2021-03-04T16:28:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@wez, you can _emulate_ what the PR will implement as follows:\r\n\r\n```powershell\r\n$Host.UI.Write(\"`e[?1l\"); gh auth login; $Host.UI.Write(\"`e[?1h\")\r\n```\r\n\r\nFor entire-session support - as a stopgap that should also work for older PS versions - you can place the following at the end of your `$PROFILE` file (assumes use of `PSReadLine`, which is true by default):\r\n\r\n```powershell\r\n# Turns application-key mode ON before displaying the PS prompt and back OFF right after.\r\n$function:PSConsoleHostReadLine = \" `$Host.UI.Write(`\"``e[?1h`\"); $function:PSConsoleHostReadLine; `$Host.UI.Write(`\"``e[?1l`\") \"\r\n# For non-interactive invocations of the PowerShell CLI: turn application-key mode off too, \r\n# So that it is left OFF on exiting (obviously won't work for -NoProfile invocations).\r\n$Host.UI.Write(\"`e[?1l\")\r\n```\r\n",
+      "created_at": "2021-03-04T17:02:30Z",
+      "updated_at": "2021-03-04T17:05:17Z"
+    },
+    {
+      "author": "wez",
+      "author_association": "NONE",
+      "body": "Thanks, but I don't use powershell; as I mentioned above, I'm just here because this issue was raised by one of the users of my terminal.  @gaborbernat: perhaps you could try those suggestions?\r\n",
+      "created_at": "2021-03-04T17:05:31Z",
+      "updated_at": "2021-03-04T17:05:31Z"
+    },
+    {
+      "author": "gaborbernat",
+      "author_association": "NONE",
+      "body": "I can confirm that @mklement0 solution works on:\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.2\r\nPSEdition                      Core\r\nGitCommitId                    7.1.2\r\nOS                             Darwin 19.6.0 Darwin Kernel Version 19.6.0: Tue Nov 10 00:10:30 PST 2020; root:xnu-6153.141.10~1/RELEASE_X86_64\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+      "created_at": "2021-03-04T18:21:48Z",
+      "updated_at": "2021-03-04T18:21:48Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #14943, which has now been successfully released as `v7.2.0-preview.5`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.5)\n",
+      "created_at": "2021-04-14T23:59:05Z",
+      "updated_at": "2021-04-14T23:59:05Z"
+    }
+  ],
+  "created_at": "2020-04-06T20:53:09Z",
+  "number": 12268,
+  "state": "closed",
+  "title": "Linux pwsh enables DECCKM, but Windows pwsh cannot handle it; arrow keys stop working after exiting linux powershell",
+  "updated_at": "2021-04-14T23:59:05Z"
+}

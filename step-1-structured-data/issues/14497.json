@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14497",
+  "author": "iSazonov",
+  "body": "1. The IsPathRoot() method does double check for UNC\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L5026-L5047\r\nand could be replaced with more short and fast code. Proposal from @mklement0 https://github.com/PowerShell/PowerShell/issues/14497#issuecomment-751356734\r\n\r\nAlso we need to review GetFileSystemItem(string path, ref bool isContainer, bool showHidden) - there is a root check and maybe a bug (no UNC share check)\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L1426-L1430\r\n\r\n2. PR #14469 Reduce aggressive correcting casing of file system paths\r\nOn Windows we do case normalizations even if results are not used.\r\n\r\n3. No need to allocate FileInfo and extra strings in IsSameWindowsVolume():\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L6141-L6147\r\nWe can use `GetDirectoryName(ReadOnlySpan<char> path)`. Also we should use Ordinal comparison.\r\n\r\n4. EnsureDriveIsRooted() method does extra path.IndexOf(':') - we can simply check last char\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L5709-L5727\r\n\r\n5. We need to review semantic of IsValidPath() method. If it is exactly about path validity the method could be simplified but we need to measure a performance. In common case it is impossible to validate path by parsing but only by opening.\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L1192-L1246\r\n\r\n6. Statistic shows:\r\n```powershell\r\ndir -Recurse 'C:\\Program Files (x86)\\' | Select -ExpandProperty Mode | Sort-Object  | Group-Object -NoElement\r\n\r\nCount Name\r\n----- ----\r\n    1 -----\r\n    3 --r--\r\n44263 -a---\r\n    6 -ar--\r\n 8136 d----\r\n    3 d---s\r\n    2 d-r--\r\n 1044 la---\r\n```\r\nand we could add \"la---\" as a static element in\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L2024-L2040\r\n```c#\r\n                if (!isLink)\r\n                {\r\n                    // special casing for the common cases - no allocations\r\n                    switch (fileAttributes)\r\n                    {\r\n                        case FileAttributes.Archive:\r\n                            return \"-a---\";\r\n                        case FileAttributes.Directory:\r\n                            return \"d----\";\r\n                        case FileAttributes.Normal:\r\n                            return \"-----\";\r\n                        case FileAttributes.Directory | FileAttributes.ReadOnly:\r\n                            return \"d-r--\";\r\n                        case FileAttributes.Archive | FileAttributes.ReadOnly:\r\n                            return \"-ar--\";\r\n                    }\r\n                }\r\n                else if (fileAttributes == FileAttributes.ReadOnly)\r\n                {\r\n                    return \"la---\";\r\n                }\r\n\r\n           ...\r\n```\r\n\r\n7. Remove double check ItemExists();\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L6105-L6112",
+  "closed_at": "2022-10-04T06:49:27Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for tackling this, @iSazonov.\r\n\r\nNote that `[io.path]::IsPathRooted()` also returns true for paths of any depth, as long as they are rooted; e.g., `[io.path]::IsPathRooted(\"\\Windows\")` returns `$true` too.\r\n\r\nBy contrast, the method's intent is to see if `path` is _just_ a root path, i.e. a path that refers to a drive's root dir.\r\n\r\nSince `[io.path]::GetPathRoot()`  also works with UNC paths, the one existing check should be enough in principle:\r\n\r\n```csharp\r\nbool isDriveOrUncRoot = string.Equals(path, Path.GetPathRoot(path), StringComparison.OrdinalIgnoreCase)\r\n```\r\n\r\nThe only edge case is that while paths such as `C:\\`, `\\`, and `C:` are all returned as-is by `[io.path]::GetPathRoot()` (and therefore make the test return `$true`), `\\\\foo\\bar\\` - note the trailing `\\` - is returned as `\\\\foo\\bar` (no trailing `\\`), so it wouldn't be recognized as a (UNC) root path.\r\n",
+      "created_at": "2020-12-25T16:26:14Z",
+      "updated_at": "2020-12-25T16:28:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Thanks for help!\r\n\r\n> `\\\\foo\\bar\\` - note the trailing `\\` - is returned as `\\\\foo\\bar`\r\n\r\nWe need this and the fact complicate our check. Also [io.path]::GetPathRoot(\"`\\\\q\\\") returns `\\\\q\\`.\r\nIt seems it is a question for .Net team how can we check if a path is a root.\r\n\r\nUpdate: GetFileSystemItem(string path, ref bool isContainer, bool showHidden) - there is a root check and maybe a bug (no UNC share check)\r\nhttps://github.com/PowerShell/PowerShell/blob/281b437a65360ae869d40f3766a1f2bbba786e5e/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L1426-L1430",
+      "created_at": "2020-12-25T17:48:39Z",
+      "updated_at": "2020-12-25T19:25:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Interesting, @iSazonov: For me, both in 7.1 and v7.2.0-preview.2 (on Windows), `[io.path]::GetPathRoot(\"\\\\q\")` returns `\\\\q`, not `\\\\q\\` - but `[io.path]::GetPathRoot(\"\\\\q\\\")` does return `\\\\q\\` - did you mean the latter?\r\n\r\nNote that `[io.path]::GetPathRoot()` performs no syntax check on its input path, and `\\\\q` is formally not a valid path - not sure if our `IsPathRoot()` needs to detect or where else such a check may be performed.\r\n\r\nLeaving paths with invalid syntax aside, I think the following would work (assuming only paths with _native_ drive letters are use on Windows):\r\n\r\n```csharp\r\nstring rootPath = Path.GetPathRoot(path);\r\nbool isDriveOrUncRoot = \r\n  ! path.EndsWith(':')\r\n  &&\r\n  string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase) \r\n  ||\r\n  string.Equals(path.Substring(0, path.Length-1), rootPath, StringComparison.OrdinalIgnoreCase) && \r\n    path.Length == 1 + rootPath.Length && (path.EndsWith('\\\\') || path.EndsWith('/'));\r\n```\r\n\r\nNote that the above handles another edge case: a path such as `c:` is returned as-is by `[io.path]::GetPathRoot()`, but it does _not_ refer to the drive's root directory, but to _whatever the current directory is_ on that drive.\r\n\r\nP.S.: `StringComparison.Ordinal` should be sufficient, from what I can tell, because no case normalization is performed by `Path.GetPathRoot()` - neither in terms of drive letters, nor in UNC paths.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-12-25T18:33:37Z",
+      "updated_at": "2020-12-25T18:39:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> does return `\\\\q\\` - did you mean the latter?\r\n\r\nYes, GitHub hide the slash.\r\n\r\n>  string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase) \r\n\r\nWhy should we compare if GetPathRoot() returns a substring? ",
+      "created_at": "2020-12-25T19:29:37Z",
+      "updated_at": "2020-12-25T19:29:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Why should we compare if GetPathRoot() returns a substring?\r\n\r\nBecause the intent of the PS method, judging by the doc comments and the implementation, is to see if the input path refers to a _root directory_, not to see if the path _starts_ from a root directly (the latter would be a root*ed* path, not a root path).\r\n\r\nThus, the idea is to extract just the root-directory portion of the path and to then see if that is the _entire_ path.\r\n\r\nFor instance, the method should return `true` for `C:\\`, `\\`, `\\\\foo\\bar`, and `\\\\foo\\bar\\`, and `false` for `C:\\foo`, `\\foo`, and `\\\\foo\\bar\\baz`.",
+      "created_at": "2020-12-25T19:33:12Z",
+      "updated_at": "2020-12-26T13:41:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I mean it is enough to check lengths of original path and Path.GetPathRoot(path) (have a workaround for UNC share paths - really remove last slash at the first step).",
+      "created_at": "2020-12-26T12:09:53Z",
+      "updated_at": "2020-12-26T12:09:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @iSazonov - no explicit comparison needed; the following could work:\r\n\r\n```csharp\r\nint rootPathLength;\r\nbool isDriveOrUncRoot = (rootPathLength = Path.GetPathRoot(path)?.Length ?? 0) > 0 && (\r\n  path.Length == rootPathLength && path[^1] != ':'  // rule out, e.g., \"C:\"\r\n  ||\r\n  path.Length == 1 + rootPathLength && (path[^1] == '\\\\' || path[^1] == '/') // ignore trailing sep. in UNC root path\r\n);\r\n```\r\n\r\n",
+      "created_at": "2020-12-26T13:41:40Z",
+      "updated_at": "2020-12-26T13:43:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Thanks! Have you an interest to pull PR?",
+      "created_at": "2020-12-26T16:52:35Z",
+      "updated_at": "2020-12-26T16:52:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov, but my hope is that someone else will pick this up.",
+      "created_at": "2020-12-26T17:12:18Z",
+      "updated_at": "2020-12-26T17:12:18Z"
+    }
+  ],
+  "created_at": "2020-12-25T07:33:59Z",
+  "number": 14497,
+  "state": "closed",
+  "title": "Tracking FileSystem provider performance issues",
+  "updated_at": "2022-10-04T06:49:27Z"
+}

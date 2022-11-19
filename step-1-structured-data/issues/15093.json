@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15093",
+  "author": "FredVH",
+  "body": "Hi\r\n\r\nSometimes I need to check if a process is running for the current user (non-admin on terminal server). Now I use `get-process -Name \"ProcessName\" | ? { $_.SI -eq $([System.Diagnostics.Process]::GetCurrentProcess().SessionId) }`. But it would be much easier if I could use `get-process -Name \"ProcessName\" -CurrentUser`.\r\n\r\n\r\nKind regards\r\nFrederik.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Making this easier sounds like a good idea, but for consistency with other cmdlets we should probably use a `-Scope` parameter with enumeration values such as `AllUsers` (default), `CurrentUser`, and perhaps also `OtherUsers`.\r\n\r\nAlso, we need to ensure cross-platform consistency:\r\n\r\n`Get-Process  | ? { $_.SI -eq $([System.Diagnostics.Process]::GetCurrentProcess().SessionId) }`, which can be simplified to `Get-Process | ? SI -eq (Get-Process -Id $PID).SI` presents two problems:\r\n\r\n* On _Windows_, it includes _additional_ processes that are _not_ owned by the current user.\r\n  * Conversely, as @jborean93 points out - it does _not_ include \"processes for that user that are run in a separate session (task scheduler, network logon/winrm, services)\" (see below).\r\n\r\n* On _Unix_-like platforms, it is in effect limited to the calling PowerShell session and child processes directly launched from it.\r\n\r\n_Conceptually_, what we're looking for (for `-Scope CurrentUser`)  is this:\r\n\r\n```\r\nGet-Process -IncludeUserName | ? UserName -eq (whoami)\r\n```\r\n\r\nThis works well on _Unix_-like platforms, but - unfortunately - requires _elevation_ on Windows (as currently implemented - see below).\r\n\r\n",
+      "created_at": "2021-03-24T23:02:36Z",
+      "updated_at": "2021-03-25T16:17:44Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> requires elevation on Windows.\r\n\r\nThat's just what `Get-Process` states but it's not the whole truth. Yes you need elevation to get the username of processes run by other users (or elevated ones of the current user) but it is still possible to get the token information for the majority of the processes run by the current user.\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition @'\r\nusing Microsoft.Win32.SafeHandles;\r\nusing System;\r\nusing System.Runtime.InteropServices;\r\n\r\nnamespace Win32\r\n{\r\n    public class NativeHelpers\r\n    {\r\n        [StructLayout(LayoutKind.Sequential)]\r\n        public struct TOKEN_USER\r\n        {\r\n            public SID_AND_ATTRIBUTES User;\r\n        }\r\n\r\n        [StructLayout(LayoutKind.Sequential)]\r\n        public struct SID_AND_ATTRIBUTES\r\n        {\r\n            public IntPtr Sid;\r\n            public int Attributes;\r\n        }\r\n    }\r\n    \r\n    public class NativeMethods\r\n    {\r\n        [DllImport(\"kernel32.dll\", SetLastError = true)]\r\n        public static extern bool CloseHandle(\r\n            IntPtr hObject);\r\n\r\n        [DllImport(\"Advapi32.dll\", SetLastError = true)]\r\n        public static extern bool GetTokenInformation(\r\n            SafeHandle TokenHandle,\r\n            int TokenInformationClass,\r\n            IntPtr TokenInformation,\r\n            int TokenInformationLength,\r\n            out int ReturnLength);\r\n\r\n        [DllImport(\"Advapi32.dll\", SetLastError = true)]\r\n        public static extern bool OpenProcessToken(\r\n            SafeHandle ProcessHandle,\r\n            int DesiredAccess,\r\n            out IntPtr TokenHandle);\r\n    }\r\n\r\n    public class SafeNativeHandle : SafeHandleZeroOrMinusOneIsInvalid\r\n    {\r\n        public SafeNativeHandle() : base(true) { }\r\n        public SafeNativeHandle(IntPtr handle) : base(true) { this.handle = handle; }\r\n\r\n        protected override bool ReleaseHandle()\r\n        {\r\n            return NativeMethods.CloseHandle(handle);\r\n        }\r\n    }\r\n}\r\n'@\r\n\r\n$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User\r\n\r\nGet-Process | Where-Object {\r\n    if (-not $_.SafeHandle -or $_.SafeHandle.IsInvalid -or $_.SafeHandle.IsClosed) {\r\n        return\r\n    }\r\n\r\n    $rawAccessToken = [IntPtr]::Zero\r\n    $res = [Win32.NativeMethods]::OpenProcessToken(\r\n        $_.SafeHandle,\r\n        0x00000008,  # TOKEN_QUERY\r\n        [ref]$rawAccessToken\r\n    ); $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()\r\n\r\n    if (-not $res) {\r\n        $exp = [ComponentModel.Win32Exception]$err\r\n        Write-Warning -Message \"Failed to open access token for $($_.Id): $($exp.Message)\"\r\n        return\r\n    }\r\n\r\n    $accessToken = [Win32.SafeNativeHandle]::new($rawAccessToken)\r\n    try {\r\n        $userLength = 0\r\n        $tokenUserId = 1  # TOKEN_USER\r\n\r\n        $null = [Win32.NativeMethods]::GetTokenInformation(\r\n            $accessToken,\r\n            $tokenUserId,\r\n            [IntPtr]::Zero,\r\n            0,\r\n            [ref]$userLength\r\n        )\r\n        $tokenInfo = [Runtime.InteropServices.Marshal]::AllocHGlobal($userLength)\r\n        try {\r\n            $res = [Win32.NativeMethods]::GetTokenInformation(\r\n                $accessToken,\r\n                $tokenUserId,\r\n                $tokenInfo,\r\n                $userLength,\r\n                [ref]$userLength\r\n            ); $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()\r\n\r\n            if (-not $res) {\r\n                $exp = [ComponentModel.Win32Exception]$err\r\n                Write-Warning -Message \"Failed to get TOKEN_USER for $($_.Id): $($exp.Message)\"\r\n                return\r\n            }\r\n\r\n            $tokenUser = [Runtime.InteropServices.Marshal]::PtrToStructure(\r\n                $tokenInfo, ([type][Win32.NativeHelpers+TOKEN_USER]))\r\n\r\n            $processUser = [Security.Principal.SecurityIdentifier]::new($tokenUser.User.Sid)\r\n\r\n            $processUser.Equals($currentUser)\r\n        }\r\n        finally {\r\n            [Runtime.InteropServices.Marshal]::FreeHGlobal($tokenInfo)\r\n        }\r\n    }\r\n    finally {\r\n        $accessToken.Dispose()\r\n    }\r\n}\r\n```\r\n\r\nThe DACL of a standard/limited access token gives query/read access to the following accounts\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/112414779-62e49a80-8d6e-11eb-80a9-c4f3a2ad9221.png)\r\n\r\nand the following for an admin one\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/112414863-8a3b6780-8d6e-11eb-8728-62b1f8a90826.png)\r\n\r\nThere are other complications when it comes to getting a copy of the process token (not the same as the access token) which stops you from getting the access token of elevated processes.\r\n\r\n> it includes additional processes that are not owned by the current user.\r\n\r\nIn addition to this, filtering by the session id means you will miss out on processes for that user that are run in a separate session (task scheduler, network logon/winrm, services).\r\n",
+      "created_at": "2021-03-25T03:38:02Z",
+      "updated_at": "2021-03-25T03:38:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @jborean93, great information.\r\n\r\nSo it sounds like it's also worth reconsidering the behavior of `-IncludeUserName`, to make it work in a best-effort manner when running without elevation.\r\n\r\nUsing `-Scope CurrentUser` _without elevation_ would then not include same-user processes running _with_ elevation, if I understand correctly.\r\n\r\nThe question then becomes how to handle inaccessible processes: reporting them all as _errors_ would generate a lot of noise even in the case where you know the limitations of the call.\r\n\r\nSo - unless _specific_ PIDs or names are also asked for (in which case errors are appropriate) - perhaps a single blanket _warning_ could be emitted, along the lines of (borrowing in part from the `Get-Process -IncludeUserName` error message):\r\n\r\n`WARNING: Results may be incomplete due to lack of permissions. To see complete results, run the command  in a session that has been opened with elevated user rights (that is, Run as Administrator).`",
+      "created_at": "2021-03-25T15:56:39Z",
+      "updated_at": "2021-03-25T20:02:59Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "What you propose sounds like sane behaviour to me.",
+      "created_at": "2021-03-25T19:49:22Z",
+      "updated_at": "2021-03-25T19:49:22Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> perhaps a single blanket _warning_ could be emitted, along the lines of (borrowing in part from the `Get-Process -IncludeUserName` error message):\r\n\r\nWe attach the process user names as _strings_ (not a token object) - so we can output \"\\<Unknown>\" without any warning. This looks good on screen and it is easily processed in scripts.",
+      "created_at": "2021-03-27T07:26:39Z",
+      "updated_at": "2021-03-27T07:41:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "* For `-IncludeUserName` _alone_ that _may_ be an option.\r\n\r\n* With `-Scope CurrentUser`, however, where the implicit promise is that _all_ the user's processes are returned, I think a warning is called for, given that this promise cannot be fulfilled predictably.\r\n\r\nHowever, even with `-IncludeUserName` you may want to know, given that  a subsequent filtering command (e.g. `| ? UserName -eq jdoe`) may also rely on this implied promise.\r\n\r\nSpeaking of: Perhaps instead of `-Scope CurrentUser` we should follow the model of the `ps`  Unix utility's `-u` option and offer a `-Username <string>` parameter, perhaps complemented by a current-user shortcut switch (which would take us back to  @FredVH's `-CurrentUser`).\r\n\r\n\r\n",
+      "created_at": "2021-03-27T17:44:50Z",
+      "updated_at": "2021-03-27T17:44:50Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "I don't really feel that providing the parameter is _really_ that useful, I think that get-process should just _always_ return the username (`ps -j`). What I really think we should do is to fix _that_ behavior (and it looks like that code was kindly supplied above). If the username was present, then we could just `gps | ? username -eq jimtru` and be done. Also, I'm not really a fan about adding `-u` equivalent since the PS philosophy is to _not_ combine operations (`ps -u` is the combination of data acquisition and data filtering).",
+      "created_at": "2021-06-02T22:54:04Z",
+      "updated_at": "2021-06-02T22:54:04Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "> I think that get-process should just always return the username\r\n\r\nSeems reasonable to me as long as it doesn't adversely impact performance.  And that would be consistent with the info I see in Task Manager.",
+      "created_at": "2021-06-06T19:00:07Z",
+      "updated_at": "2021-06-06T19:00:07Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/wg-powershell-cmdlets agrees we should add a `-CurrentUser` parameter that returns only processes owned by the current user. If the owner of a process cannot be resolved, we agree that it doesn't make sense to throw an error or warning, as it's assumed that users have access to know which processes they own. Additionally, the current behavior of IncludeUsername is to return null with no error or warning.\r\n\r\nAdding the `Up-for-grabs` label as this is not currently a high priority for us.",
+      "created_at": "2021-09-15T17:05:04Z",
+      "updated_at": "2021-09-15T17:05:04Z"
+    }
+  ],
+  "created_at": "2021-03-24T14:12:20Z",
+  "number": 15093,
+  "state": "open",
+  "title": "Feature Request: add parameter -CurrentUser for Get-Process",
+  "updated_at": "2021-09-15T17:05:15Z"
+}

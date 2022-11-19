@@ -1,0 +1,139 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4613",
+  "author": "KirkMunro",
+  "body": "Created from discussion started on #3768.\r\n\r\nDescription\r\n---\r\nIf you invoke PowerShell using the System.Management.Automation.PowerShell class, and if you handle the errors in the command you invoke by indicating that they should be ignored, S.M.A.PowerShell will still set HadErrors to true. Below are some code samples illustrating the problem.\r\n\r\nSample 1: C#/.NET invocation of PowerShell commands/scripts\r\n---\r\n```PowerShell\r\n$ps = [PowerShell]::Create()\r\n$ps.AddCommand('Get-Service').AddParameter('Name','Invalid').AddParameter('ErrorAction',[System.Management.Automation.ActionPreference]::Ignore) > $null\r\n$ps.Invoke()\r\n$ps.HadErrors # returns $true; expectation is that this would return false since the command was configured to ignore errors\r\n```\r\n\r\nSample 1: Expected behavior\r\n---\r\n$ps.HadErrors should return $false\r\n\r\nSample 1: Actual behavior\r\n---\r\n$ps.HadErrors returns $true, even when $ps.Streams.Error does not contain any errors (because there were no errors!)\r\n\r\nSample 2: Direct command invocation in PowerShell\r\n---\r\n```PowerShell\r\nGet-Service -Name Invalid -ErrorAction Ignore\r\n$? # returns $false; shouldn't this return $true?\r\n```\r\n\r\nSample 2: Expected behavior\r\n---\r\n$? should return $true\r\n\r\nSample 2: Actual behavior\r\n---\r\n$? returns $false, even though there were no errors because the invoker of the command instructed PowerShell to ignore the error that would otherwise have been raised because it is a benign error for them (and therefore, not an error)\r\n\r\nAdditional Details\r\n---\r\nIn both of these cases, -ErrorAction Ignore is being used to tell PowerShell that the error is actually not an error as far as this invocation is concerned, and therefore it can be completely ignored. Why then, do both $? and $ps.HadErrors indicate there was still error? Technically there was an error, by definition of the command being invoked, but it is being handled/treated like it is not an error in the command from which the command producing the error was invoked. In both of these cases $? and $ps.HadErrors should have values indicating that there wasn't an error. If you do not trust the command you are invoking to ignore benign errors and only notify you about errors that you actually need to care about then you should not be invoking that command.\r\n\r\nEnvironment data\r\n---\r\n```powershell\r\nPS C:\\> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-beta\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-beta.5\r\nOS                             Microsoft Windows 10.0.16251\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The whole terminating vs non-terminating errors consistently is misunderstood.  Even in some of our product code I see these mistakes and I make them myself.  Perhaps an option here is to add HadTerminatingErrors, while HadErrors continues to capture Terminating/Nonterminating (even if handled/suppressed)?",
+      "created_at": "2017-08-31T03:40:30Z",
+      "updated_at": "2017-08-31T03:40:30Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I agree discussion is required because error handling in PowerShell is a point of confusion. This particular issue has nothing to do with terminating vs non-terminating though. This has to do with handled vs non-handled, which is a completely different thing.\r\n\r\nIf I invoke a .NET method that internally receives some exception but handles that exception gracefully and then eventually returns back to me without error, should $? return $true or $false? The answer in that case is quite clear: it should return $true because there was no error as far as I, the method invoker, am concerned.\r\n\r\nI believe PowerShell command invocations should behave no differently. In both examples I shared above, I am instructing PowerShell to suppress the error if one occurs. In other words, the error is handled in my command. Yet S.M.A.PowerShell.HadErrors returns $true and $? returns $false.\r\n\r\nAside -- This related behaviour also surprises me. Try executing these commands one at a time.\r\n```PowerShell\r\nGet-Service -Name Invalid\r\n$? # returns $false\r\nGet-Service -Name Invalid -ErrorAction Stop\r\n$? # returns $false\r\ntry {Get-Service -Name Invalid -ErrorAction Stop} catch {<# Ignore the error, it's benign #>}\r\n$? # returns $false -- shouldn't this return $true?\r\n& {try {Get-Service -Name Invalid -ErrorAction Stop} catch {<# Ignore the error, it's benign #>}}\r\n$? # returns $true\r\n```",
+      "created_at": "2017-08-31T16:05:37Z",
+      "updated_at": "2017-08-31T16:05:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I see.  I think that `HadErrors` and `$?` should be consistent in that they are only true if there are unhandled errors, but will defer to @PowerShell/powershell-committee to understand the history and original intent.",
+      "created_at": "2017-08-31T19:16:10Z",
+      "updated_at": "2017-08-31T19:16:10Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this\r\n\r\n```powershell\r\n(get-service -name invalid); $?\r\nTrue\r\nget-service -name invalid; $?\r\nFalse\r\n```\r\nthe two above statements should be equivalent, however, it's not.  The bug seems to be that in @KirkMunro 's samples above, #3 should return $true and the two equivalent statements here should both return $false.",
+      "created_at": "2017-09-06T23:24:00Z",
+      "updated_at": "2017-09-06T23:24:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT:\r\n\r\nThe reason that `(get-service -name invalid); $?` returns true is the previously discussed issue that `(...)` turns a command into an _expression_ and it is then (unexpectedly) the _expression_'s success that determines the value of `$?`, and the mere act of enclosing a command in `(...)` is a \"successful\" expression - see [Automatic $? variable is reset to $True when a command is enclosed in parentheses - make $? only reflect command status, not expression status\r\n](https://github.com/PowerShell/PowerShell/issues/3359)\r\n\r\n@KirkMunro:\r\n\r\nRe `try {Get-Service -Name Invalid -ErrorAction Stop} catch {<# Ignore the error, it's benign #>}` returning `$False`:\r\n\r\nTo recap from https://github.com/PowerShell/PowerShell/issues/3768#issuecomment-323405734:\r\n> checking `$?` after `try` / `catch` is virtually pointless, because what `$?` is set to depends on whether the catch block happens to be empty (`$False`) or not (whatever statement happens to execute _last_ in the catch block determines the value of `$?`).\r\n\r\nSimilarly (unexpectedly), _anything_ that you invoke via `& { ... }` - i.e., `&` with a _script block_ - currently makes `$?` indicate `$True`; try `& { nosuchcommand }; $?` and `& { 1 / 0 }; $?`\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-09-12T22:36:43Z",
+      "updated_at": "2017-09-12T22:36:43Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Re-reviewing issues @PowerShell/powershell-committee had reviewed prior to GA to see if the decision would still stand post GA.\r\n\r\nFor this issue, based on @mklement0's explanation, it seems this is working as designed and I think just needs to be documented appropriately.",
+      "created_at": "2018-03-16T21:18:59Z",
+      "updated_at": "2018-03-16T21:18:59Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT I strongly disagree. Suggesting sample 1 from the original post is by design is wrong.\r\n\r\nYou tell PowerShell to outright _ignore errors_ in part of an invocation you make from C#, and then PowerShell says oh, hey, there were errors, so you check, but there weren't any, PowerShell lied.\r\n\r\n**This completely breaks any trust that a developer can have in HadErrors, and forces them to wrap the invocation of PowerShell and build their own HadErrors because HadErrors is broken.**\r\n\r\nYou can't document \"broken\" appropriately.",
+      "created_at": "2018-03-16T22:10:19Z",
+      "updated_at": "2018-03-16T22:13:18Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@KirkMunro sorry, I focused only on the last few replies.  Looking at your original sample, I would tend to agree that if you handle the error (or suppress it by choice), `.HadErrors` shouldn't indicate an error occurred.  Remarked for @PowerShell/powershell-committee review to understand the history/intent.",
+      "created_at": "2018-03-16T23:56:49Z",
+      "updated_at": "2018-03-16T23:56:49Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this:\r\n\r\n- `.HadErrors` was originally designed for use with PSWorkflow.  Recommendation is to remove this property or at least mark as deprecated, because PSWorkflow is not in PSCore6.   If there is a need for `.HadErrors` equivalent, recommendation is to have a proposal for a new property to fill this need.\r\n- Regarding `$?`, the intent should be that if there are not any errors written to `$error`, then `$?` is `$true`, else it's `$false`.\r\n- These changes should be posted as an RFC.",
+      "created_at": "2018-03-21T23:02:02Z",
+      "updated_at": "2018-03-21T23:02:02Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "> Regarding $?, the intent should be that if there are not any errors written to $error, then $? is $true, else it's $false.\r\n\r\n@SteveL-MSFT This statement is not quite right. I think you meant \"written to the error stream\" not \"written to $error\". That said, the following code\r\n```\r\nget-item nosuchitem 2> $null ; $?\r\n```\r\n**MUST** return false. The _$? variable is the only way for a script to determine that a command failed_ and take action (without adding the complexity of exceptions). For example:\r\n```\r\n$content = get-content foo.txt 2> $null\r\nif ($?) \r\n{ \r\n    \"Do stuff with content\" \r\n} \r\nelse { \r\n    \"Handle error\" \r\n}\r\n```\r\nLike any shell, the value of $? is only valid right after the command or expression you are interested in has executed. If you need to use it after doing a bunch of other stuff, save it in another variable. If you are executing the command in another scope, don't expect that $? in your scope will be affected.\r\n\r\nOne important thing that is missing is a way for functions and scriptblocks to indicate to the caller that they failed. (Scripts can do it by calling exit 1). \r\n",
+      "created_at": "2018-03-24T00:08:44Z",
+      "updated_at": "2018-03-24T00:08:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A few tangents:\r\n\r\n> I think you meant \"written to the error stream\" not \"written to $error\".\r\n\r\nTrue, but as an aside: `2> $null` still causes errors to be logged in `$Error`, perhaps surprisingly (as such it is the equivalent of `-ErrorAction SilentlyContinue`); only `-ErrorAction Ignore` prevents that.\r\n\r\n> The $? variable is the only way for a script to determine that a command failed and take action (without adding the complexity of exceptions).\r\n\r\nThat makes sense, but given how easy it is to wipe out the last command's `$?` status (e.g., statements such as `(get-content nosuchfile) -match 'hi'` and `@(get-content nosuchfile)`, ... making `$?` return `$True`), `$?` is currently of limited value - see https://github.com/PowerShell/PowerShell/issues/3359#issuecomment-287842045\r\n\r\n> One important thing that is missing is a way for functions and scriptblocks to indicate to the caller that they failed. (Scripts can do it by calling exit 1).\r\n\r\nWhile an explicit way to do that would definitely be nice, making `Write-Error` calls set `$?` in the _caller's_ scope would go a long way - see #3629",
+      "created_at": "2018-03-26T15:08:55Z",
+      "updated_at": "2018-04-21T13:07:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Someone just hit the `$?`-is-still-`$false`-with-`-ErrorAction Ignore` issue indirectly [on Stack Overflow](https://stackoverflow.com/q/55459737/45375), in the context of a Makefile:\r\n\r\nA recipe such as `powershell -c \" Remove-Item -ErrorAction Ignore file.txt\"` unexpectedly fails if an error was ignored, because `$?` is mapped onto exit codes `0` and `1`.\r\n",
+      "created_at": "2019-04-03T12:15:05Z",
+      "updated_at": "2019-04-03T12:15:05Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think perhaps this might be resolved by splitting the functionality expected from `$?`\r\n\r\nCurrently it reports a mixed status, depending on the last executed command OR expression. And, as far as I can think this morning, the only way an _expression_ would fail is if it's pretty much nonsensical and is either a parse or something like a math error, using operators in a context they don't allow, e.g., `\"hello\" % 2`\r\n\r\nWhat if we split this in two, so that we have a variable like `$LastCmdletFailed` and a `$LastExpressionFailed` ?",
+      "created_at": "2019-04-03T12:23:13Z",
+      "updated_at": "2019-04-03T12:23:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed that `$?` shouldn't report virtually-always-successful expression status, @vexx32, and this has come up before in #3359, which asks that `$?`:\r\n\r\n* only ever reflect the last _command_'s status \r\n* including whether the previous statement (whether command or expression) was aborted due to a _statement-terminating error_ - which is what `\"hello\" % 2` triggers (more simply `1 / 0`).\r\n\r\nIn other words: if an expression (or command) was aborted due to a statement-terminating error, `$?` is sensibly `$false`, but it never makes sense for a \"successful\" (i.e., non-aborted) expression to set `$?` to `$true`, as is currently the case.\r\n\r\nWith that, I'd say there's no need for a separate `$LastExpressionFailed`.",
+      "created_at": "2019-04-03T12:38:29Z",
+      "updated_at": "2019-04-03T12:39:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That certainly seems to be pretty sensible to me. I can't really think of a case that doesn't effectively cover. \ud83d\ude04 ",
+      "created_at": "2019-04-03T12:49:52Z",
+      "updated_at": "2019-04-03T12:49:52Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "> only ever reflect the last command's status\r\n\r\nI'd amend the quoted statement, as follows:\r\n\r\n\"only ever reflect the status of the last command that was executed _in the current scope_\".\r\n\r\nI've never, ever wanted it to work differently, and could care less about the status of the last command that was invoked any number of levels deep inside of something I invoked.",
+      "created_at": "2019-04-10T15:21:41Z",
+      "updated_at": "2019-04-10T15:22:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Definitely agreed on that. If my function handles an error state but doesn't itself emit an error, that error should not magically show up in $error or $?.",
+      "created_at": "2019-04-10T15:30:06Z",
+      "updated_at": "2019-04-10T15:30:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed.\r\n\r\n* Fortunately, at least in PowerShell code it already seems to work that way:\r\n\r\n```powershell\r\n & { gci /nosuch }; $?  # $True - fortunately, the gci status did NOT leak\r\n```\r\n\r\n* Unfortunately, you can't set the `$?` status for your caller from PowerShell code - see #3629\r\n\r\n```powershell\r\n & { Write-Error 'oh no' }; $?  # !! $True - despite the use of Write-Error\r\n```\r\nThe workaround is to use `$PSCmdlet.WriteError()`, but that's (a) cumbersome and (b) only available in _advanced_ function/scripts.\r\n\r\n\r\n",
+      "created_at": "2019-04-10T16:55:10Z",
+      "updated_at": "2019-04-10T16:55:10Z"
+    }
+  ],
+  "created_at": "2017-08-18T14:30:35Z",
+  "number": 4613,
+  "state": "open",
+  "title": "S.M.A.PowerShell.HadErrors and $? return false positives when errors are suppressed",
+  "updated_at": "2019-11-15T17:41:45Z"
+}

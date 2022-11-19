@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8816",
+  "author": "mklement0",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nA longstanding, **convenient idiom** in the Unix world is to **download and execute installation / bootstrapping shell scripts with a single, low-complexity shell command**:\r\n\r\nFor instance, you can install the .NET Core SDK with the following command, by downloading the script from GitHub and piping to `bash` for execution:\r\n\r\n```sh\r\ncurl https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/dotnet-install.sh | bash\r\n```\r\n\r\nAs an aside: \r\nThere is also a [`*.ps1` script](https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/dotnet-install.sh), but as of this writing is _Windows-only_, which is unfortunate. I have a [PR](https://github.com/dotnet/cli/pull/10646) open to make it _cross-platform_, but it is languishing due the .NET Core CLI team giving no indication as to whether they're even _prepared_ to accept such a PR and thereby future maintenance of the script.\r\n@SteveL-MSFT, if you'd like to see a cross-platform `*.ps1` .NET Core SDK installation script happen, I encourage you to make your voice heard at https://github.com/dotnet/cli/issues/8278 - which is an issue that @vors originally opened in December 2017.\r\nThe utility of such a script would be greatly enhanced if this issue's requested feature were implemented.\r\n\r\n**It would be nice if PowerShell supported something similar**, which is currently not the case:\r\n\r\n* Providing the **code via stdin** along the following lines results in **extremely slow, pseudo-interactive execution** that echoes each script line (`irm` (`Invoke-RestMethod`) is used to download the script):\r\n\r\n```powershell\r\n# !! Even though it ultimately works, the UX is unacceptable.\r\nirm https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/dotnet-install.ps1 | pwsh\r\n```\r\n\r\nThis is a general problem with stdin input, originally reported in #3223\r\n\r\n* Using **`Invoke-Expression` is an improvement**, but has **caveats and only works in limited circumstances**:\r\n\r\n```powershell\r\n# ALMOST works, but has a number of problems - see below.\r\niex (irm https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/dotnet-install.ps1)\r\n```\r\nLimitations / bugs:\r\n\r\n  * The downloaded script-content must not terminate with `exit`, lest the calling session _as a whole_ be exited.\r\n\r\n  * A couple of _bugs_ currently prevent correct script execution:\r\n     * #8778 \r\n     * #8815\r\n\r\n  * You cannot pass _arguments_ to an `Invoke-Expression` call.\r\n     * [This SO answer](https://stackoverflow.com/a/54410144/45375) shows a workaround via `[scriptblock]::Create()`, but that is obviously cumbersome and obscure.\r\n\r\n  * `Invoke-Expression` invariably \"dot-sources\" the code (executes directly in the  caller's scope), thereby polluting the caller's scope. (While you could wrap the `iex` call in ` & { ... }` that is both cumbersome and easy to forget.)\r\n\r\n_Update_: @SteveL-MSFT's [clever approach below](https://github.com/PowerShell/PowerShell/issues/8816#issuecomment-460327955) actually _bypasses_ the bugs and the scoping problem, but it is too obscure (and it doesn't address the `exit` problem).\r\n\r\nNote that `Invoke-Expression` has one advantage over the `curl ... | sh` idiom for POSIX-like shells: due to running _in-process_, the script has the ability to update the caller's _environment variables_.\r\n\r\nIn short: **Currently, the only way to robustly handle download-and-invoke scenario is to download to a _temporary script file_ first, execute that, and then clean up** - which is obviously cumbersome.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nBased on the above, the following limitations must be overcome (in addition to fixing the bugs mentioned above):\r\n\r\n* `exit` in a script (a scriptblock created from a script's downloaded content) must only exit the script itself.\r\n\r\n* the script must execute in a _child scope_\r\n\r\n* it must be possible to pass _arguments_ to the script.\r\n\r\nAdditionally, it would be nice not to have to use a separate command for downloading the script.\r\n\r\nTo that end, ~~`Invoke-Expression`~~ ` Invoke-Command` (`icm`) / `&` (`.`) could be enhanced as follows:\r\n\r\n<sup>Note: `Invoke-Expression` is ultimately not the right cmdlet to use for two reasons: (a) it doesn't quite convey the intent of the operation (that is, invoking a whole _script_) and (b) [we want to discourage `Invoke-Expression` use in general](https://blogs.msdn.microsoft.com/powershell/2011/06/03/invoke-expression-considered-harmful/).</sup>\r\n\r\nNote: The hypothetical example command line below use invocation of the PowerShell installation script https://aka.ms/install-powershell.ps1 with argument `-Preview`\r\n\r\n* Add a `-FromPipeline`  switch - with a short alias `-s` to parallel the from-stdin option in POSIX-like shells such as  `bash` ([mandated by POSIX](http://pubs.opengroup.org/onlinepubs/9699919799/utilities/sh.html))- to accept a script's _content_ via the pipeline:\r\n\r\n```powershell\r\nInvoke-RestMethod https://aka.ms/install-powershell.ps1 | Invoke-Command -FromPipeline -Preview\r\n```\r\n\r\n* As a more convenient (additional) alternative, add a `-FileUri` parameter to parallel `-FilePath` that directly accepts a URI to download the script text from, which would essentially perform the `Invoke-RestMethod` (`irm`) call _internally_, which aside from being shorter and more convenient: \r\n\r\n   * allows validating that the URI points to a resource of the expected time ('text/plain`).\r\n   * allows enforcing the effective execution policy if the script is unsigned, with a new `-Force` switch allowing intentional overriding \r\n        * Note: the execution policy could also be enforced with pipeline-supplied input text, though that could be considered too restrictive, given that what is sent through the pipeline needn't have a _remote_ origin.\r\n  * Note: If more control over the download aspect is needed (e.g., passing credentials), the `-FromPipeline` approach with a separate download command (such as `Invoke-RestMethod` / `Invoke-WebRequest`) must be used.\r\n\r\n```powershell\r\nInvoke-Command -FileUri https://aka.ms/install-powershell.ps1 -Preview\r\n```\r\n\r\nFinally, enhance `&` (and `.`, though that is less likely to be useful) so that the command above can more concisely be written as:\r\n\r\n```powershell\r\n& https://aka.ms/install-powershell.ps1 -Preview\r\n```\r\n\r\nTo be safe, the execution policy should be invariably enforced in this case. Overriding it would then require the more deliberate act of using `Invoke-Command` with `-Force`.\r\n\r\n---\r\n\r\n### _Obsolete_ part of this proposal, which suggested enhancing `Invoke-Expression`:\r\n\r\n* Generally, add a `-UseChildScope` switch to the cmdlet to opt into execution in a child scope.\r\n\r\n* Generally, add a `-ArgumentList` (`-Args`) parameter to allow passing arguments to the script, as with `Invoke-Command`.\r\n  * As with `Invoke-Command` defining the parameter as `ValueFromRemainingArguments` allows pass-thru arguments to be specified more naturally (`-foo bar` instead of `-Args '-foo', bar`).\r\n\r\n* Add a `-FromUri <uri>` parameter that allows implicit downloading of script files to execute; this parameter would _imply_ `-UseChildScope`.\r\n   * If there are security concerns, a confirmation prompt / `-Force` switch could be added.\r\n\r\n*  When running in a child scope, make `exit` exit the script only.\r\n\r\n   * _Update_: By limiting this behavior change to when the _new_ (implied via `-FromUri`) `-UseChildScope` is in effect, there are no backward-compatibility concerns (though it's hard to imagine anyone _relying_ on something like `iex '\"hi\"; exit'` exiting the entire session).\r\n\r\nWith the above, downloading and executing the .NET Core SDK installation script with argument <br>`-DryRun` would then look like this:\r\n\r\n```powershell\r\n$uri = 'https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/dotnet-install.ps1'\r\niex -FromUri $uri -DryRun\r\n```\r\n\r\nWritten as of:\r\n\r\n`PowerShell Core 6.2.0-preview.4`",
+  "closed_at": "2019-02-06T04:24:49Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 since your PR in dotnetcli repo is marked as WIP, I suspect they will wait until you deem it not a WIP before they review\r\n\r\nIt's certainly possible to pass args with saving to file first with this hard to remember syntax :)\r\n\r\n```powershell\r\niex \"& { $(irm https://aka.ms/install-powershell.ps1) } -UseMSI -Preview\"\r\n```\r\n\r\nI don't think we want `invoke-expression` to overlap with `invoke-restmethod`, but agree that having a way to pass args would greatly improve the experience.  Making it easy to verify the signature within the pipeline would help keep it secure.  In general, `exit` should not be used in PowerShell scripts.  Would be breaking change to change it.  ",
+      "created_at": "2019-02-04T17:04:41Z",
+      "updated_at": "2019-02-04T17:04:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT:\r\n\r\nRe PR:\r\n\r\n> I suspect they will wait until you deem it not a WIP before they review\r\n\r\nFair enough, but I want _assurance that there's fundamental willingness to accept such a PR_, given that it means that _they_ will have to maintain this cross-platform script _in parallel_ with the Bash version going forward - that is what I've been asking for, with no response.\r\n\r\nObviously, _my_ vote is for them to take this on, but I can also see why they'd be hesitant - and that's where it helps if others voice interest.\r\n\r\nThe PR is _functionally_ ready for review, but it is _lacking tests_ - adding those would mean substantial additional effort, which I'd like not to expend without knowing if the PR will even be accepted.\r\n\r\n---\r\n\r\nRe syntax:\r\n\r\n> with this hard to remember syntax :)\r\n\r\nThat's clever, but, as you say, obscure and hard to remember - and it doesn't address the `exit` issue (see below).\r\n\r\n---\r\n\r\nRe `exit`:\r\n\r\n> In general, `exit` should not be used in PowerShell scripts.\r\n\r\nNot only does [the documentation](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_language_keywords?view=powershell-6) state \"Causes PowerShell to exit a script or a PowerShell instance.\", **using `exit <n>` in a script is the only way to set the _exit code_ for callers that expect success / failure to be communicated via exit codes - a vital feature for robust automation.**\r\n\r\nTo address potential backward-compatibility concerns, making `exit` behave _the way it already does in scripts_ could be limited to the - previously nonexistent - `-UseChildScope` parameter (which the new `-FromUri` parameter would imply).\r\n\r\n---\r\n\r\nRe overlap with `Invoke-RestMethod`:\r\n\r\nThe overlap is only for the very specific use case discussed here - which ideally should have a _single-command_ implementation.\r\n\r\nInternalizing `Invoke-RestMethod`-like functionality to `Invoke-Expression -FromUri` would have two advantages:\r\n\r\n* being able to validate that the targeted URI is a plain-text resource\r\n* being able to enforce the effective execution policy with respect to unsigned scripts, with a `-Force` switch allowing intentional overriding.\r\n\r\nThus, your clever-but-obscure command:\r\n\r\n```powershell\r\niex \"& { $(irm https://aka.ms/install-powershell.ps1) } -UseMSI -Preview\"\r\n```\r\n\r\nwould turn into:\r\n\r\n_Update_: Note that proposal is now to enhance `Invoke-Command` rather than `Invoke-Expression` - see updated initial post.\r\n\r\n```powershell\r\niex -FromUri https://aka.ms/install-powershell.ps1 -UseMSI -Preview\r\n```\r\n\r\n* with `-Force` allowing execution of unsigned scripts prevented by the execution policy.\r\n* with `-ArgumentList` (`-Args`) defined as `ValueFromRemainingArguments` to allow passing arguments through in a more natural fashion.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-02-04T18:04:33Z",
+      "updated_at": "2019-02-04T20:52:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: \r\n\r\nTaking a step back, I've realized that adding the proposed functionality to `Invoke-Expression` is ill-advised, for two reasons:\r\n  *  it doesn't quite convey the intent of the operation (that is, invoking a whole _script_)\r\n  * [we want to discourage `Invoke-Expression` use in general](https://blogs.msdn.microsoft.com/powershell/2011/06/03/invoke-expression-considered-harmful/).\r\n\r\nBy contrast, `Invoke-Command` is a more natural fit - I've updated the initial post accordingly.\r\n\r\nThis also makes concerns about `Invoke-Expression`'s current behavior irrelevant.\r\n\r\nBased on the updated proposal, your command would become:\r\n\r\n```powershell\r\nicm -FileUri https://aka.ms/install-powershell.ps1 -UseMSI -Preview\r\n# or, shorter:\r\n& https://aka.ms/install-powershell.ps1 -UseMSI -Preview\r\n```\r\n\r\n",
+      "created_at": "2019-02-04T20:55:30Z",
+      "updated_at": "2019-02-04T21:11:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 I like using `Invoke-Command` vs `Invoke-Expression`.  I like the terseness and conciseness.  However, still not a fan of adding web capability to another cmdlet.  Perhaps an alternative would be to have a `HTTP:` and `HTTPS:` drive that would allow any cmdlet accept a file path to `GET` and `POST` to a URL?  This would mean `Get-Content https://aka.ms/install-powershell.ps1` would work.  ",
+      "created_at": "2019-02-05T16:15:02Z",
+      "updated_at": "2019-02-05T16:15:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT implementing such a provider would be interesting to say the least. Love the idea, though!\r\n\r\n@markekraus do you think this idea is feasible? \r\n\r\nIf it can utilise the web cmdlets' base functionality, we can hopefully avoid having two disparate sets of features for the same thing here.",
+      "created_at": "2019-02-05T16:20:16Z",
+      "updated_at": "2019-02-05T16:20:40Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "This is a duplicate of #5909",
+      "created_at": "2019-02-05T22:03:01Z",
+      "updated_at": "2019-02-05T22:03:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SteveL-MSFT  and @vexx32.\r\n\r\n> However, still not a fan of adding web capability to another cmdlet.\r\n\r\nI can see why, and I'd personally be happy with limiting the `Invoke-Command` change to  `-FromPipeline` (and thereby forgoing the convenience of `& <url> ...`):\r\n\r\n```powershell\r\niwr https://aka.ms/install-powershell.ps1 | icm -FromPipeline ...\r\n```\r\n\r\nThat way, download functionality remains the purview of `Invoke-WebRequest` / `Invoke-RestMethod`.\r\n\r\nThat said, I like @lzybkr's [comment here](https://github.com/PowerShell/PowerShell/issues/5909#issuecomment-358732367) (thanks for pointing out the duplicate, @markekraus), which, adapted to this proposal, would allow us to still let `Invoke-Command` enforce the execution policy:\r\n\r\n```powershell\r\nicm -FromWebRequest (iwr https://aka.ms/install-powershell.ps1) ...\r\n\r\n# or, *more naturally, via the pipeline*:\r\niwr https://aka.ms/install-powershell.ps1 | icm ...\r\n\r\n```\r\n\r\nThat is, a by-value pipeline-binding `[Microsoft.PowerShell.Commands.BasicHtmlWebResponseObject]`-typed parameter named something like `-FromWebRequest` could directly bind `Invoke-WebRequest` output (_not_ `Invoke-RestMethod` output, whose only advantage would be direct _text_ output) and perform all the necessary validation and execution-policy enforcement (overridable with `-Force`).\r\n\r\nIf we implement (just) this, I personally don't see the need for a `http:` drive anymore.\r\n\r\n\r\n\r\n\r\n\r\n\r\n   ",
+      "created_at": "2019-02-06T03:06:46Z",
+      "updated_at": "2019-02-06T03:40:19Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Enabling pipelining would certainly solve your problem and is a much simpler effort than a `http:` drive.  I think (outside of this issue), a `http:` drive might still be interesting :)",
+      "created_at": "2019-02-06T03:28:36Z",
+      "updated_at": "2019-02-06T03:28:36Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Since we've agreed that pipelining is a fine solution, resolving this as dupe of #5909 ",
+      "created_at": "2019-02-06T04:24:49Z",
+      "updated_at": "2019-02-06T04:24:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "With http/https drive we could do\r\n```powershell\r\nicm https://aka.ms/install-powershell.ps1\r\n```\r\nwithout FromWebRequest parameter.",
+      "created_at": "2019-02-06T07:10:24Z",
+      "updated_at": "2019-02-06T07:10:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:  \r\n\r\nOn a _minor_ note: That would require tweaks to the parameter sets, because you can't pass a file path positionally to `icm`, and even with an explicit `-FilePath` (which would be a tad awkward with a URL) you cannot currently execute _locally_ - you need the `-ComputerName` parameter too, from what I can tell (not sure if that's by design).\r\n\r\nOverall, however, I can definitely see the appeal, and it would again also enable use with `&` and `.`\r\n\r\n```powershell\r\n& https://aka.ms/install-powershell.ps1   # or: . https:.//...\r\n```\r\n\r\nThis new provider would have to report all its \"files\" as downloaded-from-the-net for the purposes of enforcing execution policy.\r\n\r\nMy saying that we may not need this was primarily based on the perceived substantial implementation effort, but I encourage you or @SteveL-MSFT to open a new feature request.\r\n",
+      "created_at": "2019-02-06T11:56:13Z",
+      "updated_at": "2019-02-06T11:56:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It should be RFC for new WWW provider/drive/namespace.\r\n\r\nUpdate: #8835",
+      "created_at": "2019-02-06T12:09:45Z",
+      "updated_at": "2019-02-06T13:26:55Z"
+    }
+  ],
+  "created_at": "2019-02-02T17:11:05Z",
+  "number": 8816,
+  "state": "closed",
+  "title": "Make it easier to download and execute scripts as a single operation, by enhancing Invoke-Command",
+  "updated_at": "2019-02-06T13:26:55Z"
+}

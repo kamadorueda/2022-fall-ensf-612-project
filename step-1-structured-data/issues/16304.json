@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16304",
+  "author": "chriskuech",
+  "body": "### Summary of the new feature / enhancement\n\nA major blocker in using PowerShell for my daily driver shell on macOS is lack of support for dot-sourcing shell scripts.  Dot-sourcing is a big extensibility point for shell scripts as it allows them to update the environment of the parent process, so I cannot use tools that require a bash/zsh profile.  If PowerShell supported dot-sourcing non-PowerShell scripts, these tools could be installed by dot-sourcing them (as they are done in the bash/zsh profile) or just dot-sourcing the bash/zsh profile.\n\n### Proposed technical implementation details (optional)\n\n1. Use file extension and shebang to intelligently detect shell script language.\r\n2. If the file is a bash or zsh script, interpret the script in its associated interpreter.\r\n3. In the same interpreter, output all the environment variables to the PowerShell process.\r\n4. Set the environment variables in the PowerShell process from the output of the shell script.",
+  "closed_at": "2021-11-03T12:00:46Z",
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I've done some thinking on this, especially since it was a consideration around login profile support for PowerShell.\r\n\r\n(Our solution there is to run /bin/sh to execute the profile and then `exec` PowerShell from there.)\r\n\r\nPOSIX shells tend to call dot-sourcing just \"sourcing\" and the reason they do that is because there isn't a parent process involved, they just execute the source in the current scope. That means that more than just environment variables (which are defined with the `export` command and exported to *child* processes), sourced scripts also modify shell variables and function definitions in the calling scope. Clearly that's something PowerShell wouldn't be able to support.\r\n\r\nSo instead, as you suggest, we could slurp up the environment variables defined in the POSIX shell subprocess. [That's not a very natural thing, for a child process to communicate environment *upward* to a parent](https://unix.stackexchange.com/questions/372627/is-it-possible-to-pass-environment-variables-from-child-to-parent-in-user-space). We can't use output, since the shell script itself may output things and we won't reliably be able to sift intended output from our output. So we'd need a secure file or named pipe ACL'd to just these two processes, meaning complexity and a possible way to leak information. We'd need to dump the variables out in a way PowerShell could easily parse back in and set, so probably something like CSV or JSON.\r\n\r\nIn terms of invocation, the problem with automatic detection is:\r\n- Plenty of shell scripts don't have a reliable extension, or their intended interpreter isn't inferable from their extension\r\n- Shebangs are intended for invocation, not for parsing, and can contain arbitrary argument vectors ([since it's actually the OS that invokes it](https://en.wikipedia.org/wiki/Shebang_(Unix)#Magic_number))\r\n\r\nSo I don't think automatic detection is a good idea. Instead, we should provide a more explicit mechanism for this. For example a cmdlet would be an easy and explicit way to specify a path to a script, an argument vector, and optionally parameterise the interpreter as well.\r\n\r\nWith all of this said, it's probably straightforward to write your own small version of a function like this in script. The components you'd need are:\r\n\r\n- PowerShell function with a parameter for the script path\r\n- A wrapper POSIX sh script that can invoke a given script with arguments and dump out the final env var settings to a file\r\n- A way to read that file in in PowerShell and then set the local environment accordingly",
+      "created_at": "2021-10-25T23:19:30Z",
+      "updated_at": "2021-10-25T23:19:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "You can not dot-sourcing one language to another - you can not insert Java in C++ and expect it is compiled, you cannot insert PowerShell script in bash and expect it will be executed in-process in bash.",
+      "created_at": "2021-10-26T07:50:07Z",
+      "updated_at": "2021-10-26T07:50:07Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": "When the shell script you write complies with certain specifications, you can write a powershell script to complete the 1, 2, 3, 4 functions as you wish. \r\nE.g:\r\n$env:var1 = /usr/bin/bash -f /path/name.bash\r\n\r\nYou can also rename this powershell script to [....ps1] (four dots), so that you can use [...] (three dots) to call it. \r\nE.g:\r\nps> ... '/path/name.bash'",
+      "created_at": "2021-10-27T15:28:47Z",
+      "updated_at": "2021-10-27T15:29:43Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-11-03T12:00:46Z",
+      "updated_at": "2021-11-03T12:00:46Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Just came across this: https://github.com/oh-my-fish/plugin-foreign-env\r\n\r\nMight be worth consideration given that `fish` does this\n\n<blockquote><img src=\"https://opengraph.githubassets.com/62e64971d9ee1c6125b32f74566112b8866fd0c3ac6c4291fcc10fa4582e3dd4/oh-my-fish/plugin-foreign-env\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/oh-my-fish/plugin-foreign-env\">GitHub - oh-my-fish/plugin-foreign-env: Run foreign bash scripts and capture exported environment variables</a></strong></div><div>Run foreign bash scripts and capture exported environment variables - GitHub - oh-my-fish/plugin-foreign-env: Run foreign bash scripts and capture exported environment variables</div></blockquote>",
+      "created_at": "2021-11-10T20:37:00Z",
+      "updated_at": "2021-11-10T20:37:02Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Proof of concept:\r\n\r\n```powershell\r\n# Execute bash to obtain the environment\r\n$divider = '----DIVIDER----'\r\n$command = \"echo && echo '$divider' && env\"\r\nif ($args.Count -gt 0) { $command = \"$args && $command\" }\r\n$output = bash -c $command\r\n\r\n# Find the divider index in the output\r\n$i = 0\r\nwhile ($output[$i] -ne $divider) { $i++ }\r\n$i++\r\n\r\n# Parse the environment and set it in the parent session\r\n$output |\r\n    Select-Object -Skip $i |\r\n    ConvertFrom-Csv -Header 'Name','Value' -Delimiter '=' |\r\n    ForEach-Object { Set-Item \"env:$($_.Name)\" $_.Value }\r\n\r\n```",
+      "created_at": "2021-11-10T22:40:30Z",
+      "updated_at": "2021-11-10T22:40:30Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT this is in your wheelhouse",
+      "created_at": "2021-11-11T00:38:49Z",
+      "updated_at": "2021-11-11T00:38:49Z"
+    }
+  ],
+  "created_at": "2021-10-25T21:46:43Z",
+  "number": 16304,
+  "state": "closed",
+  "title": "Support dot-sourcing shell scripts (*nix)",
+  "updated_at": "2021-11-11T00:38:50Z"
+}

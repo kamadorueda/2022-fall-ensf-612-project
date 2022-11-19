@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6029",
+  "author": "IISResetMe",
+  "body": "## PR Summary\r\n\r\nFix #6164.\r\n\r\nThis PR adds rudimentary lambda support to the `-replace` operator:\r\n\r\n    PS C:\\> \"ID 0000123\" -replace \"\\b0+\", {return \" \" * $args[0].Value.Length}\r\n    ID     123\r\n\r\n----\r\n\r\nThe current `-replace` operator implementation has the following syntax:\r\n\r\n    <value> -replace <pattern>[, <substitution>]\r\n\r\nThis (functionally) maps directly onto:\r\n\r\n    Regex.Replace(<value>, <pattern>, <substitution>)\r\n\r\n`Regex.Replace()` already has an overload that supports a [`MatchEvaluator` delegate](https://docs.microsoft.com/en-us/dotnet/api/system.text.regularexpressions.matchevaluator?view=netframework-4.7.1), which in turn allows us to pass a scriptblock instead of a string value as the substitution pattern.\r\n\r\nSince only wiring is required, we can accomplish this with:\r\n\r\n\r\n    if `<substitution>` argument is a ScriptBlock\r\n        convert `<substitution>` to a `MatchEvaluator` instance\r\n        pass MatchEvaluator to Regex.Replace() instead of \"`<substitution>`\"\r\n\r\n**Update:**\r\n\r\nTo support arbitrary delegates  (like existing `MatchEvaluator`s and `PSMethod`s), \r\n\r\n    if `<substitution>` argument is not a string\r\n        attempt to convert `<substitution>` to a `MatchEvaluator` instance\r\n        pass MatchEvaluator to Regex.Replace() instead of \"`<substitution>`\"\r\n",
+  "closed_at": "2018-03-14T16:43:59Z",
+  "comments": [
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I'd think it would be better to check if you have something that can be converted to a MatchEvaluator.\r\nPSMethods can now be converted to matching delegates.\r\n\r\nThis works:\r\n```\r\nclass R { static [string] RR([Text.RegularExpressions.Match] $m) {return \"Foo\"}}\r\n[Regex]::replace(\"bar\", 'a', [R]::RR)\r\n```\r\nIt would be nice if \r\n```\r\n\"bar\" -replace \"a\", [R]::RR\r\n```\r\nworked too.\r\n",
+      "created_at": "2018-01-26T08:36:15Z",
+      "updated_at": "2018-01-26T08:36:47Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "What happens if the delegate code raises an exception ?\r\nIs the _Match_ delegate parameter named _**$args**_ under Powershell ?",
+      "created_at": "2018-01-26T10:13:27Z",
+      "updated_at": "2018-01-26T10:13:27Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@LaurentDardenne `Replace()` will throw a `RuntimeException` if the delegate throws during substitution\r\n\r\nIf you pass a scriptblock with no explicit params, the `Match` parameter argument populates the `$args` automatic variable. User could also explicitly name it if desired, no functional difference",
+      "created_at": "2018-01-26T10:24:19Z",
+      "updated_at": "2018-01-26T10:24:19Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "Thank you.",
+      "created_at": "2018-01-26T10:30:37Z",
+      "updated_at": "2018-01-26T10:30:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@IISResetMe Thanks for your contribution. Now we are waiting PowerShell Committee conclusion in days.",
+      "created_at": "2018-01-27T17:06:01Z",
+      "updated_at": "2018-01-27T17:06:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and agree with taking this change, would prefer `$_` implemented, but can accept `$args[0]` since it's automatically there",
+      "created_at": "2018-01-31T23:15:18Z",
+      "updated_at": "2018-01-31T23:15:18Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Cool! I agree that `$_` would be nicer, but since we're passing the scriptblock directly to the method call as a delegate I can't really inject anything into the resulting expression . \r\n\r\nOnly way I can think of is by parsing the user-supplied scriptblock, inspecting the `param` block (optionally adding `param([Match]$_)`) and then re-creating it. It feels a bit ugly.\r\n\r\nIf anyone has suggestions or comments on this approach (or better ideas) I'm all ears. ",
+      "created_at": "2018-02-01T01:29:12Z",
+      "updated_at": "2018-02-01T01:29:24Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@IISResetMe - you could create a closure as the delegate instead, something like this:\r\n\r\n```C#\r\nMatchEvaluator GetEvaluator(ScriptBlock sb)\r\n{\r\n    return m => sb.DoInvokeReturnAsIs(\r\n        useLocalScope: true, // or false, not sure\r\n        errorHandlingBehavior: ErrorHandlingBehavior.WriteToCurrentErrorPipe,\r\n        dollarUnder: m,\r\n        input: AutomationNull.Value,\r\n        scriptThis: AutomationNull.Value,\r\n        args: Utils.EmptyArray<object>());\r\n}\r\n```",
+      "created_at": "2018-02-01T01:39:19Z",
+      "updated_at": "2018-02-01T01:39:19Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Interesting, I thought `DoInvokeReturnAsIs()` would execute the scriptblock immediately, no? ",
+      "created_at": "2018-02-01T01:55:04Z",
+      "updated_at": "2018-02-01T01:55:36Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "As expected, the following works as intended:\r\n\r\n```\r\nprivate static object ReplaceOperatorImpl(ExecutionContext context, string input, Regex regex, object substitute)\r\n{\r\n    MatchEvaluator matchEvaluator = null;\r\n    if (!(substitute is string) )\r\n    {\r\n        if(substitute is ScriptBlock) \r\n        {\r\n            ScriptBlock substituteScriptBlock = substitute as ScriptBlock;\r\n            ScriptBlockAst substituteAst = substituteScriptBlock.Ast as ScriptBlockAst;\r\n            if(substituteAst.ParamBlock == null && \r\n                substituteAst.Find(\r\n                    ast => ast is VariableExpressionAst && \r\n                    (ast as VariableExpressionAst).VariablePath.UserPath == \"_\", \r\n                false) != null)\r\n            {\r\n                substitute = ScriptBlock.Create(@\"param([System.Text.RegularExpressions.Match]$_)\" + substituteScriptBlock.ToString());\r\n            }\r\n        }   \r\n        if(LanguagePrimitives.TryConvertTo(substitute, out matchEvaluator)){\r\n            return regex.Replace(input, matchEvaluator);\r\n        }\r\n    }\r\n\r\n    string replacement = PSObject.ToStringParser(context, substitute);\r\n    return regex.Replace(input, replacement);\r\n}\r\n```\r\n... but it doesn't look or feel very clean :-\\ ",
+      "created_at": "2018-02-01T02:03:35Z",
+      "updated_at": "2018-02-01T02:06:01Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Had a closer look at your suggestion, makes sense, but when I try to compile it I get:\r\n\r\n    .\\PowerShell\\src\\System.Management.Automation\\engine\\lang\\parserutils.cs(909,25): \r\n      error CS1662: Cannot convert lambda expression to intended delegate type because some of the return types in the block are not implicitly convertible to the delegate return type ",
+      "created_at": "2018-02-01T02:21:10Z",
+      "updated_at": "2018-02-01T02:21:10Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Oh, right, I guess call `LanguagePrimitives.ConvertTo<string>` on the return value.",
+      "created_at": "2018-02-01T02:40:11Z",
+      "updated_at": "2018-02-01T02:40:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Added fix #6164 in description.",
+      "created_at": "2018-02-16T04:18:35Z",
+      "updated_at": "2018-02-16T04:18:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@IISResetMe What is the PR status?",
+      "created_at": "2018-02-16T06:50:35Z",
+      "updated_at": "2018-02-16T06:50:35Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@IISResetMe This PR is a good enhancement to have. But it's been a while since this PR was left unattended, so I updated the changes to address the `$_` pending issue. Hope you don't mind.\r\n\r\nMy changes were:\r\n1. Squash the existing commits to a single one.\r\n2. Refactor `ReplaceOperatorImpl` with `switch` (pattern matching).\r\n3. Add copyright string to the new `.ps1` file and use `$_` for the `-replace xx { ... }` test case.\r\n\r\n@iSazonov @lzybkr @powercode Can you please take another look?",
+      "created_at": "2018-03-13T01:00:24Z",
+      "updated_at": "2018-03-13T01:03:20Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw LGTM!",
+      "created_at": "2018-03-13T10:54:39Z",
+      "updated_at": "2018-03-13T10:54:39Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks @daxian-dbw! Couldn't get `$_` to work inside the MatchEvaluator and then life got in the way :)\r\n\r\nLooks good!",
+      "created_at": "2018-03-13T13:10:23Z",
+      "updated_at": "2018-03-13T13:10:23Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov Your comments have been addressed. Can you please take another look?",
+      "created_at": "2018-03-13T16:22:15Z",
+      "updated_at": "2018-03-13T16:22:15Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov Given that your pending comment is not blocking (questions about `PSObject.ToStringParser`), I will merge this PR. Feel free to continue the discussion in the comment thread.",
+      "created_at": "2018-03-14T16:33:31Z",
+      "updated_at": "2018-03-14T16:33:31Z"
+    }
+  ],
+  "created_at": "2018-01-25T21:41:51Z",
+  "number": 6029,
+  "state": "closed",
+  "title": "Add ScriptBlock substitution overload to -replace operator",
+  "updated_at": "2018-10-15T21:44:21Z"
+}

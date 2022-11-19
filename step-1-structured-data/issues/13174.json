@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13174",
+  "author": "Smorgan05",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nPowerShell 7 implemented Parallel Foreach but has not added a means to do Sync lock.  In C# the way to do this is as follows:\r\n\r\n```\r\nobject sync = new object();\r\nParallel.ForEach(List,\r\nitem =>\r\n{\r\nlock (sync){ Locked item to execute in multiple threads}\r\n});\r\n```\r\n\r\nPlease implement the ability to lock the script block as follows:\r\n\r\n```\r\n$Sync = New-Object -TypeName System.Object\r\n$List | ForEach-Object -Parallel {\r\n//Locked Resource for each Thread\r\nlock($Sync){\r\nWrite-Host $_\r\n}}\r\n```\r\n\r\nCurrently the way this is done is by the following:\r\n```\r\n$List | ForEach-Object -Parallel {\r\n[System.Threading.Monitor]::Enter($_)\r\nWrite-Host $_\r\n[System.Threading.Monitor]::Exit($_)\r\n} -ThrottleLimit 5\r\n```",
+  "closed_at": "2020-07-17T12:00:14Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It looks like overhead for PowerShell to have a lock.\r\n\r\n/cc @PaulHigin ",
+      "created_at": "2020-07-15T12:18:14Z",
+      "updated_at": "2020-07-15T12:18:14Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "There is no need to take a lock before running a script block.  And in fact doing so serializes script block execution, completely losing any benefit of using -Parallel.  PowerShell can't know what script will be executed in the -Parallel block and so it is up to the script author to use thread synchronization objects as needed, just like in C#.  But it is recommended to use thread safe types (such as ConcurrentDictionary) so that explicit use of sync objects is not needed.",
+      "created_at": "2020-07-15T15:30:27Z",
+      "updated_at": "2020-07-15T15:30:27Z"
+    },
+    {
+      "author": "Smorgan05",
+      "author_association": "NONE",
+      "body": "@PaulHigin I see your point but if you guys are going to implement Multi-threading then you should leave it up to the user how they execute such operations like how C# handles it.  The performance impact is minimal as it simply ensures thread safety when executing commands.  The performance gain of Parallel vs non is still there so what is the performance impact on PowerShell implementing this?",
+      "created_at": "2020-07-15T15:42:58Z",
+      "updated_at": "2020-07-15T15:46:43Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I am not convinced this is necessary.  As you point out, it is already possible to use C# sync objects if needed.  But needing sync objects seems rare enough where it is not necessary to create a new PowerShell language 'lock' keyword.  \r\n\r\nBTW, it is not necessary to protect 'Write-Host' inside a lock.  \r\n\r\nIt seems to me the most likely scenario is for collecting data, but that can be covered by C# thread safe types or the PowerShell pipeline.\r\n\r\n```powershell\r\n$dictionary = [System.Collections.Concurrent.ConcurrentDictionary[[int],[string]]]::new()\r\n1..1000 | ForEach-Object -Parallel {\r\n    $dict = $using:dictionary\r\n    $null = $dict.TryAdd($_, \"Item $_\")\r\n    Write-Host \"Item $_\"\r\n}\r\n$dictionary[35]\r\nItem 35\r\n```\r\n\r\n```powershell\r\n$Items = 1..1000 | ForEach-Object -Parallel {\r\n    Write-Output \"Item $_\"\r\n    Write-Host \"Item $_\"\r\n}\r\n$Items[35]\r\nItem 36\r\n```\r\nBTW, PowerShell has supported running multi-threaded script blocks for over 10 years via API.  The new ForeEach-Object -Parallel feature just makes it easier to use, similar to ThreadJobs.",
+      "created_at": "2020-07-15T16:53:56Z",
+      "updated_at": "2020-07-15T16:53:56Z"
+    },
+    {
+      "author": "Smorgan05",
+      "author_association": "NONE",
+      "body": "If we follow through with this logic then the user should always use concurrent data structures when working with Parallel foreach.  The user is not going to want to use concurrent data structures all the time because of the overhead involved with such processing.  Additionally, there should be a means to initialize a Concurrent Data Structure without using .net objects to make this happen.\r\n\r\nI think we need to cut to the chase here.  The lock statement should be implemented so that the end user has both options.  Having a flag means that it won't be turned on by default thus nailing your concerns.",
+      "created_at": "2020-07-16T02:21:16Z",
+      "updated_at": "2020-07-16T02:32:58Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> If we follow through with this logic then the user should always use concurrent data structures when working with Parallel foreach.\r\n> (...)\r\n> Additionally, there should be a means to initialize a Concurrent Data Structure without using .net objects to make this happen.\r\n\r\nThe majority of use cases won't actually need concurrent data structures nor locking.  Most of the time folks just use the pipeline like in @PaulHigin's example.\r\n\r\n> The user is not going to want to use concurrent data structures all the time because of the overhead involved with such processing.\r\n\r\nTypically the concurrent types are a lot faster than old school sync objects.\r\n\r\n> The lock statement should be implemented so that the end user has both options. Having a flag means that it won't be turned on by default thus nailing your concerns.\r\n\r\nThere's only going to be a very small handful of cases where a sync object makes sense.  In those scenarios, using `Monitor.Enter` and `Exit` will work just fine.  For something to be worth adding a whole extra keyword and hooking up the parser/compiler to handle it, it's gotta have pretty high demand.",
+      "created_at": "2020-07-16T02:54:17Z",
+      "updated_at": "2020-07-16T02:54:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Really PowerShell implements many magic things hided from users. Thus conhost has internal locks and users have no needs to lock/sync console outputs. \r\nI think we should follow the best practice and enhance internal PowerShell engine if we need to cover a new scenario. ",
+      "created_at": "2020-07-16T03:35:01Z",
+      "updated_at": "2020-07-16T03:35:01Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-07-17T12:00:13Z",
+      "updated_at": "2020-07-17T12:00:13Z"
+    }
+  ],
+  "created_at": "2020-07-15T01:20:22Z",
+  "number": 13174,
+  "state": "closed",
+  "title": "Parallel Foreach Thread locking",
+  "updated_at": "2020-07-17T12:00:14Z"
+}

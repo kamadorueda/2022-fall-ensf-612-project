@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12406",
+  "author": "thomaslazar",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n1. Windows System with ADFS Installed\r\n2. Have following AdfsAccessControlPolicy in place\r\n```none\r\nGet-AdfsAccessControlPolicy -name \"Permit specific claim\"\r\n\r\nName           : Permit specific claim\r\nIdentifier     : Permitspecificclaim\r\nIsBuiltIn      : False\r\nRpUsageCount   : 4\r\nLastUpdateTime : 25.03.2019 15:40:00\r\nDescription    :\r\nPolicyMetadata : RequireFreshAuthentication:False\r\n                 IssuanceAuthorizationRules:\r\n                 {\r\n                   Permit users\r\n                     with <ClaimsParameter_0> in the request\r\n                 }\r\n                 ParameterDescription:\r\n                 {\r\n                   <ClaimsParameter_0>: Specify condition with ClaimType, Operator and Value using hashtable.\r\n                 }\r\n```\r\n3. Run script from following Gist [Setup-AdfsApplicationGroup.ps1](https://gist.github.com/thomaslazar/aaf82f53187b77f6ea7072125a6efa68)\r\n\r\nSpecifically this bit is the problem. \r\n```powershell\r\n$acl = @{\r\n    ClaimsParameter_0 = @{ ClaimType = 'http://schemas.microsoft.com/ws/2008/06/identity/claims/role'; Operator = 'Contains'; Value = $CustomerGroup }\r\n}\r\n\r\nAdd-AdfsWebApiApplication -ApplicationGroupIdentifier $CustomerId -Identifier \"$CustomerId\" -Name \"$CustomerId - Web Application\" -AccessControlPolicyName \"Permit specific claim\" -AccessControlPolicyParameters $acl -TokenLifetime 15\r\n\r\n```\r\n\r\n# Expected behavior\r\n\r\nShould run and create an AdfsWebApplication\r\n\r\n# Actual behavior\r\n\r\n```none\r\nAdd-AdfsWebApiApplication: ADMIN0144: SpecificClaimCondition and SpecificClaimException parameter 'ClaimsParameter_0' should be assigned through a hashtable that specifies ClaimType, Operator and Value. If multiple conditions are desired, use an array of hashtables.\r\n```\r\n# Additional information\r\n\r\nI used dotPeak to look into `Microsoft.IdentityServer.dll`. The problem seems to be the following check inside the `ParameterInterface.cs` `AssignSpecificClaimParemeterFromPSHInput` method , which is not working in PowerShell 7 but is working in PowerShell 5.1\r\n\r\n```csharp\r\nif (!(value is Hashtable hashtable))\r\n  throw new InvalidDataException(Microsoft.IdentityServer.SR.GetString(\"ADMIN0144\", (object) specific.Label));\r\n```\r\n\r\nThe content of the variable `value` is the content that got passed into the `AccessControlPolicyParameters` parameter of the `Add-AdfsWebApiApplication` command.\r\n\r\nIt does not matter what you put into the `AccessControlPolicyParameters` parameter. It always triggers this check and throws the exception. \r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nPS C:\\Temp> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2021-01-17T13:00:04Z",
+  "comments": [
+    {
+      "author": "thomaslazar",
+      "author_association": "NONE",
+      "body": "It is ADFS 2019 on Windows Server 2019. Just to clarify. ",
+      "created_at": "2020-04-21T07:48:21Z",
+      "updated_at": "2020-04-21T07:48:21Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Can you check `(Get-Command Add-AdfsWebApiApplication).Module` and ensure the module is imported as a binary module?\r\n\r\nI'm wondering if it's being imported as a script module via Windows PS implicit remoting instead...",
+      "created_at": "2020-04-21T14:06:06Z",
+      "updated_at": "2020-04-21T14:06:06Z"
+    },
+    {
+      "author": "thomaslazar",
+      "author_association": "NONE",
+      "body": "```\r\nPS C:\\Users\\lazar> (Get-Command Add-AdfsWebApiApplication).Module\r\n\r\n Creating implicit remoting module ...\r\n    Getting command information from remote session ... 48 commands received\r\n    [oooooooooooooooooooooooooooo                                                                                ]\r\n    00:00:10 remaining.\r\n\r\n\r\nModuleType Version    PreRelease Name                                ExportedCommands\r\n---------- -------    ---------- ----                                ----------------\r\nScript     1.0                   ADFS                                {Add-AdfsAttributeStore, Add-AdfsCertificate, Add\u2026\r\n```\r\n\r\nI got a Windows PS implicit remoting progress bar thingy though when I executed that command. ",
+      "created_at": "2020-04-22T06:36:43Z",
+      "updated_at": "2020-04-22T06:39:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm. I could be wrong, but If it's that specific type check that's failing, I'd be inclined to assume that Windows PS isn't able to properly reconstruct the hashtable on that side of the remoting connection, so the type check fails.\r\n\r\nYou can try instead importing the module directly in powershell 7 with Import-Module and see if you can get it to import directly into powershell 7 without the remoting in-between.",
+      "created_at": "2020-04-22T12:46:19Z",
+      "updated_at": "2020-04-22T12:48:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @anmenaga for information.",
+      "created_at": "2020-04-22T14:15:23Z",
+      "updated_at": "2020-04-22T14:15:23Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The content of the variable value is the content that got passed into the AccessControlPolicyParameters parameter of the Add-AdfsWebApiApplication command.\r\n\r\nWhat is the runtime type of  variable `value` ?\r\n\r\nCouple of possible workarounds:\r\n1) run entire script in in PowerShell 5.1 session:\r\n```powershell\r\n$CustomerId = \"TestCustomerId\"\r\n$HostName = \"TestHostName\"\r\n$CustomerGroup = \"TestCustomerGroup\"\r\n\r\n$s = Get-PSSession -Name WinPSCompatSession -ErrorAction SilentlyContinue\r\nif (-not $s) {Import-Module ADFS -UseWindowsPowerShell;$s = Get-PSSession -Name WinPSCompatSession}\r\nInvoke-Command -Session $s -ScriptBlock { Setup-AdfsApplicationGroup.ps1 $using:CustomerId $using:HostName $using:CustomerGroup }\r\n```\r\n\r\n2) as @vexx32 suggested - it is worth trying if the module actually works with PS Core:\r\n```\r\n$CustomerId = \"TestCustomerId\"\r\n$HostName = \"TestHostName\"\r\n$CustomerGroup = \"TestCustomerGroup\"\r\n\r\nImport-Module -Name ADFS -SkipEditionCheck\r\nSetup-AdfsApplicationGroup.ps1 $CustomerId $HostName $CustomerGroup\r\n```",
+      "created_at": "2020-04-22T19:07:39Z",
+      "updated_at": "2020-04-22T19:07:39Z"
+    },
+    {
+      "author": "thomaslazar",
+      "author_association": "NONE",
+      "body": "@anmenaga \r\nFirst workaround is working, as is just calling that script in a 5.1 PS environment\r\n\r\nSecond workaround is not working. I'm getting these errors when calling methods from the imported module.\r\n\r\n```none\r\nGet-AdfsApplicationGroup: C:\\Temp\\Setup-AdfsApplicationGroup.ps1:14\r\nLine |\r\n  14 |  If (Get-AdfsApplicationGroup $CustomerId) {\r\n     |      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n     | Method not found: 'Void System.ServiceModel.NetTcpBinding.set_ListenBacklog(Int32)'.\r\n\r\nCreating Application Group: 00017\r\nNew-AdfsApplicationGroup: C:\\Temp\\Setup-AdfsApplicationGroup.ps1:27\r\nLine |\r\n  27 |  New-AdfsApplicationGroup $CustomerId\r\n     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n     | Method not found: 'Void System.ServiceModel.NetTcpBinding.set_ListenBacklog(Int32)'.\r\n.\r\n.\r\n.\r\n```\r\n",
+      "created_at": "2020-04-24T12:16:42Z",
+      "updated_at": "2020-04-24T12:16:42Z"
+    },
+    {
+      "author": "thomaslazar",
+      "author_association": "NONE",
+      "body": "And i can't really tell what the runtime type of `value` is, because I'm not debugging that code. I just looked into the disassembled .ddls to see where stuff could go wrong.\r\n\r\nBut I tried to explicitly make a `Hashtable` to pass into it. \r\n\r\nI was only using PS7 because I like to use the new stuff for dev. So PS7 is not really a requirement for me. I just wanted to report this issue I had with PS7.",
+      "created_at": "2020-04-24T12:19:02Z",
+      "updated_at": "2020-04-24T12:19:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "ADFS module is not supported by PowerShell Core. Please request the support in https://github.com/PowerShell/PowerShellModuleCoverage\n\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/11524380?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShellModuleCoverage\">PowerShell/PowerShellModuleCoverage</a></strong></div><div>Track issues related to using Windows PowerShell modules with PowerShell - PowerShell/PowerShellModuleCoverage</div></blockquote>",
+      "created_at": "2021-01-16T10:36:10Z",
+      "updated_at": "2021-01-16T10:36:12Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as external and has not had any activity for **1 day**. It has been be closed for housekeeping purposes.",
+      "created_at": "2021-01-17T13:00:03Z",
+      "updated_at": "2021-01-17T13:00:03Z"
+    }
+  ],
+  "created_at": "2020-04-21T06:08:58Z",
+  "number": 12406,
+  "state": "closed",
+  "title": "Add-AdfsWebApiApplication command not working in Powershell 7",
+  "updated_at": "2021-01-17T13:00:04Z"
+}

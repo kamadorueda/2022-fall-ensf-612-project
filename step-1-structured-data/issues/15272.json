@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15272",
+  "author": "JAK1047",
+  "body": "## Steps to reproduce\r\n\r\nThis may not be an issue at all and just something in Powershell I am unaware of. While making a call to an internal REST API I noticed a difference when piping to a ForEach-Object vs saving the output to a variable first and running in a ForEach loop. If I do not either expand a property on the call or save it to a variable first then the output gets piped over to the foreach a single time as the full array. Does it have to serialize the data first or something? I've tried finding any relevant documentation for this exact scenario but haven't had any luck so far.\r\n\r\n```powershell\r\n$APIKey = 'APIKeyHere'\r\n$Address = 'https://nagiosxi.contoso.com/nagiosxi/api/v1'\r\n\r\n$Count1 = 0\r\n$Count2 = 0\r\n\r\nInvoke-RestMethod -Method GET -Uri \"$Address/Config/contact?apikey=$APIKey\" | ForEach-Object {$Count1++}\r\n\r\n$Contacts = Invoke-RestMethod -Method GET -Uri \"$Address/Config/contact?apikey=$APIKey\"\r\nForEach ($Contact in $Contacts) {$Count2++}\r\n\r\nWrite-Output \"Object count was: $Count1\"\r\nWrite-Output \"Object count was: $Count2\"\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\nObject count was: 274\r\nObject count was: 274\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nObject count was: 1\r\nObject count was: 274\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.3\r\nPSEdition                      Core\r\nGitCommitId                    7.1.3\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2021-04-20T17:20:44Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This is probably due to how the API returns the result, it can depend on the endpoint, but it is noticeably different at times to how Windows PowerShell handled it, I think. There's been a lot of discussion over it, and at the moment I don't recall if there was ever an agreement to change the behaviour or not.\r\n\r\nThe quick workaround is just to pipe the result through `Write-Output` to force it to enumerate -- `Invoke-RestMethod ...| Write-Output | ...`",
+      "created_at": "2021-04-19T16:51:37Z",
+      "updated_at": "2021-04-19T16:51:37Z"
+    },
+    {
+      "author": "JAK1047",
+      "author_association": "NONE",
+      "body": "That's interesting. I imagine any change to the behavior would probably be a breaking change, so if it's something already at least somewhat known it's certainly easy enough for me to work around. Was just the first time I had ever encountered it and my 15 minutes of Google didn't return me anything that seemed to match documentation wise.",
+      "created_at": "2021-04-19T17:05:40Z",
+      "updated_at": "2021-04-19T17:05:40Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": " Yes, when `Invoke-RestMethod` receives an _array_, it sends that _as a whole_ to the pipeline, which contravenes PowerShell's usual behavior of _enumerating_ arrays, i.e. sending their elements _one by one_.\r\n\r\n`ConvertFrom-Json` _used to_ behave this way, but the behavior was changed in v7.0, and a `-NoEnumerate` switch was added as an opt-in to the old non-enumeration behavior - see #3424 for the original discussion.\r\n\r\nIt would make sense to me to change `Invoke-RestMethod` in the same fashion, which would (again) be a breaking change, however.\r\n\r\nA simpler alternative to the `Write-Output` workaround mentioned by @vexx32  is to simply enclose the `Invoke-RestMethod` in `(...)`, which also forces enumeration.\r\n\r\n(Using `(...)` generally collects the output from the enclosed command in memory in full first, but that's not a problem here, given that the data in question already is in memory in full, as an array.)\r\n\r\n",
+      "created_at": "2021-04-20T03:13:25Z",
+      "updated_at": "2021-04-20T03:33:33Z"
+    },
+    {
+      "author": "JAK1047",
+      "author_association": "NONE",
+      "body": "Order of operations type deal I got it. From a user perspective I can say the behavior I expected was enumeration like most every other command you send down the pipeline, but if the trade-off of changing the functionally does more harm then good then it may not be worth it in the grand scheme of things. (I don't know the consensus on why ConvertFrom-JSON was changed and if this checks similar boxes)\r\n\r\nIt would definitely make sense to me however to add a footnote on this objectively, nonstandard behavior to the Microsoft docs page for the cmdlet since I feel that's where most users, like myself, would turn to for guidance.",
+      "created_at": "2021-04-20T03:53:53Z",
+      "updated_at": "2021-04-20T03:56:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It would definitely make sense to me however to add a footnote on this objectively, nonstandard behavior to the Microsoft docs page for the cmdlet since I feel that's where most users, like myself, would turn to for guidance.\r\n\r\nGood idea, please see https://github.com/MicrosoftDocs/PowerShell-Docs/issues/7504\r\n\r\n> I don't know the consensus on why ConvertFrom-JSON was changed and if this checks similar boxes\r\n\r\nTo me, definitely - if the change was worth it for `ConvertFrom-JSON`, then it's also worth it for the same functionality that is built into `Invoke-RestMethod`.\r\n",
+      "created_at": "2021-04-20T04:13:54Z",
+      "updated_at": "2021-04-20T04:13:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> > I don't know the consensus on why ConvertFrom-JSON was changed and if this checks similar boxes\r\n> \r\n> To me, definitely - if the change was worth it for `ConvertFrom-JSON`, then it's also worth it for the same functionality that is built into `Invoke-RestMethod`.\r\n\r\nIf it is true behavior please open new clear issue with the request.",
+      "created_at": "2021-04-20T12:44:50Z",
+      "updated_at": "2021-04-20T12:44:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good idea, @iSazonov; please see #15280",
+      "created_at": "2021-04-20T12:57:26Z",
+      "updated_at": "2021-04-20T12:57:26Z"
+    }
+  ],
+  "created_at": "2021-04-19T15:39:53Z",
+  "number": 15272,
+  "state": "closed",
+  "title": "Piping off Invoke-RestMethod not expanding as expected",
+  "updated_at": "2021-04-20T17:20:44Z"
+}

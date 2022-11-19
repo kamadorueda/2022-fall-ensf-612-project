@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17149",
+  "author": "SteveL-MSFT",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\nThis was reported by a Windows partner.\r\n\r\n`GetCurrentDirectory()` is a Win32 API that returns the current working directory.  This is used by native commands to resolve things like relative paths.  It will currently always return the directory where pwsh was started.\r\n\r\n```powershell\r\ncd $env:WINDIR\r\n[System.IO.Directory]::GetCurrentDirectory()\r\n```\r\n\r\nPS7 should call `SetCurrentDirectory()` when the main console thread changes location and also set `$env:PWD`.  There are no guarantees for multi-threads as the current working directory is process scope.\r\n\r\n### Expected behavior\r\n\r\n```console\r\nc:\\Windows\r\n```\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\nYour home dir\r\n```\r\n\r\n\r\n### Error details\r\n\r\n_No response_\r\n\r\n### Environment data\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.3.0-preview.3\r\nPSEdition                      Core\r\nGitCommitId                    7.3.0-preview.3\r\nOS                             Microsoft Windows 10.0.19044\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n_No response_",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> This is used by native commands to resolve things like relative paths. It will currently always return the directory where pwsh was started.\r\n\r\nIt's worth noting that for native command invocations we do already send the new working directory over:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/be998816f7c5346b1120c6b2eba0b90729f21086/src/System.Management.Automation/engine/NativeCommandProcessor.cs#L1380-L1385\r\n\r\nRelevant discussion in #3428 (and a few linked threads there).",
+      "created_at": "2022-04-13T19:55:58Z",
+      "updated_at": "2022-04-13T19:55:58Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "That would be a pretty big change. I mean, this has been like this (despite our pleas) since day 1 ...\r\n\r\nHaving said that, I've been adding SetCurrentDirectory into my prompt since my first prompt function, so I can't really think of any reason *not* to fix this, except the classic: It's bound to break **something** \ud83d\ude0b\ud83d\ude0b\r\n",
+      "created_at": "2022-04-20T03:55:32Z",
+      "updated_at": "2022-04-20T03:56:04Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "If you change it to call `SetCurrentDirectory`, but only in one thread, that could be confusing for scripts that use dotnet APIs.\r\n\r\ne.g.\r\n\r\n```powershell\r\n# script.ps1\r\ncd temp:\\\r\n[IO.Directory]::GetFiles('./')\r\n```\r\n\r\nThat script would then behave differently if invoked with `Start-ThreadJob`.\r\n\r\nThere may not be a lot of folks doing anything like that currently, but if we build the expectation that `cd` changes dotnet's view of the current directory, we likely will. I could see it being fine to set every REPL loop (like when `prompt` is called) but if the intention is to change it mid script execution I think that's problematic.",
+      "created_at": "2022-04-20T16:58:01Z",
+      "updated_at": "2022-04-20T16:58:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this.  We agreed that we should take this as an Experimental Feature.  The setting of the current directory via the API and $env:PWD should be done in the FileSystemProvider and only on the main console thread (somehow the context needs to be passed through).  No assurances for multiple threads as this information is process wide and also only for file system paths and not psprovider paths.  Cmdlets/scripts that can use pspaths should use the existing PS API.",
+      "created_at": "2022-04-20T22:22:10Z",
+      "updated_at": "2022-04-20T22:22:10Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> GetCurrentDirectory() is a Win32 API that returns the current working directory. This is used by native commands to resolve things like relative paths.\r\n\r\nGiven that the filesystem current working directory is passed in when starting a native command, why do we need `SetCurrentDirectory()` then? Is it for allowing a user to use .NET API directly with relative paths? If so, I think it will be confusing for someone to find something works in console, but not in a thread job or `ForEach-Object -Parallel`.",
+      "created_at": "2022-04-20T23:16:51Z",
+      "updated_at": "2022-04-20T23:16:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The current situation is already perplexing for people who don't know how runspace works. We have always told them that PowerShell keeps track of the current directory per runspace. This proposed change will confuse users even more. Furthermore, it will lead to race conditions.\r\n\r\nIt should also be noted that this completely destroys the basic principles of PowerShell. The current location is an inherent attribute of PowerShell providers. In other words, _by accepting this change, we must extend it to all providers._",
+      "created_at": "2022-04-21T03:28:33Z",
+      "updated_at": "2022-04-21T03:28:33Z"
+    },
+    {
+      "author": "Hrxn",
+      "author_association": "NONE",
+      "body": "There's also `[System.Environment]::CurrentDirectory` \ud83d\ude04 \r\n\r\n(Can be both `{get; set;}` )\r\n\r\nWhich does reflect the currently active directory of the process itself (i.e. pwsh.exe) when changed with the `SetCurrentDirectory()` static method.\r\n\r\nI always thought that this was by design, because PowerShell has this notion of runspaces, and what you see as the `gl | pwd | $PWD` is the currently active directory in only the currently active runspace.\r\n\r\nThat said, I have some sympathy for this change...\r\n\r\nBecause there's this one time (I guess we all could tell similar stories here) where a script I wrote tripped over the path given as a parameter value to a static method of a .NET type I was using, like [IO.File]::ReadLines , or [Net.WebClient]::DownloadFile ...\r\n\r\n\ud83d\ude04 \r\n\r\nAlways had to remember to use full path names in such cases.",
+      "created_at": "2022-05-01T17:11:52Z",
+      "updated_at": "2022-05-01T17:11:52Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "> Given that the filesystem current working directory is passed in when starting a native command, why do we need `SetCurrentDirectory()` then?\r\n\r\nThere are some other issues, of particular note for terminal authors and other more advanced users.\r\n\r\n1. A terminal emulator that wants to track the working directory of the processes it's spawned -- for example, to enable session restoration -- will look at the process's working directory. If it is always the same, it becomes unreliable.\r\n2. The current directory is held locked by the process \"using\" it; in PowerShell's case, this means that a shell that is spawned in one folder and \"moved\" to another will keep the _original_ directory handle open and make it impossible to delete or move.",
+      "created_at": "2022-08-18T23:12:50Z",
+      "updated_at": "2022-08-18T23:12:50Z"
+    }
+  ],
+  "created_at": "2022-04-13T17:49:38Z",
+  "number": 17149,
+  "state": "open",
+  "title": "PowerShell doesn't call `SetCurrentDirectory()` when location changes nor sets `$env:PWD`",
+  "updated_at": "2022-08-18T23:12:50Z"
+}

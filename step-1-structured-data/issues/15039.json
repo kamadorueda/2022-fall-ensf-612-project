@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15039",
+  "author": "robinmalik",
+  "body": "When querying the Office 365 Management API with PowerShell Core (7.1.3), it fails to correctly parse/process certain hyperlinks. PowerShell 5.1 works.\r\n\r\nI believe this is due to the presence of `$` in the URL.\r\n\r\nA quick in-line fix for my script to work under PS v7 is simply `$URL = ($URL -replace \"\\$\",\"``$\")`\r\n\r\n## Steps to reproduce\r\n\r\n```\r\n$headerParams = @{'Authorization'=\"Bearer TOKENVALUE\"}\r\n$URL = \"https://manage.office.com/api/v1.0/TENANCYGUID/activity/feed/subscriptions/content?contenttype=Audit.General&endtime=2021-03-16T13:21:48.1859513Z&starttime=2021-03-15T13:21:48.1859513Z&nextpage=20210315183117827000466$20210315132148185000000$emea0010\"\r\nInvoke-WebRequest -Method Get -Headers $headerParams -Uri $URL\r\n```\r\n\r\n## Expected behavior\r\n\r\n```\r\nIt works.\r\n```\r\n\r\n## Actual behavior\r\n\r\n```\r\nCannot convert 'System.String[]' to the type 'System.Uri' required by parameter 'Uri'. Specified method is not supported.\r\n```\r\n\r\n## Environment data\r\n\r\n```\r\nPSVersion                      7.1.3\r\nPSEdition                      Core\r\nGitCommitId                    7.1.3\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u0393\u00c7\u00aa}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+  "closed_at": "2022-01-20T00:00:43Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This is expected. `$emea0010` is a valid variable name, and in a double-quoted string PowerShell will attempt to interpolate its value. If the variable doesn't exist, it will be replaced by an empty string (effectively removing the variable name from the string).\r\n\r\nThe most straightforward solution is to use single quotes when defining the URL, this disables the interpolation and tells PowerShell to treat the string as literal:\r\n\r\n```powershell\r\n$headerParams = @{ Authorization = \"Bearer TOKENVALUE\" }\r\n$URL = 'https://manage.office.com/api/v1.0/TENANCYGUID/activity/feed/subscriptions/content?contenttype=Audit.General&endtime=2021-03-16T13:21:48.1859513Z&starttime=2021-03-15T13:21:48.1859513Z&nextpage=20210315183117827000466$20210315132148185000000$emea0010'\r\nInvoke-WebRequest -Method Get -Headers $headerParams -Uri $URL\r\n```\r\n\r\nAs you mentioned, you can also escape the `$` with a backtick to indicate that symbol is literal and does not constitute the start of a variable name.",
+      "created_at": "2021-03-16T15:18:52Z",
+      "updated_at": "2021-03-16T16:27:03Z"
+    },
+    {
+      "author": "robinmalik",
+      "author_association": "NONE",
+      "body": "@vexx32 Hi Joel, thanks for the reply. In providing example code to replicate I expanded the URL (at which point it becomes obvious why that'd happen - doh!). Actually, `$URL` isn't within single/double quotes but direct to variable from an object property. The complete code would be:\r\n\r\n```\r\n$AggregateListArray = [System.Collections.ArrayList]@()\r\n$URL = \"https://manage.office.com/api/v1.0/$tenantGuid/activity/feed/subscriptions/content?contentType=Audit.General&PublisherIdentifier=$Publisher\"\r\n$Count = 1\r\ndo {\r\n\tWrite-Verbose -Message \"Request $Count\"\r\n\t$Data = Invoke-WebRequest -Method Get -Headers $headerParams -Uri $URL\r\n\t$Aggregates = $Data.content | convertfrom-json\r\n\tforeach($Aggregate in $Aggregates)\r\n\t{\r\n\t\t$AggregateListArray.Add($Aggregate) | out-null\r\n\t}\t\r\n\t$Count++\r\n\t$URL = $Data.Headers.NextPageUri\r\n}\r\nuntil($Null -eq $URL)\r\n```",
+      "created_at": "2021-03-16T15:46:23Z",
+      "updated_at": "2021-03-16T15:46:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The conversion `[uri]$uri` works well for URI from your repro steps. Are you sure you create the URI correctly? I mean perhaps the issue is not in Invoke-WebRequest but in script code which creates the URI.",
+      "created_at": "2021-03-16T17:46:26Z",
+      "updated_at": "2021-03-16T17:46:26Z"
+    },
+    {
+      "author": "robinmalik",
+      "author_association": "NONE",
+      "body": "I've discovered the cause and it wasn't what I originally thought. The issue is header data. Using `$Data` when it first becomes populated: `($Data.Headers.NextPageUri).gettype()`\r\n\r\nPowerShell 7:\r\n```\r\n\r\nIsPublic IsSerial Name                                     BaseType\r\n-------- -------- ----                                     --------\r\nTrue     True     String[]                                 System.Array\r\n```\r\n\r\nPowerShell 5.1:\r\n```\r\nIsPublic IsSerial Name                                     BaseType                                                                                                                                                                                                \r\n-------- -------- ----                                     --------                                                                                                                                                                                                \r\nTrue     True     String                                   System.Object                                                                                                                                                                                           \r\n```\r\n\r\nApologies for the initial mislead. I suspect this is expected/known behaviour with all the changes to the web cmdlets in PS7.",
+      "created_at": "2021-03-16T19:04:15Z",
+      "updated_at": "2021-03-16T19:04:36Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "@robinmalik it's unclear to me if you've fixed your problem. Do you still see a bug here? ",
+      "created_at": "2021-03-17T00:36:07Z",
+      "updated_at": "2021-03-17T00:36:07Z"
+    },
+    {
+      "author": "robinmalik",
+      "author_association": "NONE",
+      "body": "@joeyaiello Hi Joey. Sorry for that. The problem is worked around but I wouldn't expect a singular string in the headers (in this case, NextPageUri) to become an array object. I don't know what has changed as part of the web cmdlets in PS7, only that I recall seeing many mentions of such in the release notes. Is there anything I can do to help?",
+      "created_at": "2021-03-17T10:27:20Z",
+      "updated_at": "2021-03-17T10:27:20Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-01-20T00:00:42Z",
+      "updated_at": "2022-01-20T00:00:42Z"
+    }
+  ],
+  "created_at": "2021-03-16T13:39:28Z",
+  "number": 15039,
+  "state": "closed",
+  "title": "Invoke-WebRequest: Cannot convert 'System.String[]' to the type 'System.Uri'",
+  "updated_at": "2022-01-20T00:00:43Z"
+}

@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15767",
+  "author": "SeeminglyScience",
+  "body": "### Summary of the new feature / enhancement\r\n\r\nAs someone who writes in C#, I want to be able to use PowerShell to prototype as much as possible. Currently, this comes to a grinding halt whenever a pointer (`void*` or `T*`) is involved. It is not possible to enable this outside of the engine with custom type conversions, but it *is* possible from within the engine itself.\r\n\r\n### Proposed technical implementation details (optional)\r\n\r\n#### Binder support\r\n\r\nOn a whim I gave adding support for \"boxing\" `void*` to `System.Reflection.Pointer` to see if it were feasible.  Turns out with just 9 additional lines, the engine can get very minimal support:\r\n\r\n```diff\r\ndiff --git a/src/System.Management.Automation/engine/CoreAdapter.cs b/src/System.Management.Automation/engine/CoreAdapter.cs\r\nindex 48077bbaf..ef3c5c573 100644\r\n--- a/src/System.Management.Automation/engine/CoreAdapter.cs\r\n+++ b/src/System.Management.Automation/engine/CoreAdapter.cs\r\n@@ -841,6 +841,11 @@ namespace System.Management.Automation\r\n             Type fromType = null;\r\n             ConversionRank rank = ConversionRank.None;\r\n\r\n+            if (parameterType.IsPointer && argument is Pointer boxedPointer)\r\n+            {\r\n+                return ConversionRank.Assignable;\r\n+            }\r\n+\r\n             if (allowCastingToByRefLikeType && parameterType.IsByRefLike)\r\n             {\r\n                 // When resolving best method for use in binders, we can accept implicit/explicit casting conversions to\r\ndiff --git a/src/System.Management.Automation/engine/runtime/Binding/Binders.cs b/src/System.Management.Automation/engine/runtime/Binding/Binders.cs\r\nindex 275529b7b..6690823dd 100644\r\n--- a/src/System.Management.Automation/engine/runtime/Binding/Binders.cs\r\n+++ b/src/System.Management.Automation/engine/runtime/Binding/Binders.cs\r\n@@ -262,6 +262,11 @@ namespace System.Management.Automation.Language\r\n                 return Expression.Call(CachedReflectionInfo.PSObject_Base, target.Expression.Cast(typeof(PSObject)));\r\n             }\r\n\r\n+            if (parameterType.IsPointer && argType == typeof(Pointer))\r\n+            {\r\n+                return Expression.Call(typeof(Pointer).GetMethod(\"Unbox\"), target.Expression.Cast(typeof(Pointer)));\r\n+            }\r\n+\r\n             // If the conversion can't fail, skip wrapping the conversion in try/catch so we generate less code.\r\n             if (parameterType.IsAssignableFrom(argType))\r\n             {\r\n@@ -6927,6 +6932,11 @@ namespace System.Management.Automation.Language\r\n                     return new DynamicMetaObject(expr, restrictions);\r\n                 }\r\n\r\n+                if (expr.Type.IsPointer)\r\n+                {\r\n+                    expr = Expression.Call(typeof(Pointer).GetMethod(\"Box\"), expr, Expression.Constant(expr.Type));\r\n+                }\r\n+\r\n                 expr = expr.Cast(typeof(object));\r\n\r\n                 // Likewise, when calling methods in types defined by PowerShell, we don't\r\n```\r\n\r\nAfter this, the following works:\r\n\r\n```powershell\r\nAdd-Type -CompilerOptions '-unsafe' -TypeDefinition '\r\n    public static unsafe class Test\r\n    {\r\n        public static void* Get() => (void*)System.Runtime.InteropServices.Marshal.AllocHGlobal(4);\r\n    }'\r\n\r\n$ptr = [Test]::Get()\r\n[IntPtr]::new($ptr)\r\n# 140702897041244\r\n```\r\n\r\nNow the above diff isn't exactly the best way to go about it, but it shows that adding support to the binder is now pretty easy with CAS gone.\r\n\r\n---\r\n\r\n<details>\r\n<summary>\r\n\r\n# PSPointer API Proposal (click to expand)</summary>\r\n\r\nThere are a lot more hurdles to getting approval for a public API like this then just lighting up support in the binder, so this is more of a \"stretch goal\".\r\n\r\n## Why\r\n\r\n`System.Reflection.Pointer` is by design pretty bare.  Pretty much all you can do with it is unbox it, which makes sense, but makes it less desirable for the use case of prototyping.\r\n\r\n## API\r\n\r\n```csharp\r\nnamespace System.Managment.Automation\r\n{\r\n\tpublic class PSPointer\r\n\t{\r\n        private protected PSPointer(nint value)\r\n\r\n\t\tpublic static unsafe PSPointer Box(void* ptr);\r\n\r\n\t\tpublic static unsafe PSPointer<T> Box(T* ptr) where T : unmanaged;\r\n\r\n\t\tpublic static unsafe PSPointer Box(void* ptr, Type type);\r\n\r\n\t\tpublic static bool operator ==(PSPointer left, PSPointer right);\r\n\r\n\t\tpublic static bool operator !=(PSPointer left, PSPointer right);\r\n\r\n\t\tpublic static bool operator <(PSPointer left, PSPointer right);\r\n\r\n\t\tpublic static bool operator >(PSPointer left, PSPointer right);\r\n\r\n\t\tpublic static PSPointer operator +(PSPointer left, PSPointer right);\r\n\r\n\t\tpublic static PSPointer operator -(PSPointer left, PSPointer right);\r\n\r\n\t\tpublic static implicit operator PSPointer(int value);\r\n\r\n\t\tpublic static implicit operator PSPointer(nint value);\r\n\r\n        public nint Value { get; }\r\n\r\n\t\tpublic override string ToString();\r\n\r\n\t\t// This method will be hidden in PowerShell since it would just return\r\n\t\t// a new instance of itself.\r\n\t\t[Hidden]\r\n\t\tpublic unsafe void* Unbox();\r\n\t}\r\n\r\n    public sealed class PSPointer<T> : PSPointer\r\n\t{\r\n\t\tpublic PSPointer(nint value);\r\n\r\n\t\tpublic T this[int index] { get; set; }\r\n\r\n\t\t// This method will be hidden in PowerShell since it would just return\r\n\t\t// a new instance of itself.\r\n\t\t[Hidden]\r\n\t\tpublic new unsafe T* Unbox();\r\n\t}\r\n}\r\n```\r\n\r\n</details>",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We would need something like `Set-StrictMode -EnableKillFeatures` \ud83d\ude38 ",
+      "created_at": "2021-07-13T14:57:11Z",
+      "updated_at": "2021-07-13T14:57:11Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> We would need something like `Set-StrictMode -EnableKillFeatures` \ud83d\ude38\r\n\r\nNah nothing like that is needed. This isn't about supporting things like `stackalloc` or `ref` \ud83d\ude01 \r\n\r\nI went ahead and changed the example to not confuse the issue, this isn't really any different than what you can already do with `Marshal` and `IntPtr`.",
+      "created_at": "2021-07-13T15:10:54Z",
+      "updated_at": "2021-07-13T15:13:52Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "nice hack ! \r\n",
+      "created_at": "2021-07-13T19:25:14Z",
+      "updated_at": "2021-07-13T19:25:14Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks! Note that it's not really a hack.  I mean it is, but this is also how the reflection API's in general handle pointers. The engine just doesn't account for them.",
+      "created_at": "2021-07-13T20:31:39Z",
+      "updated_at": "2021-07-13T20:31:57Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "Obviously, it was hack in the noble sense of the term \ud83d\ude42 ",
+      "created_at": "2021-07-13T22:16:38Z",
+      "updated_at": "2021-07-13T22:16:38Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The Engine WG discussed this and agree it would be good to enable these scenarios under an experimental feature if it is easy to do so.\r\n\r\nI'm going to leave up for grabs off of this one because the benefit to complexity ratio is very delicate here. Some effort should be taken to introduce the least amount of maintenance requirements that still enables this scenario.",
+      "created_at": "2022-04-29T14:53:14Z",
+      "updated_at": "2022-04-29T14:55:42Z"
+    }
+  ],
+  "created_at": "2021-07-13T13:24:14Z",
+  "number": 15767,
+  "state": "open",
+  "title": "Allow method and property invocations of signatures containing pointer types",
+  "updated_at": "2022-04-29T14:55:42Z"
+}

@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16767",
+  "author": "jhoneill",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nIf a cmdlet takes a parameter of type `System.DateTime`  a parameter passed to it is parsed using the **local** date format. \r\nIf a function takes a parameter of type `System.DateTime`  a parameter passed to it is parsed using the **Invariant** time format. \r\n\r\nNote this will not be visible if the culture is US.  \r\nFor example  \r\n```\r\nps > set-culture fr-Fr\r\nps > pwsh -nologo\r\nps > get-date\r\nmardi 18 janvier 2022 17:57:15\r\n\r\nps > New-TimeSpan -Start \"18 janvier 2022\" -end \"19 janvier 2022\" | % days   # French months recognized\r\n1\r\nps > function test {[cmdletbinding()] param ([system.datetime]$start, [system.datetime]$End) $end.Subtract($start)}\r\nps > test -Start \"18 janvier 2022\" -end \"19 janvier 2022\"\r\ntest: Cannot process argument transformation on parameter 'start'. Cannot convert value \"18 janvier 2022\" to type \"System.DateTime\". Error: \"The string '18 janvier 2022' was not recognized as a valid DateTime. There is an unknown word starting at index '3'.\"\r\n\r\nps > New-TimeSpan -Start 3/1/2022 -end 1/3/2022 | % days    # parsed as d/m/y \r\n57\r\n> test  -Start 3/1/2022 -end 1/3/2022 | % days                   # parsed as m/d/y\r\n-57\r\n```\r\nI compiled the cmdlet below and it behaved as the built in cmdlet did. \r\n\r\n```c#\r\nusing System;\r\nusing System.Management.Automation;\r\n\r\nnamespace psmodule {\r\n    [Cmdlet(VerbsDiagnostic.Test,\"SampleCmdlet\")]\r\n    public class TestSampleCmdletCommand : PSCmdlet {\r\n        [Parameter(Position = 0)]\r\n        public DateTime Before { get; set; }\r\n        [Parameter(Position = 1)]\r\n        public DateTime After { get; set; }\r\n        protected override void BeginProcessing()  {}\r\n        protected override void ProcessRecord()    { WriteObject(After.Subtract(Before) ); }\r\n        protected override void EndProcessing()    {}\r\n    }\r\n}\r\n```\r\n\r\n**fixing this would be a breaking change** I would like to understand if there is a reason for it. \r\n\n\n### Expected behavior\n\n```console\nConsistent. See actual behavior\n```\n\n\n### Actual behavior\n\n```console\nps > New-TimeSpan -Start 3/1/2022 -end 1/3/2022 | % days    # parsed as d/m/y \r\n57\r\n> test  -Start 3/1/2022 -end 1/3/2022 | % days               # parsed as m/d/y\r\n-57\r\nps > Test-SampleCmdlet -Before  \"18 janvier 2022\" -after \"19 janvier 2022\" | % days  # parsed in French \r\n1\r\nps >  test -Start \"18 janvier 2022\" -end \"19 janvier 2022\"  # Can only parse English \r\n<<error janvier isn't recognized>>\n```\n\n\n### Error details\n\n_No response_\n\n### Environment data\n\n```powershell\nName                           Value\u001b[0m\r\n----                           -----\u001b[0m\r\nPSVersion                      7.2.1\r\nPSEdition                      Core\r\nGitCommitId                    7.2.1\r\nOS                             Microsoft Windows 10.0.19043\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u00d4\u00c7\u00aa}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n(same on 5.1.19041.1320)\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": "2022-01-19T12:14:42Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "To make script text culture-insensetive there is used Invariant culture for constants.\r\nC# code follow C# rules.",
+      "created_at": "2022-01-18T18:54:20Z",
+      "updated_at": "2022-01-18T18:54:20Z"
+    },
+    {
+      "author": "MartinGC94",
+      "author_association": "CONTRIBUTOR",
+      "body": "Ooof that's a bad inconsistency to discover after so many years/versions.\r\n\r\nFor full completion, the rules for casting to datetime are the same as functions use (uses the US format) while `[datetime]::Parse` uses the local format by default.\r\n\r\nPersonally I'm in favor of making the breaking change so it follows the general .NET rules because I don't think people should have to check if a command is a cmdlet or function (and imagine replacing a cmdlet with a proxy function and discovering this the hard way).",
+      "created_at": "2022-01-18T23:40:06Z",
+      "updated_at": "2022-01-18T23:40:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@MartinGC94 The issue question is about script vs C#, not cmdlet vs function. ",
+      "created_at": "2022-01-19T04:23:11Z",
+      "updated_at": "2022-01-19T04:23:11Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Ooof that's a bad inconsistency to discover after so many years/versions.\r\n> \r\n> For full completion, the rules for casting to datetime are the same as functions use (uses the US format) while `[datetime]::Parse` uses the local format by default.\r\n> \r\n\r\nActually, there is a different rule, and I found this by chance writing a blog post about it \r\n**Casting with `[type]$x` syntax  uses invariant culture.**   You can see it with US culture. \r\n\r\n```\r\n > [datetime]::now.tostring()\r\n1/19/2022 9:08:40 AM\r\n\r\n> [string][datetime]::now\r\n01/19/2022 09:09:05\r\n```\r\nUS format for the clock is 12 hour with \"AM/PM\"  Invariant is 24 clock. \r\n\r\nIn French \r\n```\r\n> [string][datetime]::now\r\n01/19/2022 09:10:37\r\n> [datetime]::now.tostring()\r\n19/01/2022 09:10:42\r\n> [datetime]::now.tostring(\"D\")\r\nmercredi 19 janvier 2022\r\n\r\n> (1234567).tostring(\"N2\")\r\n1\u00a0234\u00a0567,00\r\n```\r\nSo `[string]`  was invariant, `toString()` uses local culture. In French the thousand separator is a space and comma is the decimal point  but ...\r\n```\r\n[double]\"123,567\"\r\n123567\r\n\r\n> [double]\"1\u00a0234\u00a0567,00\"\r\nInvalidArgument: Cannot convert value \"1\u00a0234\u00a0567,00\" to type \"System.Double\"\r\n```\r\n\r\ncasting with `[double]` uses **invariant** so comma is the thousand separator and space isn't allowed.  \r\n\r\nIf I want to use something that I **know** is **local** format I can use `parse` (or the `[convert]` class) without identifying the culture:\r\n```\r\n> [double]::parse(\"1\u00a0234\u00a0567,00\")\r\n1234567\r\n\r\n>([double]::parse(\"1\u00a0234\u00a0567,00\")).tostring(\"E7\")\r\n1,2345670E+006\r\n\r\n[string][datetime]::parse(\"mercredi 19 janvier 2022\")\r\n01/19/2022 00:00:00\r\n```\r\nThe last one understands French (and only French) weekday and month names, -\"January\" would throw an error - and then `[string]` makes it invariant format (i.e. US Date and 24 hour clock).  I can also call parse with a culture to say \"This file was written with UK English, this one with US English, this one Canadian French, that one French French\" \r\n\r\nSo what do you think casting with `-As` does ? \r\n```\r\n> (\"mercredi 19 janvier 2022\" -as [datetime] ).tostring('d')\r\n19/01/2022\r\n\r\n $null -eq (\"1\u00a0234\u00a0567,00\" -as [double])\r\nTrue\r\n```\r\n\r\n`-As`  returns null on a failed conversion and uses local for dates and invariant for numbers.  \r\n\r\n\r\n\r\n\r\n> @MartinGC94 The issue question is about script vs C#, not cmdlet vs function.\r\n\r\n@iSazonov A trace shows that the parameter conversion is different depending on whether what is called is a a cmdlet written in C# and loaded from a .DLL  or an \"advanced function\" / \"script cmdlet\" . loaded from a PS1 file. \r\n\r\nThe result is if a module has commands that take date parameters, users need to know **how** those commands were implemented it. An author should be able to change that implementation detail without impacting the user, but as @MartinGC94  already said a proxy function for Get-Date would break existing scripts.   \r\n\r\nIf the first thing a user meets is a function that takes dates they expect  `Get-Date` to require invariant format. If the first thing they meet is `Get-Date` the expect local format to work anywhere. \r\n",
+      "created_at": "2022-01-19T09:58:03Z",
+      "updated_at": "2022-01-19T09:58:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Dup #6989 and #3348 with PowerShell Committee conclusion `Won't fix`.\r\n",
+      "created_at": "2022-01-19T11:36:11Z",
+      "updated_at": "2022-01-19T11:36:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "You could investigate how many modules/cmdlets will break and share the info in #3348 if you vote for breaking change.",
+      "created_at": "2022-01-19T11:40:22Z",
+      "updated_at": "2022-01-19T11:40:22Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@iSazonov   You either have an incredible memory or are much better with the search tools than I am :-) \r\nThanks for sharing that one,  I might not agree but at least I understand. ",
+      "created_at": "2022-01-19T12:01:58Z",
+      "updated_at": "2022-01-19T12:01:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> You either have an incredible memory\r\n\r\nAh, I'd want :-) \r\nThe questions in this repository are too different for me to remember them all.\r\nHopefully WGs will do it better since they will focus on a narrower range of issues.\r\n\r\n>  I might not agree but at least I understand.\r\n\r\nMe too. You can continue investigations in #3348",
+      "created_at": "2022-01-19T12:06:46Z",
+      "updated_at": "2022-01-19T12:08:03Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> You could investigate how many modules/cmdlets will break and share the info in #3348 if you vote for breaking change.\r\n\r\nMaking it consistent would change mean every parametrized script, and every function with a datetime parameter (inside a module or not) would change its behaviour.  And so anything that called them with a string would need to be changed. I said in the first post I understood it was a breaking change :-) \r\n\r\nHow many time have we heard  \r\n**Novice:**   This is _stupid_ why are we _still_ doing it\r\n**Master:**   Compatibility, grasshopper.\r\n\r\n:-)\r\n\r\n\r\n",
+      "created_at": "2022-01-19T12:14:42Z",
+      "updated_at": "2022-01-19T12:14:42Z"
+    }
+  ],
+  "created_at": "2022-01-18T18:12:24Z",
+  "number": 16767,
+  "state": "closed",
+  "title": "Date parameters handled differently for compiled c# cmdlets and functions. ",
+  "updated_at": "2022-01-19T12:14:44Z"
+}

@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11412",
+  "author": "sheldonhull",
+  "body": "# Support Named Token String Replacement\r\n\r\nAs a PowerShell developer, I want to allow variable name interpolation, to improve readability and maintainability of strings used as a template. \r\n\r\nFor example: \r\n\r\n```powershell\r\n$HereString = \r\n@'\r\nuse [{0}]\r\nselect * from dbo.table where Databasename like '{0}%'\r\n'@\r\n```\r\n\r\nRight now we can do this via the example above, which means if you begin to pass in 5-6 variables, you have to maintain the 0 index position for them carefully. \r\n\r\nMore intuitive text similar to python's string formatting, and later c# string replacement might be: \r\n\r\n```powershell\r\n$HereString = \r\n@'\r\nuse [{DatabaseName}]\r\nselect * from dbo.table where DatabaseName like '{DatabaseName}%'\r\n'@\r\n```\r\n\r\nI know we can use: \r\n\r\n```powershell\r\n$HereString = \r\n@\"\r\nuse [$DatabaseName]\r\nselect * from dbo.table where DatabaseName like '$DatabaseName%'\r\n\"@\r\n```\r\n\r\nIn most cases this works fine. However, if you are generating a text string like this that you want to pass to a parallel pipeline and iterate on then the improved syntax would help things be much more readable and intuitive.\r\n\r\nThis is a sample of where this syntax would be much more intuitive.\r\n_Sample code, not used for-eachobject paralle, so syntax might be slightly off_\r\n\r\n```powershell\r\n$HereString = \r\n@'\r\nuse [{DatabaseName}]\r\nselect * from dbo.table where DatabaseName like '{DatabaseName}%'\r\n'@\r\n\r\n@('Database1','Database2','Database3') | ForEach-Object -Parallel { \r\n\r\n$DatabaseName = $_\r\nInvoke-Query -Query $HereString # this or some approach to include the variables by name mean I don't have to do string format replacement in this scope now\r\n\r\n}\r\n```\r\n\r\n## Note\r\nI couldn't find any issue on supporting named tokens but I have to believe something exists. If so, please just link it and close this as duplicate and I'll add my \ud83d\udc4d  to it. Thanks!",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This will works:\r\n```powershell\r\n@('Database1','Database2','Database3') | ForEach-Object -Parallel { \r\n\r\n$DatabaseName = $_\r\n\r\n$HereString = \r\n@\"\r\nuse [{DatabaseName}]\r\nselect * from dbo.table where DatabaseName like '{DatabaseName}%'\r\n\"@\r\n\r\nInvoke-Query -Query $HereString # this or some approach to include the variables by name mean I don't have to do string format replacement in this scope now\r\n\r\n}\r\n```",
+      "created_at": "2019-12-20T18:59:42Z",
+      "updated_at": "2019-12-20T18:59:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You can use `$ExecutionContext.InvokeCommand.ExpandString` to expand a verbatim string as if it were an expandable one on demand:\r\n\r\n```powershell\r\n$HereString = \r\n@'\r\nuse [${DatabaseName}]\r\nselect * from dbo.table where DatabaseName like '${DatabaseName}%'\r\n'@\r\n\r\n$DatabaseName = 'foo'\r\n\r\n$ExecutionContext.InvokeCommand.ExpandString($HereString)\r\n```\r\n\r\nThe caveat is that you should only do that if you fully control or implicitly trust the content of the string template (`$HereString`) to not contain malicious commands, since it's possible to embed arbitrary commands with `$(...)`.\r\n\r\n---\r\n\r\nIt would be nice to surface this functionality as a cmdlet, say `Expand-String`.\r\nSuch a cmdlet could then support a switch, say, `-VariablesOnly` to prevent execution of embedded commands.\r\nOr, perhaps a safer alternative is to not execute embedded commands _by default_, and require opt-in via an `-IncludeCommands` switch.\r\n",
+      "created_at": "2019-12-20T21:21:02Z",
+      "updated_at": "2019-12-23T21:33:06Z"
+    },
+    {
+      "author": "logicalextreme",
+      "author_association": "NONE",
+      "body": "I can't get the code in either of the two follow-up comments to work (7.0.0-rc.2), so I'm not sure if I'm missing something\u2026but I'm pretty sure what @sheldonhull is referring to is these:\r\n\r\n[$ - string interpolation (C# reference) | Microsoft Docs](https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/tokens/interpolated)\r\n[PEP 498 -- Literal String Interpolation | Python.org](https://www.python.org/dev/peps/pep-0498/)\r\n\r\nIt might or might not need its own signifier (like C#'s `$` or Python's `f`), but while it's always been pretty painful doing string formatting in Powershell (`-f` is about the best there is, but has the same readability issues as formatting methods) it's extra-painful since f-strings dropped in Python. Put simply, given `$then = [datetime]::Now`, it would be good to be able to do:\r\n\r\n`$\"the time was {then:HH:mm:ss} on {then:yyyy-MM-dd} and the day was {then.DayOfWeek}\"` ($ is just an example character to denote that it's an interpolated string, it could be anything)` \r\n\r\nor even simpler\r\n\r\n`\"the time was {$then:HH:mm:ss} on {$then:yyyy-MM-dd} and the day was {$then.DayOfWeek}\"`\r\n\r\nrather than\r\n\r\n`\"the time was {0:HH:mm:ss} on {0:yyyy-MM-dd} and the day was $($then.DayOfWeek)\" -f $then`\r\n\r\nor\r\n\r\n`\"the time was {0:HH:mm:ss} on {0:yyyy-MM-dd} and the day was {1}\" -f $then, $then.DayOfWeek`\r\n\r\nThis is an extremely basic example and doesn't appear to offer much of a saving in terms of characters typed (in fact when referencing the same variable multiple times in the same string the numeric index method can easily use less characters in total), but you can already see that you have to mix up two different formatting/expansion methods in PS as it currently stands (or pass multiple objects to `-f` \u2014 and as pointed out, dealing with several items in the formatting list means that the index positions become crucial.\r\n\r\nAside from anything else, as soon as the list has more than a few items in it readability can be heavily compromised (to the point that I honestly don't know how Python and C# devs put up with not having interpolation for so long \u2014 it's still relatively new to both of them). It's the difference between reading a line once, from left to right, and flicking your eyes across it right to left and back as many times as there are references in the string (and potentially miscounting the variables in the list and introducing a bug as a result).\r\n\r\nThat said I'm aware that there's a desire to have Powershell not ape C# at every turn and become a pale imitation of a .NET programming language \u2014 it's a shell foremost, so if this kind of thing is overkill for a shell that makes sense to me. :)",
+      "created_at": "2020-01-17T16:17:48Z",
+      "updated_at": "2020-01-17T16:17:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I can't get the code in either of the two follow-up comments to work (7.0.0-rc.2)\r\n\r\n[@iSazonov's code](https://github.com/PowerShell/PowerShell/issues/11412#issuecomment-568045473) simply shows _regular_ PowerShell string interpolation, the way that it has always worked (and long predates the analogous interpolated strings (`$\"...\"`) in C#); e.g.:\r\n\r\n```powershell\r\n\"Honey, I'm $HOME; tomorrow is $((Get-Date).AddDays(1).Date).\"\r\n```\r\nSee below re embedded formatting instructions.\r\n\r\nThe initial post shows that @sheldonhull  is aware of this option, but his use case is a different one: define a string _template_ once, and then _expand it on demand_ using _then-current_ variable values; analogous to C#'s `FormattableString`.\r\n\r\nThis is what [my code](https://github.com/PowerShell/PowerShell/issues/11412#issuecomment-568092051) demonstrates, and it does work, both in Windows PowerShell and PowerShell Core.\r\nAgain, it would be nice to have an `Expand-String` cmdlet for that, with an option to evaluate only _variable_ references, not also expressions.\r\n\r\n----\r\n\r\nYou're discussing a different issue, namely the desire for embedded _formatting instructions_:\r\n\r\nWhile PowerShell doesn't support embedded formatting instructions the way C# does, they are often not needed and, when they are, can be embedded:\r\n\r\n```powershell\r\n$then = [datetime]::Now\r\n\"the time was $('{0:HH:mm:ss}' -f $then) on $('{0:yyyy-MM-dd}' -f $then) and the day was $($then.DayOfWeek)\"\r\n```\r\n\r\nIf you feel string strongly that support for embedded format strings is needed, please create a _new_ issue.\r\n\r\n[Update: @stinos has since created #12259]\r\n\r\n\r\n",
+      "created_at": "2020-01-17T17:16:41Z",
+      "updated_at": "2020-04-18T12:21:54Z"
+    },
+    {
+      "author": "logicalextreme",
+      "author_association": "NONE",
+      "body": "I do apologise, I completely missed the `$` preceding the `{` in your example. I've never seen that before \u2014 but `${variablename}` doesn't seem to behave any differently to `$variablename` in a string for me, what's the significance of the curly braces there?\r\n\r\nI wasn't aware of `FormattableString` and the C# documentation's lacking but I see what you mean now. I shouldn't be doing things like this on Friday afternoons \ud83d\ude42 \r\n\r\nI'll search again and raise an issue if I think it's worth it. It's about readability, simplicity and consistency for me, so you're correct, I am mostly after the embedded formatting aspect of it (though to be honest I find `$()` slows me down reading code, especially as it's so often seen combined with a `$($variable)`!).\r\n\r\nThanks for your patience.",
+      "created_at": "2020-01-17T23:17:08Z",
+      "updated_at": "2020-01-17T23:17:08Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The `${variable}` syntax is used for two purposes. One is to allow the use of otherwise forbidden characters in variable names; for example, `${my var}` is legal syntax. Almost anything is allowed, except use of curly braces themselves.\r\n\r\nThe other use is to be explicit about where the variable name ends: `\"my string is ${var}text\"` -- this prevents the parser reading the variable name as `$vartext` when it should just be `$var`.",
+      "created_at": "2020-01-18T00:04:17Z",
+      "updated_at": "2020-01-18T00:04:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "No worries, @logicalextreme.\r\n\r\n> `$()` slows me down reading code, especially as it's so often seen combined with a `$($variable)`!).\r\n\r\nYes, `$($variable)` isn't pretty; just `$variable` will often do, or `${variable}`, as @vexx32 explained (which can nowadays cause confusion for people used to C# interpolated strings).\r\nHowever, it's understandable that people use `$($variable)`, for conceptual simplicity, as it isn't readily obvious what you can and cannot embed _without_ the `$(...)` enclosure.\r\n\r\nC#'s unified `{...}` approach is nicer, but I don't think we'll ever see a change in the long-established syntax for expandable strings in PowerShell.\r\n\r\n",
+      "created_at": "2020-01-18T16:04:34Z",
+      "updated_at": "2020-01-18T16:04:34Z"
+    },
+    {
+      "author": "logicalextreme",
+      "author_association": "NONE",
+      "body": "Yeah, I meant using `$()` for variable properties and methods rather than just variables themselves, though I do expect that some people insist on it as a coding standard for consistency.\r\n\r\nFinally figured out what had thrown me about the `${}` syntax \u2014 I hadn't realised it and `$()` were constructs that can be used outside strings!",
+      "created_at": "2020-01-22T13:38:56Z",
+      "updated_at": "2020-01-22T13:38:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@sheldonhull, I've fleshed out my previous suggestion (an `Expand-String` cmdlet based on the regular expandable-string syntax) in #11693 \r\n\r\nIf this would meet your needs, please consider closing this issue.\r\n",
+      "created_at": "2020-01-27T18:10:35Z",
+      "updated_at": "2020-01-27T18:10:35Z"
+    }
+  ],
+  "created_at": "2019-12-20T17:12:57Z",
+  "number": 11412,
+  "state": "open",
+  "title": "Support Named Token String Replacement",
+  "updated_at": "2020-04-18T12:21:54Z"
+}

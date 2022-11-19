@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9372",
+  "author": "MiYanni",
+  "body": "# Summary\r\nI didn't know to enter this as a bug, a documentation issue, or a feature request. Basically, **there is a limit of 32 usable parameter sets**. This hard limit is not documented anywhere (from what I could find). There is a blog post about it from 2015 for someone using *PowerShell 3.0*:\r\nhttps://www.craig-tolley.co.uk/2015/07/01/maximum-number-of-powershell-parameter-sets-in-function/\r\n\r\nThe reason is that the maximum number of parameter sets that can be associated with a parameter is 32. It is 32 because a `uint` (32-bit number) is storing a bitmask of which parameter sets that parameter is part of. In a technical sense, there is allowed up to `uint.MaxValue` defined parameter sets. However, the parameters themselves can only associate to 32 parameter sets.\r\n\r\nThe method that allows `uint.MaxValue` as a mapping index is [AddParameterSetToMap](https://github.com/PowerShell/PowerShell/blob/23451ac32f789a93d0575413700dbdf3861059e6/src/System.Management.Automation/engine/MergedCommandParameterMetadata.cs#L220). However, the next method below that one, [GenerateParameterSetMappingFromMetadata](https://github.com/PowerShell/PowerShell/blob/23451ac32f789a93d0575413700dbdf3861059e6/src/System.Management.Automation/engine/MergedCommandParameterMetadata.cs#L270), you can see that it uses [ParameterSetFlag](https://github.com/PowerShell/PowerShell/blob/13fd3af8106dbfd5d65e697036af5999255badc7/src/System.Management.Automation/engine/ParameterSetSpecificMetadata.cs#L141) as a bitmask to determine which parameter sets a parameter is part of.\r\n\r\n# Proposals\r\nIf this is seen as a bug or feature request, it likely would be fixed if [ParameterSetFlag](https://github.com/PowerShell/PowerShell/blob/13fd3af8106dbfd5d65e697036af5999255badc7/src/System.Management.Automation/engine/ParameterSetSpecificMetadata.cs#L141) would be used as an actual index into a List of parameter sets. Then, you can define parameter sets up to `uint.MaxValue`.\r\n\r\nIf this is seen as a documentation issue, the *max parameters sets allowed* (being 32) should be documented in the reference document for [about_Functions_Advanced_Parameters](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_functions_advanced_parameters#parametersetname-argument) and in the conceptual document for [Cmdlet Parameter Sets](https://docs.microsoft.com/en-us/powershell/developer/cmdlet/cmdlet-parameter-sets).\r\n",
+  "closed_at": "2022-08-22T19:11:18Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I wonder about the usability of a command with 32 parameter sets, but assuming that's not an issue, what about upping the limit to 64? That might be a simple change (by using a `ulong` instead of `uint`).\r\n\r\nI'm concerned a list might be bad for performance. The parameter binder is already really slow. I don't know the full history, but this bitmask always felt like the only consideration for performance in the original parameter binder code.",
+      "created_at": "2019-04-15T23:16:45Z",
+      "updated_at": "2019-04-15T23:16:45Z"
+    },
+    {
+      "author": "MiYanni",
+      "author_association": "NONE",
+      "body": "@lzybkr I'm currently working on this: https://devblogs.microsoft.com/powershell/cmdlets-via-autorest/\r\n\r\nBasically, based on the number of optional parameters exposed by a REST service, we'd need to create a quite large number of parameter sets. Originally, it would be 2<sup>x</sup> number of parameter sets. So, 5 optional REST parameters would be the limit. Since we are now aware that this limitation exists, we'll adjust our parameter set generation strategy to attempt to reduce that. We need to support PowerShell 5.1 for now, so the fix here won't be useful for our efforts until much later down the road.\r\n\r\nThe primary concern is making this limitation known. Beyond that blog post (and looking at the code directly), I found no documentation about this. Upping it to 64 would be beneficial in the future, though. If performance is a concern, AFAIK, the parameter set names are unique. So, using them as a key to a `Dictionary` should be performant.\r\n\r\nAdditionally, PowerShell should inform the user that they hit that limit when defining a cmdlet. Right now, it **overflows** and makes it quite confusing when trying to understand the issue. An error here would be preferred so at least the developer making the cmdlet knows the issue.",
+      "created_at": "2019-04-16T17:55:49Z",
+      "updated_at": "2019-04-16T17:55:49Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I agree there should be an error if you hit the limit. I'm guessing it's a breaking change with minimal risk, but maybe some scenarios work despite having too many parameter sets?\r\n\r\nDo keep in mind what the help looks like for commands with many parameter sets. Optional parameters turning into 2<sup>x</sup> parameter sets would probably result in very confusing output from `Get-Command -Syntax`.",
+      "created_at": "2019-04-16T20:09:52Z",
+      "updated_at": "2019-04-16T20:09:52Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83d\ude2c I can see the syntax diagrams now, and they are _not_ pretty!\r\n\r\nSpeaking of, I should get that syntax diagram rework looked at again, see how I can fix that up some, perhaps.",
+      "created_at": "2019-04-16T20:50:10Z",
+      "updated_at": "2019-04-16T20:50:10Z"
+    },
+    {
+      "author": "MiYanni",
+      "author_association": "NONE",
+      "body": "@lzybkr @vexx32 We have worked around having too many parameter sets. Now, we are (generally) < 10 parameter sets for a given cmdlet. Some cmdlets will go above that, but we shouldn't (hopefully) hit the 32 limit. Despite our generator changes, all my points above are still valid about proper documentation and error handling for this limitation.",
+      "created_at": "2019-04-19T00:39:34Z",
+      "updated_at": "2019-04-19T00:39:34Z"
+    },
+    {
+      "author": "fflaten",
+      "author_association": "CONTRIBUTOR",
+      "body": "Isn't it about time that we change this to `_nextAvailableParameterSetIndex == 32`, `_nextAvailableParameterSetIndex > Math.Log2(uint.MaxValue)` or something similar and actually throw the exception? \ud83d\ude42 \r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/65b83e90d5ee79464dba0dc2b41d3da38c4f8d5c/src/System.Management.Automation/engine/MergedCommandParameterMetadata.cs#L231-L241\r\n\r\n> I agree there should be an error if you hit the limit. I'm guessing it's a breaking change with minimal risk, but maybe some scenarios work despite having too many parameter sets?\r\n\r\nWorking code due to pure luck should not be a blocking issue. Those who waste a lot of time troubleshooting hard-to-detect behavior due to this overflow is a bigger problem.\r\n\r\nIn a perfect world this would even be backported to 5.1. Maybe it's possible to output to warning-stream so it wouldn't break anything and could be suppressed `-WarningAction` which all affected commands will have.",
+      "created_at": "2022-08-07T20:37:19Z",
+      "updated_at": "2022-08-09T10:21:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@fflaten Feel free to pull PR with simple check (==32) and new tests.",
+      "created_at": "2022-08-08T05:23:38Z",
+      "updated_at": "2022-08-08T05:23:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> If this is seen as a documentation issue, the _max parameters sets allowed_ (being 32) should be documented in the reference document for [about_Functions_Advanced_Parameters](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_functions_advanced_parameters#parametersetname-argument) and in the conceptual document for [Cmdlet Parameter Sets](https://docs.microsoft.com/en-us/powershell/developer/cmdlet/cmdlet-parameter-sets).\r\n\r\n/cc @sdwheeler for information.",
+      "created_at": "2022-08-23T05:56:28Z",
+      "updated_at": "2022-08-23T05:56:28Z"
+    },
+    {
+      "author": "sdwheeler",
+      "author_association": "COLLABORATOR",
+      "body": "This documented in https://docs.microsoft.com/powershell/module/microsoft.powershell.core/about/about_parameter_sets and \r\nhttps://docs.microsoft.com/powershell/scripting/developer/cmdlet/cmdlet-parameter-sets\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/media/logos/logo-powershell-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parameter_sets\">about Parameter Sets - PowerShell</a></strong></div><div>Describes how to define and use parameter sets in advanced functions.</div></blockquote>",
+      "created_at": "2022-08-23T10:23:21Z",
+      "updated_at": "2022-08-23T14:08:35Z"
+    }
+  ],
+  "created_at": "2019-04-15T21:16:09Z",
+  "number": 9372,
+  "state": "closed",
+  "title": "Limit of 32 parameter sets",
+  "updated_at": "2022-08-24T04:17:55Z"
+}

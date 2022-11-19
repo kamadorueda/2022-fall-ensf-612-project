@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12750",
+  "author": "lktslionel",
+  "body": "# Summary of the new feature/enhancement\r\n\r\n###### As A\r\nUser \r\n\r\n###### I WANT\r\nTo use `pwsh` as my default container's shell\r\n\r\n###### SO THAT\r\nI could launch any process with `start-Process` and make the process be the `PID 1`",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I think first we need to discuss how to expose this via `Start-Process`.  For example, maybe we could add a switch `-AsExec`?  cc @JamesWTruher and @rjmholt for suggestions.  The code to actually call `exec` can be borrowed from here: https://github.com/PowerShell/PowerShell/blob/b1e998046e12ebe5da9dee479f20d479aa2256d7/src/powershell/Program.cs#L436\r\n",
+      "created_at": "2020-05-21T19:23:29Z",
+      "updated_at": "2020-05-21T19:23:29Z"
+    },
+    {
+      "author": "lktslionel",
+      "author_association": "NONE",
+      "body": "Does `Program.Exec` act the same way as the linux `exec` ? \r\nIf so `-AsExec` seems great. ",
+      "created_at": "2020-05-21T19:26:08Z",
+      "updated_at": "2020-05-21T19:26:08Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "`Exec` doesn't play nicely with .NET's environment variable implementation; they have a native layer to prevent thread issues with things setting environment variables. Basically we'll have difficulty making sure the environment is passed correctly through when we exec. It might be possible for us to flush the .NET env store into the actual process environment before we exec perhaps.\r\n\r\nI'd like the understand the scenario a bit better if we can. I understand that PID 1 is special and has its own Linux namespace, but what's the constraint on the container scenario here? Is only one process allowed?\r\n\r\nMy thinking here is I'm not sure we can make this behave well enough in general that we can support it nicely.\r\n\r\nAlso I'm not sure `Start-Process` is the right place to put the logic:\r\n\r\n- We're not starting a new process\r\n- We'll be using entirely new logic, so it's not a simple perturbation from the current implementation",
+      "created_at": "2020-05-21T19:29:27Z",
+      "updated_at": "2020-05-21T19:43:42Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Related issues:\r\n\r\n- https://github.com/dotnet/runtime/issues/30525\r\n- https://github.com/dotnet/runtime/issues/4103\r\n- https://github.com/dotnet/runtime/issues/9529",
+      "created_at": "2020-05-21T19:33:14Z",
+      "updated_at": "2020-05-21T19:33:14Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I have thought about us implementing this though, and I think it deserves its own command like `Invoke-Exec` or some other wording that implies that this will be the last PowerShell command you get to use",
+      "created_at": "2020-05-21T19:55:48Z",
+      "updated_at": "2020-05-21T19:55:48Z"
+    },
+    {
+      "author": "lktslionel",
+      "author_association": "NONE",
+      "body": "Here is a concrete example. Let's say, I want to create a custom `nginx` that derives from `mcr.microsoft.com/powershell`. Doing this, usure that my default shell will be powershell (`pwsh`). \r\n\r\nMy Doker file looks like this : \r\n\r\n```dockerfile\r\nFROM mcr.microsoft.com/powershell\r\n\r\nCOPY run /run\r\n\r\nCMD /run\r\n```\r\n\r\nThe `run.sh` script use `exec nginx -g 'daemon off;'`, to make sure the `nginx` command get `PID 1`. But this only works with `bash/sh` shell because they suport `exec`command.\r\n\r\nIt will be great if I could do something like this and make sure I get the same behavior as below : \r\n\r\n\r\n```dockerfile\r\nFROM mcr.microsoft.com/powershell\r\n\r\nCOPY run /run\r\n\r\n# `run` runs \"Invoke-Exec -Command nginx -g 'daemon off;'\"\r\nCMD /run\r\n```\r\n\r\nI hope is more clear now :-)\r\nLet me know.",
+      "created_at": "2020-05-21T20:08:31Z",
+      "updated_at": "2020-05-21T20:10:00Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "So the exec'd process will get whatever PID had spawned it. It's only `1` in your scenario because it's a docker instance where the first process gets the PID you're looking for. The PID itself shouldn't matter much unless the `nginx` process _must_ have PID=1 - is that the case?",
+      "created_at": "2020-05-21T20:20:20Z",
+      "updated_at": "2020-05-21T20:20:20Z"
+    },
+    {
+      "author": "lktslionel",
+      "author_association": "NONE",
+      "body": "Actually, WHen I say `PID 1` is because \u2014 as you said \u2014 it's the first process. If instead, any first process forwards all the SIGKILL and SIGTERM to nginx (its child process) it works for my case.\r\n\r\nIn summary, it will be great if the `Invoke-Exec` make the executing command be the first process inside the container.",
+      "created_at": "2020-05-21T20:31:04Z",
+      "updated_at": "2020-05-21T20:31:04Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Here's a simple implementation of a cmdlet that I haven't tested. But it should be as simple as compiling it to a DLL (you can use a new C# project or Add-Type to do that), importing the DLL (you could add a module manifest and put it on the module path to import it implicitly too), and then calling `exec -Executable nginx -Arguments '-g','daemon off;'`\r\n\r\n```csharp\r\n[Alias(\"exec\")]\r\n[Cmdlet(VerbsLifecycle.Invoke, \"Exec\")]\r\npublic class InvokeExecCommand : PSCmdlet\r\n{\r\n    [Parameter(Mandatory = true)]\r\n    [ValidateNotNullOrEmpty]\r\n    public string Executable { get; set; }\r\n\r\n    [Parameter()]\r\n    public string[] Arguments { get; set; }\r\n\r\n    protected override void EndProcessing()\r\n    {\r\n        // Resolve exes passed by path\r\n        string executable = Executable.Contains('/') || Executable.Contains('\\\\')\r\n            ? GetUnresolvedProviderPathFromPSPath(Executable)\r\n            : Executable;\r\n\r\n        // Set up the exec arcs\r\n        var args = new List<string>();\r\n        if (Arguments != null)\r\n        {\r\n            args.AddRange(Arguments);\r\n        }\r\n        args.Add(null); // Needed by exec\r\n\r\n        // Flush the env vars\r\n        foreach (DictionaryEntry envEntry in Environment.GetEnvironmentVariables())\r\n        {\r\n            setenv(envEntry.Key.ToString(), envEntry.Value.ToString(), overwrite: true);\r\n        }\r\n\r\n        // Invoke the exec syscall\r\n        exec(executable, args.ToArray());\r\n    }\r\n\r\n    [DllImport(\"libc\", SetLastError = true)]\r\n    private static extern int exec(string path, string[] args);\r\n\r\n    [DllImport(\"libc\", SetLastError = true)]\r\n    private static extern int setenv(string name, string value, bool overwrite);\r\n}\r\n```",
+      "created_at": "2020-05-21T20:51:10Z",
+      "updated_at": "2020-05-21T20:57:25Z"
+    },
+    {
+      "author": "lktslionel",
+      "author_association": "NONE",
+      "body": "@rjmholt Thanks! Do you think that it should be part of a powershell release ?\r\nI will test it and let you guys know if it works.\r\n\r\nI will try with this `Dockerfile`: \r\n\r\n```Dockerfile\r\nFROM mcr.microsoft.com/powershell\r\n\r\nSHELL [\"/opt/microsoft/powershell/7/pwsh\", \"-C\"]\r\n\r\nRUN apt update -y;apt install nginx -y\r\n\r\n# Or with this alias 'exec'\r\nCMD  Invoke-Exec -Executable nginx -Arguments '-g','daemon off;'\r\n```\r\n\r\nAcutally it does look nice \ud83d\ude48\ud83e\udd17\r\n",
+      "created_at": "2020-05-21T21:57:15Z",
+      "updated_at": "2020-05-21T21:57:15Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Do you think that it should be part of a powershell release ?\r\n\r\nI think we might look to implementing in a module of unix-specific PowerShell commands. If that proves useful or popular, we can consider whether it should be a part of the standard PowerShell release. But in general, our preference is for new commands to go into modules unless they really make sense at the heart of PowerShell, since the module system and the gallery lower the friction of getting new functionality",
+      "created_at": "2020-05-21T22:28:43Z",
+      "updated_at": "2020-05-21T22:28:43Z"
+    },
+    {
+      "author": "lktslionel",
+      "author_association": "NONE",
+      "body": "Geat. I will try to implement it in another powershell module.\r\nShould I close the issue or let it open in case I need some help?\r\n",
+      "created_at": "2020-05-22T05:38:29Z",
+      "updated_at": "2020-05-22T05:38:29Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "@lktslionel I'm working on this now as well - planning on releasing a UnixUtils module which includes umask, ulimit and this.",
+      "created_at": "2020-05-22T17:44:45Z",
+      "updated_at": "2020-05-22T17:44:45Z"
+    },
+    {
+      "author": "lktslionel",
+      "author_association": "NONE",
+      "body": "Great @JamesWTruher !\r\nLet me know if you need any help from me.\r\nI can write documentation if needed. Where can I see your progress ? ",
+      "created_at": "2020-05-22T18:38:14Z",
+      "updated_at": "2020-05-22T18:38:14Z"
+    },
+    {
+      "author": "r-darwish",
+      "author_association": "NONE",
+      "body": "@JamesWTruher such module would be helpful to me. Would you mind posting it here once it's published?",
+      "created_at": "2020-08-24T12:50:10Z",
+      "updated_at": "2020-08-24T12:50:10Z"
+    }
+  ],
+  "created_at": "2020-05-21T19:07:20Z",
+  "number": 12750,
+  "state": "open",
+  "title": "Use `start-Process` start any process with PID 1 as `exec` do in bash",
+  "updated_at": "2020-08-24T12:50:11Z"
+}

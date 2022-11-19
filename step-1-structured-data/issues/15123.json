@@ -1,0 +1,265 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15123",
+  "author": "chris-steema",
+  "body": "## Steps to reproduce\r\n\r\nRun the following *.ps1 script in a text file with UTF-8 ecoding:\r\n\r\n```\r\nwhile ($true)\r\n{ \r\n  $date = Get-Date -Format \"o\"\r\n  $rand = Get-Random -Minimum -10 -Maximum 40\r\n  $message = '{\"time\":' + '\"' + \"$date\" + '\"' + ', \"value\":' + \"$rand\" + ', \"label\":\"\u00baC\"}'\r\n  #echo \"$message\"\r\n  mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  Start-Sleep -s 1\r\n}\r\n```\r\n\r\nNow in another terminal window, subscribe to the mosquitto topic:\r\n\r\n`mosquitto_sub -h test.mosquitto.org -t tofol/test`\r\n\r\nThe output is unexpected:\r\n\r\n`{time:2021-03-30T12:30:24.0266957+02:00, value:3, label:\u2551C}`\r\n\r\n## Expected behavior\r\n\r\nExpected behavior is seem by running the following script:\r\n\r\n```\r\nwhile ($true)\r\n{ \r\n  $date = Get-Date -Format \"o\"\r\n  $rand = Get-Random -Minimum -10 -Maximum 40\r\n  $message = '{\"time\":' + '\"' + \"$date\" + '\"' + ', \"value\":' + \"$rand\" + ', \"label\":\"\u00baC\"}'\r\n  echo \"$message\"\r\n  #mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  Start-Sleep -s 1\r\n}\r\n```\r\n\r\nThis outputs:\r\n`\r\n{\"time\":\"2021-03-30T12:31:48.2728626+02:00\", \"value\":33, \"label\":\"\u00baC\"}`\r\n\r\n\r\n## Environment data\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.3\r\nPSEdition                      Core\r\nGitCommitId                    7.1.3\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2021-04-08T19:59:49Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It is the encoding stored in `[Console]::OutputEncoding` that determines how PowerShell decodes output from external programs, so it needs to be set to `[System.Text.Utf8Encoding]::new()` in order to decode UTF-8 output _from external programs_ correctly.\r\n\r\nUnfortunately, console / Windows Terminal windows for PowerShell still default to the active _OEM_ code page (even though the `$OutputEncoding` preference variable, which only controls how to encode text piped _to_ external programs, already defaults to UTF-8): see #7233 and #14945.",
+      "created_at": "2021-03-30T13:51:26Z",
+      "updated_at": "2021-03-30T13:52:05Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "If I now add in that line to my UTF-8 script:\r\n\r\n```\r\n[System.Text.Utf8Encoding]::new()\r\n\r\nwhile ($true)\r\n{ \r\n  $date = Get-Date -Format \"o\"\r\n  $rand = Get-Random -Minimum -10 -Maximum 40\r\n  $message = '{\"time\":' + '\"' + \"$date\" + '\"' + ', \"value\":' + \"$rand\" + ', \"label\":\"\u00baC\"}'\r\n  mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  echo \"$message\"\r\n  Start-Sleep -s 1\r\n}\r\n```\r\nthe output now looks like this:\r\n\r\n```\r\nPreamble          :\r\nBodyName          : utf-8\r\nEncodingName      : Unicode (UTF-8)\r\nHeaderName        : utf-8\r\nWebName           : utf-8\r\nWindowsCodePage   : 1200\r\nIsBrowserDisplay  : True\r\nIsBrowserSave     : True\r\nIsMailNewsDisplay : True\r\nIsMailNewsSave    : True\r\nIsSingleByte      : False\r\nEncoderFallback   : System.Text.EncoderReplacementFallback\r\nDecoderFallback   : System.Text.DecoderReplacementFallback\r\nIsReadOnly        : True\r\nCodePage          : 65001\r\n\r\n{\"time\":\"2021-03-30T15:59:52.4552125+02:00\", \"value\":-5, \"label\":\"\u00baC\"}\r\n{\"time\":\"2021-03-30T15:59:53.6047370+02:00\", \"value\":15, \"label\":\"\u00baC\"}\r\n```\r\nbut when I do the following in another terminal window:\r\n\r\n`mosquitto_sub -h test.mosquitto.org -t tofol/test`\r\n\r\nI still receive this:\r\n\r\n`{time:2021-03-30T16:00:03.9143529+02:00, value:-3, label:\u2551C}`\r\n\r\nWhat is curious here, for me, is the inconsistency between the 'echo' (which is in fact superfluous, we could change that line to $message) and what I receive from the MQTT subscription using mosquitto_sub. In Linux this does not happen - the equivalent script:\r\n\r\n```\r\nwhile true; \r\ndo\r\n  adate=`date --iso-8601=seconds`\r\n  rand=$((-10 + $RANDOM % 40))\r\n  message=\"[{\\\"Dist\\\":[{\\\"t\\\":\\\"$adate\\\", \\\"v\\\":$rand, \\\"u\\\":\\\"\u00baC\\\"}]}]\"\r\n  mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  echo \"$message\"\r\n  sleep 1; \r\ndone\r\n```\r\ngives me the same from the echo as it does from the mosquitto_sub. Is it the mosquitto_sub/pub the issue here? If so I will get in touch with them.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-30T14:06:19Z",
+      "updated_at": "2021-03-30T14:06:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "What I meant is: `[Console]::OutputEncoding = [System.Text.Utf8Encoding]::new()`, as also discussed in  #7233.\r\n",
+      "created_at": "2021-03-30T14:29:14Z",
+      "updated_at": "2021-03-30T14:29:14Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "Modified script:\r\n\r\n```\r\n[Console]::OutputEncoding = [System.Text.Utf8Encoding]::new()\r\n\r\nwhile ($true)\r\n{ \r\n  $date = Get-Date -Format \"o\"\r\n  $rand = Get-Random -Minimum -10 -Maximum 40\r\n  $message = '{\"time\":' + '\"' + \"$date\" + '\"' + ', \"value\":' + \"$rand\" + ', \"label\":\"\u00baC\"}'\r\n  mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  echo \"$message\"\r\n  Start-Sleep -s 1\r\n}\r\n```\r\nmosquitto_sub is still giving me erroneous output:\r\n\r\n`{time:2021-03-30T16:32:40.4649581+02:00, value:10, label:\u2551C}`\r\n\r\nI mentioned that in Linux this inconsistancy between 'echo' and what I recieve from mosquitto_sub doesn't occur - I would also like to mention that when I run pwsh on Linux using the above script (without the call to [Console]) I obtain the same, that is, inconsistent and erroneous mosquitto_sub output. I would expect the same binaries on Linux (mosquitto_sub, mosquitto_pub) to behave identically in the two cases of using bash and pwsh to call them. \r\n",
+      "created_at": "2021-03-30T14:36:34Z",
+      "updated_at": "2021-03-30T14:38:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "On Windows (only), _display_ output can work properly even when _captured_ output due to an encoding mismatch does not (this difference across platforms is outside PowerShell's control and won't go away).\r\n\r\nFor correct _programmatic_ processing (capturing in a variable, sending through the pipeline to another command), the program's actual output encoding _must_ match `[Console]::OutputEncoding`\r\n\r\nSo the questions are (I know nothing about `mosquitto_*`): \r\n\r\n* What output encoding does `mosquitto_sub` use - is it a fixed encoding, or what environment conditions does it depend on?\r\n\r\n* You're not showing  `mosquitto_sub` calls - do they run in a _different_ console, and does `[Console]::OutputEncoding` match there?\r\n  * Note that, for robustness, `[Console]::InputEncoding` should be set too, as shown in #7233 (and if you set it to something other than UTF-8, you should additionally set `$OutputEncoding` too, to ensure that data piped _to_ external programs uses that encoding too).\r\n\r\nThe fact that your output shows `\u2551` instead of `\u00ba` actually indicates that `mosquitto_sub` uses _ANSI_ encoding, because the code point of `\u00ba` is `0xba`, which, interpreted in the [`437` OEM code page](https://en.wikipedia.org/wiki/Code_page_437) - which may be the one in effect by default for you - is `\u2551` \r\n\r\nIf true, it would share this - nonstandard - behavior with Python - or perhaps it `mosquitto_sub` is _implemented_ in Python?\r\n\r\nAnyway, to (temporarily) use ANSI encoding, run the following (you should restore the original settings afterwards):\r\n\r\n```powershell\r\n[Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage)\r\n\r\n# To switch to ANSI in *all* aspects\r\n$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage)\r\n```\r\n\r\nNote, however, that if you had truly switched `[Console]::OutputEncoding` to UTF-8, you wouldn't have seen `\"\u2551C\"`, but `\"C\ufffd\"`, because decoding the ANSI output as UTF-8 would have yielded an invalid character for byte `0xab`.\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-30T15:53:25Z",
+      "updated_at": "2021-04-07T13:06:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The short of it:\r\n\r\n* It looks like `mosquitto_sub` isn't playing by the rules - it doesn't base its output encoding on the console code page, and seemingly always uses the system's active ANSI code page, the way Python does.\r\n\r\n* PowerShell cannot anticipate such cases, but it could make it easier to handle such calls.\r\n   * See the proposal at https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-800503184, which covers switching console windows to UTF-8 by default, and modifying / extending the behavior of `$OutputEncoding` to act as a (temporary) encoding override that also determines how data _received_ is decoded (currently it only determines how data _sent_ is encoded).\r\n\r\nIn the meantime, you can use helper function  `Invoke-WithEncoding`, which you can install directly [from a Gist](https://gist.github.com/mklement0/ef57aea441ea8bd43387a7d7edfc6c19) as follows (I can assure you that doing so is safe, but you should always check):\r\n\r\n```powershell\r\n# Download and define advanced function Invoke-WithEncoding in the current session.\r\nirm https://gist.github.com/mklement0/ef57aea441ea8bd43387a7d7edfc6c19/raw/Invoke-WithEncoding.ps1 | iex\r\n```\r\n\r\nUsing a Python command as an example, you could then use the following, which - thanks to the `-WindowsOnly` switch - would work properly on both Windows and Unix:\r\n\r\n```powershell\r\n# Outputs *already-decoded* output, so if the output *prints* fine, then *decoding* worked fine too.\r\nPS> Invoke-WithEncoding { python -c \"print('\u00baC')\" } -Encoding Ansi -WindowsOnly\r\n\u00baC\r\n```\r\n\r\nNote that `Invoke-WithEncoding` ensures that actual decoding to a .NET string happens before it outputs, so that encoding problems aren't accidentally masked by the direct-to-display output _seemingly_ being correct on Windows.\r\n\r\nA similar function focused on _diagnostic_ output is `Debug-NativeInOutput`, discussed in [this comment](https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-792033710).\r\n\r\n\r\n---\r\n\r\nAs an aside: You may have just used this char. as an example or perhaps you chose it for better appearance, but note that the symbol you're using is `\u00ba` (MASCULINE ORDINAL INDICATOR, [`U+00BA`](http://www.fileformat.info/info/unicode/char/ba)), whereas you may be looking for `\u00b0` (DEGREE SIGN, [`U+00B0`](http://www.fileformat.info/info/unicode/char/b0)).\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-30T20:19:11Z",
+      "updated_at": "2021-03-30T23:05:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I should mention one more solution, available since Windows 10 but _still in beta_ as of this writing:\r\n\r\nYou can switch to UTF-8 _system-wide_, which effectively sets both the OEM and the ANSI code page to UTF-8 (`65001`), which would solve the Python problem - do note that this has far-reaching consequences, however: see [this Stack Overflow answer](https://stackoverflow.com/a/57134096/45375) for more information.\r\n\r\n",
+      "created_at": "2021-03-31T21:54:47Z",
+      "updated_at": "2021-03-31T21:55:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Finally, note that it is possible to make Python use UTF-8, namely by either setting environment variable `PYTHONUTF8` to `1` or - in v3.7+ - by passing parameter `-X utf8` (case-exactly), so you can combine that with switching the console to UTF-8:\r\n\r\n```powershell\r\n[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Utf8Encoding]::new()\r\n$env:PYTHONUTF8=1\r\n(python -c \"print('\u00baC')\")  # properly decodes the output to '\u00baC'\r\n\r\n``` ",
+      "created_at": "2021-04-03T12:36:16Z",
+      "updated_at": "2021-04-03T12:36:16Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "It seems that mosquitto_sub and mosquitto_pub are written in C - [here](https://github.com/eclipse/mosquitto/blob/master/client/sub_client.c) is the source for the former, and [here](https://github.com/eclipse/mosquitto/blob/master/client/pub_client.c) for the latter.\r\n\r\nPart of my issue has been resolved by using your ANSI suggestion - my mosquitto_pub.ps1 file looks like this:\r\n\r\n```\r\n[Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage)\r\n\r\nwhile ($true)\r\n{ \r\n  $date = Get-Date -Format \"o\"\r\n  $rand = Get-Random -Minimum -10 -Maximum 40\r\n  $message = '{\"time\":' + '\"' + \"$date\" + '\"' + ', \"value\":' + \"$rand\" + ', \"label\":\"\u00baC\"}'\r\n  echo \"$message\"\r\n  mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  Start-Sleep -s 1\r\n}\r\n```\r\nNotepad++ reports this file as Encoding -> UTF-8\r\n\r\nMy mosquitto_sub.ps1 file looks like this:\r\n\r\n```\r\n[Console]::InputEncoding = [System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage)\r\n\r\nmosquitto_sub -h test.mosquitto.org -t tofol/test\r\n```\r\nAgain, Notepad++ reports this file as Encoding -> UTF-8. I run mosquitto_pub.ps1 in a PowerShell 7.1.3 tab of Windows Terminal, and I run mosquitto_sub.ps1 in a second PowerShell 7.1.3 tab of Windows Terminal. The output of mosquitto_pub.ps1 - the echo - looks like this:\r\n\r\n`{\"time\":\"2021-04-07T14:00:21.8438294+02:00\", \"value\":0, \"label\":\"\u00baC\"}`\r\n\r\nWhile the output of mosquitto_sub.ps1 looks like this:\r\n\r\n`{time:2021-04-07T14:01:09.7805529+02:00, value:6, label:\u00baC}`\r\n\r\nThis seems to have resolved the '\u00ba' issue, however, it does seem as though I'm still losing the quotation marks as the string moves from one to the other.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-07T12:03:20Z",
+      "updated_at": "2021-04-07T12:03:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I see, @chris-steema. \r\n\r\nThe double quotes disappearing is a separate problem, which, unfortunately, has been a problem with PowerShell's argument-passing to external programs since v1, due to lack of escaping of _embedded_ `\"` characters.\r\n\r\nThe workaround for now is to _manually_ `\\`-escape the embedded `\"` chars. - which, of course, _shouldn't be necessary_:\r\n\r\n```powershell\r\nmosquitto_pub -h test.mosquitto.org -t tofol/test -m ($message -replace '\"', '\\\"')\r\n```\r\n\r\nI presume that this fundamental problem hasn't been fixed to date so as not to break such existing workarounds, but a fix is finally, coming:\r\n\r\n* as an _experimental feature_ at first\r\n* which is an _opt-in_ fix, via a new preference variable, `$PSNativeCommandArgumentPassing = 'Standard'` (`'Legacy'`, the default, representing the old behavior).\r\n\r\nRelevant issues and comments:\r\n\r\n* Details about the current problem and workarounds: https://github.com/PowerShell/PowerShell/issues/1995#issuecomment-562334606\r\n\r\n* The PR implementing the fix: #14692 \r\n\r\n* The suggestion to widen the scope of the fix to include vital accommodations for high-profile nonstandard CLIs on Windows (based on rules rather than specific exceptions): #15143 \r\n",
+      "created_at": "2021-04-07T12:43:26Z",
+      "updated_at": "2021-04-07T12:44:46Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "Thank you @mklement0.\r\n\r\nI closed my instance of Windows Terminal, and when I reopened it the code in my last message didn't work. It seems as though setting the $OutputEncoding is a requirement - for posterity then, correctly working ps1 files in a new instance of Windows Terminal with two open tabs:\r\n\r\nmosquitto_pub.ps1:\r\n\r\n```\r\n$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage)\r\n\r\nwhile ($true)\r\n{ \r\n  $date = Get-Date -Format \"o\"\r\n  $rand = Get-Random -Minimum -10 -Maximum 40\r\n  $message = '{\"time\":' + '\"' + \"$date\" + '\"' + ', \"value\":' + \"$rand\" + ', \"label\":\"\u00baC\"}' -replace '\"', '\\\"'\r\n  echo \"$message\"\r\n  mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  Start-Sleep -s 1\r\n}\r\n```\r\n\r\nmosquitto_sub.ps1:\r\n\r\n```\r\n$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage)\r\n\r\nmosquitto_sub -h test.mosquitto.org -t tofol/test\r\n```\r\n ",
+      "created_at": "2021-04-07T12:51:02Z",
+      "updated_at": "2021-04-07T12:51:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm not sure I understand how `$OutputEncoding` comes into play here, given that I don't see PowerShell piping data to an external program (I may not have the full picture), but generally speaking:\r\n\r\n* For robustness it makes sense to always set `[Console]::In/OutputEncoding]` and `$OutputEncoding` _together_, to the same encoding.\r\n\r\n* Given that your external programs exhibit nonstandard behavior, It's best to _scope_ the change to ANSI encoding (make the change, call the external program, restore the previous settings) so that subsequent calls to different external programs aren't affected.\r\n\r\nAs for a _persistent_ encoding change:\r\n\r\n* System-wide solution:\r\n  * To switch both the OEM and ANSI code page _system-wide_ to UTF-8, use the still-in-beta Windows 10 feature discussed in [the aforementioned Stack Overflow answer](https://stackoverflow.com/a/57134096/45375), but note its far-reaching consequences, notably that it also switches _Windows PowerShell_' s`Get-Content` / `Set-Content` default encoding from ANSI to UTF-8.\r\n  * Also note that this the only way to set the active OEM and ANSI code page to the _same value_, and that that value is limited to UTF-8 - as a way to finally end the encoding confusion on Windows, by consistently using a Unicode-based encoding that speaks all human languages by definition.\r\n\r\n* As for a PowerShell-only solution:\r\n\r\n  * Assigning to `[Console]::In/OutputEncoding]` / `$OutputEncoding` is only ever session-scoped - to make it quasi-persistent, you'd have to add it to your `$PROFILE`, but,  of course, that can be bypassed with a `-noprofile` CLI invocation.\r\n\r\n  * While `[Console]::In/OutputEncoding]` can persistently be preset (on Windows) by associating an - invariably _fixed_ -code page with `pwsh.exe` console windows via the registry (`HKEY_CURRENT_USER\\Console\\<full-exe-path-with-backslashes-replaced-with-underscores>`, `DWORD` value `CodePage`), launching the same executable via a _shortcut file_ bypasses that.\r\n\r\n  * Making PowerShell itself, on startup, default to code page `65001` == UTF-8, as proposed in https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-800503184, would solve this problem. While technically a breaking change - see https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-814939800 for the affected scenarios - to me, its benefits far outweigh the risk of breaking existing code, which makes it a [bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) change.\r\n\r\n",
+      "created_at": "2021-04-07T14:03:21Z",
+      "updated_at": "2021-04-07T14:16:33Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "> I'm not sure I understand how $OutputEncoding comes into play here, given that I don't see PowerShell piping data to an external program (I may not have the full picture), but generally speaking:\r\n> \r\n>     For robustness it makes sense to always set [Console]::In/OutputEncoding] and $OutputEncoding together, to the same encoding.\r\n\r\nNo, I was wrong to suggest $OutputEncoding comes into play. Looking closer, I see I get the results I expect with the following two pub/sub ps1 files (saved as UTF-8):\r\n\r\n```\r\nwhile ($true)\r\n{ \r\n  $date = Get-Date -Format \"o\"\r\n  $rand = Get-Random -Minimum -10 -Maximum 40\r\n  $message = '{\"time\":' + '\"' + \"$date\" + '\"' + ', \"value\":' + \"$rand\" + ', \"label\":\"\u00baC\"}' -replace '\"', '\\\"'\r\n  echo \"$message\"\r\n  mosquitto_pub -h test.mosquitto.org -t tofol/test -m \"$message\"\r\n  Start-Sleep -s 1\r\n}\r\n```\r\n```\r\n[Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage)\r\n\r\nmosquitto_sub -h test.mosquitto.org -t tofol/test\r\n```\r\nNote that in a new instance of Windows Terminal with two PowerShell 7 tabs, setting OutputEncoding only in the sub ps1 file - with no Console settings at all in the pub file - is sufficient for me to receive the output I expect. I'm not sure of the significance of this with respect to attributions of erroneous behavior to the mosquitto_pub/mosquitto_sub executable files. \r\n\r\n",
+      "created_at": "2021-04-07T14:20:59Z",
+      "updated_at": "2021-04-07T14:20:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Makes sense, @chris-steema.\r\n\r\n> I'm not sure of the significance of this with respect to attributions of erroneous behavior to the mosquitto_pub/mosquitto_sub executable files.\r\n\r\nI wouldn't call it erroneous, just nonstandard - I presume it was a deliberate decision, as for Python, to use the relatively more widely used ANSI code page over the OEM code page, whose use is limited to consoles. \r\n\r\nAs an aside: It's important to remember that there's no such thing as _the_ ANSI or _the_ OEM code page, given that multiple, language-specific varieties exist and that it is the host system's configuration that determines the active variety.\r\nWindows-1252 is the most widely used ANSI code page, for Western European languages. So, conceivably, your programs could exhibit one of two different ANSI-related behavior:  _invariable_ use of the _specific_ Windows-1252 ANSI code page vs. honoring the _system's_ active ANSI code page.\r\nUTF-8 (as an encoding of the _Unicode_ standard), as a _single_ \"global alphabet\", makes all these problems go away.\r\n\r\nUnfortunately, though, that decision to use ANSI makes use in consoles problematic.\r\nHowever, I wonder if these programs, like Python, offer an opt-in mechanism for specifying the desired encoding.\r\n\r\nAs for where the workaround is necessary in your scenario:\r\n\r\n* Command-line _arguments_, due to being (in-memory) _strings_  are generally _not_ susceptible to encoding issues, so (as long as the source-code file itself is properly encoded and interpreted by PowerShell), so _no_ workaround is needed for passing something like `'\u00baC'` _as an argument_ to `mosquitto_pub`.\r\n\r\n* By contrast, character-encoding issues do come into play when PowerShell _captures stdout output_ from `mosquitto_sub`, which invariably involves _decoding_ (in order to convert the raw byte output to .NET strings), which PowerShell bases on `[Console]::OutputEncoding`\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-07T14:41:48Z",
+      "updated_at": "2021-04-07T14:45:17Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "> However, I wonder if these programs, like Python, offer an opt-in mechanism for specifying the desired encoding.\r\n\r\nGood point. I'll see if I can find anything. Thanks.\r\n\r\n> By contrast, character-encoding issues do come into play when PowerShell captures stdout output from mosquitto_sub, which invariably involves decoding (in order to convert the raw byte output to .NET strings), which PowerShell bases on [Console]::OutputEncoding\r\n\r\nYes, the conversion of byte streams to .NET strings I can imagine very clearly. Great stuff, thanks to your patient explanations I think I now have a pretty clear idea of what's going on. Powershell's inability to escape embedded quotes was a red herring for me, as I had imagined that that and what turned out to be an encoding issue were related, which they aren't. As far as I'm concerned we can close this issue, but I won't do so now just in case you'd prefer to keep it open for whatever reason. \r\n",
+      "created_at": "2021-04-07T14:53:28Z",
+      "updated_at": "2021-04-07T14:53:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm glad to hear the explanations were helpful - this is tricky business, for sure.\r\n\r\nI think it's fine to close this issue, as I've just posted a question & answer [on Stack Overflow](https://stackoverflow.com/q/66990509/45375) that summarizes the problem and the solution.\r\n\r\nIt's probably mostly a hypothetical concern, but note that the solution there uses `[System.Text.Encoding]::GetEncoding([int] (Get-ItemPropertyValue HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage ACP))` to reliably determine the _system's_ ANSI code page.\r\n\r\nBy contrast, `[cultureinfo]::CurrentCulture.TextInfo.ANSICodePage` reflects the ANSI code page associated with the _culture in effect for the current thread (session)_, which comes from the _current user_'s culture settings (and can also be modified in-session), which can differ from the system locale (\"Language for non-Unicode programs\").\r\n\r\n",
+      "created_at": "2021-04-07T16:53:38Z",
+      "updated_at": "2021-04-07T19:54:49Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "A curiosity is the same test done from pwsh (Linux) to PowerShell 7 (Windows) and the reverse.\r\n\r\n```\r\nPS /home/XXXX/Documents> $PSVersionTable \r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.3\r\nPSEdition                      Core\r\nGitCommitId                    7.1.3\r\nOS                             Linux 5.8.0-48-generic #54~20.04.1-Ubuntu SMP Sat Mar 20 13:40:25 UTC 2021\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\ufffd}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\nSo from Linux using pwsh I can run mosquitto_pub.sh1 as it is in [this message](https://github.com/PowerShell/PowerShell/issues/15123#issuecomment-814955211) of mine, but when I run mosquitto_sub.sh1 on Windows I get mangled output unless I do:\r\n\r\n```\r\n[Console]::OutputEncoding = [System.Text.Utf8Encoding]::new()\r\n\r\nmosquitto_sub -h test.mosquitto.org -t tofol/test\r\n```\r\nThis is different to the case in which both ps1 files are running on Windows. However, I can't get the reverse to show me correct output - that is, running mosquitto_pub.sh1 on Windows and mosquitto_sub.sh1 on Linux. I've tried a good number of combinations of [Console]::OutputEncoding/InputEncoding, but the '\u00ba' always gets mangled - in fact it gets mangled to the same character you can see in the above $PSVersionTable output after '4.0' of PSCompatibleVersions.\r\n\r\nP.S. the following output run on Linux using pwsh is interesting:\r\n\r\n```\r\nPS /home/XXXX/Documents> $page = [cultureinfo]::CurrentCulture.TextInfo.ANSICodePage\r\nPS /home/XXXX/Documents> echo $page\r\n1252\r\n```\r\n",
+      "created_at": "2021-04-07T19:48:27Z",
+      "updated_at": "2021-04-07T19:51:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It makes sense to me that Mosquitto uses UTF-8 on Unix-like platforms, which `mosquitto_sub` apparently receives as such even on Windows, which explains why `[Console]::OutputEncoding = [System.Text.Utf8Encoding]::new()` helps.\r\n\r\n> the following output run on Linux using pwsh is interesting:\r\n\r\nUnix-like platforms don't use code pages, so this information is purely informative there, I think: the active locale, as reflected in `[cultureinfo]::CurrentCulture`, is mapped to what the corresponding Windows code page _would_ be.\r\n\r\n> I can't get the reverse to show me correct output - that is, running mosquitto_pub.sh1 on Windows and mosquitto_sub.sh1 on Linux.\r\n\r\nIf you run `irm https://gist.github.com/mklement0/ef57aea441ea8bd43387a7d7edfc6c19/raw/Invoke-WithEncoding.ps1 | iex` per the instructions above (to define function `Invoke-WithEncoding`)  and then the following, is the output not correct?\r\n\r\n```powershell\r\nInvoke-WithEncoding.ps1 -Encoding Ansi { mosquitto_sub -h test.mosquitto.org -t tofol/test }\r\n```\r\n\r\nIf not, what is it?\r\n\r\n",
+      "created_at": "2021-04-07T20:13:24Z",
+      "updated_at": "2021-04-07T20:13:24Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "> If not, what is it?\r\n\r\nIt doesn't seem to return anything - I've left this terminal now for a few minutes:\r\n\r\n![Screenshot from 2021-04-08 10-28-45](https://user-images.githubusercontent.com/19690135/113994141-6d666000-9855-11eb-8b51-ed9c2f3369e7.png)\r\n\r\n",
+      "created_at": "2021-04-08T08:31:42Z",
+      "updated_at": "2021-04-08T08:31:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That is curious - does it hang with `Invoke-WithEncoding { python -c \"print('e\u00e9')\" } ansi` too, for instance?\r\n\r\nI suggest inspecting the raw byte output; can you infer what actual encoding is used?\r\n\r\n```powershell\r\nsh -c 'mosquitto_sub -h test.mosquitto.org -t tofol/test > out.txt' && Format-Hex out.txt\r\n```",
+      "created_at": "2021-04-08T11:17:04Z",
+      "updated_at": "2021-04-08T11:17:04Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "It is strange behavior, however, using a different Windows machine (but the same Ubuntu one) it seems to have disappeared, and everything now works as expected without any modifications to `[Console]::OutputEncoding/InputEncoding` in either the mosquitto_pub.ps1 or mosquitto_sub.ps1. There must have been something out-of-the-ordinary in the configuration of the Windows machine I was using in my previous messages. In fact, I can run both mosquitto_pub.ps1 and mosquitto_sub.ps1 on this different Windows machine without any modifications to `[Console]::OutputEncoding/InputEncoding` in either of them as well. I'm only sorry I didn't try running all this on a different machine earlier. ",
+      "created_at": "2021-04-08T11:44:41Z",
+      "updated_at": "2021-04-08T11:44:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Intriguing - would be good to understand what that configuration is.\r\n\r\nAlso: if you run everything on the other Windows machine alone, does `mosquitto_sub` _not_ emit ANSI-encoded output there?\r\nIf it doesn't, I need to scrap my Stack Overflow post - or update it with information as to what configuration might cause the ANSI behavior.\r\n\r\nOne possible explanation is that the other Windows machine has system-wide UTF-8 support turned on, which you can verify by opening a `cmd.exe` console window and running `chcp` and checking if it returns `65001` (UTF-8).\r\n\r\n\r\n",
+      "created_at": "2021-04-08T13:27:26Z",
+      "updated_at": "2021-04-08T13:27:26Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "> One possible explanation is that the other Windows machine has system-wide UTF-8 support turned on, which you can verify by opening a cmd.exe console window and running chcp and checking if it returns 65001 (UTF-8).\r\n\r\nYes, this is the case: one machine returns `Active code page: 65001`, whereas the other returns `Active code page: 850` -  on the machine with system-wide UTF-8 (which I don't remember activating, but then it's not my machine) the two UTF-8 encoded ps1 files work as expected with no `[Console]::` modifications, whereas on the 850 machine the modifications we discussed above are necessary.",
+      "created_at": "2021-04-08T13:38:10Z",
+      "updated_at": "2021-04-08T13:38:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> on the machine with system-wide UTF-8 (which I don't remember activating, but then it's not my machine) the two UTF-8 encoded ps1 files work as expected with no [Console]:: modifications\r\n\r\nThat is to be expected: the system-wide UTF-8 supports sets _both_ the OEM _and_ the ANSI code page to `65001`, so the problem goes away - and any Unix end points speak UTF-8 anyway.\r\n\r\nActivating system-wide UTF-8 is definitely advisable in general to make encoding problems go away, but it definitely also has the potential to break existing code. \r\n\r\nFor instance, _Windows PowerShell_ scripts that rely on BOM-less text files getting read as ANSI-encoded suddenly interpret such files as UTF-8-encoded, in effect causing all non-ASCII characters to turn into `\ufffd` (REPLACEMENT CHARACTER, [`U+FFFD`](http://www.fileformat.info/info/unicode/char/fffd)).\r\n",
+      "created_at": "2021-04-08T13:44:02Z",
+      "updated_at": "2021-04-08T13:44:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for `Invoke-WithEncoding` getting stuck on your Linux machine: Is it possible that you simply forgot to publish a message, or that it was misdirected, so that `mosquitto_sub` simply ended up waiting indefinitely for a message to arrive?",
+      "created_at": "2021-04-08T13:49:58Z",
+      "updated_at": "2021-04-08T13:49:58Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "Great! Then the only unexplained event is mosquitto_pub.ps1 running (without `[Console]::` modifications) on the 850 machine and mosquitto_sub.ps1 (without `[Console]::` modifications) running on Ubuntu - I get the replacement character instead of '\u00ba':\r\n\r\n![Screenshot from 2021-04-08 15-50-21](https://user-images.githubusercontent.com/19690135/114038494-35c1dd00-9882-11eb-8092-4a231fdb9273.png)\r\n\r\nNot sure how much energy you have left to work out what's going on here ::smiley::\r\n",
+      "created_at": "2021-04-08T13:53:39Z",
+      "updated_at": "2021-04-08T13:53:39Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "> I suggest inspecting the raw byte output; can you infer what actual encoding is used?\r\n> \r\n> ```powershell\r\n> sh -c 'mosquitto_sub -h test.mosquitto.org -t tofol/test > out.txt' && Format-Hex out.txt\r\n> ```\r\n\r\nI've run this now, and the contents of out.txt look like this:\r\n```\r\n{\"time\":\"2021-04-08T15:58:27.2948130+02:00\", \"value\":-4, \"label\":\"\u00baC\"}\r\n{\"time\":\"2021-04-08T15:58:28.4389277+02:00\", \"value\":21, \"label\":\"\u00baC\"}\r\n{\"time\":\"2021-04-08T15:58:29.5871878+02:00\", \"value\":15, \"label\":\"\u00baC\"}\r\n{\"time\":\"2021-04-08T15:58:30.7212235+02:00\", \"value\":-10, \"label\":\"\u00baC\"}\r\n{\"time\":\"2021-04-08T15:58:31.8537600+02:00\", \"value\":34, \"label\":\"\u00baC\"}\r\n```\r\n\r\nWhich is to say, correct and expected format. \r\n\r\n",
+      "created_at": "2021-04-08T14:00:16Z",
+      "updated_at": "2021-04-08T14:00:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Re most recent comment: that suggests that the publisher was a Windows machine with system-wide UTF-8 support.\r\n\r\nRe the comment before that:\r\n\r\n\ud83d\ude01 \r\nThat behavior makes sense to me: the non-UTF-8  Windows machine sends ANSI-encoded strings, which the Ubuntu machine - which expects UTF-8 - misreads as UTF-8 and therefore runs into invalid-as-UTF-8 bytes, which it replaces with `\ufffd`.\r\n\r\nIn other words: you need to know the publisher's encoding in order to decode properly.\r\n\r\nAnd since Mosquitto appears to have no way to explicitly control the encoding on Windows, you're left with two choices:\r\n\r\n* _If acceptable_, activate system-wide UTF-8 support on all your publishing Windows machines - then all problems go away.\r\n\r\n* Otherwise:\r\n  * You either need to know in advance what the publisher's encoding is (i.e., its active ANSI code page, as indicated by `Get-ItemPropertyValue HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage ACP` on that machine), in which case you can (temporarily) adjust `[Console]::OutputEncoding` accordingly.\r\n\r\n  * If you don't know the encoding, you need to obtain the raw bytes first. The simplest - but slow - solution is to save the raw bytes to a file, via `sh -c` as shown above, and work from there. Otherwise, use [`System.Diagnostics.Process`](https://docs.microsoft.com/en-US/dotnet/api/System.Diagnostics.Process) to call `mosquitto_sub` to obtain an in-memory byte-array representation.\r\n ",
+      "created_at": "2021-04-08T14:13:49Z",
+      "updated_at": "2021-04-08T14:14:30Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "> Re most recent comment: that suggests that the publisher was a Windows machine with system-wide UTF-8 support.\r\n\r\nIt may suggest that, but I've run the test a number of times now, and as you can see the pwsh instance in the Ubuntu terminal is reading '\u00ba' as `U+FFFD` (that is, mosquitto_pub is running on the 850 Windows machine) just before I make the call to write to out.txt. And the content of out.txt remains the same (that is, correct). \r\n\r\n![Screenshot from 2021-04-08 16-16-04](https://user-images.githubusercontent.com/19690135/114043028-39eff980-9886-11eb-89a2-c2e9f582dcbc.png)\r\n\r\n> You either need to know in advance what the publisher's encoding is (i.e., its active ANSI code page, as indicated by Get-ItemPropertyValue HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage ACP on that machine), in which case you can (temporarily) adjust [Console]::OutputEncoding accordingly.\r\n\r\nThe machine that returns 850 using cmd.exe `chcp` returns 1252 using `Get-ItemPropertyValue HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage ACP` - however, if I adjust `[Console]::OutputEncoding` in the mosquitto_sub.ps1 running on Ubuntu accordingly, it doesn't seem to make a difference:\r\n\r\n![Screenshot from 2021-04-08 16-24-27](https://user-images.githubusercontent.com/19690135/114044172-445ec300-9887-11eb-87c3-91f2e53f3a7a.png)\r\n\r\n",
+      "created_at": "2021-04-08T14:27:42Z",
+      "updated_at": "2021-04-08T14:27:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To narrow this down, let's eliminate incidental factors:\r\n* Create a _new_ PowerShell session\r\n* Make sure that `[Console]::OutputEncoding]` indicates UTF-8.\r\n* Make sure that `locale` only indicates values ending in `.UTF-8` (e.g., `LC_CTYPE=\"en_US.UTF-8\"`)\r\n\r\nIn the first case, PowerShell's behavior makes sense to me, `sh -c`'s doesn't (unless your Unix locale is _not_ set to UTF-8).\r\nAre you sure `out.txt` is actually being written every time? Delete it before every `sh -c` call.\r\n\r\nIn the second case, make sure that you restore `[Console]::OutputEncoding` back to UTF-8 _before_ outputting the `mosquitto_sub` result, which is tricky to do: `Invoke-WithEncoding` does it for you, which is why I suggested it. \r\n\r\nHowever, I now realize why it didn't work for you: it tried to _wait for `mosquitto_sub` to exit_ in order to _collect all output first_, which doesn't work with such indefinitely running programs.\r\n\r\nI've fixed `Invoke-WithEncoding` to exhibit _streaming_ behavior; via a `ForEach-Object` loop, it now temporarily restores the original `[Console]::OutputEncoding` (to UTF-8, on Unix), then outputs the already decoded line at hand (which thanks to the restored encoding now prints correctly), then reverts to the specified target encoding in preparation for decoding the next output line.\r\n\r\nPlease try\r\n`irm https://gist.github.com/mklement0/ef57aea441ea8bd43387a7d7edfc6c19/raw/Invoke-WithEncoding.ps1 | iex`\r\nand then\r\n`Invoke-WithEncoding -Encoding Ansi { mosquitto_sub -h test.mosquitto.org -t tofol/test }`\r\nagain.\r\n\r\n\r\n",
+      "created_at": "2021-04-08T15:43:40Z",
+      "updated_at": "2021-04-08T15:45:24Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "> Make sure that [Console]::OutputEncoding] indicates UTF-8.\r\n![Screenshot from 2021-04-08 18-51-08](https://user-images.githubusercontent.com/19690135/114066210-c35df680-989b-11eb-9470-775a0a0cedca.png)\r\n\r\n> Make sure that locale only indicates values ending in .UTF-8 (e.g., LC_CTYPE=\"en_US.UTF-8\")\r\n![Screenshot from 2021-04-08 18-51-31](https://user-images.githubusercontent.com/19690135/114066263-d2dd3f80-989b-11eb-8a6c-3767ac021583.png)\r\n\r\n> Are you sure out.txt is actually being written every time? \r\n\r\nYes.\r\n![Screenshot from 2021-04-08 18-55-24](https://user-images.githubusercontent.com/19690135/114066397-fe602a00-989b-11eb-9787-6e78023d35e2.png)\r\n\r\n> Please try\r\n> irm https://gist.github.com/mklement0/ef57aea441ea8bd43387a7d7edfc6c19/raw/Invoke-WithEncoding.ps1 | iex\r\n> and then\r\n> Invoke-WithEncoding -Encoding Ansi { mosquitto_sub -h test.mosquitto.org -t tofol/test }\r\n> again.\r\n\r\n![Screenshot from 2021-04-08 18-56-28](https://user-images.githubusercontent.com/19690135/114066600-2e0f3200-989c-11eb-9e0b-79702e3c1038.png)\r\n",
+      "created_at": "2021-04-08T16:57:05Z",
+      "updated_at": "2021-04-08T16:57:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks. So it looks like everything works as expected now, correct?\r\n",
+      "created_at": "2021-04-08T17:00:37Z",
+      "updated_at": "2021-04-08T17:00:37Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "Yes, in these circumstances it does, thank you. We have an app written in .NET Core/5 that runs on a 'Unix-like system' and which collates information by subscribing to MQTT brokers. Our clients use MQTT to relay information from their sensors to our system via that route. In the case that our clients use Windows systems that are not UTF-8 enabled - or in fact any other system which isn't - this issue could present problems to us. At least now we understand exactly where such problems could be coming from ::smiley::",
+      "created_at": "2021-04-08T17:49:09Z",
+      "updated_at": "2021-04-08T17:49:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Understood, @chris-steema.\r\n\r\nPersonally, I suggest asking the Mosquitto people to implement UTF-8 at least as an opt-in on Windows, via an environment variable and/or command-line option, analogous to what Python has done.\r\n\r\nI think it's fine to close this issue now.\r\n",
+      "created_at": "2021-04-08T18:39:46Z",
+      "updated_at": "2021-04-08T18:39:46Z"
+    },
+    {
+      "author": "chris-steema",
+      "author_association": "NONE",
+      "body": "Yes, I will consider getting in touch with the Eclipse team. \r\n\r\nMeanwhile, thank you very much again @mklement0 for all your help. ",
+      "created_at": "2021-04-08T19:59:49Z",
+      "updated_at": "2021-04-08T19:59:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "My pleasure, @chris-steema; I certainly learned a few things myself. ",
+      "created_at": "2021-04-08T20:01:52Z",
+      "updated_at": "2021-04-08T20:01:52Z"
+    }
+  ],
+  "created_at": "2021-03-30T10:33:07Z",
+  "number": 15123,
+  "state": "closed",
+  "title": "Erroneous string format using mosquitto_sub/_pub",
+  "updated_at": "2021-04-08T20:01:52Z"
+}

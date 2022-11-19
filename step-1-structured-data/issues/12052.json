@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12052",
+  "author": "grzegorz-wolszczak",
+  "body": "\r\n\r\n\r\n\r\n# Steps to reproduce \r\n\r\nProvided that there is a dotnet core sdk istalled, run script as below.\r\nWhat script does:\r\n - Displays some debug stuff (dotnet core version, powershell version)\r\n - Crates some directories e.g. where published library will be copied\r\n - Creates ad hoc dot net core class lib project (targeted for `netstandard2.0`)\r\n - Compiles the project into dll\r\n - Loads the dll into powershell\r\n - Calls function `Hello` from the dll and expects to receive predefined output (== \"Works!\")\r\n\r\n\r\n```powershell\r\nFunction ShowErrorDetails\r\n{\r\n    param(\r\n        $ErrorRecord = $Error[0]\r\n    )\r\n\r\n    $out=\"\"\r\n    $out+= $($ErrorRecord | Format-List -Property * -Force | out-string)\r\n    $out+= $($ErrorRecord.InvocationInfo | Format-List -Property * | out-string)\r\n    $Exception = $ErrorRecord.Exception\r\n    for ($depth = 0; $Exception -ne $null; $depth++)\r\n    {\r\n        $out+= $(\"$depth\" * 80)\r\n        $out+= $($Exception | Format-List -Property * -Force | out-string)\r\n        $Exception = $Exception.InnerException\r\n    }\r\n    # emit return object\r\n    $out\r\n}\r\n \r\n $myLibName=\"MyLib\"\r\n $myLibDllName=\"${myLibName}.dll\"\r\n $csProjName = \"${myLibName}.csproj\"\r\n $thisDir = Get-Location  \r\n $workdir = Join-Path $thisDir \"workdir\"\r\n $libraryCodeDir = Join-Path $workdir $myLibName\r\n $csProjFilePath = Join-Path $libraryCodeDir $csProjName \r\n $publishedOutputDir = Join-Path $workdir \"published\"\r\n $dllFilePath = Join-Path $publishedOutputDir $myLibDllName\r\n \r\n Write-Host \"thisDir            : '$thisDir'\"\r\n Write-Host \"myLibName          : '$myLibName'\"\r\n Write-Host \"csProjName         : '$csProjName'\"\r\n Write-Host \"workdir            : '$workdir'\"\r\n Write-Host \"libraryCodeDir     : '$libraryCodeDir'\"\r\n Write-Host \"csProjFilePath     : '$csProjFilePath'\"\r\n Write-Host \"publishedOutputDir : '$publishedOutputDir'\"\r\n Write-Host \"myLibDllName       : '$myLibDllName'\"\r\n Write-Host \"dllFilePath        : '$dllFilePath'\"\r\n\r\n Write-host \"------ >>>>>   Powershell version : \"\r\n $PsVersionTable | Out-Host\r\n \r\n Write-Host \"------ >>>>>   Dotnet core version: \"\r\n dotnet --info\r\n \r\n Write-host \"------ >>>>>   Creating $libraryCodeDir...\"\r\n New-item $libraryCodeDir -ItemType Directory -Force\r\n \r\n Write-Host \"`n------ >>>>>   Creating library template in '$libraryCodeDir'\"\r\n dotnet new classlib --name $myLibName --output $libraryCodeDir --framework \"netstandard2.0\" --force\r\n \r\n\r\n$expectedOutput = \"Works!\"\r\n\r\n$codeContent = @\"\r\npublic static class MyClass\r\n{ \r\n    public static string Hello()\r\n    {\r\n      return \"${expectedOutput}\";\r\n    }\r\n}\r\n\"@\r\n\r\ntry \r\n{\r\n  Set-Content -Path $libraryCodeDir/Class1.cs -Value $codeContent\r\n  dotnet publish -c Debug -o ${publishedOutputDir} ${csProjFilePath}\r\n   # if compilation was not successful\r\n  if($global:LASTEXITCODE -ne 0 )\r\n  {\r\n    Write-Error \"------ >>>>>   Compilation failed, cannot continue with the script..\"\r\n    Exit 1\r\n  }\r\n  else\r\n  {\r\n    Write-Host \"------ >>>>>   OK: compilation successful\"\r\n  }\r\n\r\n  Write-Host \"------ >>>>>   Loading library...\"\r\n  $bytes = [System.IO.File]::ReadAllBytes($dllFilePath)\r\n  $loadedLib = [System.Reflection.Assembly]::Load($bytes)\r\n  $loadedLib.GetTypes() | Out-Host\r\n  $functionCallResult = [MyClass]::Hello()\r\n  \r\n  if($functionCallResult -eq  $expectedOutput )\r\n  {\r\n     Write-Host \"------ >>>>>   SUCCESS: Function call returned expected result\"\r\n  }\r\n  else\r\n  {\r\n    Write-Error \"------ >>>>>   FAILURE: Function call unxpected result '${functionCallResult}' while expecting '${expectedOutput}'\"\r\n    Exit 1\r\n  }\r\n}\r\ncatch {\r\n  ShowErrorDetails | Out-Host\r\n}\r\n\r\n```\r\n\r\n# Expected behavior\r\n After the script finishes , user should see line like\r\n```none\r\n------ >>>>>   SUCCESS: Function call returned expected result\r\n```\r\n\r\n# Actual behavior\r\nI've added a debug function `ShowErrorDetails` to show full error details (code taken from book `Windows Powershell in action` 3rd edition) if something goes wrong.\r\nPowershell 7.0 cannot find the type from the library and at the end of error output it prints something like:\r\n\r\n```none\r\n00000000000000000000000000000000000000000000000000000000000000000000000000000000\r\nErrorRecord                 : Unable to find type [MyClass].\r\nWasThrownFromThrowStatement : False\r\nTargetSite                  : Void CheckActionPreference(System.Management.Automation.Language.FunctionContext, System.Exception)\r\nStackTrace                  :    at System.Management.Automation.ExceptionHandlingOps.CheckActionPreference(FunctionContext funcContext, Exception exception)\r\n                                 at System.Management.Automation.Interpreter.ActionCallInstruction`2.Run(InterpretedFrame frame)\r\n                                 at System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame frame)\r\n                                 at System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame frame)\r\nMessage                     : Unable to find type [MyClass].\r\nData                        : {System.Management.Automation.Interpreter.InterpretedFrameInfo}\r\nInnerException              :\r\nHelpLink                    :\r\nSource                      : System.Management.Automation\r\nHResult                     : -2146233087\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\nThe issue is related only for powershell 7: \r\nI tested it on :\r\nWindows\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nUbuntu:\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Linux 5.3.0-40-generic #32~18.04.1-Ubuntu SMP Mon Feb 3 14:05:59 UTC 2020\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\nI have verified that this correctly WORKS  platforms such as\r\nwindows powershell 5.1\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.17763.1007\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.17763.1007\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```\r\n\r\nwindows powershell core 6.2.4\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.4\r\nPSEdition                      Core\r\nGitCommitId                    6.2.4\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nubuntu powrshell core 6.2.4\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.4\r\nPSEdition                      Core\r\nGitCommitId                    6.2.4\r\nOS                             Linux 5.3.0-40-generic #32~18.04.1-Ubuntu SMP Mon Feb 3 14:05:59 UTC 2020\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\n[ubuntu_pwsh6.2.4_output.txt](https://github.com/PowerShell/PowerShell/files/4298867/ubuntu_pwsh6.2.4_output.txt)\r\n[ubuntu_pwsh7_output.txt](https://github.com/PowerShell/PowerShell/files/4298868/ubuntu_pwsh7_output.txt)\r\n[windows_powershell_output.txt](https://github.com/PowerShell/PowerShell/files/4298869/windows_powershell_output.txt)\r\n[windows_pwsh6.2.4_output.txt](https://github.com/PowerShell/PowerShell/files/4298870/windows_pwsh6.2.4_output.txt)\r\n[windows_pwsh7_output.txt](https://github.com/PowerShell/PowerShell/files/4298871/windows_pwsh7_output.txt)\r\n\r\n\r\n",
+  "closed_at": "2020-03-28T15:26:00Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Looks like `Assembly.Load` doesn't load into the default assembly load context (which is where PowerShell now looks for type resolution).\r\n\r\nHere's a work around:\r\n\r\n```powershell\r\n$bytes = [System.IO.File]::ReadAllBytes($dllFilePath)\r\n$loadedLib =  [Runtime.Loader.AssemblyLoadContext]::Default.LoadFromStream(\r\n    [IO.MemoryStream]::new($bytes))\r\n```",
+      "created_at": "2020-03-06T15:09:29Z",
+      "updated_at": "2020-03-06T15:09:29Z"
+    },
+    {
+      "author": "grzegorz-wolszczak",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience  Did that changed between pwsh 6.x and 7.x ?",
+      "created_at": "2020-03-06T15:12:34Z",
+      "updated_at": "2020-03-06T15:12:34Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, it changed in #11088",
+      "created_at": "2020-03-06T15:28:04Z",
+      "updated_at": "2020-03-06T15:28:04Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Maybe resolution could look at `AssemblyLoadContext.All` and either pick out the ALCs with the name \"`Assembly.Load(byte[], ...)`\"  or that are of the (non-public) type `System.Runtime.Loader.IndividualAssemblyLoadContext`?",
+      "created_at": "2020-03-06T16:16:45Z",
+      "updated_at": "2020-03-06T16:16:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We discussed this in #11088 and intermediate conclusion was that it is by-design. Really there are two methods which load in non default context. .Net Core implements in such manner and it is not clear why we should change this and de-facto revert #11088.",
+      "created_at": "2020-03-06T18:23:08Z",
+      "updated_at": "2020-03-06T18:23:08Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> .Net Core implements in such manner and it is not clear why we should change this\r\n\r\nSo that the types can be resolved by PowerShell, which would avoid making `Assembly.Load` essentially impossible to use from PowerShell (and breaking all code that uses it).\r\n\r\n> and de-facto revert #11088.\r\n\r\nThe way I proposed would still filter out assemblies explicitly loaded in custom assembly load contexts.  Nothing would need to be reverted.",
+      "created_at": "2020-03-06T18:37:12Z",
+      "updated_at": "2020-03-06T18:37:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is .Net Core behaviour for ALC.\r\n\r\nI think #11088 is right direction to switch to ALC from AppDomain since we are discussing (1) support dll-s with different versions, (2) resolving name conflicts from different dll-s, (3) dll unloading.",
+      "created_at": "2020-03-07T19:46:15Z",
+      "updated_at": "2020-03-07T19:46:15Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> It is .Net Core behaviour for ALC.\r\n> \r\n> I think #11088 is right direction to switch to ALC from AppDomain since we are discussing (1) support dll-s with different versions, (2) resolving name conflicts from different dll-s, (3) dll unloading.\r\n\r\nI agree.  That's why I proposed a solution that doesn't interfere with that.",
+      "created_at": "2020-03-07T21:04:27Z",
+      "updated_at": "2020-03-07T21:04:27Z"
+    },
+    {
+      "author": "Shayan-To",
+      "author_association": "NONE",
+      "body": "I updated my PowerShell from 6 to 7 a few days ago, and found out that a lot of my scripts have stopped working.\r\n\r\nIs there a workaround? Can I use some other method than `Assembly.Load`, so that PowerShell finds the types? (I use the overload getting a byte array, so that the `.dll` file isn't locked and can be deleted/overwritten.)",
+      "created_at": "2020-03-20T15:38:38Z",
+      "updated_at": "2020-03-20T15:39:16Z"
+    },
+    {
+      "author": "grzegorz-wolszczak",
+      "author_association": "NONE",
+      "body": "Few answers above: https://github.com/PowerShell/PowerShell/issues/12052#issuecomment-595810608",
+      "created_at": "2020-03-20T15:55:57Z",
+      "updated_at": "2020-03-20T15:55:57Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Sorry that I missed this one for so long :(\r\nTo be honest, I didn't realize `Assembly.Load(byte[])` loads the assembly to an anonymous load context. I did know `Assembly.LoadFile` does that, but thought it was fine to not discover it because `Assembly.LoadFile` is useful only when you are trying to load a conflict assembly file and then do pure reflection on the returned assembly.\r\n\r\nI think @SeeminglyScience's proposal makes sense. Let me look into this more and reply back.",
+      "created_at": "2020-03-20T16:09:55Z",
+      "updated_at": "2020-03-20T16:09:55Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "There was another issue where we discussed this that I'd like to link to update the original opener, but I can't find it. Let me know if you remember it",
+      "created_at": "2020-03-25T19:51:10Z",
+      "updated_at": "2020-03-25T19:51:10Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "That conversation was in #11088 which introduced this regression. I already notified @stevenebutler who reported it.",
+      "created_at": "2020-03-26T17:03:40Z",
+      "updated_at": "2020-03-26T17:03:40Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #12203, which has now been successfully released as `v7.1.0-preview.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.2)\n",
+      "created_at": "2020-04-23T18:03:41Z",
+      "updated_at": "2020-04-23T18:03:41Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #12203, which has now been successfully released as `v7.0.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.1)\n",
+      "created_at": "2020-05-14T22:53:21Z",
+      "updated_at": "2020-05-14T22:53:21Z"
+    }
+  ],
+  "created_at": "2020-03-06T14:46:00Z",
+  "number": 12052,
+  "state": "closed",
+  "title": "Powershell 7.x : Cannot use type from dll (built for netstandard2.0)",
+  "updated_at": "2020-05-14T22:53:21Z"
+}

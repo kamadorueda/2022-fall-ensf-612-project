@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6305",
+  "author": "ericsciple",
+  "body": "The problem:\r\n`get-childitem env:` fails on Windows when an environment variable exists twice, each instance cased differently.\r\n\r\nThe scenario:\r\nOn Windows, set the environment variable `NPM_CONFIG_PATH` to control where the npm cache is created. And use npm to run unit tests, use powershell within a unit test, and from powershell invoke `get-childitem env:`. Note, it is common to use `npm test` to build and test a nodejs project.\r\n\r\nIt appears npm internally creates environment variables to manage state, and a lower-case variable `npm_config_path` is created. When powershell is invoked from the unit test, the environment variables `NPM_CONFIG_PATH` and `npm_config_path` are both set.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nOn Windows, tested with npm v5.6.0 in my PATH.\r\n\r\n```powershell\r\nWrite-Host \"******************** SETTING NPM_CONFIG_PATH ********************\"\r\n$null = mkdir env-test\r\ncd env-test\r\n$env:NPM_CONFIG_PATH = $PWD\r\nWrite-Host \"******************** CREATING PACKAGE.JSON ********************\"\r\n& npm init --force --yes\r\nWrite-Host \"******************** MODIFYING PACKAGE.JSON ********************\"\r\n$package = Get-Content package.json | ConvertFrom-Json\r\n$package.scripts.test = \"pwsh -command Get-ChildItem env:\"\r\nSet-Content -LiteralPath package.json -Encoding UTF8 -Value (ConvertTo-Json -InputObject $package -Depth 99)\r\nGet-Content package.json\r\nWrite-Host \"******************** TESTING ENV PS DRIVE, VIA NPM ********************\"\r\n& npm test\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nPowerShell should gracefully handle the duplicate environment variable. The `set` builtin in cmd.exe handles it gracefully. .NET `Environment.GetEnvironmentVariables()` handles it gracefully.\r\n\r\nActual behavior\r\n---------------\r\n\r\nGet-ChildItem fails with \\\"An item with the same key has already been added. Key: NPM_CONFIG_PATH\\\"\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.1\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2018-03-21T19:30:50Z",
+  "comments": [
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Does not repro on macOS",
+      "created_at": "2018-03-06T00:03:31Z",
+      "updated_at": "2018-03-06T00:03:31Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Here is the fix we made for macOS/Linux:  https://github.com/PowerShell/PowerShell/blob/c1c5344a8897262433141ecbc13bb06ac2c4bbef/src/System.Management.Automation/namespaces/EnvironmentProvider.cs#L185\r\n\r\nUpdate: Linux/macOS actually support this scenario... Windows does not.  This would only mask the issue NPM is creating.",
+      "created_at": "2018-03-06T00:05:22Z",
+      "updated_at": "2018-03-06T00:14:23Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "We would need to verify that making this change for windows would not be breaking.\r\n",
+      "created_at": "2018-03-06T00:09:05Z",
+      "updated_at": "2018-03-06T00:09:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13:\r\n\r\n#6320 does fix the issue, but I suggest resolving it differently:\r\n\r\nThat `npm` even _manages_ to create a separate variable that differs by case only is unfortunate - given that environment variable names are case-insensitive (but case-preserving) in all other contexts I am aware of.\r\n\r\nIn effect, however, there's only _one_ environment variable _on retrieval by name_, and - irrespective of what case variation in the _name_ was used last - ~~the last _value_ assigned wins - from what I can tell.~~\r\n\r\nThus, I suggest sticking with the case-insensitive dictionary and simply _replacing_ the value of the existing dictionary entry if a case variation is encountered in the process of enumerating `Environment.GetEnvironmentVariables()`\r\n\r\nThere is _no_ benefit in listing all case variations of a given name - all it creates is confusion, given that the values of ~~earlier~~ [other] case variants are unreachable by name.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-03-08T23:09:19Z",
+      "updated_at": "2018-03-21T15:46:48Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@mklement0  \r\nI agreed that there is little to no value retrieving both values.  I'm open to the change if the cost of the change is justified, but the cost of the change is increased complexity and therefore maintenance.\r\n\r\nOur provider remains case-insensitive, case-preserving.  You can never assign two variables with the same case (due to dotnet behavior and we have tests to verify this.)  I chose this implementation over the other implementations because it was simpler with the only side effect occurring during the scenario we are fixing.\r\n\r\nFixing this while preserving the case insensitive dictionary would require additional specialized logic for windows, while this fix removed the specialized logic for windows.  I believe the side-effects are reasonable unless I'm incorrect about them being limited to the scenario being fixed.  ",
+      "created_at": "2018-03-08T23:46:33Z",
+      "updated_at": "2018-03-08T23:46:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13: Fixing this in a Windows-friendly manner would be simple, I believe:\r\nThe only change needed is to replace:\r\n\r\n```csharp\r\nproviderTable.Add((string)entry.Key, entry);\r\n```\r\n\r\nwith:\r\n\r\n```csharp\r\ntry {\r\n    providerTable.Add((string)entry.Key, entry);\r\n} catch (System.ArgumentException) { // Windows only: duplicate key (variable name that differs only in case)\r\n    // NOTE: Even though this shouldn't happen, it can, e.g. when npm\r\n    //       creates duplicate environment variables that differ only in case -\r\n    //       see https://github.com/PowerShell/PowerShell/issues/6305.\r\n    //       However, because retrieval *by name* later is invariably\r\n    //       case-INsensitive, in effect only a *single* variable exists.\r\n    //       We simply ask Environment.GetEnvironmentVariable() which value is\r\n    //       the effective one, and use that.\r\n    providerTable[(string)entry.Key] = new DictionaryEntry((string)entry.Key, Environment.GetEnvironmentVariable((string)entry.Key));\r\n}\r\n```\r\nNote:\r\n\r\n* This assumes that the current distinction between a case-sensitive (Unix) and case-INsensitive dictionary (Windows) is retained.\r\n\r\n* No attempt is made to decide which particular case variant among the duplicate names is the \"real\" one associated with the \"winning\" value - I don't think we need to worry about that.\r\n\r\n---\r\n\r\nI've chosen the above approach because I've come to realize that it's _not_ necessarily the _definition order_ that determines the values that wins; here's a simplified reproduction of the original problem:\r\n\r\n```powershell\r\n$env:FOO = 'first'\r\nnode -pe @'\r\n    env = {}\r\n    env.PATH = process.env.PATH\r\n    env.FOO = process.env.FOO\r\n    env.foo = 'last'\r\n    require('child_process').execSync(\\\"pwsh -nop -command $env:fOo; [environment]::getenvironmentvariable('fOo'); '---'; [environment]::getenvironmentvariables(); \\\", { env: env }).toString()\r\n'@\r\n```\r\n\r\nThe above prints (note how the _first_ definition remained in effect):\r\n\r\n```none\r\nfirst\r\nfirst\r\n---\r\n\r\nName                           Value\r\n----                           -----\r\nfoo                            last\r\nUSERPROFILE                    C:\\Users\\jdoe\r\nPROMPT                         $P$G\r\nPSModulePath                   C:\\Users\\jdoe\\Documents\\PowerShell\\Modules;C:\\Program Files\\PowerShell\\Modules;c:\\program files\\powershell\\6.0.1\\Modules\r\nLOGONSERVER                    \\\\MK-W10\r\nCOMSPEC                        C:\\WINDOWS\\system32\\cmd.exe\r\nFOO                            first\r\nSYSTEMROOT                     C:\\WINDOWS\r\nWINDIR                         C:\\WINDOWS\r\nSYSTEMDRIVE                    C:\r\nHOMEPATH                       \\Users\\jdoe\r\nPATHEXT                        .COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC\r\nPATH                           C:\\ProgramData\\Oracle\\Java\\javapath;C:\\Program Files\\CMake\\bin;C:\\tools\\ruby23\\bin;C:\\Python35\\Scripts\\;C:\\Python35\\;C:\\WINDOWS\\system32;C:\\WINDO...\r\nUSERDOMAIN                     JDOE-W10\r\nTEMP                           C:\\Users\\jdoe\\AppData\\Local\\Temp\r\nUSERNAME                       jdoe\r\nHOMEDRIVE                      C:\r\n```\r\n",
+      "created_at": "2018-03-09T05:59:04Z",
+      "updated_at": "2018-03-09T05:59:04Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@mklement0 The fix you were suggesting was easy enough to understand.  The question is what is the benefit.  Let us review the differences between the two changes:\r\n\r\n|                                             |My fix      | your fix       |\r\n|---------------------------|----------|------------|\r\n|case sensitivity                   |Unaltered  |Unaltered  | \r\n|what show up                    | Both items| One Item (potentially hiding a value)  |\r\n|complexity versus original |Reduced     | Increased |\r\n\r\nSo, is only seeing one item (hiding one value) in the environment provider really worth the increased complexity.  \r\n\r\nYour example also shows that one value could be hidden with your fix.  ",
+      "created_at": "2018-03-09T19:08:24Z",
+      "updated_at": "2018-03-09T19:08:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13:\r\n\r\nI hope we can agree that complexity of the implementation should not be the driving factor here, given that even my _relatively_ more complex fix is, in the end, quite simple.\r\n\r\nIf we focus on the user experience:\r\n\r\n* My approach hides a value that for all intents and purposes doesn't exist, so hiding it is a good thing and indeed the main purpose of my fix.\r\n\r\n* Conversely, not hiding it is apt to create confusion - which value is in effect?\r\n\r\n* If someone truly wanted to get at the hidden value - and I don't see why - they can still use `[Environment]::GetEnvironmentVariables()`.\r\n\r\n\r\n",
+      "created_at": "2018-03-09T19:28:26Z",
+      "updated_at": "2018-03-09T19:28:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13:\r\n\r\nLet's consider a concrete example of the side effects of _not_ hiding the case variants:\r\n\r\n* Assume that a \"rogue\" application has created case variants `FOO_bar`, `foo_bar` and `fOo_bar`, with distinct values `1`, `2`, `3` (to recap: only _one_ of which is actually visible if you acess `$env:foo_bar` in _any_ case variation).\r\n\r\n* Additionally, assume the existence of (single) var. `foo_other` with value `4`.\r\n\r\n* Now I want to get the values  of these variables using a  *wildcard expression* with `Get-Item`:\r\n\r\n```powershell\r\n# With your fix, you'd get *4* matches\r\n> Get-Item env:foo_* \r\nName                           Value                                                                                                                                               \r\n----                           -----                                                                                                                                               \r\nFOO_bar                            1      \r\nfoo_bar                            2                                                                                                                                                  \r\nfOo_bar                            3                \r\nfoo_other                          4                                                                                                                                  \r\n```\r\n\r\nNow, which one is the `foo_bar` value I'm looking for, which one is actually _in effect_ for a lookup _by name_? \r\nEven if  you know what the underlying problem is, you would (a) have to anticipate it every time and (b) work around it in a cumbersome fashion.",
+      "created_at": "2018-03-09T19:42:03Z",
+      "updated_at": "2018-03-09T19:44:46Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@mklement0 \r\nI found something that convinced me to make the change.  Get-Item does become case sensitive.  Thanks for your feedback.\r\n\r\n```\r\nPS > node -pe @'\r\n>>     env = {}\r\n>>     env.FOO = 'first'\r\n>>     require('child_process').execSync(\\\"pwsh -nop -command get-item env:FOO; get-item env:foo; $env:foo \\\", { env: en\r\nv }).toString()\r\n>> '@\r\n\r\nName                           Value\r\n----                           -----\r\nFOO                            first\r\nfirst\r\n\r\n```\r\n",
+      "created_at": "2018-03-09T21:21:24Z",
+      "updated_at": "2018-03-09T21:21:24Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@mklement0 I updated the PR.  I didn't use try-catch, but the fix is equivalent.  Assuming, we don't care which value ends up in the provider.",
+      "created_at": "2018-03-20T19:26:25Z",
+      "updated_at": "2018-03-20T19:26:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13: While we needn't worry what case variant of the _name_ ends up being reported by the provider, I think it is crucial that we make sure that the _value_ is the _effective_ one, i.e., the one that `$env:foo` returns - hence my use of `Environment.GetEnvironmentVariable((string)entry.Key)` to determine the value.",
+      "created_at": "2018-03-21T02:34:48Z",
+      "updated_at": "2018-03-21T02:34:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13: To illustrate the previous point:\r\n\r\nMy first `node` snippet demonstrated that it is - regrettably - possible to create case-variant-only environment variables with _distinct values_; e.g., `FOO` with value `first` and `foo` with value `last`.\r\n\r\nHowever, on _retrieving_ the value, only one of them \"wins\", and we shouldn't speculate about which one it is, as that is an implementation detail (though it seems that whatever one is assigned _first_ to the `env` JS object in my example is the winner).\r\n\r\nSpecifically, we want to avoid a scenario where `Get-Item env:foo` returns `last`, whereas `$env:foo` returns `first`.\r\n\r\nBy simply consulting `Environment.GetEnvironmentVariable((string)entry.Key)` whenever a case variant is encountered during the enumeration, we ensure that `Get-Item` too reflects the \"winning\" value.",
+      "created_at": "2018-03-21T15:40:52Z",
+      "updated_at": "2018-03-21T15:40:52Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "The only goal here is to prevent the provider from crashing.  This is beyond the scope of this issue.  Please file a new issue to handle this feature request.  I don't think your fix is as simple as it sounds.",
+      "created_at": "2018-03-21T17:19:07Z",
+      "updated_at": "2018-03-21T17:19:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The only goal here is to prevent the provider from crashing.\r\n\r\nThat being the _only_ goal is regrettable, given that we already know that the fix you just merged introduces an insidious - if rare - inconsistency and that we've discussed a proper fix. (The rarity may actually heighten the insidiousness.)\r\n\r\n> Please file a new issue to handle this feature request.\r\n\r\nPlease see #6460\r\n\r\n> I don't think your fix is as simple as it sounds.\r\n\r\nPlease tell us why - over at #6460, which duplicates much of what we've discussed here.\r\n\r\nAll in all, not concluding the discussion here has ended up creating more work for everyone.\r\n\r\n",
+      "created_at": "2018-03-22T03:22:07Z",
+      "updated_at": "2018-03-22T03:22:07Z"
+    }
+  ],
+  "created_at": "2018-03-03T01:55:32Z",
+  "number": 6305,
+  "state": "closed",
+  "title": "get-childitem env: fails on Windows when an environment variable is defined twice, cased differently",
+  "updated_at": "2018-03-24T18:52:24Z"
+}

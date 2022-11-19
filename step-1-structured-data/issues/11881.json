@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11881",
+  "author": "rkitover",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\nfunction read_services {\r\n    $entry\r\n    $entries = @()\r\n\r\n    foreach ($line in get-content /windows/system32/drivers/etc/services) {\r\n        ($name, $port, $description) = $line -split ' +'\r\n\r\n        $entry && ($entries += $entry)\r\n\r\n        $entry = [ordered]@{\r\n            'name'    = $name;\r\n            'port'    = $port;\r\n            'comment' = $description;\r\n        };\r\n    }\r\n}\r\n\r\n$services = read_services\r\n\r\nwrite-host $services.count\r\n```\r\n\r\nOutput:\r\n```\r\n41903\r\n```\r\n\r\nWith the `&&` construct changed to an if statement, it works correctly:\r\n\r\n```powershell\r\nfunction read_services {\r\n    $entry\r\n    $entries = @()\r\n\r\n    foreach ($line in get-content /windows/system32/drivers/etc/services) {\r\n        ($name, $port, $description) = $line -split ' +'\r\n\r\n        if ($entry) { $entries += $entry }\r\n\r\n        $entry = [ordered]@{\r\n            'name'    = $name;\r\n            'port'    = $port;\r\n            'comment' = $description;\r\n        };\r\n    }\r\n\r\n    return $entries\r\n}\r\n\r\n$services = read_services\r\n\r\nwrite-host $services.count\r\n```\r\n\r\nOutput:\r\n\r\n```\r\n287\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.2\r\nOS                             Microsoft Windows 10.0.19551\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-02-21T00:00:27Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Using an _expression_ such as `$entry` as the LHS of `&&` is pointless, because `&&` and `||` act on the _success status_ of the LHS, and an expression's success status is _always_ `$true` (unless a statement-terminating error occurs, in which case the entire statement is terminated).\r\n\r\n```powershell\r\nPS> $null && 'yes'\r\nyes\r\n```\r\n\r\nUse `&&` and `||` only with _commands_, where the implied `$?` value - not the command's _output_ - determines the success status.",
+      "created_at": "2020-02-19T02:29:56Z",
+      "updated_at": "2020-02-19T02:33:38Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think @rjmholt was the one doing the work with `&&` and `||` if I'm not mistaken? \ud83e\udd14 (Feel free to correct me if my memory is incorrect!)\r\n\r\nEssentially, `&&` in PS does _not_ work like it does in C#. It instead behaves somewhat more closely to how it behaves in Bash and Bash-like shells, where it acts on the _perceived success or failure of the prior command_.\r\n\r\n`&&` only triggers the following statement if the prior statement succeeds. `||` is the exact opposite. Whether or not a statement _succeeds_ is typically down to whether or not it generates an error of some kind, and nothing more.\r\n\r\nYou can do something similar to what you seem to be looking to do with PS's logical `-and` operator to a similar effect:\r\n\r\n```powershell\r\n$entry -and ($entries += $entry)\r\n```\r\n\r\nHowever, do note that `-and` is a logical expression and will always return true or false. If you want this to behave like the if statement, you'll need to also capture or redirect the output:\r\n\r\n```powershell\r\n$entry -and ($entries += $entry) > $null\r\n\r\n# or\r\n\r\n$null = $entry -and ($entries += $entry)\r\n```",
+      "created_at": "2020-02-19T02:32:39Z",
+      "updated_at": "2020-02-19T02:34:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A few asides, @rkitover:\r\n\r\n* `$entry` by itself doesn't declare a variable; it outputs the value of a non-existent `$entry` variable, which defaults to `$null`.\r\n\r\n* No need for `(...)` around destructuring assingments.\r\n* _Unary_ `-split` splits by nonempty runs of whitespace (trimming and leading whitespace too)\r\n\r\nThus:\r\n\r\n```powershell\r\n$name, $port, $description = -split $line\r\n```\r\n\r\n* Building arrays with `+=` is inefficient (a _new_ array is created in each iteration) and verbose; simply treat the entire `foreach` loop as an expression and let PowerShell collect the results in an array for you, which bypasses your initial problem:\r\n\r\n```powershell\r\n[array] $entries  = foreach ($line in get-content /windows/system32/drivers/etc/services) {\r\n       $name, $port, $description = -split $line\r\n       # Construct and output \r\n       [ordered] @{\r\n            name   = $name\r\n            port   = $port\r\n            comment = $description\r\n        }\r\n    }\r\n}\r\n```",
+      "created_at": "2020-02-19T02:45:47Z",
+      "updated_at": "2020-02-19T02:45:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 \r\n\r\n> Whether or not a statement succeeds is typically down to whether or not it generates an error of some kind, and nothing more.\r\n\r\nEssentially, it comes down to the value of `$?` after execution of the _command_ (or, pointlessly, _expression_; due to the current grammar it can't be a whole _statement_), which means that `$?` is `$false` if:\r\n\r\n* with a PowerShell command: if it writes to the error stream, which means emitting at least one _non-terminating error_.\r\n\r\n* with an external program: if it reports a _nonzero exit code_ (as reflected in `$LASTEXITCODE`).\r\n\r\n   * Regrettably, due to #10512, a `2>` redirection incorrectly sets `$?` to `$false` in the presence of stderr output even if `$LASTEXITCODE` is `0`.\r\n\r\n> with PS's logical -and operator \r\n\r\nI suggest not recommending the use of `-and`, because it serves a fundamentally different purpose.\r\n\r\nAn `if` statement or ternary conditional is the appropriate construct to use for _expressions_ and also `Test-*` commands (which signal their success by _outputting_ a Boolean).\r\n",
+      "created_at": "2020-02-19T03:01:30Z",
+      "updated_at": "2020-02-19T03:01:30Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Yes `$x && $y` is **not** the same as `$x; if ($x) { $y }`. It's instead the same as `$x; if ($?) { $y }`.\r\n\r\n`&&` and `||` are designed to encode command success, not expression value. In that case, you should use `if` or a ternary (or add your \ud83d\udc4d to [this proposal](https://github.com/PowerShell/PowerShell/issues/10596)).",
+      "created_at": "2020-02-19T03:12:46Z",
+      "updated_at": "2020-02-19T03:12:46Z"
+    },
+    {
+      "author": "rkitover",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm sure eventually you guys will make all of this more intuitive, thank you for all the great info! I'm very new to powershell.\r\n\r\nThe thing that actually confused me here is that powershell can return data from multiple places and it will all be streamed together. I have never seen anything like that before. That's actually pretty awesome.\r\n\r\nWhen I see differences from UNIX for some things in powershell, usually powershell makes the correct design choice. Not to say that everything is not controversial.",
+      "created_at": "2020-02-19T08:17:03Z",
+      "updated_at": "2020-02-19T08:17:03Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If it helps any @rkitover, you might want to check out https://aka.ms/pskoans to get familiar with some of the nuance that can trip you up from time to time in PS \ud83d\ude42 \r\n\r\nAlso, I highly recommend reading through the `about_*` help docs in PS -- they're all available from `Get-Help` or the online documentation. There's a _ton_ of good info in those.\n\n<blockquote><img src=\"https://repository-images.githubusercontent.com/139899094/a0dcb680-69bf-11e9-81ae-38bab4cde89b\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/vexx32/PSKoans\">vexx32/PSKoans</a></strong></div><div>A simple, fun, and interactive way to learn the PowerShell language through Pester unit testing. - vexx32/PSKoans</div></blockquote>",
+      "created_at": "2020-02-19T12:18:56Z",
+      "updated_at": "2020-02-19T12:18:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A final note on the pipeline-chain operators, `&&` and `||` (see [`about_Pipeline_Chain_Operators`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pipeline_chain_operators)): They were borrowed from the world of POSIX-like shells (e.g., Bash) and are primarily useful for chaining _external programs_ (e.g., `git`) that reliably reflect their overall success or failure though their _process exit code_.\r\n\r\n> The thing that actually confused me here is that powershell can return data from multiple places and it will all be streamed together. I have never seen anything like that before. That's actually pretty awesome.\r\n\r\nIt is indeed awesome if you learn to harness it to your advantage.\r\n\r\nPowerShell balances many worlds deftly (mostly - interaction with external programs is a perennial trouble spot), but the challenge is that if you come from only _one_ similar world, such as Unix shells or traditional programming languages, and expect everything to work the same, pain ensues.\r\n\r\nWhile you can limp along with only ever using `return` and `echo 'foo'`, ..., it really pays to familiarize yourself with the fundamentals of PowerShell, which is what @vexx32's PS Koans project helps with (plus the `about_*`  topics he mentions).\r\n\r\nPart of learning the fundamentals is learning how to use the help system (`Get-Help`) effectively, so you can perform targeted lookups not just for whole commands, but also for examples and individual parameters.\r\n\r\nThere is no support (yet) for looking up _operators_ directly via `Get-Help` - see the suggestion in #11339, which also points to a helper command, `Show-OperatorHelp`, which would allow you to run <br>`Show-OperatorHelp '&&'`, for instance.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-02-19T14:19:08Z",
+      "updated_at": "2020-02-19T14:19:08Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-02-21T00:00:24Z",
+      "updated_at": "2020-02-21T00:00:24Z"
+    }
+  ],
+  "created_at": "2020-02-19T01:56:03Z",
+  "number": 11881,
+  "state": "closed",
+  "title": "weird behavior with && and array concatenation",
+  "updated_at": "2020-02-21T00:00:27Z"
+}

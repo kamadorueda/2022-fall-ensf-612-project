@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9870",
+  "author": "danielboth",
+  "body": "# Summary of the new feature/enhancement\r\n\r\n<!-- \r\nA clear and concise description of what the problem is that the new feature would solve.\r\nTry formulating it in user story style (if applicable):\r\n'As a user I want X so that Y.' with X being the being the action and Y being the value of the action.\r\n-->\r\nAs a user I would like to be able to capture the output when a function or cmdlet is called using -WhatIf. This can be very useful when implementing tooling on top of PowerShell, for example a REST API, where we also want to be able to see what action would happen. Currently, we need to implement a separate code path, as the output of -WhatIf cannot be captured.\r\n\r\nIn PowerShell that could look like this:\r\n```PowerShell\r\n$whatIf = New-PSDrive -PSProvider FileSystem -Name Test -Root c:\\temp -WhatIf 7>&1\r\n\r\n# This would contain the messages\r\n$whatIf.Message\r\n\r\n# This would contain the target\r\n$whatIf.Target\r\n\r\n# This would contain the action:\r\n$whatIf.Action\r\n```\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\n<!-- \r\nA clear and concise description of what you want to happen.\r\nConsider providing an example PowerShell experience with expected result.\r\n-->\r\nI would like to see a separate output stream for the WhatIf messages, like the information stream which was added in PS5, but now for WhatIf messages.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "An alternative that might be quicker is to implement a `$WhatIfView` in the style of `$ErrorView` and have 'Information' as an option that would send Whatifs to the Information Stream. This would solve the problem without introducing a lot of potentially breaking changes associated with a new stream.\r\n\r\nUse Case: I want to do -Whatif Testing on commands in Pester, but the Whatif output completely obliterates my test screen output and I have no way to suppress it short of maybe running it in a custom C# powershell host (not ideal at all)\r\n\r\nWhat do you think @iSazonov?",
+      "created_at": "2020-03-14T02:05:10Z",
+      "updated_at": "2020-03-14T02:07:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Tbh I don't know why -WhatIf messages _don't_ get submitted to the Information stream. That's pretty much what they **are**, even if only in principle at the moment.",
+      "created_at": "2020-03-14T03:33:54Z",
+      "updated_at": "2020-03-14T03:33:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "These messages present in transcription:\r\nhttps://github.com/PowerShell/PowerShell/blob/07962a9749ab50444ebe87101e5bacf5b5f47f88/src/System.Management.Automation/engine/MshCommandRuntime.cs#L1520-L1521\r\n\r\nIf it does not help, technically we could replace the console output with Write-Host/Write-Information.",
+      "created_at": "2020-03-14T09:19:40Z",
+      "updated_at": "2020-03-14T09:19:40Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov as mentioned the goal is to be able to suppress them or redirect them. However I'd be concerned just directly replacing the console output as Write-Information could be considered a breaking change depending on existing script expectations, hence the recommendation of a feature flag to enable it.\r\n\r\nI'd be totally cool with it being the default though :)",
+      "created_at": "2020-03-15T16:10:48Z",
+      "updated_at": "2020-03-15T16:10:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> a breaking change depending on existing script expectations\r\n\r\nWith Write-Host we get a console output so there is no a breaking change.",
+      "created_at": "2020-03-15T18:33:18Z",
+      "updated_at": "2020-03-15T18:33:18Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov I guess I meant more if someone is expecting certain information output on a script and now the script has a ton more information output than before and their regexes or whatever weren't very sound. This would only be in the case you added -Whatif to the script anyways so the chance is very very low of a regression I agree, probably could just be considered a feature change.",
+      "created_at": "2020-03-15T18:48:22Z",
+      "updated_at": "2020-03-15T18:48:22Z"
+    },
+    {
+      "author": "aolszowka",
+      "author_association": "NONE",
+      "body": "We have been using the `Transcript` work around for a bit internally. However this breaks down if you attempt to perform this in a remote context like so:\r\n\r\n```powershell\r\nfunction Test-ShouldProcessHost {\r\n    [CmdletBinding(SupportsShouldProcess = $true)]\r\n    param()\r\n    process {\r\n        Invoke-Command -HostName $remoteIP -UserName 'ssh' -ScriptBlock {\r\n            function Test-ShouldProcess {\r\n                [CmdletBinding(SupportsShouldProcess = $true)]\r\n                param()\r\n                process {\r\n                    if ($PSCmdlet.ShouldProcess(\"Widget\", \"Frob\")) {\r\n                    }\r\n                }\r\n            }\r\n\r\n            Test-ShouldProcess -WhatIf:$using:WhatIfPreference\r\n        }\r\n    }\r\n}\r\n\r\nStart-Transcript RemoteVerboseLogging.txt\r\nWrite-Host '###################################################################'\r\nWrite-Host '# Test With WhatIf False'\r\nWrite-Host '###################################################################'\r\nTest-ShouldProcessHost -WhatIf\r\nStop-Transcript\r\n```\r\n\r\nIf you run this in Visual Studio code you get the following output:\r\n\r\n```text\r\nTranscript started, output file is RemoteVerboseLogging.txt\r\n###################################################################\r\n# Test With WhatIf False\r\n###################################################################\r\nWhat if: Performing the operation \"Frob\" on target \"Widget\".\r\nTranscript stopped, output file is S:\\Git\\SimpleExamples\\WhatIf\\RemoteVerboseLogging.txt\r\n```\r\n\r\nHowever if you attempt to look at the transcript that looks like this (note the missing What if):\r\n\r\n```text\r\n**********************\r\nPowerShell transcript start\r\nStart time: 20210608113944\r\nUsername: redacted\\Ace.Olszowka\r\nRunAs User: redacted\\Ace.Olszowka\r\nConfiguration Name: \r\nMachine: redacted (Microsoft Windows NT 10.0.18363.0)\r\nHost Application: C:\\Program Files\\PowerShell\\7\\pwsh.dll -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command Import-Module 'c:\\Users\\ace.olszowka\\.vscode\\extensions\\ms-vscode.powershell-2021.5.1\\modules\\PowerShellEditorServices\\PowerShellEditorServices.psd1'; Start-EditorServices -HostName 'Visual Studio Code Host' -HostProfileId 'Microsoft.VSCode' -HostVersion '2021.5.1' -AdditionalModules @('PowerShellEditorServices.VSCode') -BundledModulesPath 'c:\\Users\\ace.olszowka\\.vscode\\extensions\\ms-vscode.powershell-2021.5.1\\modules' -EnableConsoleRepl -StartupBanner '=====> PowerShell Integrated Console v2021.5.1 <=====\r\n' -LogLevel 'Normal' -LogPath 'c:\\Users\\ace.olszowka\\.vscode\\extensions\\ms-vscode.powershell-2021.5.1\\logs\\1623162116-2a6aaa7a-8c81-4f8f-adeb-1db8912c38d51623157853644\\EditorServices.log' -SessionDetailsPath 'c:\\Users\\ace.olszowka\\.vscode\\extensions\\ms-vscode.powershell-2021.5.1\\sessions\\PSES-VSCode-13516-338205' -FeatureFlags @() \r\nProcess ID: 19052\r\nPSVersion: 7.1.3\r\nPSEdition: Core\r\nGitCommitId: 7.1.3\r\nOS: Microsoft Windows 10.0.18363\r\nPlatform: Win32NT\r\nPSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.10032.0, 6.0.0, 6.1.0, 6.2.0, 7.0.0, 7.1.3\r\nPSRemotingProtocolVersion: 2.3\r\nSerializationVersion: 1.1.0.1\r\nWSManStackVersion: 3.0\r\n**********************\r\nTranscript started, output file is RemoteVerboseLogging.txt\r\n###################################################################\r\n# Test With WhatIf False\r\n###################################################################\r\n**********************\r\nPowerShell transcript end\r\nEnd time: 20210608113946\r\n**********************\r\n```\r\n\r\nAt very least probably a bug with `Transcript` but the rest of the points (such as redirection/manipulation) still stand and is what got us down this path.",
+      "created_at": "2021-06-08T17:48:25Z",
+      "updated_at": "2021-06-08T17:48:25Z"
+    },
+    {
+      "author": "dkattan",
+      "author_association": "NONE",
+      "body": "I would love to see WhatIf messages on the InformationStream. I'm trying to use the WhatIf output to test if certain things exist already, like a compliance check. It would dry my scripts up a lot.",
+      "created_at": "2022-01-24T04:16:48Z",
+      "updated_at": "2022-01-24T04:16:48Z"
+    }
+  ],
+  "created_at": "2019-06-11T16:40:55Z",
+  "number": 9870,
+  "state": "open",
+  "title": "Feature Request: Output stream for WhatIf messages",
+  "updated_at": "2022-01-24T04:16:48Z"
+}

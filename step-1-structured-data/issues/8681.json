@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8681",
+  "author": "vexx32",
+  "body": "<!-- Anything that looks like this is a comment and can't be seen after the Pull Request is created. -->  \r\n\r\n## PR Summary\r\n\r\nStandardizes numeric conversions by invoking `Parser.ScanNumber()` during conversions, allowing numeric conversions to recognise and appropriately handle suffixed numerals that are specific to the parser and otherwise not known to PS's standard casting and conversion methods.\r\n\r\n* Added `shouldTryCoercion` parameter to `Parser.ScanNumber()` which has a default value of `true`. When the method is called without this parameter, it will throw instead of attempting to recurse back into `LanguagePrimitives.ConvertTo()`\r\n* Added code paths to `ConvertStringToInteger()`, `ConvertStringToReal()`, and `ConvertStringToDecimal()` in `LanguagePrimitives` to attempt to parse numbers using the PS parser itself.\r\n  * This will allow operations like `[int]\"1ulgb\"` where the cast string would otherwise not be recognised as a number.\r\n  * If this parse fails, it will fall back to the current conversion methods to account for things like `[int]\"1,000\"` which can be converted with more conventional methods but not recognised by the parser.\r\n* Altered existing method binder to include the default parameter to prevent weird behaviour.\r\n  * The binder mismatch was causing errors to be completely hidden from normal console display... somehow.\r\n\r\nResolves #7710\r\n\r\n/cc @lzybkr @rjmholt @SteveL-MSFT  \r\n\r\n~~***However***, attempting to convert _invalid_ values (that normally result in a parsing exception e.g., `[int]\"200y\"`) instead triggers a `StackOverflowException`, crashing PowerShell. I don't know enough about the internals to figure out exactly what's going wrong here, would appreciate some guidance!~~\r\n\r\n@SeeminglyScience helped me find out where it was recursing until stack overflow; the issue is that calling `Parser.ScanNumber()` will eventually attempt to invoke `LanguagePrimitives.ConvertTo()` which will eventually attempt to re-invoke the method that originally called `Parser.ScanNumber()`. Resolved by adding a default parameter which instead throws an exception, and the conversion methods fall back to their original code paths.\r\n\r\n## PR Context  \r\n\r\nSee #7710\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [ ] [Change is not breaking](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.  \r\n- **User-facing changes**\r\n    - [ ] Not Applicable\r\n    - **OR**  \r\n    - [X] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [X] Issue filed: https://github.com/MicrosoftDocs/PowerShell-Docs/issues/3650\r\n- **Testing - New and feature**\r\n    - [ ] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [x] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n        - [ ] [Add `[feature]` to your commit messages if the change is significant or affects feature tests](https://github.com/PowerShell/PowerShell/blob/master/docs/testing-guidelines/testing-guidelines.md#requesting-additional-tests-for-a-pr)\r\n",
+  "closed_at": "2019-02-04T20:22:06Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr @rjmholt It seems that by calling `ScanNumber()` in here, we're potentially triggering recursion when the value is not a valid number value. `ScanNumber()` calls `LanguagePrimitives.ConvertTo()` which eventually ends up calling the `ConvertStringToInteger` or another related conversion method, which just re-invokes `Parser.ScanNumber()` \ud83d\ude15 \r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/f1218bd3d9ba97ea13cc7e37a0c5a82ed9fa9556/src/System.Management.Automation/engine/parser/Parser.cs#L250-L256\r\n\r\nThis seems to be the source of the stackoverflow I'm encountering here. Not really sure how best to avoid this one, though. \r\n\r\n(ty @SeeminglyScience for double-checking my blindness and pointing this out!)\r\n\r\nPer @iSazonov's [comment](https://github.com/PowerShell/PowerShell/issues/7710#issuecomment-455428521) in #7710 I'll look to see if we can keep a Parser handy in LanguagePrimitives for this purpose, and perhaps along the way I'll find a good way to circumvent the issue here.",
+      "created_at": "2019-01-18T04:45:29Z",
+      "updated_at": "2019-01-18T13:11:40Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Per @iSazonov's comment in #7710 I'll look to see if we can keep a Parser handy in LanguagePrimitives for this purpose, and perhaps along the way I'll find a good way to circumvent the issue here.\r\n\r\nThat's a great idea!\r\n\r\n> `ScanNumber()` calls `LanguagePrimitives.ConvertTo()` which eventually ends up calling the `ConvertStringToInteger` or another related conversion method, which just re-invokes `Parser.ScanNumber()` \ud83d\ude15\r\n\r\nThe only way to stop it is going to be some way of communicating to `ScanNumber()` that `LanguagePrimitives.ConvertTo()` has called it and that it should bottom out. However, `LanguagePrimitives.ConvertTo()` is public, whereas `ScanNumber()` is not. So perhaps the ticket is adding a default parameter to the internal `ScanNumber()` method: `Parser.ScanNumber(string strToConvert, Type resultType, bool shouldTryCoercion = true)`. Then when it's called from `LanguagePrimitives.ConvertTo()`, you can use `Parser.ScanNumber(str, t, shouldTryCoercion: false)` while leaving all other calls the same.\r\n\r\nThe relevant Parser code would then be:\r\n\r\n```csharp\r\n if (shouldTryCoercion && (token == null || !tokenizer.IsAtEndOfScript(token.Extent))) \r\n { \r\n     // We call ConvertTo, primarily because we expect it will throw an exception, \r\n     // but it's possible it could succeed, e.g. if the string had commas, our lexer \r\n     // will fail, but Convert.ChangeType could succeed. \r\n  \r\n    return LanguagePrimitives.ConvertTo(str, toType, CultureInfo.InvariantCulture); \r\n```",
+      "created_at": "2019-01-18T17:09:54Z",
+      "updated_at": "2019-01-18T17:12:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt @lzybkr appreciate the suggestions! It now no longer overflows.\r\n\r\nHowever, despite also attempting to throw an exception here when handling the recursion, it seems that somehow that's getting swallowed and not emitted like other conversion failures do. Not sure what's happening there?\r\n\r\nHmm. Also, attempting to create a static Parser object for this purpose seems to trigger an AMSI uninitialization failure? \r\n\r\n```\r\nThe shell cannot be started. A failure occurred during initialization:\r\nThe type initializer for 'System.Management.Automation.Language.Compiler' threw an exception.\r\nAssertion Failed\r\nAMSI should have been uninitialized.\r\n```",
+      "created_at": "2019-01-19T02:07:17Z",
+      "updated_at": "2019-01-19T23:48:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Okay, all fixed. I think. Let's make sure that runs correctly now... Seems OK locally.\r\n\r\nIt was _very_ surprising to me to completely break console error display by adding a default parameter to `ScanNumber()` but now I know for the future, I guess.\r\n\r\nIf this runs OK I'll look at adding some tests. \ud83d\ude04 ",
+      "created_at": "2019-01-19T20:21:00Z",
+      "updated_at": "2019-01-19T20:21:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83e\udd14 OK, not sure what I broke in this test.\r\n\r\nFailure is:\r\n\r\n```\r\nDescribing Trusted module on locked down machine should not expose private functions to script debugger command processing\r\n[-] Verifies that private trusted module function is not available in script debugger 11.97s\r\nExpected regular expression 'DebuggerStopHandled' to match NoResult, but it did not match.\r\n172:             $debuggerTester.TestResult | Should -Match \"DebuggerStopHandled\"\r\n at <ScriptBlock>, D:\\a\\1\\s\\test\\powershell\\Modules\\Microsoft.PowerShell.Security\\ConstrainedLanguageDebugger.Tests.ps1: line 172\r\n```\r\n\r\nI can't really figure out how/why this is failing here, unfortunately. Looking at the test, it seems like it originates from a helper module that I don't have any experience with. \ud83d\ude15 ",
+      "created_at": "2019-01-20T01:07:50Z",
+      "updated_at": "2019-01-20T01:07:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Could you please help @vexx32 with the debugger security issue? Is it possible to resolve the issue in the PR context?",
+      "created_at": "2019-01-21T04:02:54Z",
+      "updated_at": "2019-01-21T04:04:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt @BrucePay @iSazonov  I've looked at coding in a static parser instance to reuse for the static class methods, but it might be more trouble than it's worth.\r\n\r\nWas discussing it with @SeeminglyScience and he brought up a thread-safety concern; with a static parser instance in place there's no guarantee multiple threads won't try to use it at the same time. \ud83d\ude15 \r\n\r\nThread safety isn't something I have a lot of awareness of at the moment, so I think I'll probably not try to get too deep into that here as that's more of a tangent than anything else in this PR. \ud83d\ude04 \r\n\r\n(Also, I did _try_ it out and it seems to work, but it is breaking something somewhere in the builds, and I'm not sure where... \ud83d\ude41 It seems that it would have to be declared in the actual Parser class, though, as declaring it in LanguagePrimitives triggers the AMSI uninit failure message.) ",
+      "created_at": "2019-01-22T15:29:21Z",
+      "updated_at": "2019-01-22T15:34:06Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Per @lzybkr's [comment](https://github.com/PowerShell/PowerShell/issues/7710#issuecomment-458658886) in #7710, we're not going the static parser instance route here unless there's a compelling reason to do so. ",
+      "created_at": "2019-01-31T14:30:21Z",
+      "updated_at": "2019-01-31T14:30:21Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'll take care of the CodeFactor issues tomorrow. \ud83d\ude04 ",
+      "created_at": "2019-01-31T22:01:35Z",
+      "updated_at": "2019-01-31T22:01:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov @PaulHigin that ought to do it. The remaining CodeFactor issues are all \"this looks like Hungarian notation\" complaints; unless we feel the need to rename half the variables in this file, I don't think it's worth pursuing. \ud83d\ude04 ",
+      "created_at": "2019-02-01T21:26:31Z",
+      "updated_at": "2019-02-01T21:26:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Thanks for your contribution!\r\n\r\n@anmenaga The PR is ready to merge.",
+      "created_at": "2019-02-02T06:12:21Z",
+      "updated_at": "2019-02-02T06:12:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Please create Docs issue and link in the PR description. Thanks!",
+      "created_at": "2019-02-05T03:51:52Z",
+      "updated_at": "2019-02-05T03:53:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov all done!",
+      "created_at": "2019-02-05T06:01:17Z",
+      "updated_at": "2019-02-05T06:01:17Z"
+    }
+  ],
+  "created_at": "2019-01-18T04:12:14Z",
+  "number": 8681,
+  "state": "closed",
+  "title": "Parse numeric strings as numbers again during conversions",
+  "updated_at": "2019-02-05T06:08:22Z"
+}

@@ -1,0 +1,167 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3595",
+  "author": "iSazonov",
+  "body": "Fix #3577.\r\n\r\nMake changes to not expose the aliases \"gin\", \"gsv\", \"sasv\" and \"spsv\" in Unix platforms.\r\nAlso refactored aliases related tests and added new tests covering the complete list of built-in aliases/cmdlets.\r\n",
+  "closed_at": "2017-05-23T17:27:32Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov thanks for the fix!\r\nThere are a few other aliases that are not supposed to be exposed on Unix. Do you think they can be taken care of in the same PR? (absolutely not required \ud83d\ude04)\r\n```\r\nPS /> Get-Alias | ? { gcm $_.Definition -ea SilentlyContinue > $null; !$? }                         \r\n\r\nCommandType     Name                                               Version    Source               \r\n-----------     ----                                               -------    ------               \r\nAlias           gin -> Get-ComputerInfo                            3.1.0.0    Microsoft.PowerShe...\r\nAlias           gsv -> Get-Service                                                                 \r\nAlias           sasv -> Start-Service                                                              \r\nAlias           spsv -> Stop-Service           \r\n```",
+      "created_at": "2017-04-20T01:19:23Z",
+      "updated_at": "2017-04-20T01:19:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw I am glad to fix this aliases too while the ears in this.\r\n\r\nNow I catched interensting issue with \"gin\" alias. Please help me understand. As for `Get-Service` cmdlet I add the alias in `InitialSessionState.cs` and remove from .psd1 files. After that I start PowerShell, ipmo .\\Build.psm1 and get error \"AllScope option cannot be removed from the alias 'gin'\". CI tests is failed too as you see. Then I remove `[Alias(\"gin\")]` from `GetComputerInfoCommand.cs` - now all work well.\r\n\r\n1. So my question is what is right way? Move aliases to `InitialSessionState.cs` or add Alias attribute to cmdlets and exclude them on unsupported platform? Or Alias attribute is for third-party cmdlets only and we should remove it from `Get-ComputerInfo`?\r\n\r\n2. How `Get-ComputerInfo` is excluded from compiling code on Unix?\r\n\r\n3. Why we only init exported aliases in `InitialSessionState.cs` but not cmdlets?",
+      "created_at": "2017-04-20T09:27:37Z",
+      "updated_at": "2017-04-20T13:20:20Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> So my question is what is right way?\r\n\r\nWhat I would do is:\r\n1. For cmdlets that are not supposed to work on Unix, like `Get-ComputerInfo`, exclude the source code from unix build, by enclosing the code with in `#if !UNIX` and `#endif`. Please take `TimeZoneCommands.cs` as an example.\r\n2. For aliases that declared in `InitialSessionState.cs`, move the declarations to the `#if !UNIX/endif` section. You will find the section in the part of code that declares all `SessionStateAliasEntry` instances.\r\n\r\nFor cmdlets like `*-Clipboard`, they have already been excluded from the build in powershell core. You can take a look at the .csproj file of the corresponding project.\r\n\r\nBasically, there are also 4 aliases that are currently exposed on unix plats by mistake. You can run the following command to observe.\r\n```\r\nGet-Alias | ? { gcm $_.Definition -ea SilentlyContinue > $null; !$? }                         \r\n\r\nCommandType     Name                                               Version    Source               \r\n-----------     ----                                               -------    ------               \r\nAlias           gin -> Get-ComputerInfo                            3.1.0.0    Microsoft.PowerShe...\r\nAlias           gsv -> Get-Service                                                                 \r\nAlias           sasv -> Start-Service                                                              \r\nAlias           spsv -> Stop-Service         \r\n```",
+      "created_at": "2017-04-20T22:48:48Z",
+      "updated_at": "2017-04-20T22:48:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Thanks! I still don't understand\r\n\r\n1. If currently  Get-ComputerInfo don't excluded by `#if !UNIX  and  #endif ` it is bug and we should have tests to control such problems?\r\n2. What is the preferred way to add an alias in `InitialSessionState.cs` or by an attribute `[Alias(\"alias\")]`? In last commits I used first way. We should use the single preferred way to avoid errors (which addressed in the PR). It seems the first way gives a more quick start, the second way is more intuitive.\r\n\r\n@lzybkr Could you please comment too?",
+      "created_at": "2017-04-21T11:10:18Z",
+      "updated_at": "2017-04-21T11:10:18Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> If currently Get-ComputerInfo don't excluded by #if !UNIX and #endif it is bug and we should have tests to control such problems?\r\n\r\nYes, we can have a test for it. Basically, we need to get the list of types that shouldn't be available on different platforms, for example, `[Microsoft.PowerShell.Commands.GetComputerInfoCommand]` should fail on Unix plats.\r\n\r\n> What is the preferred way to add an alias in InitialSessionState.cs or by an attribute [Alias(\"alias\")]? In last commits I used first way. We should use the single preferred way to avoid errors (which addressed in the PR). It seems the first way gives a more quick start, the second way is more intuitive.\r\n\r\nDeclaration of aliases in `InitialSessionState.cs` came from the days before `[Alias]` attribute was made supported for command types (previously `[Alias]` was only supported for parameters). So they are legacy code. For new cmdlet code, `AliasAttribute` should be used.\r\n\r\nFor the legacy code, I'm inclined to keep them that way, as I'm not sure if changing them would cause some unobvious regression. For new cmdlet implementation, I think `AliasAttribute` is the way to go.",
+      "created_at": "2017-04-21T16:31:36Z",
+      "updated_at": "2017-04-21T16:31:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can we create new attribute like `Platform(\"Unix\")` to mark cmdlet classes? Can this approach make our tests easier?\r\n\r\nWhat unobvious regression you expect with aliases? I believe that there is no functional code which we can break down, no new code. On the other hand, if we move the aliases in cmdlets (`[Alias]`) we get rid of some of the complexities that are trying to fix here.",
+      "created_at": "2017-04-21T19:28:27Z",
+      "updated_at": "2017-04-21T19:28:27Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> What unobvious regression you expect with aliases?\r\n\r\nThose alias declarations are publicly accessible, via `InitialSessionState.Commands`. For example:\r\n```\r\nPS> $iis = [initialsessionstate]::CreateDefault()\r\nPS> $iis.Commands.Name | ? { $_ -eq 'gps' }\r\ngps\r\n```\r\nSo it's hard to anticipate how people will depend on them ... that's why I said _unobviously_ regression.\r\n\r\n> Can we create new attribute like Platform(\"Unix\") to mark cmdlet classes? Can this approach make our tests easier?\r\n\r\nA class that should be excluded from a platform may not be a cmdlet, so I don't think a new attribute will help.\r\n\r\nNot excluding a file that is supposed to be excluded on a platform won't be a big issue really. I think we can just fix it when it comes up.",
+      "created_at": "2017-04-21T22:09:59Z",
+      "updated_at": "2017-04-21T22:11:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Clear about new attribute.\r\n\r\nI tried to add `gin` alias to `InitialSessionState.cs` and use `Alias('gin')]` (the [code](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/InitialSessionState.cs#L5886) add cmdlet aliases in a session) - in both cases, I see the alias in a session state. Both options work equally. So it looks safe if we move the cmdlet aliases in cmdlets and exclude the files (or the aliases) with #if !UNIX  and  #endif if we need. The only public change will be (not breaking change) that we will remove aliases that should not be there (aliases for not ported cmdlets or aliases unwanted on Unix) and add the ones we want to appear. So users get right thinks with ` [initialsessionstate]::CreateDefault()`.",
+      "created_at": "2017-04-22T10:59:34Z",
+      "updated_at": "2017-04-22T10:59:34Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov thanks for the extra validation exercise! Then I'm fine moving the aliases from `InitialSessionState` to individual cmdlets. Do you want to do that in a separete PR or address all in this PR?",
+      "created_at": "2017-04-24T23:04:38Z",
+      "updated_at": "2017-04-24T23:04:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Thanks for approve! I believe we can continue here to preserve the usefull discussion.\r\n\r\nI have already started to prepare new tests.",
+      "created_at": "2017-04-25T13:11:39Z",
+      "updated_at": "2017-04-25T15:17:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I created new file with tests to check default alias and cmdlet lists. \r\nAlias tests is from `Default-Aliases.Tests.ps1`. Later we should remove the test from `Default-Aliases.Tests.ps1`.\r\nI would use the session state to get default alias and cmdlet lists instead of `Get-Alias` and `Get-Command` but latest is more simple use.\r\n\r\n@daxian-dbw Please review the test. After that the way will be open for safe code edits.\r\n",
+      "created_at": "2017-04-25T15:30:24Z",
+      "updated_at": "2017-04-25T15:30:24Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov the test looks mostly good. I left a few comments.",
+      "created_at": "2017-04-25T17:17:53Z",
+      "updated_at": "2017-04-25T17:17:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw I fixed the original list of aliases. \r\nPlease could you comment:\r\n1. Currently in `InitialSessionState.cs` all aliases is added with 'ScopedItemOptions.AllScope' attribute and some one still with `ScopedItemOptions.ReadOnly`. I don't see any patterns in that - why not all aliases readonly? Ex.: `Connect-PSSession` - read only but `New-PSSession` - no?\r\nI could agree that some core aliases should be read only but not all.\r\n\r\n2. Also from `[Alias()]` an [attribute is added ](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/InitialSessionState.cs#L5886)with `ScopedItemOptions.None`. Why no  'ScopedItemOptions.AllScope'? Why no `ScopedItemOptions.ReadOnly`?\r\n\r\n3. There is [exclusion ](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/InitialSessionState.cs#L5302) for `sls` and `Select-String` - where  did it come from?\r\n\r\n",
+      "created_at": "2017-04-27T16:03:09Z",
+      "updated_at": "2017-04-27T16:03:09Z"
+    },
+    {
+      "author": "mirichmo",
+      "author_association": "MEMBER",
+      "body": "@daxian-dbw - Please take another look.",
+      "created_at": "2017-05-03T03:34:53Z",
+      "updated_at": "2017-05-03T03:34:53Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov sorry for coming back so late.\r\nThe scope options, yes, thanks for bringing it up --\r\n- `AllScope` indicates the alias is copied to any new scopes that are created\r\n- `ReadOnly` indicates the alias cannot be changed\r\n\r\n> I don't see any patterns in that - why not all aliases readonly? Ex.: Connect-PSSession - read only but New-PSSession - no?\r\nI could agree that some core aliases should be read only but not all.\r\n\r\nI agree the alias option settings there seem a bit messed up, for example, aliases for `*-PSSession` cmdlets should be consistent in my opinion.\r\nHowever, some of the aliases are made `AllScope` only for a good reason -- so that user can make them point to customized function/utility as they want. An example [here](https://serverfault.com/questions/452430/how-to-override-the-default-dir-alias-in-powershell) that override the `dir` alias.\r\n\r\n> Also from [Alias()] an attribute is added with ScopedItemOptions.None. Why no 'ScopedItemOptions.AllScope'? Why no ScopedItemOptions.ReadOnly?\r\n\r\nYep, `AliasAttribute` now doesn't set any options to an alias, which seems by design to me, because we don't want the module author to decide if their alias definition should be copied to all scopes or can never be changed by the user. For a module cmdlet, a user should be the one to make that decision. PowerShell defines some alias as 'AllScope' or 'ReadOnly' because they are core cmdlets and probably shouldn't be randomly altered by the user.\r\n\r\n> There is exclusion for sls and Select-String - where did it come from?\r\n\r\nThis can be explained by the same `dir` example I gave above. It sounds like very common for people to set `sls` to point to a different function/utility. With `AllScope`, you have to write `Set-Alias ... -Option AllScope` to make it work, which is annoying. I think that's why it was made `None` option.\r\n\r\nIt turns out there are good reasons to keep alias declarations in InitialSessionState.cs. I suggest we go back to the proposal I made in https://github.com/PowerShell/PowerShell/pull/3595#issuecomment-295951577\r\n\r\n",
+      "created_at": "2017-05-12T00:17:24Z",
+      "updated_at": "2017-05-12T00:17:24Z"
+    },
+    {
+      "author": "mirichmo",
+      "author_association": "MEMBER",
+      "body": "@iSazonov - Please update the PR title and description to reflect the current state of the PR. This PR has slowly moved beyond the original intent and I'd like that reflected in the title and description.",
+      "created_at": "2017-05-12T16:38:47Z",
+      "updated_at": "2017-05-12T16:38:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mirichmo  the PR title and description was updated.\r\n\r\n@daxian-dbw Thanks for great comments! I moved aliases to InitialSessionState.cs\r\nI did not fix alias 'ReadOnly' because we need make review for all aliases. Maybe open new Issue?",
+      "created_at": "2017-05-15T11:45:18Z",
+      "updated_at": "2017-05-15T12:11:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If we shall move alias definitions to _multiple_ files (modules) maybe add tests in `DefaultCommands.Tests.ps1` to check alias's ScopedItemOptions?",
+      "created_at": "2017-05-16T10:14:49Z",
+      "updated_at": "2017-05-16T10:15:07Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> If we shall move alias definitions to multiple files (modules) maybe add tests in DefaultCommands.Tests.ps1 to check alias's ScopedItemOptions?\r\n\r\nThat sounds great.",
+      "created_at": "2017-05-16T17:42:06Z",
+      "updated_at": "2017-05-16T17:42:06Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov The changes look good to me, and special thanks for the new tests covering the complete list of built-in aliases/cmdlets!\r\nI think it's good to go as soon as you remove the old `Default-Aliases.Tests.ps1`.",
+      "created_at": "2017-05-19T18:36:47Z",
+      "updated_at": "2017-05-19T18:36:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw I removed `Default-Aliases.Tests.ps1` and move test for `more` to `DefaultCommands.Tests.ps1` (Remaining tests looks as duplications)",
+      "created_at": "2017-05-22T04:30:47Z",
+      "updated_at": "2017-05-22T04:32:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Thanks for help and great comments!",
+      "created_at": "2017-05-23T17:32:38Z",
+      "updated_at": "2017-05-23T17:32:38Z"
+    }
+  ],
+  "created_at": "2017-04-19T09:01:25Z",
+  "number": 3595,
+  "state": "closed",
+  "title": "Change to not expose unsupported aliases/cmdlets in Unix",
+  "updated_at": "2017-10-25T11:19:45Z"
+}

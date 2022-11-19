@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7049",
+  "author": "ChrisMagnuson",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```\r\n@() | % {1}\r\n$ArrayList = New-Object System.Collections.ArrayList\r\n$ArrayList | % {1}\r\n$null | % {1}\r\n$VarNotDefined | % {1}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```\r\nPS > @() | % {1}\r\nPS > $ArrayList = New-Object System.Collections.ArrayList\r\nPS > $ArrayList | % {1}\r\nPS > $null | % {1}\r\nPS > $VarNotDefined | % {1}\r\nPS >\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```\r\nPS > @() | % {1}\r\nPS > $ArrayList = New-Object System.Collections.ArrayList\r\nPS > $ArrayList | % {1}\r\nPS > $null | % {1}\r\n1\r\nPS > $VarNotDefined | % {1}\r\n1\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.2\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n\r\nTo follow the principle of least astonishment I would expect all of these to do nothing.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Consider `$null, $null, $null | %{ 1 }`. What would you expect to happen? How about `$null, $null | % { 1 }`? Now given the first two, what would the consistent behaviour for `$null | %{ 1 }` be?",
+      "created_at": "2018-06-13T05:50:29Z",
+      "updated_at": "2018-06-13T05:50:29Z"
+    },
+    {
+      "author": "ChrisMagnuson",
+      "author_association": "NONE",
+      "body": "@BrucePay With `$null, $null, $null | %{ 1 }` and `$null, $null | % { 1 }` the behavior is driven by the fact that an array is sent through the pipeline, irrespective of what is in the array, so the fact that those examples produce a `1` for each element of the array makes sense. \r\n\r\nIf I was saying that `@($null) | %{ 1 }` shouldn't produce output then your examples would be directly comparable but in my examples no array with given size (regardless of what it contains) is being created.\r\n\r\nTo be fair though my biggest beef is with the `$VarNotDefined | % {1}` scenario though I suspect that under the hood somewhere the `$null | % {1}` scenario is related to `$VarNotDefined | % {1}` and it still also feels wrong.",
+      "created_at": "2018-06-13T12:06:57Z",
+      "updated_at": "2018-06-13T12:10:29Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@ChrisMagnuson When sending the result of an expression evaluation into the pipeline, there is effectively an implicit `@( )` around the input such that `1 | % { 1 }` is equivalent to `@( 1 )  | % { 1 }`.\r\n\r\n> To be fair though my biggest beef is with the $VarNotDefined | % {1} scenario \r\n\r\nBy default, referencing an undefined variable results in `$null`. You can change this behaviour using the [`Set-StrctMode` cmdlet](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/set-strictmode?view=powershell-5.1). ",
+      "created_at": "2018-06-13T13:52:38Z",
+      "updated_at": "2018-06-13T13:52:38Z"
+    },
+    {
+      "author": "ChrisMagnuson",
+      "author_association": "NONE",
+      "body": "@BrucePay If I understand properly, what `Set-StrictMode` will do is generate an error where as the behavior that is desired is to do nothing when a variable that doesn't exist is piped into the pipeline.\r\n\r\nThanks for the explanation about the implicit `@( )`.\r\n\r\nI still feel that the expected behavior listed initially is best for least astonishment.\r\n\r\nDo you have examples of where it is desirable that `$null | % {1}` executes the pipeline?",
+      "created_at": "2018-06-13T14:30:51Z",
+      "updated_at": "2018-06-13T14:31:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@ChrisMagnuson: Indeed, `Set-StrictMode -Version 1` and higher cause a _statement-terminating error_ when you reference an uninitialized variable, but don't allow you to change the _enumeration behavior_.\r\n\r\nThe only way to avoid enumeration of `$null` is to use the `foreach` _loop_ instead of the pipeline (e.g. `foreach($v in $null) { <# never entered #> }`) - a discrepancy that is in itself problematic, let alone that substituting one for the other is not always an option.\r\n\r\nOne way out of this would be to let uninitialized variables default to the \"null collection\", `[System.Management.Automation.Internal.AutomationNull]::Value` rather than to `$null`, given that this null collection is enumerated in neither scenario.  \r\n\r\nThat would still enumerate _explicit_ `$null` values (in the pipeline), but that is less problematic, given that commands must go out of their way to output `$null` (not producing any output implicitly results in `[System.Management.Automation.Internal.AutomationNull]::Value`).\r\n\r\nHowever, that would clearly be a breaking change.",
+      "created_at": "2018-06-13T14:44:26Z",
+      "updated_at": "2018-06-13T14:45:10Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Actually, that's not quite correct. @Mklement0 -- the first reference you make, to having the foreach loop use a straight $null, isn't quite analogous to the pipeline examples.\r\n```PowerShell\r\nforeach ($n in @($null)) { 1 }\r\n# is equivalent to\r\n$null | ForEach-Object { 1 }\r\n```\r\nBecause the pipeline is incapable of determining the difference between an array and a single object (because by default all arrays are passed as individual objects) it *has* to assume that the `$null` it's receiving is intentional and part of a collection, so it has to operate on it just like anything else. To the pipeline, there's no difference between `@($null)` and `$null`, so it has to behave the same for both.",
+      "created_at": "2018-06-24T22:32:46Z",
+      "updated_at": "2018-06-24T22:32:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32:\r\n\r\nWhat this comes down to is _consistency_ and, as a corollary, _predictability_:\r\n\r\nBoth `<stmt> | ...` and `foreach ($var in <stmt>) { ... }` are _enumeration contexts_.\r\n\r\nIn PowerShell, this implies:\r\n\r\n* If `<stmt>` evaluates to something that already _is_ enumerable, enumerate it.\r\n\r\n* If it doesn't, _treat it like an enumerable_, and treat that something as the one and only member of the pretend-enumerable, _except_ if that \"something\" is the PS-specific \"null collection\" value whose very purpose is to signal that there is _nothing to enumerate_ (see below).\r\n\r\nNot treating these two enumeration contexts the same is an inconsistency that invites confusion and is hard to remember.\r\n\r\n---\r\n\r\nArguably, in the context of PowerShell:\r\n\r\n* `$null` is a _something_ that happens to _represent_ a \"single nothing\" and is therefore _enumerable_ - it corresponds to `null` in C#.\r\n\r\n* By contrast, `[System.Management.Automation.Internal.AutomationNull]::Value` is a PS-specific representation of an _enumerable_ that is _nothing in itself_ and _has no elements_: It is the \"null _collection_\" whose purpose is to signal \"I represent nothing - I am not an object myself (unless I'm forced to act as one (as a scalar), in which case I'll pretend to be `$null`), and enumerating me results in _no_ iterations\".  \r\nIt it is the \"value\" that commands that produce _no output_ implicitly \"return\".\r\n\r\n---\r\n\r\nTherefore,  _both_ the `foreach` loop _and_ the pipeline:\r\n\r\n* should treat `$null` as an enumerable and result in a _single iteration_ whose iteration variable is `$null`.\r\n\r\n* should result in _no_ iterations for `[System.Management.Automation.Internal.AutomationNull]::Value`, given that its very purpose is to signal that there is _nothing to enumerate_.\r\n\r\n---\r\n\r\nYet, these two contexts currently act differently with respect to _uninitialized variables_ (which default to `$null`), as the following example demonstrates:\r\n\r\n```powershell\r\nPS> foreach ($var in $noSuchVar) { 'inside the foreach loop' }; $noSuchVar | ForEach-Object { 'inside ForEach-Object' }\r\ninside ForEach-Object\r\n```\r\n\r\nThe `foreach` loop didn't enumerate anything, but the pipeline did:\r\n\r\n* It is the _pipeline_ that acts as expected here: given that uninitialized variables default to `$null`, it enumerates that `$null`.\r\n\r\n* Unexpectedly, the `foreach` loop does _not_ enumerate the `$null`.\r\n\r\n---\r\n\r\nThe same discrepancy happens with an _initialized_ variable that _happens to contain `$null`_:\r\n\r\n```powershell\r\nPS> $varThatIsNull = $null; foreach ($var in $varThatIsNull) { 'inside the foreach loop' }; $varThatIsNull | ForEach-Object { 'inside ForEach-Object' }\r\ninside ForEach-Object\r\n```\r\n\r\n---\r\n\r\nThe only time the discrepancy does _not_ surface is by _direct use of a command_ that outputs `$null`:\r\n\r\n```powershell\r\nPS> foreach ($var in & { $null }) { 'inside the foreach loop' }; & { $null } | ForEach-Object { 'inside inside the foreach loop' }\r\ninside the foreach loop\r\ninside inside the foreach loop\r\n```\r\n\r\nNote how the `foreach` loop now too enumerated the `$null` output by the script block.\r\n\r\nThis is the subject of #5674, though the OP there is looking for the opposite behavior: they want `foreach` not to enumerate in this case either.\r\n\r\n---\r\n\r\nAgain: These inconsistencies could be resolved if:\r\n\r\n*  both the `foreach` loop _and_ the pipeline consistently enumerate `$null`\r\n\r\n* if uninitialized variables default to `[System.Management.Automation.Internal.AutomationNull]::Value` rather than `$null`.\r\n\r\nRemember that `$null -eq $noSuchVar` would continue to work, because, as stated, `[System.Management.Automation.Internal.AutomationNull]::Value` acts like `$null` when forced into a scalar context (try `$null -eq (& {})` - `& {}` being the simplest statement that produces a `[System.Management.Automation.Internal.AutomationNull]::Value` value).\r\n\r\nNote that reversing the operands should arguably work differently, given that `[System.Management.Automation.Internal.AutomationNull]::Value` should be considered an _enumerable_ (array-valued) LHS, but `(& {}) -eq $null` does currently return `$True`, i.e., treats `[System.Management.Automation.Internal.AutomationNull]::Value` as a _scalar_\r\n\r\nhttps://github.com/PowerShell/PowerShell/issues/3866#issuecomment-304764165 discusses this and shows that the current behavior is inconsistent in that the behavior varies depending on the operator used.\r\n\r\nWhile it would be warranted from a consistency perspective, making `$noSuchVar -eq $null` return `@()` - i.e., treating the `[System.Management.Automation.Internal.AutomationNull]::Value` LHS as array-valued - would be a massively breaking change, because existing code that relies on such conditionals to return `$True` (whether explicitly or not) would break.\r\n\r\n---\r\n\r\nAs another (farther) aside: #6823 is another example of inconsistent use of `$null` vs. `[System.Management.Automation.Internal.AutomationNull]::Value`.\r\n\r\n",
+      "created_at": "2018-06-25T01:51:44Z",
+      "updated_at": "2019-06-04T07:37:06Z"
+    }
+  ],
+  "created_at": "2018-06-12T17:43:53Z",
+  "number": 7049,
+  "state": "open",
+  "title": "$Null, $VariableThatDoesntExist result in pipeline execution whereas @() doesn't",
+  "updated_at": "2019-06-04T07:37:06Z"
+}

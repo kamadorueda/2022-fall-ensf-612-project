@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10537",
+  "author": "vors",
+  "body": "# Steps to reproduce\r\n\r\nGo to some directory other then `~`. Run `1 | % -Parallel {$pwd} `\r\n\r\n# Expected behavior\r\n\r\nOutput should be the same as just `$pwd`\r\n\r\n# Actual behavior\r\n\r\nOutput is always the `~` directory.\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.3\r\nOS                             Darwin 18.7.0 Darwin Kernel Version 18.7.0: Tue Aug 20 16:57:14 PDT 2019; root:xnu-4903.271.2~2/RELEASE_X86_64\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-10-01T20:55:29Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Runspaces is always initialized to FileSystemProvider and Directory.GetCurrentDirectory().",
+      "created_at": "2019-09-14T02:43:36Z",
+      "updated_at": "2019-09-14T02:43:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The behavior is certainly unexpected; there's no good reason for the current location to differ only because `-parallel` is added.\r\n\r\nTechnically, the behavior is consistent with `Start-ThreadJob` behavior (which uses `[environment]::CurrentDirectory]` as @iSazonov notes).\r\n\r\n`Start-ThreadJob`, in turn, behaves differently from `Start-Job`, which defaults to `$HOME` (unlike postpositional `&`, which sensibly - but inconsistently with `Start-Job` - defaults to the current location - see #4267).\r\n\r\nSadly, `Start-ThreadJob` and `Start-Job` can't be fixed without potentially breaking existing code - though here's our chance to get it right for `ForEach-Object -Parallel`.\r\n\r\nThe next best thing to get the behavior that should have been the default all along is to use `-WorkingDirectory $PWD` with `Start-Job`; sadly, `Start-ThreadJob` doesn't support `-WorkingDirectory` as of v2.0.1 - see https://github.com/PaulHigin/PSThreadJob/issues/44\r\n\r\n\r\n\r\n",
+      "created_at": "2019-09-26T19:30:08Z",
+      "updated_at": "2019-09-26T19:30:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "While working on # 10401, I was thinking over the idea that maybe we should initialize not to Directory.CurrentDirectory(), but to a value from the parent runspace (both provider and current location), but I came to the conclusion that users often don\u2019t understand that many of pwd values \u200b\u200bcan exist (one per runspace) and as a result we will only complicate things and confuse users even more.\r\n\r\nThe fact is that when users create runspaces manually, they have the same behavior (ForEach-Object -Parallel) for many years. (I don't understand why we ignore this many years but want change this for ForEach-Object -Parallel.)\r\nChanging this either way would be a huge breaking change.\r\n\r\nAlso there is a problem with $Home in Snap and AppX. It would be more reliable to have Start-ThreadJob initilized to current location too. A script that runs on a regular system may suddenly not work in Snap and AppX #9278 /cc @PaulHigin.\r\n\r\nTaking into account that users often do not understand how this works, waiting for a certain initial value cannot be considered reliable practice and we should recommend always setting current location explicitly.\r\n\r\n\r\n",
+      "created_at": "2019-09-27T03:47:39Z",
+      "updated_at": "2019-09-27T03:47:39Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "This is pure ergonomics question. Sure when somebody uses runspaces and writes 3 non-obvious lines to create a new runspace and control a lot of things about how it's created, it's reasonable to expect to set the location explicitly. When you have a `%` loop and realize that it can speed up by parallelization, it would be nice to change as little as possible after adding `-Parallel`. I don't think that people would know they need the parallelization before actually writing and trying the code for a normal foreach. So less friction is it to include `-Parallel` the better.\r\n\r\n> Changing this either way would be a huge breaking change.\r\n\r\n`ForEach -Parallel` haven't been realized in any stable build yet - I don't see changing behavior of it as a breaking change. The behavior of it doesn't need to match the runspace creation 1:1.",
+      "created_at": "2019-09-27T03:59:05Z",
+      "updated_at": "2019-09-27T03:59:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Let me add to @vors' comment:\r\n\r\n>  users often don\u2019t understand that many of pwd values \u200b\u200bcan exist (one per runspace) \r\n\r\nNor should they _have to_ understand, _unless it is inevitable_.\r\n\r\n**The following user expectation is perfectible reasonable and should never be subverted unless absolutely necessary for technical reaons:**\r\n\r\n**Code invoked by a caller (the current runspace) _on the same machine_ should see the same current location as the caller**, unless requested otherwise.\r\n\r\n#### Fortunately, this _is_ true in the following cases:\r\n\r\n* running PowerShell code in the _same_ runspace (but _not_ .NET method calls).\r\n\r\n* invoking an _external process_ (in which case the _filesystem provider_'s current location is used).\r\n\r\n  * Including use of `Start-Process`, even with `-Verb RunAs`, if the target executable is `pwsh` itself.\r\n\r\n* when using `... &` to create a background job - but _not_ with `Start-Job`.\r\n\r\n#### It is _not_ true in the following cases - regrettably so, but I presume it's too late to change that:\r\n\r\n  * `Start-Job` (defaults to `$HOME`)\r\n  * `Start-ThreadJob` (uses the process-wide working dir, `[Environment]::CurrentDirectory`)\r\n  * (This may be a technical necessity, I'm not sure) `Start-Process -Verb RunAs` with an executable other than `pwsh` (uses `$env:windir\\System32`).\r\n\r\nAs @vors points out, it is _not_ too late to fix this for `ForEach-Object -Parallel` - and I don't see a problem with diverging from `Start-ThreadJob`, if necessary, as the connection between the two isn't obvious, and it's conceivable that users will make do with  `ForEach-Object -Parallel` without ever needing `Start-ThreadJob`.\r\n\r\n#### It _cannot be done for technical reasons_ when calling .NET methods (per-runspace location in PowerShell vs. single, process-wide working directory in .NET)\r\n\r\nThis is and will remain a perennial pain point when attempting to pass relative paths to .NET methods.\r\n\r\nI'm starting to wonder if we should ask CoreFx for an opt-in to thread-local working directories to resolve this problem.\r\n\r\n(By contrast, execution of code _on a different computer_ justifiably should carry no expectation of the caller's location being retained (which may be impossible anyway)).\r\n\r\n",
+      "created_at": "2019-09-27T20:47:46Z",
+      "updated_at": "2019-09-27T22:05:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Last days I was somewhere deep in PowerShell code :-) so my comment was from that side.\r\nIf look from user side I full agree.\r\n\r\nSo we have two rules:\r\nrule A - \"new runspace inherits current provider and location\".\r\nrule B that \"new runspace has FileSystem provider default and Directory.CurrentDirectory location\". \r\n\r\nI am sure that we should have single rule and it is rule A so as not to mislead users and fix all three cases.\r\nWe could expose this as new experimental feature.\r\nI think there are not problems with -Parallel and Start-ThreadJob. As for Start-Job defaulting to $Home it looks like a bug (\"I am on my working dir but a job puts results to home dir\". also there could be problems in containers as mentioned aboved) and we should fix it.",
+      "created_at": "2019-09-28T11:42:13Z",
+      "updated_at": "2019-09-28T11:42:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov - I'm definitely in favor of a fix as well.\r\n\r\nI agree that fixing `Start-ThreadJob` is probably unproblematic, given that `Start-ThreadJob`'s behavior is virtually unpredictable from the user's perspective (it's whatever PowerShell's startup directory was - irrespective of a `-WorkingDirectory` argument - or whatever in-session code that changed the process-wide current directory last set it to). I've created an issue for it: https://github.com/PaulHigin/PSThreadJob/issues/46\r\n\r\nHowever, given that for `Start-Job` it is a _fixed_ directory, users are much more likely to have come to depend on it.\r\n\r\nGiven that experimental features are an \"on-ramp\" for regular features, how do you see that transition unfolding?\r\n\r\nEven if users adopt the experimental feature in significant enough numbers, turning it into a regular feature can still break existing code if it is turned into a regular feature.\r\n\r\n",
+      "created_at": "2019-09-28T12:54:09Z",
+      "updated_at": "2019-09-28T13:28:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I suggest to consider Start-Job case as _bug_.\r\nIf my work folder is `c:\\work` and I run a job which switched to $home that is `c:\\users\\isazonov` - the last place is the worst place where user would like to see a resulting file. We could guess that user would use relative path to Documents folder. But most likely when faced with this inconsistency, the user will use the _exact_ path to the working directory (`c:\\work`), especially since the job is perceived as some kind of background process.\r\n\r\n",
+      "created_at": "2019-09-28T15:27:06Z",
+      "updated_at": "2019-09-28T15:27:06Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Sorry for the late reply, I was out of town last week.  I agree that this is a bug and that foreach -parallel should preserve the current working directory, and be consistent with foreach as much as possible.  I am not as sure about threadjob since my goal there was to make it work like Start-Job.  ",
+      "created_at": "2019-10-01T16:28:27Z",
+      "updated_at": "2019-10-01T16:28:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT It would good to get a conclusion for the issue before 7.0 GA. Maybe PowerShell committee do it?",
+      "created_at": "2019-10-01T17:00:06Z",
+      "updated_at": "2019-10-01T17:00:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin \r\n\r\nMaking `Start-ThreadJob` follow `Start-Job`'s example generally makes sense, but note that:\r\n\r\n(a) it already behaves differently from `Start-Job`\r\n\r\n(b) even if that were to be fixed, `Start-Job`'s behavior is unfortunate \r\n\r\n(c) Ideally, we'd have a _consistent_ experience across _all_ job/thread-related features, meaning:\r\n\r\n   * Start-Job\r\n   * Start-ThreadJob\r\n   * postpositional `&`  to start a job\r\n   * `ForEach-Object -Parallel`\r\n\r\nThe question now is:\r\n\r\nCan we consider `Start-Job`'s default-to-`$HOME` behavior a bug / something worth fixing as a  [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) change, as argued by @iSazonov above?\r\n\r\nIf so, we can achieve the desired consistency, by making all features default to the _caller's current location_.\r\n\r\nI'm certainly personally in favor of that, but I haven't looked into how likely it is that existing `Start-Job` code relies on `$HOME` to be the default directory.\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-01T17:08:39Z",
+      "updated_at": "2019-10-01T17:12:14Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I have submitted a PR for the fix for ForEach-Object -Parallel (#10672 ).",
+      "created_at": "2019-10-01T20:55:29Z",
+      "updated_at": "2019-10-01T20:55:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @PaulHigin - I've created #10673 to address the larger issue.",
+      "created_at": "2019-10-01T21:21:31Z",
+      "updated_at": "2019-10-01T21:21:31Z"
+    }
+  ],
+  "created_at": "2019-09-13T22:35:36Z",
+  "number": 10537,
+  "state": "closed",
+  "title": "ForEach -Parallel $pwd",
+  "updated_at": "2019-10-29T14:27:50Z"
+}

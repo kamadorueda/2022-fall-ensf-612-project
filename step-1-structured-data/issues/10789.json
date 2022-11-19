@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10789",
+  "author": "SvenGroot",
+  "body": "# Steps to reproduce\r\nI have a Windows executable that produces unicode (utf-16) output. In PowerShell 5.1, I can set the [Console]::OutputEncoding property so the output of that command gets correctly interpreted. On PowerShell Core 6.2.3, that doesn't appear to work.\r\n\r\nI've also tried setting [Console]::InputEncoding and $OutputEncoding, but the problem persists.\r\n\r\nFor example, I use the wsl.exe binary here, so this should repro on any system that has the Windows Subsystem for Linux installed.\r\n\r\n```powershell\r\n[Console]::OutputEncoding = [System.Text.Encoding]::Unicode\r\nwsl.exe --list -v | ForEach-Object { $_ }\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nPS C:\\Users\\svgroot> [Console]::OutputEncoding = [System.Text.Encoding]::Unicode\r\nPS C:\\Users\\svgroot> wsl.exe --list -v | ForEach-Object { $_ }\r\n  NAME            STATE           VERSION\r\n* Ubuntu          Stopped         2\r\n  Ubuntu-18.04    Stopped         2\r\n  Alpine          Stopped         1\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nPS C:\\Users\\svgroot> [Console]::OutputEncoding = [System.Text.Encoding]::Unicode\r\nPS C:\\Users\\svgroot> wsl.exe --list -v | ForEach-Object { $_ }\r\n    N A M E                         S T A T E                       V E R S I O N\r\n\r\n *   U b u n t u                     S t o p p e d                   2\r\n\r\n     U b u n t u - 1 8 . 0 4         S t o p p e d                   2\r\n\r\n     A l p i n e                     S t o p p e d                   1\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.3\r\nPSEdition                      Core\r\nGitCommitId                    6.2.3\r\nOS                             Microsoft Windows 10.0.19001\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-10-19T05:09:45Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's not good - the bug is still present as of PowerShell Core 7.0.0-preview.4.\r\n\r\nHere's a repro that doesn't require WSL:\r\n\r\n```powershell\r\n[Console]::OutputEncoding = [text.encoding]::unicode; sfc /? | Write-Output\r\n```\r\n\r\nAs a Pester test:\r\n\r\n```powershell\r\n[Console]::OutputEncoding = [text.encoding]::unicode; sfc /? | Write-Output | Should -Not -Match \"`0\"\r\n```\r\n",
+      "created_at": "2019-10-16T14:31:19Z",
+      "updated_at": "2019-10-16T14:31:19Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Has this ever worked in PowerShell Core, or has it been broken ever since 6.0.0?",
+      "created_at": "2019-10-16T14:47:10Z",
+      "updated_at": "2019-10-16T14:47:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32: It's also broken in 6.0.0.",
+      "created_at": "2019-10-16T14:58:45Z",
+      "updated_at": "2019-10-16T14:58:45Z"
+    },
+    {
+      "author": "0xd4d",
+      "author_association": "NONE",
+      "body": "This is due to a breaking change in .NET Core. You should initialize `ProcessStartInfo.StandardInputEncoding/StandardErrorEncoding/StandardOutputEncoding` if they're redirected. .NET Framework defaults to using `Console.OutputEncoding` if you don't initialize `StandardOutputEncoding`, but .NET Core defaults to calling `Process.GetEncoding((int)Interop.Kernel32.GetConsoleOutputCP())` which is UTF8 (on my system).\r\n\r\nThis is the code that creates `ProcessStartInfo`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/NativeCommandProcessor.cs#L1088-L1150",
+      "created_at": "2019-10-16T17:05:59Z",
+      "updated_at": "2019-10-16T17:06:23Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If I understand correctly, then, a fix should be to set the `ProcessStartInfo.StandardInput(/Output)Encoding` to match `[console]::Input(/Output)Encoding` values explicitly?\r\n\r\nShould this respect `[console]` encoding settings, or `$OutputEncoding`? From what I recall, those values don't always align, if I'm not mistaken?",
+      "created_at": "2019-10-16T17:13:41Z",
+      "updated_at": "2019-10-16T17:13:41Z"
+    },
+    {
+      "author": "0xd4d",
+      "author_association": "NONE",
+      "body": "I don't know if it should use `$OutputEncoding` or `Console.OutputEncoding`, but the code would be something like this:\r\n\r\n```C#\r\n        bool redirectStdOut = true;\r\n        bool redirectStdErr = true;\r\n        bool redirectStdIn = false;\r\n        var startInfo = new ProcessStartInfo();\r\n        if (redirectStdOut)\r\n        {\r\n            startInfo.RedirectStandardOutput = true;\r\n            startInfo.StandardOutputEncoding = Console.OutputEncoding;\r\n        }\r\n        if (redirectStdErr)\r\n        {\r\n            startInfo.RedirectStandardError = true;\r\n            startInfo.StandardErrorEncoding = Console.OutputEncoding;\r\n        }\r\n        if (redirectStdIn)\r\n        {\r\n            startInfo.RedirectStandardInput = true;\r\n            startInfo.StandardInputEncoding = Console.InputEncoding;\r\n        }\r\n```",
+      "created_at": "2019-10-16T17:22:43Z",
+      "updated_at": "2019-10-16T17:22:43Z"
+    },
+    {
+      "author": "0xd4d",
+      "author_association": "NONE",
+      "body": "Actually to match PS 5.1 behavior it should not use $OutputEncoding",
+      "created_at": "2019-10-16T17:24:52Z",
+      "updated_at": "2019-10-16T17:24:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed, @0xd4d: I don't know how `.StandardInput` comes into play, but on the output side It should definitely be `[Console]::OutputEncoding`, because that is how it has always worked in Windows PowerShell, where it determines how PowerShell decodes stream output _from_ external programs.\r\n\r\n`$OutputEncoding` controls what encoding is used to send data from Powershell _to_ external programs, via a pipe. It defaults to UTF-8 in PSCore and to ASCII(!) in WinPS. In either edition it can differ from `[Console]::OutputEncoding`.",
+      "created_at": "2019-10-16T17:26:21Z",
+      "updated_at": "2019-10-16T17:26:43Z"
+    },
+    {
+      "author": "SvenGroot",
+      "author_association": "NONE",
+      "body": "Thanks for looking into this, everyone. Hopefully this can get fixed soon.",
+      "created_at": "2019-10-16T21:13:10Z",
+      "updated_at": "2019-10-16T21:13:10Z"
+    },
+    {
+      "author": "jszabo98",
+      "author_association": "NONE",
+      "body": "Yep.  Note that C:\\Windows\\system32\\sfc.exe in Windows 10 outputs utf-16.  It's a powershell question that comes up occasionally.",
+      "created_at": "2019-10-17T19:49:52Z",
+      "updated_at": "2019-10-17T19:49:52Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I guess that would mean `.StandardInputEncoding` should match `$OutputEncoding`, then? \ud83e\udd14 On the assumption that we may be piping _into_ such a command as well.",
+      "created_at": "2019-10-17T19:53:28Z",
+      "updated_at": "2019-10-17T19:53:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 I've only glanced at the code, and I see that the pipe that is connected to the child process' stdin explicitly uses `$OutputEncoding`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/425bc36a6fe66b571fc88f25500b0b3a3cf3e2a7/src/System.Management.Automation/engine/NativeCommandProcessor.cs#L1797-L1801\r\n\r\nI don't fully understand how that relates to the default `.StandardInput` encoding - it looks like it may override it.",
+      "created_at": "2019-10-17T20:12:01Z",
+      "updated_at": "2019-10-17T20:12:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@SvenGroot do you have any examples on the input side where we have issues with encoding?",
+      "created_at": "2019-10-17T21:17:45Z",
+      "updated_at": "2019-10-17T21:17:45Z"
+    },
+    {
+      "author": "SvenGroot",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT No, I only use OutputEncoding in my scenario.",
+      "created_at": "2019-10-17T21:19:20Z",
+      "updated_at": "2019-10-17T21:19:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Here's my _guess_ as to what we should do:\r\n\r\n* When piping data from PowerShell to an external process, it is `$OutputEncoding` that already drives the standard input encoding for the child process (no change there - this was never broken).\r\n\r\n* When _not_ piping (starting an interactive console application, for instance), i.e. when stdin is _not_ redirected, we should set `.StandardInput` to `[Console]::InputEncoding`.\r\n\r\n* Whether redirected or not, `.StandardOutput` should always be set to `[Console]::OutputEncoding`\r\n",
+      "created_at": "2019-10-17T21:30:40Z",
+      "updated_at": "2019-10-17T21:52:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 when not piping, what is value of setting `.StandardInput` to any encoding?  For your 3rd bullet, I believe you meant `[Console]::OutputEncoding`.  For my PR, I'm focusing on output only unless someone brings a case where input encoding is a problem.",
+      "created_at": "2019-10-17T21:37:28Z",
+      "updated_at": "2019-10-17T21:37:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: Thanks for the correction re 3rd bullet point - I've fixed my previous comment.\r\n\r\n> what is value of setting `.StandardInput` to any encoding?\r\n\r\nMy thinking is: An interactive console application that reads from stdin probably expects the _console's_ (terminal's) input encoding to be in effect (~~that's presumably how it works in Windows PowerShell~~).\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-17T21:57:46Z",
+      "updated_at": "2019-10-26T21:20:40Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Glad to see this was fixed for `.StandardOutput`.\r\n\r\nAs for setting `.StandardInput` to `[Console]::InputEncoding`: please see #10907, @SteveL-MSFT.",
+      "created_at": "2019-10-26T21:21:09Z",
+      "updated_at": "2019-10-26T21:21:09Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #10824, which has now been successfully released as `v7.0.0-preview.6`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.6)\n",
+      "created_at": "2019-11-21T22:35:43Z",
+      "updated_at": "2019-11-21T22:35:43Z"
+    }
+  ],
+  "created_at": "2019-10-14T19:13:37Z",
+  "number": 10789,
+  "state": "closed",
+  "title": "[Console]::OutputEncoding doesn't work to parse exe with unicode output",
+  "updated_at": "2019-11-21T22:35:43Z"
+}

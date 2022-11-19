@@ -1,0 +1,342 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3424",
+  "author": "mklement0",
+  "body": "Note: **Perhaps the behavior in question will rarely be noticed as problematic in the real world, so perhaps the only thing that's needed is adding a note to the _documentation_** - I'm unclear on whether this ultimately a non-issue.\r\n\r\nalpha.17 fixed issue #3153 with respect to `ConvertTo-Json` no longer wrapping `ConvertFrom-Json`  array output in an extraneous object with `value` and `count` properties.\r\n\r\nHowever, `ConvertFrom-Json` still sends the objects resulting from converting a JSON _array_ as a _single array_ through the pipeline, which is a deviation from the usual cmdlet behavior of _unwrapping_ collections and sending the items _one by one_.\r\n\r\n```powershell\r\n> ('[ 1, 2 ]' | ConvertFrom-Json | Measure-Object).Count\r\n1  # !! PS array `1, 2` was sent as a *single* object through the pipeline.\r\n```\r\n\r\n**Workaround**: Enclose the `ConvertFrom-Json` part of the pipeline in `(...)`, which forces enumeration:\r\n\r\n```powershell\r\n> (('[ 1, 2 ]' | ConvertFrom-Json) | Measure-Object).Count\r\n2  # OK, (...) forced enumeration\r\n```\r\n\r\nAlternatively, simply insert a `Write-Output` pipeline segment:\r\n\r\n```powershell\r\n> ('[ 1, 2 ]' | ConvertFrom-Json | Write-Output | Measure-Object).Count\r\n2  # OK, Write-Output forced enumeration\r\n```\r\n\r\n<sup>Note: On _Windows PowerShell_, as of v5.1, you paradoxically need `Write-Output -NoEnumerate` to prevent unwrapping  from getting applied to the individual array elements as well.</sup>\r\n\r\nOn the plus side, as @PetSerAl  points out, this preserves the input structure in a round-trip in the case of _single_-element JSON arrays:\r\n\r\n```powershell\r\n> '[ 1 ]' | ConvertFrom-Json | ConvertTo-Json\r\n[\r\n  1\r\n]\r\n```\r\nIt is only `ConvertFrom-Json`'s send-the-array-as-a-whole approach that enables the above round trip.\r\n\r\nBy contrast, **when you start with a PS array**, it doesn't work that way (which illustrates the difference in pipeline behavior):\r\n\r\n```powershell\r\n> , 1 | ConvertTo-Json\r\n1 # !! Input PS array was unwrapped on sending it through the pipeline\r\n```\r\n\r\nTo preserve the array, you must _explicitly_ _nest_ the array:\r\n\r\n```powershell\r\n> , , 1 | ConvertTo-Json\r\n[\r\n  1\r\n]\r\n\r\n# Alternative: explicitly prevent enumeration\r\n> Write-Output -NoEnumerate (, 1) | ConvertTo-Json\r\n[\r\n  1\r\n]\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-alpha (v6.0.0-alpha.17) on Darwin Kernel Version 16.4.0: Thu Dec 22 22:53:21 PST 2016; root:xnu-3789.41.3~3/RELEASE_X86_64\r\n```\r\n",
+  "closed_at": "2020-09-09T04:01:56Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "An alternate illustration of this behavior is `'[ 1, 2 ]' | ConvertFrom-Json | foreach { $_.Count }` which returns the value 2 indicating that the array is passed as a single value as opposed to `'[ 1, 2 ]' | ConvertFrom-Json | write-output | foreach { $_.Count }` which will return 1,1.",
+      "created_at": "2017-03-31T22:23:49Z",
+      "updated_at": "2017-03-31T22:23:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @BrucePay, but what I'm unclear on is: is this behavior - given that it deviates from usual collection-unwrapping behavior - problematic _in practice_?",
+      "created_at": "2017-03-31T22:30:55Z",
+      "updated_at": "2017-03-31T22:30:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The more I think about it, the more I believe this behavior should be changed:\r\n\r\nI just came across [a real-world problem](https://stackoverflow.com/a/44473567/45375) in which the behavior is problematic, and I found that despite being aware of the issue in principle, I simply _forgot_, which stumped me for a while.\r\n\r\nHaving to remember this exception is a burden, especially given that there's no obvious reason for it and that the _only_ benefit is the ability to round-trip a _single-item_ array - something that it isn't even expected to work with PowerShell's own arrays.",
+      "created_at": "2017-06-10T13:10:54Z",
+      "updated_at": "2017-06-10T13:10:54Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and agrees that we should be consistent with expected PowerShell semantics and a single element array would be a single item.  However, we also don't want to revert the original problem in #3153\r\n",
+      "created_at": "2017-06-14T23:28:54Z",
+      "updated_at": "2017-06-14T23:28:54Z"
+    },
+    {
+      "author": "bojanrajkovic",
+      "author_association": "NONE",
+      "body": "This behavior needs to be fixed--it means you can't effectively compose pipelines that involve JSON arrays, unless you either assign to an intermediate variable, or wrap in a \"subshell\" to terminate the pipeline.\r\n\r\nThat is by no means obvious to discover--I found it before I found this issue by pure accident, mostly because I suspected something wrong with the pipeline objects and wanted to call `GetType` on the output of `ConvertFrom-Json`. Another engineer had already spent at least 20 minutes wondering why his pipeline didn't work.\r\n\r\nThis looks really bad as a user--Powershell's object-oriented nature should make pipelines like this a breeze, instead you get hard-to-diagnose Heisenbugs (this would have disappeared as soon as someone tried assigning it to a variable, only to reappear again later).",
+      "created_at": "2017-11-17T19:37:29Z",
+      "updated_at": "2017-11-17T19:37:29Z"
+    },
+    {
+      "author": "san7hos",
+      "author_association": "NONE",
+      "body": "I think the way to fix the issue could be by introducing a switch to the ConvertFrom-Json that would modify the behaviour, either returning an array or pipeline objects, e.g.:\r\n\r\n```powershell\r\nConvertFrom-Json -PipelineFriendly\r\n```\r\n\r\nI wrote an advanced function while trying to solve the issue\r\n\r\n```powershell\r\nfunction Split-Array {\r\n    [CmdletBinding()]\r\n    param (\r\n        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]\r\n        [System.Object[]] $Array\r\n    )\r\n    \r\n    process {\r\n        foreach ($item in $Array) {\r\n            $item\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nHowever, when reading throughout this ticket, I realized that `Write-Output` could be used instead.",
+      "created_at": "2017-11-24T13:47:35Z",
+      "updated_at": "2017-11-24T13:48:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've added a simple workaround to the original post: in short: enclosing the `Convert-FromJson` part of the pipeline  in `(...)` forces enumeration; simply inserting a `Write-Output` pipeline segment would work too (except in _Windows PowerShell_, where you'd paradoxically need `Write-Output -NoEnumerate`)).\r\n\r\nI like the idea of introducing the switch, but I'd reverse the logic: pipeline-friendliness should be the _default_; thus, something like `-NoEnumerate` - in line with `Write-Output`'s parameter - would be more appropriate.\r\n\r\nObviously, however, that would be a breaking change.\r\n\r\n\r\n",
+      "created_at": "2017-11-24T15:10:05Z",
+      "updated_at": "2017-11-24T15:10:05Z"
+    },
+    {
+      "author": "elijahgagne",
+      "author_association": "NONE",
+      "body": "I'm glad I found this post. I spent a couple hours trying to figure out what was wrong. I originally thought the API I was working with was doing something improper. I switched over to Python and realized that the API was returning good results, the problem was Convert-FromJson was not working the way I expected it to.",
+      "created_at": "2017-12-02T16:13:58Z",
+      "updated_at": "2017-12-02T16:13:58Z"
+    },
+    {
+      "author": "AikenBM",
+      "author_association": "NONE",
+      "body": "I came across this in [a StackOverflow question](https://stackoverflow.com/q/49136148/696808) where the user was trying to pipeline the output of `ConvertFrom-Json`.  The difference in these behaviors is very much unexpected:\r\n\r\n```\r\nPS> ConvertFrom-Json '[1, 2, 3]' | ForEach-Object  {\": $_\"}\r\n: 1 2 3\r\n\r\nPS> $x = ConvertFrom-Json '[1, 2, 3]'\r\nPS> $x | ForEach-Object  {\": $_\"}\r\n: 1\r\n: 2\r\n: 3\r\nPS> ,$x | ForEach-Object  {\": $_\"}\r\n: 1 2 3\r\n\r\nPS> (ConvertFrom-Json '[1, 2, 3]') | ForEach-Object  {\": $_\"}\r\n: 1\r\n: 2\r\n: 3\r\n```\r\n\r\nOnce you know that `ConvertFrom-Json` is wrapping the item in an array it's clear what's going on, but until then it's very confusing.  `ConvertFrom-Csv` certainly doesn't behave like this, but, of course, JSON is much more structured than CSV.\r\n",
+      "created_at": "2018-03-06T18:31:02Z",
+      "updated_at": "2018-03-06T18:37:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@AikenBM \r\n\r\n> Once you know that ConvertFrom-Json is wrapping the item in an array\r\n\r\nYes, but the problem is _remembering_ it - given that it works differently from the rest of PowerShell; the benefits of this deviation (round-tripping of single-item JSON arrays) are too slim to warrant it, in my opinion.",
+      "created_at": "2018-03-06T18:46:52Z",
+      "updated_at": "2018-03-06T18:47:16Z"
+    },
+    {
+      "author": "AikenBM",
+      "author_association": "NONE",
+      "body": "I'm not saying that the current behavior is desirable, I'm commenting more to refute the \"Perhaps the behavior in question will rarely be noticed as problematic in the real world\" note on the initial post since there were not many instances of people saying they also had a real world problem with it. I've not encountered the issue before, but I would have classified it as a bug if I had not found other people describing problems with `ConvertFrom-Json` and `ForEach-Object`. People are noticing that the command doesn't work like other PowerShell commands.\r\n\r\nI'm still not convinced there isn't also a need for something like `ConvertTo-Json -AsJsonArray` to handle the edge cases where you're pipelining a single valued array, however.\r\n",
+      "created_at": "2018-03-06T20:32:16Z",
+      "updated_at": "2018-03-06T20:32:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@AikenBM Personally, I'm not against adding `-AsJsonArray` to make it more discoverable particularly for newer users",
+      "created_at": "2018-03-06T21:00:29Z",
+      "updated_at": "2018-03-06T21:00:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@AikenBM: Thanks for confirming that it is a real-world issue.\r\n\r\n@SteveL-MSFT : I agree; such a switch would be the `ConvertTo-Json` JSON equivalent of `@(...)`\r\n\r\nThe - awkward and  potentially slow - workaround is:\r\n\r\n```powershell\r\n, @(1) | ConvertTo-Json  # -> '[ 1 ]'\r\n```\r\n\r\n(In this particular case `,, 1 ` would do, but to support any value - whether already an array or not - `, @($val)` is needed.)\r\n\r\n~~@AikenBM: Can I suggest you create a new issue that suggests introducing `-As[Json]Array`?~~\r\n",
+      "created_at": "2018-03-06T21:03:57Z",
+      "updated_at": "2018-03-06T21:28:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@AikenBM: Never mind, I just went ahead and did it: #6327\r\n\r\n",
+      "created_at": "2018-03-06T21:28:10Z",
+      "updated_at": "2018-03-06T21:28:10Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT @joeyaiello \r\n\r\nI'd like clarity on this because it's a common enough issue I hear about with `Invoke-RestMethod` and we should align the behavior of `ConvertFrom-Json` with `Invoke-RestMethod` within the same release if not within the same PR regardless of what is decided (i.e they should always have the same behavior in every release).\r\n\r\nI have code which relies on the JSON arrays not being unrolled. As a simplified demo:\r\n\r\n```powershell\r\nfunction Get-OneOrMoreJsonArrays {\r\n    [CmdletBinding()]\r\n    param ()\r\n    end {\r\n        switch (1..2 | Get-Random) {\r\n            1 { '[1,2]' }\r\n            2 { '[1,2]','[3,4]','[5,6]' }\r\n        }\r\n    }\r\n}\r\nfunction Get-ArrayIndexOne {\r\n    [CmdletBinding()]\r\n    param (\r\n        [Parameter(ValueFromPipeline)]\r\n        $Collection\r\n    )\r\n    process {\r\n        $Collection[1]\r\n    }\r\n}\r\nGet-OneOrMoreJsonArrays | ConvertFrom-Json | Get-ArrayIndexOne\r\n```\r\n\r\n`Get-OneOrMoreJsonArrays` may return one or more JSON arrays (e.g. `'[1,2]'`, or `'[1,2]', '[3,4]', '[5,6]'`) that are ingested from either a set of files or from an API/Database. So the change to defaulting to unrolling would result in `Get-ArrayIndexOne` receiving 2 objects now instead of 1 for a single array, 6 objects now instead of 3 for the second example, with no way for me to correlate back to which item belongs to which original JSON array. \r\n\r\nThat is just to demonstrate that this is a breaking change and I believe it to be [bucket 1](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-1-public-contract) and as such I believe this should not be implemented without a full RFC process.\r\n\r\nHowever, since this has been the observable behavior since addition of `ConvertFrom-Json` and `Invoke-RestMethod`, I would like to suggest that instead of going through an RFC, changing the default behavior, and breaking existing code, I would rather add a `-Enumerate` (name subject to change) switch to both cmdlets. Those seeking this as default behavior could add it to their `$PSDefaultParameterValues`. we could potentially use telemetry to see how often the change is used and see if it justifies switching the default behavior. additionally, we could do a better job of documenting the current behavior and how to use the new parameter.\r\n\r\nI'm not trying to sound dismissive, but those that have voiced their concerns about the current behavior to me personally don't work as regularly with JSON as those who have voiced their desire to maintain the current behavior. It's a somewhat niche group that works heavily with web APIs and JSON that desire this behavior to remain as is and would definitely require it to be available (though `-NoEnumerate` or something). A small group with a lot of code that would break. \r\n\r\nAnyway, since It's still not clear to me how we manage breaking changes in a way that makes sense... I'd like guidance on what to do for this. I agree with everyone that there should be a way to unroll from both cmdlets. I disagree  (with what seems like everyone) that it should be the default behavior, and I certainly disagree that this is something that should be done without RFC. But, I would like to meet in the middle and provide a way to start unrolling now in a way that is not a breaking change through the addition of a new parameter on both cmdlets. but, I also don't want to do that work if someone will just a short time later submit a PR which flops the default behavior.\r\n\r\nIf we add the new parameter and decide to change the default behavior later, we can then add another parameter (`-NoEnumerate`) make the existing parameter hidden (`-Enumerate`). That would be similar to how we changed the `*-Csv` cmdlets.",
+      "created_at": "2018-03-17T20:47:23Z",
+      "updated_at": "2018-03-17T20:47:23Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus I like the proposal to add a switch to define the behavior.  I'll have the @PowerShell/powershell-committee review this specific aspect.",
+      "created_at": "2018-03-19T23:50:36Z",
+      "updated_at": "2018-03-19T23:50:36Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  Proposal is to add `-NoEnumerate` (aligns with `Write-Output`) switch to relevant cmdlets which would add a property `PSNoEnumerate` set to $true on the collection.  `Write-Object` in the pipeline would observe this property and not unroll the collection.  An RFC should be drafted for this proposal.  Consider how the user can re-enumerate the collection further in the pipeline (like formatting).",
+      "created_at": "2018-03-21T22:34:45Z",
+      "updated_at": "2018-03-21T22:34:45Z"
+    },
+    {
+      "author": "stej",
+      "author_association": "NONE",
+      "body": "Any plans in which version this will be available? ",
+      "created_at": "2018-12-13T08:59:06Z",
+      "updated_at": "2018-12-13T08:59:06Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@stej Someone would need to write an RFC and then implement it. this work is open to the community. If you have would like to see it implemented you are welcome to do the work. I personally have no interest in making this change and it is likely low priority for the PowerShell team as well. This change would likely need to be community driven and thus there is no timeline for when it will be implemented at present.",
+      "created_at": "2018-12-13T15:50:32Z",
+      "updated_at": "2018-12-13T15:50:32Z"
+    },
+    {
+      "author": "mrtristan",
+      "author_association": "NONE",
+      "body": "this was pretty painful. kept questioning my knowledge of powershell in fighting through what i was doing. props to @mklement0 for including a workaround!",
+      "created_at": "2019-03-23T00:15:33Z",
+      "updated_at": "2019-03-23T00:15:33Z"
+    },
+    {
+      "author": "AceHack",
+      "author_association": "NONE",
+      "body": "I still don't understand how to fix the issue, I want to\r\n\r\n$json | ConvertFrom-Json | Export-Csv\r\n\r\nand I just get one row.",
+      "created_at": "2019-05-09T17:46:05Z",
+      "updated_at": "2019-05-09T17:46:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@AceHack: Use `($json | ConvertFrom-Json) | Export-Csv`, as mentioned in the OP.",
+      "created_at": "2019-05-09T17:49:37Z",
+      "updated_at": "2019-05-09T17:49:37Z"
+    },
+    {
+      "author": "Agazoth",
+      "author_association": "NONE",
+      "body": "https://get-powershellblog.blogspot.com/2018/06/why-invoke-restmethod-and-convertfrom.html?spref=tw&m=1",
+      "created_at": "2019-05-09T17:49:52Z",
+      "updated_at": "2019-05-09T17:49:52Z"
+    },
+    {
+      "author": "Agazoth",
+      "author_association": "NONE",
+      "body": "($json | ConvertFrom-Json) | Export-Csv should work",
+      "created_at": "2019-05-09T17:50:46Z",
+      "updated_at": "2019-05-09T17:50:46Z"
+    },
+    {
+      "author": "AceHack",
+      "author_association": "NONE",
+      "body": "@Agazoth it does not, it puts one row in the CSV with with array details.\r\n\r\nJson looks like\r\n```\r\n[\r\n  {\r\n   ...\r\n  },\r\n  {\r\n   ...\r\n  },\r\n  {\r\n   ...\r\n  }\r\n]\r\n```\r\n\r\nCsv looks like\r\n```\r\n\"Length\",\"LongLength\",\"Rank\",\"SyncRoot\",\"IsReadOnly\",\"IsFixedSize\",\"IsSynchronized\",\"Count\"\r\n\"2295\",\"2295\",\"1\",\"System.Object[]\",\"False\",\"True\",\"False\",\"2295\"\r\n```",
+      "created_at": "2019-05-09T18:06:17Z",
+      "updated_at": "2019-05-09T18:06:17Z"
+    },
+    {
+      "author": "AceHack",
+      "author_association": "NONE",
+      "body": "Scratch that, the parentheses fixes the issue.  Thanks.",
+      "created_at": "2019-05-09T18:08:46Z",
+      "updated_at": "2019-05-09T18:08:46Z"
+    },
+    {
+      "author": "ormico",
+      "author_association": "NONE",
+      "body": "just chiming in that I hit this same problem and would have been stumped w/o finding this issue here.",
+      "created_at": "2019-08-06T15:22:51Z",
+      "updated_at": "2019-08-06T15:22:51Z"
+    },
+    {
+      "author": "wehr",
+      "author_association": "NONE",
+      "body": "Google \"convertfrom-json pipeline\" brought me here. \r\n($json | ConvertFrom-Json) | My-Function works",
+      "created_at": "2019-08-28T10:56:01Z",
+      "updated_at": "2019-08-28T10:56:01Z"
+    },
+    {
+      "author": "danstur",
+      "author_association": "CONTRIBUTOR",
+      "body": "Not sure what the etiquette for Up-for-Grabs issues is here, but I assume it's good behavior to tell people when you're working on an issue. \r\n\r\nI thought it might be a nice simple issue to check out the code base. The required patch is only a few lines of code (https://github.com/danstur/PowerShell/commit/abcd9489391fabfd52207e6bfe77f37bc306e1ce) plus additional tests, so I should write an RFC next to get this rolling. ",
+      "created_at": "2019-10-21T21:30:08Z",
+      "updated_at": "2019-10-21T21:30:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@danstur just commenting that you're taking ownership is sufficient since GitHub doesn't allow assigning to non \"Contributors\".  You don't need to write a whole RFC for this, the new model is to discuss any issues (functional or design) in an issue.  You can just use this issue.  Thanks!",
+      "created_at": "2019-10-21T21:33:57Z",
+      "updated_at": "2019-10-21T21:33:57Z"
+    },
+    {
+      "author": "danstur",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT Thanks for the quick response. Glad to hear that I can avoid the bureaucracy of writing a RFC.\r\n\r\nI'll just write some additional tests and then create a PR to get feedback. Will have to also update the documentation since this is a breaking change and introduces an additional parameter.",
+      "created_at": "2019-10-21T21:53:37Z",
+      "updated_at": "2019-10-21T21:53:37Z"
+    },
+    {
+      "author": "danstur",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT Also should Invoke-RestMethod be adapted in the same or a separate pull request?",
+      "created_at": "2019-10-22T08:42:46Z",
+      "updated_at": "2019-10-22T08:42:46Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@danstur I would suggest doing `Invoke-RestMethod` as a separate PR even if the changes are similar.  Thanks!",
+      "created_at": "2019-10-22T20:54:14Z",
+      "updated_at": "2019-10-22T20:54:14Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this in light of https://github.com/PowerShell/PowerShell/pull/10861.  We made a misstatement back in 2018.  Our intent is to keep the current behavior allowing round-trip for ConvertFrom-Json | ConvertTo-Json.  So what we ask is to add a `-Enumerate` switch to opt into the unwrapping behavior.",
+      "created_at": "2019-10-30T22:35:17Z",
+      "updated_at": "2019-10-30T22:35:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "This is deeply disappointing, @SteveL-MSFT.\r\n\r\nSince I created this issue I've seen people get tripped up time and again by this behavior - and  despite _knowing_ about it, I continue to fall for it on occasion.\r\n\r\nTo justify it in the name of _round-trip_ behavior is baffling, given that:\r\n\r\n*  _round-tripping_ is far from being the _typical_ use case and is _something  that it isn't even expected to work with PowerShell's own arrays_ (`(Write-Output (, 1)) -is [array]` is `$false`).\r\n* user who truly need that  can now use the `-AsArray` switch",
+      "created_at": "2019-10-31T01:44:39Z",
+      "updated_at": "2019-10-31T01:44:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "We believe that the round-trip behavior is expected as usage would be: $j | ConvertFrom-Json; modify $j; $j | ConvertTo-Json where $j is an array.  It also the current behavior so making a breaking change AGAIN on this seems undesirable.  If there is evidence that most common usage expects unwrapping and users prefer `-NoEnumerate`, we can revisit.",
+      "created_at": "2019-10-31T02:49:58Z",
+      "updated_at": "2019-10-31T02:49:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> We believe that the round-trip behavior is expected\r\n\r\nJSON is a _serialization_ format, and as such it has two primary uses cases:\r\n\r\n* Converting an endpoint-native object - such as a `[pscustomobject]`  in PowerShell - _to_ JSON\r\n\r\n* Converting to an endpoint-native representation _from_ JSON.\r\n\r\nI haven't done any research, but round-trip modification of JSON _on the same system_ strikes me as the exception, not the norm.\r\n\r\n> so making a breaking change AGAIN\r\n\r\nWhy _again_? To date, there has only been the counterintuitive behavior.",
+      "created_at": "2019-10-31T03:48:13Z",
+      "updated_at": "2019-10-31T03:48:52Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 the Committee was under the impression that the json cmdlet was changed once to enable round trip due to pipeline unwrapping behavior.  However, searching now I can't find the issue/PR.  This could be a misunderstanding on our part.  ",
+      "created_at": "2019-10-31T04:26:44Z",
+      "updated_at": "2019-10-31T04:26:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: I just tried  (with `'[1, 2]' | ConvertFrom-Json | Measure-Object`) in v3 (when the JSON cmdlets were introduced), v4, v5.1 and v6.2.3 : all exhibit the problematic array-as-single-output-object behavior.",
+      "created_at": "2019-10-31T05:05:48Z",
+      "updated_at": "2019-10-31T05:06:20Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 I think I got it.  So the current behavior is consistent with previous versions of PowerShell.   However, that behavior is inconsistent with rest of PowerShell because it doesn't unwrap the array in the pipeline.  The ask is to have a single breaking change to make this consistent as users are getting confused by this.  Correct?",
+      "created_at": "2019-10-31T16:22:15Z",
+      "updated_at": "2019-10-31T16:22:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Exactly, @SteveL-MSFT.\r\n\r\nTo recap two head scratchers:\r\n\r\n``` powershell\r\nPS> '[ {\"v\":1}, {\"v\":2}, {\"v\":3} ]' | ConvertFrom-Json | Select-Object -Expand v\r\nSelect-Object: Property \"v\" cannot be found.\r\n\r\nPS> '[ {\"v\":1}, {\"v\":2}, {\"v\":3} ]' | ConvertFrom-Json | Where-Object v -eq 2\r\n# No output\r\n```\r\n\r\nBecause the resulting array of custom objects was sent _as a whole_, _as one object_, `Select-Object` can't expand the `v` property, because the _array_ has no such property.\r\nFor the same reason, `Where-Object` finds no match.\r\n\r\n<sup>Note: `Select-Object` and `Where-Object` arguably should apply _member enumeration_ to the input array, as discussed in  #9576, but that is a separate issue (and still wouldn't make the `Where-Object` command work as expected).</sup>\r\n\r\nUsers - rightfully - expect the input array's custom objects to be sent _one by one_ through the pipeline, as it _usually_ works with arrays / collections / enumerables sent to the pipeline.\r\n\r\nIn cases where non-enumeration _is_ desired, we should have the proposed `-NoEnumerate` switch, analogous to `Write-Output`'s - it is an _opt-in_ to the _anomalous_ behavior.\r\n",
+      "created_at": "2019-10-31T18:12:58Z",
+      "updated_at": "2019-10-31T18:12:58Z"
+    },
+    {
+      "author": "danstur",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT I have to agree with @mklement0 here, I'm also disappointed. I picked this issue not just because it's a nice entry level problem to look at the code base but also because not only have I fallen into this trap, but I also had to help lots of colleagues with the same issue. \r\n\r\nNot only is this behavior completely unintuitive, since it behaves contrary to almost (? I can't think of a single counterexample actually) everything else, it is also as far as I can see nowhere documented.\r\n\r\nAnd not only is the behavior unintuitive, when trying to analyse an issue (which will often involve assigning partial expressions to variables to make it easier to debug), you're likely to unknowingly fix the underlying problem which means you might not even understand the problem at all, just that the problem magically went away after a bit of debugging. \r\n\r\nThe same problem also makes the current solution very fragile, since a simple refactoring will change the observable behavior.",
+      "created_at": "2019-11-02T19:41:02Z",
+      "updated_at": "2019-11-02T19:41:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "To add one further point to what's already mentioned, I think we should avoid the inherent inconsistency of having one common command with `-NoEnumerate` (i.e., Write-Output) and other with `-Enumerate`\r\n\r\nVariant behaviours may be desired, and that is why we have the _option_ to select non-standard behaviour, but we should not have two completely different standard behaviours. Documentation or no, this difference is not an immediately obvious behaviour in that users not already very familiar with the commands will be able to diagnose. As such, I think the default behaviours should be consistent.",
+      "created_at": "2019-11-02T20:01:40Z",
+      "updated_at": "2019-11-02T20:01:40Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@danstur I believe the @PowerShell/powershell-committee misunderstood the situation when we discussed it, we'll discuss this again on Monday.",
+      "created_at": "2019-11-03T02:39:00Z",
+      "updated_at": "2019-11-03T02:39:00Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this again.  There is a case of an array of arrays that would break with this change, but this is unlikely and can be addressed with the `-noenumerate` switch.  So we support adding the `-noenumerate` switch to return an array as a single object and have `ConvertFrom-Json` return elements individually to the pipeline following expected PowerShell behavior by default for arrays.",
+      "created_at": "2019-11-07T00:00:28Z",
+      "updated_at": "2019-11-07T00:00:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "After #10861 can we close the issue?",
+      "created_at": "2020-09-09T03:40:43Z",
+      "updated_at": "2020-09-09T03:40:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Yes, we can:\r\n\r\n```powershell\r\nPS> ('[ 1, 2, 3]' | ConvertFrom-Json | Measure-Object).Count\r\n3 # implies that the array elements were sent one by one through the pipeline.\r\n```",
+      "created_at": "2020-09-09T03:49:35Z",
+      "updated_at": "2020-09-09T04:40:43Z"
+    }
+  ],
+  "created_at": "2017-03-25T18:28:36Z",
+  "number": 3424,
+  "state": "closed",
+  "title": "ConvertFrom-Json sends objects converted from a JSON array as an *array* through the pipeline.",
+  "updated_at": "2020-09-09T04:40:43Z"
+}

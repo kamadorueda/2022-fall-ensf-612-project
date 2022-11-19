@@ -1,0 +1,167 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17523",
+  "author": "lclutz",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nWhen outputting UTF-8 from a native application PowerShell pipes fail to parse the data correctly even if a BOM is present. \r\nIn contrast this works in PowerShell 5.1 - that's why I'm reporting this as a bug.\r\n\r\nThe following python script will produce UTF-8 encoded output with a BOM.\r\n\r\n```python\r\n#!/usr/bin/env python3\r\nimport sys\r\nsys.stdout.buffer.write(\"\u00e4\u00f6\u00fc\u00df \u03b1\u03b2\u03b3\u03b4\\n\".encode(\"utf_8_sig\"))\r\n```\r\n\r\nPowershell 5.1 is able to recognise the output is UTF-8 encoded if the BOM is present. PowerShell 7.2.4 does not. \r\n\r\nNote that both shells were started with the `-noprofile` option to ensure default configuration.\n\n### Expected behavior\n\n```console\nPS> python .\\test.py | echo\r\n\u00e4\u00f6\u00fc\u00df \u03b1\u03b2\u03b3\u03b4\n```\n\n\n### Actual behavior\n\n```console\nPS > python .\\test.py | echo\r\n\u00b4\u2557\u2510\u251c\u00f1\u251c\u00c2\u251c\u255d\u251c\u0192 \u256c\u2592\u256c\u2593\u256c\u2502\u256c\u2524\n```\n\n\n### Error details\n\n_No response_\n\n### Environment data\n\n```powershell\nPS> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.4\r\nPSEdition                      Core\r\nGitCommitId                    7.2.4\r\nOS                             Microsoft Windows 10.0.19044\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell relies on [System.Diagnostics.Process](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.process?view=net-6.0) to parse the output from a pipe and in the absence of an explicit setting of the `Standard*Encoding` property in the start info it will rely on the global setting of `Console.OutputEncoding` to determine what encoding is used. On Windows the default console encoding is still whatever the OS is configured to, which is typically 431 on English hosts.\r\n\r\nUnfortunately your only workaround here is to set `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` and then run your command\r\n\r\n```powershell\r\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\npython .\\test.py | echo\r\n```\r\n\r\nEven then it's still going to read the BOM as text and not a marker so it's not perfect but you at least get the proper string back.\r\n\r\nAlso keep in mind not all executables use the console output encoding as the encoding they write to stdout/stderr as. Some completely ignore the setting and always use UTF-8, others will use some other setting somewhere to control this. PowerShell is just using whatever the console encoding is set to (rights so IMO). If you want to deal with UTF-8 everywhere I recommend adding this to your profile\r\n\r\n```powershell\r\n# UTF8Encoding is used instead of the UTF8 field to set a BOM-less encoding for writing to stdin\r\n[Console]::OutputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n```\r\n\r\nPython is a clear example of a program that doesn't use the console codepage. It actually uses the system locale, which on US English hosts is `windows-1252`. If in your example you didn't use `sys.stdout.buffer` but wrote text to `sys.stdout` then getting back UTF-8 requires even more work on the Python side. You can force it to use a specific encoding with the `PYTHONIOENCODING` env var or by calling Python with `python.exe -X utf8` to use UTF-8, e.g.\r\n\r\n```powershell\r\n$env:PYTHONIOENCODING = 'utf-8'\r\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\npython -c \"print('\u00e4\u00f6\u00fc\u00df \u03b1\u03b2\u03b3\u03b4')\" | echo\r\n\r\n$env:PYTHONIOENCODING = ''  # Unsets env var for test\r\npython -X utf8 -c \"print('\u00e4\u00f6\u00fc\u00df \u03b1\u03b2\u03b3\u03b4')\" | echo\r\n```",
+      "created_at": "2022-06-13T19:01:10Z",
+      "updated_at": "2022-06-13T19:12:45Z"
+    },
+    {
+      "author": "lclutz",
+      "author_association": "NONE",
+      "body": "Hey Jordan!\r\n\r\nThank you for your explanation of what's going on behind the scenes. \r\n\r\nTo be clear I am not really advocating adding a BOM to UTF-8 output. I only did it to signal to PowerShell what encoding I'm using.\r\n\r\nI knew about `[Console]::OutputEncoding` but I viewed setting it more as a workaround to be honest. I think it is preferable to provide as a \"marker\" for lack of a better term to help PowerShell process the data regardless of user settings over telling the end user of my scripts to change their output encoding before running them.\r\n\r\nI wanted the code for repoducing the issue be short but what I am actually doing is checking if the output handle is a console window or not. If it is I set the code page to UTF-8 and output UTF-8 without BOM to avoid the artifact you mentioned. If it is not a console window but a pipe I output UTF-8 with BOM to allow PowerShell to pipe correctly. As I said this works in version 5.1 but not in the current release.\r\n\r\nIf this difference in the behaviour of the pipes between PowerShell 5.1 and the current release is in fact the intended behaviour feel free to close this issue.",
+      "created_at": "2022-06-13T20:51:58Z",
+      "updated_at": "2022-06-13T20:51:58Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Unfortunately the code that is reading from the stdout on the new process doesn't utilise the BOM at all. This all happens in dotnet itself and isn't actually controlled by PowerShell. It is interesting that it does work on WinPS which would indicate to me that the change that handled all this occurred in dotnet itself and not PowerShell. By the time the output gets to PowerShell it's already a string so the BOM is lost or at least you've lost enough detail to be able to re-encode it correctly.\r\n\r\n> If this difference in the behaviour of the pipes between PowerShell 5.1 and the current release is in fact the intended behaviour feel free to close this issue.\r\n\r\nI'm not sure if this is intended behaviour or maybe just an unexpected artifact of the dotnet core migration, maybe they did it on purpose and decided to ignore the BOM or maybe it's an unexpected side affect of some other change there.",
+      "created_at": "2022-06-13T20:58:07Z",
+      "updated_at": "2022-06-13T20:58:07Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": ">I think it is preferable to provide as a \"marker\" \r\n>Unfortunately the code that is reading from the stdout on the new process doesn't utilise the BOM at all.   '\r\n\r\nWhen I saw your discussion, I burst into tears.\r\n\"No one defines the coding standard of powershell standard input and standard output\" ----- I think this is the biggest mistake of powershell.\r\nA \"bom2\" similar to the bom header should actually be defined to standardize this.\r\n\r\nLet me talk about my thoughts:\r\n1 Design a bom2 as a logo header. The string used to identify the header will be automatically recognized by powershell, translated into the target encoding, and output in the current powershell console.\r\n\r\n2 This solution must be able to express emoj on win without relying on win terminal\r\n\r\n3Q: What encoding scheme is used? A: I recommend only using utf8.\r\nBecause of utf16, only 65535 characters can be used. utf32 is actually unused and should be considered obsolete.\r\n\r\n4Q: Does it support multiple encodings? A: I recommend: No.\r\n\r\n5Q: If multiple encodings are supported, do you want to default base64 encoding and decoding? A: I suggest: yes.\r\n\r\nThe ultimate purpose of doing these things: support emoj, unified encoding, no garbled characters.\r\n\r\n----\r\n\r\nThis is the solution I think works so far: base64 encode, decode\r\n\r\n```\r\n#!/usr/bin/env python3\r\nimport sys\r\nimport base64\r\n\r\naaa = 'write-host \"\u4e2d\u6587\"'\r\nbbb = base64.b64encode(aaa.encode(\"utf_16_le\"))\r\nsys.stdout.buffer.write(bbb)\r\n#$base64_cmd = 'dwByAGkAdABlAC0AaABvAHMAdAAgACIALU6HZSIA'\r\n#powershell.exe -EncodedCommand $base64_cmd\r\n```\r\n\r\nThere is also a temporary solution: \r\nwrite the information, plus the bom header, to a file. Let powershell read by itself.",
+      "created_at": "2022-06-14T03:26:29Z",
+      "updated_at": "2022-06-14T03:26:29Z"
+    },
+    {
+      "author": "lclutz",
+      "author_association": "NONE",
+      "body": "Sorry @kasini3000 but that doesn't make sense to me.\r\n\r\nI'm not arguing for or against any BOMs or headers. \r\n\r\nThere is a difference in behaviour between version 5.1 and current release. I happen to rely on the 5.1 behaviour to get around some encoding issues but that's besides the point. All I'm saying is there is a discrepancy and this might be a bug.\r\n\r\nEmojis have nothing to do with it. UTF-16 only being able to represent 65535 characters is not true and I'm not sure what base64 encoding is supposed to do. \r\n\r\nYes, you are right, you can always directly write a file and then read the file back - circumventing the pipe. But passing data through pipes is what this issue is about.\r\n\r\n---\r\n\r\nI think the original title of this issue was a bad choice because it emphasised the failure to parse rather than the difference between versions. I have edited the title hoping to prevent future misunderstandings.\r\n",
+      "created_at": "2022-06-14T13:13:22Z",
+      "updated_at": "2022-06-14T13:13:22Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I think the original title of this issue was a bad choice because it emphasised the failure to parse rather than the difference between versions.\r\n\r\n~~The encoding difference is documented in [Differences between Windows PowerShell 5.1 and PowerShell 7.x](https://docs.microsoft.com/en-us/powershell/scripting/whats-new/differences-from-windows-powershell?view=powershell-7.2#change-outputencoding-to-use-utf-8-nobom-encoding-rather-than-ascii).~~ Unrelated\r\n\r\n",
+      "created_at": "2022-06-14T15:07:02Z",
+      "updated_at": "2022-06-14T16:08:29Z"
+    },
+    {
+      "author": "lclutz",
+      "author_association": "NONE",
+      "body": "> The encoding difference is documented in Differences between Windows PowerShell 5.1 and PowerShell 7.x.\n\nI disagree. Correct me if I'm wrong but `$OutputEncoding` is a setting that controls how the output of cmdlets will be encoded.\n\nThe relevant encoding setting in this case would be `[System.Console]::OutputEncoding` which controls which encoding PowerShell will expect from native applications. \n\nThat setting did not change its default value as far as I'm aware. On my machine it defaults in both versions to ibm850 (this is region specific iirc, it might be a different value for you but it'll be the same value in either PowerShell version).",
+      "created_at": "2022-06-14T16:00:48Z",
+      "updated_at": "2022-06-14T16:00:48Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I disagree. Correct me if I'm wrong but `$OutputEncoding` is a setting that controls how the output of cmdlets will be encoded.\r\n\r\nOops you're right it doesn't apply here. That controls the encoding of objects piped to native commands.",
+      "created_at": "2022-06-14T16:08:14Z",
+      "updated_at": "2022-06-14T16:08:14Z"
+    },
+    {
+      "author": "munezerocity",
+      "author_association": "NONE",
+      "body": "so i need you help please\n\n<https://www.avast.com/sig-email?utm_medium=email&utm_source=link&utm_campaign=sig-email&utm_content=webmail>\nVirus-free.\nwww.avast.com\n<https://www.avast.com/sig-email?utm_medium=email&utm_source=link&utm_campaign=sig-email&utm_content=webmail>\n<#DAB4FAD8-2DD7-40BB-A1B8-4E2AA1F9FDF2>\n",
+      "created_at": "2022-06-14T17:20:41Z",
+      "updated_at": "2022-06-14T18:35:23Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> I disagree. Correct me if I'm wrong but $OutputEncoding is a setting that controls how the output of cmdlets will be encoded.\r\n\r\nJust to clarify `$OutputEncoding` controls the encoding PowerShell uses to encode strings (if not a string the stringified string of the object) being piped into native applications through stdin. That is how PowerShell will encode `\"my data\" | my.exe`. Maybe that's what you meant by what you said but I wasn't fully clear and thought it best to mention.",
+      "created_at": "2022-06-14T18:47:48Z",
+      "updated_at": "2022-06-14T18:48:12Z"
+    },
+    {
+      "author": "lclutz",
+      "author_association": "NONE",
+      "body": "> Just to clarify `$OutputEncoding` controls the encoding PowerShell uses to encode strings (if not a string the stringified string of the object) being piped into native applications through stdin. That is how PowerShell will encode `\"my data\" | my.exe`. Maybe that's what you meant by what you said but I wasn't fully clear and thought it best to mention.\r\n\r\nThanks for clarifying. I worded it poorly you are completely right.",
+      "created_at": "2022-06-14T19:15:52Z",
+      "updated_at": "2022-06-14T19:15:52Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": "Like the great definition bom, despite the initial denials. But now is the de facto standard.\r\n\r\nCome on, hero! we need you!\r\n\r\nCome here and define specifications for powershell standard input,  and standard output.\r\n\r\n\"my string eg : \u2b50\ud83c\udf1b\" |  my.exe   ----Emojis have nothing to do with it?\r\n",
+      "created_at": "2022-06-15T13:00:44Z",
+      "updated_at": "2022-06-15T16:09:12Z"
+    },
+    {
+      "author": "lclutz",
+      "author_association": "NONE",
+      "body": "> Like the great definition bom, despite the initial denials. But now is the de facto standard.\r\n\r\nI don't know what you mean by that. It is not at all common for UTF8 encoded data to include a BOM. Even PowerShell changed their default encoding for the `Out-File` cmdlet to UTF8 without BOM in later versions.\r\n\r\nIf you want to argue that it would be nice to have a marker indicating the encoding of the file that's fine but this issue is not about text encoding in general - that's a much larger topic and the PowerShell issue tracker probably wouldn't be the place I'd raise it.\r\n\r\n> \"my string eg : \u2b50\ud83c\udf1b\" | my.exe ----Emojis have nothing to do with it?\r\n\r\nWhether the payload text includes emojis or not doesn't matter for what I'm talking about.\r\n\r\nLook, I'm not trying to say your concerns are not valid. I'd recommend you open issues about those concerns in the relevant places so they can be addressed individually. But I would appreciate it if you could keep the discussion here on topic without broadening the scope.",
+      "created_at": "2022-06-15T21:13:29Z",
+      "updated_at": "2022-06-15T21:19:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> PowerShell relies on [System.Diagnostics.Process](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.process?view=net-6.0) to parse the output from a pipe and in the absence of an explicit setting of the `Standard*Encoding` property in the start info it will rely on the global setting of `Console.OutputEncoding` to determine what encoding is used.\r\n\r\nYes, it seems it is a regression in .Net. It makes sense to create simple repro on C# and open new issue in .Net Runtime repository. I guess the regression is in internal [AsyncStreamReader](https://source.dot.net/System.Diagnostics.Process/R/4741a36c74c58421.html) class",
+      "created_at": "2022-06-16T11:33:40Z",
+      "updated_at": "2022-06-16T11:33:40Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "#10824 might be related",
+      "created_at": "2022-06-16T15:14:44Z",
+      "updated_at": "2022-06-16T15:14:44Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I investigated this issue some more trying to understand the discrepancy in this behavior between WinPS 5.1 and PS 7.2. It turns out this is because PowerShell 7 changed how to read a process' standard output:\r\n- WinPS uses `Process.StandardOutput`, which is a `StreamReader`, while PS 7 uses the `OutputDataReceived` event handler.\r\n\r\nWhen using `OutputDataReceived`, the behavior is the same on both .NET and .NET Framework -- BOM is NOT respected and `Console.OutputEncoding` is used for encoding bytes to string.\r\nWhen using `Process.StandardOutput`, the behavior is also the same on both .NET and .NET Framework -- BOM is respected by the `StreamReader`.\r\n\r\nSwitching to `OutputDataReceived` was part of a [big change](https://github.com/PowerShell/PowerShell/pull/2450) back in 2016 to support streaming behavior in a pipeline of native commands. I will let the Engine Group to review this issue again.",
+      "created_at": "2022-08-03T22:23:05Z",
+      "updated_at": "2022-08-03T22:23:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Related #1908",
+      "created_at": "2022-08-04T04:47:12Z",
+      "updated_at": "2022-08-04T04:47:12Z"
+    },
+    {
+      "author": "AE1020",
+      "author_association": "NONE",
+      "body": "> I'm not arguing for or against any BOMs or headers.\r\n\r\nI would argue strongly against them in UTF-8 files, for the reasons given in this thread:\r\n\r\n  https://stackoverflow.com/a/2223926\r\n\r\n* Unicode standard recommends against it\r\n\r\n* [Illegal in JSON](https://jimmybogard.com/the-curious-case-of-the-json-bom/)\r\n\r\n* Corrupts detection of shebang (#!) in shell scripts\r\n\r\n* Complicates binary level issues\r\n   * Empty files no longer 0 bytes long\r\n   * Pure ASCII files no longer all < 128 byte value  \r\n   * Raw concatenation puts BOM at each concatenation point\r\n\r\n* Conflates with other text formats and hence cannot be used unambiguously for identification\r\n\r\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/Img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/2223882/whats-the-difference-between-utf-8-and-utf-8-without-bom\">What's the difference between UTF-8 and UTF-8 without BOM?</a></strong></div><div>What's different between UTF-8 and UTF-8 without a BOM? Which is better?</div></blockquote>",
+      "created_at": "2022-08-04T19:48:34Z",
+      "updated_at": "2022-08-04T23:54:32Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": "@daxian-dbw  thanks for tech.\r\n@AE1020 You can hate the BOM, you can live without it, but need a mechanic similar to the bom, do you have such a mechanic now?\r\n\r\nDefining the mechanism is easy, but getting the command line world to obey it is hard. No matter how you define it, there are many people who oppose it, and many programs are incompatible.\r\n\r\nvi respect BOM\r\n\r\nHave you ever thought deeply about how to make many command line programs coding compatible? What is your advice to do?",
+      "created_at": "2022-08-05T05:05:27Z",
+      "updated_at": "2022-08-05T05:08:52Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Personally I think just having a runspace specific way to define the encoding used to process the native command output data will be good enough. The `[Console]::OutputEncoding` works but it's a process wide setting so can get very messy when you start dealing with multiple runspaces in the same thread.\r\n\r\nNothing is going to be foolproof, console encoding is difficult as every native command uses their own rules. Some respect the console codepage, others hardcode to UTF-8, some use UTF-16-LE, and there are also the ones that hardcode to something different altogether. Keeping a sane default (console encoding) but with a safe way to override in the Runspace fits the bill nicely IMO.",
+      "created_at": "2022-08-05T05:12:23Z",
+      "updated_at": "2022-08-05T05:12:23Z"
+    },
+    {
+      "author": "AE1020",
+      "author_association": "NONE",
+      "body": "> Have you ever thought deeply about how to make many command line programs coding compatible? What is your advice to do?\r\n\r\n@kasini3000 I would have to know the specifics of particular situations to advise how a given program could accomplish its goal without a BOM.\r\n\r\nBut as a general rule: whatever reason a system feels a signal is needed directly inside a file--the basic approach would be to ask that be stored aside in a table or manifest elsewhere.  Or something passed on the command line.  The program would consult the table of files (or file patterns) for this information.\r\n\r\nYou certainly would not want a program like git to ask you to go around editing byte patterns into your files, to say whether they should be ignored or not.  That's why there is a `.gitignore` file out-of-band, it is consulted to get the information required.\r\n\r\nPrograms that want more information about your generalized files (or data streams) that they cannot guess should not make you edit that data directly.  The data was fit for their purpose as is--and in the BOM case, it is documented and understood that many things become unfit by virtue of the modification.",
+      "created_at": "2022-08-05T08:11:15Z",
+      "updated_at": "2022-08-05T08:11:15Z"
+    },
+    {
+      "author": "ding-dang-do",
+      "author_association": "NONE",
+      "body": "@jborean93\r\n> ```powershell\r\n> # UTF8Encoding is used instead of the UTF8 field to set a BOM-less encoding for writing to stdin\r\n> [Console]::OutputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n\r\nI found this very helpful code snippet (thank you for that) and just want to ask you, is there a typo in it, because of:\r\n> ```powershell\r\n> [Console]::OutputEncoding = [Console]::OutputEncoding\r\n\r\nShouldn't it be like this?\r\n> ```powershell\r\n> [Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n\r\nSorry if I'm wrong. I'm not an expert in Powershell. ;)",
+      "created_at": "2022-10-31T08:57:49Z",
+      "updated_at": "2022-10-31T08:59:01Z"
+    }
+  ],
+  "created_at": "2022-06-13T12:25:48Z",
+  "number": 17523,
+  "state": "open",
+  "title": "Data passed through a pipe will be parsed differently in PowerShell 5.1 vs current release",
+  "updated_at": "2022-10-31T08:59:01Z"
+}

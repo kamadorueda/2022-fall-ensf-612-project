@@ -1,0 +1,34 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9331",
+  "author": "alatdev",
+  "body": "I'm using Remote-Powershell-Session.\r\nI have configured Kerberos Constrained Delegation, to access fileshares on other servers, which works fine.\r\n\r\nBut if i want to access a SQL-Server, i'm getting:\r\nLogin failed for user 'NT AUTHORITY\\ANONYMOUS LOGON'.\r\n\r\nThe SPN's are correctly set, because other clients are authenticating with kerberos.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nEnter-PSSession -ComputerName xxxx -SessionOption $options -Authentication Kerberos -ConfigurationName \"powershell.6.2.0\"\r\n$SqlConnection = New-Object System.Data.SqlClient.SqlConnection\r\n$SqlConnection.ConnectionString = \"Data Source=tcp:host,port; Initial Catalog=database; Integrated Security = SSPI\"\r\n$SqlCmd = New-Object System.Data.SqlClient.SqlCommand\r\n$SqlCmd.CommandText = \"select * from sys.tables\"\r\n$SqlCmd.Connection = $SqlConnection\r\n$SqlAdapter = New-Object System.Data.SqlClient.SqlDataAdapter\r\n$SqlAdapter.SelectCommand = $SqlCmd\r\n$DataSet = New-Object System.Data.DataSet\r\n$nRecs = $SqlAdapter.Fill($DataSet)\r\n\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nKerberos-Authentication to SQL-Server should work.\r\n```\r\n\r\n# Actual behavior\r\n\r\n```powershell\r\nException calling \"Fill\" with \"1\" argument(s): \"Login failed for user 'NT AUTHORITY\\ANONYMOUS LOGON'.\"\r\nAt line:1 char:1\r\n+ $nRecs = $SqlAdapter.Fill($DataSet)\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [], MethodInvocationException\r\n+ FullyQualifiedErrorId : SqlException\r\n\r\n```\r\n\r\n# Environment data\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.0\r\nPSEdition                      Core\r\nGitCommitId                    6.2.0\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0.}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-09-29T13:11:56Z",
+  "comments": [
+    {
+      "author": "jonkeda",
+      "author_association": "NONE",
+      "body": "Does anyone have an answer to this question?",
+      "created_at": "2019-09-18T11:55:45Z",
+      "updated_at": "2019-09-18T11:55:45Z"
+    },
+    {
+      "author": "lachlann562",
+      "author_association": "NONE",
+      "body": "I posted this question on stack overflow: https://stackoverflow.com/questions/57331089/sspi-sql-access-fails-in-remote-powershell-request-due-to-double-hop-failure-co\r\n\r\nit was suggested to check for the SPN and authentication scheme. will reply here if i make progress.\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/57331089/sspi-sql-access-fails-in-remote-powershell-request-due-to-double-hop-failure-co\">SSPI sql access fails in remote powershell request due to double-hop failure, constrained delegation</a></strong></div><div>We are trying to run an automated install from serverA on remote serverB which needs to talk to sql serverC using windows authentication.\n\nInvoke-Command -ComputerName serverB -ScriptBlock {\n\n    $...</div></blockquote>",
+      "created_at": "2019-09-20T18:24:12Z",
+      "updated_at": "2019-09-20T18:24:14Z"
+    },
+    {
+      "author": "lachlann562",
+      "author_association": "NONE",
+      "body": "We finally got this to work:\r\n1) Register the SPN for sql server in active directory using:\r\n`\r\nSetSPN \u2013A MSSQLSvc/<sqlserver>.<DomainName>:<port> <sql service AccountName>\r\n`\r\n2) enable kerberos delagation for server \"B\" in active directory. Enable the option \"trust this computer for delegation to any server (Kerberos only)\" in the delegation tab of the computer account.\r\n\r\nsee https://support.microsoft.com/en-ca/help/909801/how-to-make-sure-that-you-are-using-kerberos-authentication-when-you-c\r\n\r\nthe following code can be used to test if the connection is possible to be made using kerberose (when not using double hop), look at the auth_scheme column:\r\n ```\r\n   $conn = new-object System.Data.SqlClient.SqlConnection 'Data Source=demodbca02\\demo16;Initial Catalog=master;Integrated Security=SSPI'\r\n    $conn.open()\r\n    $cmd = New-Object System.Data.SqlClient.SqlCommand 'select * from sys.dm_exec_connections where session_id=@@spid',$conn\r\n    #get field name/positions\r\n\t$SQLReader = $cmd.ExecuteReader()\r\n    $columns = @()\r\n\tfor ($i = 0 ; $i -lt $SQLReader.FieldCount ; $I++)\r\n\t{\r\n\t\t$columns += $SQLReader.GetName($i)\r\n\t}\r\n    #$SQLReader.Read()\r\n\tforeach ($row in $SQLReader)\r\n\t{\r\n        $info = @{}\r\n\t\tforeach ($col in $columns)\r\n\t\t{\r\n\t\t\t$info[$col] = $row.Item($col)\r\n\t\t}\r\n\t\t\t\t\r\n\t\t[pscustomobject]$info\r\n\t\t\t\t\r\n\t}\r\n    $SQLReader.Close()\r\n    $conn.Dispose()\r\n\r\n```\r\n\r\nhere is minimal code to test double-hop for sql\r\n```\r\n#run from server a\r\n\r\nInvoke-Command -ComputerName serverB -ScriptBlock {\r\n    \r\n    $conn = new-object System.Data.SqlClient.SqlConnection 'Data Source=ServerC;Initial Catalog=master;Integrated Security=SSPI'\r\n    try\r\n    {\r\n        $conn.open()\r\n    } finally {\r\n        $conn | Remove-SQLConnection\r\n    }\r\n\r\n} -Credential $cred \r\n```\r\n<blockquote><img src=\"//www.microsoft.com/favicon.ico?v2\" width=\"48\" align=\"right\"></blockquote>",
+      "created_at": "2019-09-20T19:41:01Z",
+      "updated_at": "2019-09-20T20:19:46Z"
+    }
+  ],
+  "created_at": "2019-04-10T12:55:29Z",
+  "number": 9331,
+  "state": "closed",
+  "title": "PS-Remoting Kerberos Delegation to SQL-Server",
+  "updated_at": "2019-09-29T13:12:05Z"
+}

@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16922",
+  "author": "jespergustinmsft",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\nNoticed a dot (.) showing up in my filenames when getting the $item.BaseName property, and it turns out Get-Item and Resolve-Path doesn't trim the input from leading and trailing whitespaces.\r\n\r\nIn this minimized test case, I suffixed the path to Get-Item with 4 spaces, causing the BaseName property to return the complete file name, including the file extension:\r\n```New-Item \"foo.bar\" | Out-Null; \"`\"$((Get-Item \"foo.bar    \").BaseName)`\"\"; Remove-Item \"foo.bar\"```\r\n\r\nAnd this minimized test case throws an error that the file name \"  foo.bar\" cannot be found:\r\n```New-Item \"foo.bar\" | Out-Null; \"`\"$((Get-Item \"  foo.bar\").BaseName)`\"\"; Remove-Item \"foo.bar\"```\r\n\r\nResolve-Path behaves the same way, actually returning a path that ends with spaces:\r\n```New-Item \"foo.bar\" | Out-Null; \"`\"$((Resolve-Path \"foo.bar    \").Path)`\"\"; Remove-Item \"foo.bar\"```\r\n\r\nNew-Item **does** trim trailing white-space however, so there is a discrepancy here on how input paths are handled.\r\n\r\n### Expected behavior\r\n\r\n```console\r\nPS> New-Item \"foo.bar\" | Out-Null; \"`\"$((Get-Item \"foo.bar    \").BaseName)`\"\"; Remove-Item \"foo.bar\"\r\n\"foo\"\r\n```\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\nPS> New-Item \"foo.bar\" | Out-Null; \"`\"$((Get-Item \"foo.bar    \").BaseName)`\"\"; Remove-Item \"foo.bar\"\r\n\"foo.bar\"\r\n```\r\n\r\n\r\n### Error details\r\n\r\n_No response_\r\n\r\n### Environment data\r\n\r\n```powershell\r\nPS> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.1\r\nPSEdition                      Core\r\nGitCommitId                    7.2.1\r\nOS                             Microsoft Windows 10.0.22000\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n_No response_",
+  "closed_at": "2022-06-11T01:01:10Z",
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "Without quotes `(Get-item  foo.bar                  ).basename`  works as expected.   \r\n\r\nUsing quotes around `\"foo bar . temp\"`  makes the spaces part of the name.  It is valid (but unusual) to have leading spaces in a file name (trailing spaces is less usual but also valid) - or indeed in the extension. \r\nSpecifying a trim copes with case that the user didn't type what they intended, but it's a sure bet that if `trim()` is applied to input someone will complain that they tried to do `set-content` or `out-file` and include spaces in the name and PowerShell won't let them. \r\nIsn't the answer to this (a) only use quotes on the command line where needed and (b) only around the characters you intend to be part of the file name ? \r\n\r\nDoes any other shell do a it as suggested ? ",
+      "created_at": "2022-02-25T15:28:39Z",
+      "updated_at": "2022-02-25T15:28:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Notice, Windows path API always trim trailing spaces.",
+      "created_at": "2022-02-26T07:55:30Z",
+      "updated_at": "2022-02-26T07:55:30Z"
+    },
+    {
+      "author": "jespergustinmsft",
+      "author_association": "NONE",
+      "body": "@jhoneill - one part of the problem is that BaseName property claims to return the file name without the file extension, so if trimming the input isn't the problem (or at least is behaving as expected), then the BaseName implementation needs to be fixed, since I would never expect anything but \"foo\" to be returned by that property.\r\n\r\nAs I wrote however - New-Item trims the input, which means you can never create any new files using New-Item that has trailing whitespace, which then adds another bug report to the stack if your idea that trailing whitespace should be valid(?). It does keep leading whitespace though and I have updated my report to reflect this.",
+      "created_at": "2022-03-01T10:51:38Z",
+      "updated_at": "2022-03-01T10:51:38Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Notice, Windows path API always trim trailing spaces.\r\n\r\nYes, but not leading ones. \r\n\r\n`dir > \"   temp.txt\"`  Creates a file with leading spaces     \r\n`dir \\ > \"   temp.txt  \"`  overwrites it because trailing spaces are trimmed.\r\n\r\nAnd searching for files \r\n```\r\nps >  dir \"   temp.txt\" | % {\"***$($_.name)***\"}\r\n***   temp.txt***\r\nps > dir \"   temp.txt              \" | % {\"***$($_.name)***\"}\r\n***   temp.txt              ***\r\n```\r\nI can put in any number of trailing spaces and that's the name that is returned even though the file name doesn't have them \r\n\r\nBaseName is weird  - it looks like a clunky bit of string parsing inside .NET (not PowerShell). \"How many letters after the final . \" , \"Reduce the string length by that number.\" \r\n```\r\nps > dir \" *\" | % {\"***$($_.BaseName)***\"}\r\n***   temp***\r\nps > dir \"   temp.txt     \" | % {\"***$($_.BaseName)***\"}\r\n***   temp.txt ***\r\n```\r\nThat does look a bug to take to the .NET folks.\r\n\r\nGenerally PowerShell doesn't change a path for you , if you put a : \" > | < etc in the name or use a file name like LPT1 it finds its way into .NET and probably down into the OS, where the Windows filesystem (not .NET or PowerShell) generates the error and pushes it back up.\r\n\r\nFor other providers \r\n`dir \"Cert:\\CurrentUser\\My\\DB...23   \" `  returns the cert   (trims the trailing space) \r\n`dir 'HKCU:\\Control Panel ' ` returns an error (looks for the name with a trailing space ? )\r\n\r\nPossibly the providers could impose some consistency, but I'm not convinced the effort to do it would be justified\r\n\r\n",
+      "created_at": "2022-03-01T15:15:12Z",
+      "updated_at": "2022-03-01T15:15:12Z"
+    },
+    {
+      "author": "jespergustinmsft",
+      "author_association": "NONE",
+      "body": "So - what part of any of the code that we have demonstrated does not work as intended is actually in PowerShell? I would have thought that e.g. the BaseName property getter implementation is in PowerShell? Where should the (at least 2?) bug reports go?\r\n\r\nTo sum up:\r\n1. BaseName has an implementation that is misbehaving and could return more than just the filename without it's extension (original bug report here).\r\n2. Discrepancies between different providers in terms of trimming trailing whitespaces.\r\n3. Trailing whitespaces in file names *should* be allowed (according to @jhoneill), causing all implementations that explicitly trims trailing whitespace on file creation (New-Item, \"cmd > filename\" and just creating a new file in explorer.exe to mention three) to break compatibility with the file system(?).",
+      "created_at": "2022-03-02T06:56:57Z",
+      "updated_at": "2022-03-02T06:56:57Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "It is legal to have trailing spaces in the *name* (base name) but not in the *extension*. What I wrote implies that the file-name-including-extension can have trailing spaces which isn't correct, sorry for creating confusion. \r\n\r\n1. Basename is implemented by .Net, does look like a bug and should be sent over there (perhaps by the PowerShell team).  \r\n2. PowerShell providers appear to be lazy and pass unmodified names to whatever the providing for, I _think_ (for example) the registry API will create a key or value with spaces at the end, but the file system trims spaces from the end of the path (so after the extension).  Having the registry provider treat some legal paths as invalid to make all providers do the same thing is probably not a good path to go down\r\n3. No, what @iSazonov  said above is correct: the windows API trims anything at the end of the path. I gave an example of spaces around the dot between name and extension, which works in Windows explorer , PowerShell etc. But if you try to add spaces at the very end, they're removed in PowerShell and Explorer.  I don't know what rules linux or mac file systems apply, and can't test from the machine I'm on, but I would say it is for the file system to decide how a given name is handled (if at all -the windows fs won't let you use \"lpt1\" but I think linux will, and I think there are differences over illegal characters, the provider shouldn't intervene). \r\n  \r\n**TLDR**  Basename is bug for .NET , the rest is by design. \r\n",
+      "created_at": "2022-03-02T11:14:37Z",
+      "updated_at": "2022-03-02T11:14:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> **TLDR** Basename is bug for .NET , the rest is by design.\r\n\r\nBasename is not .Net property, it comes from PowerShell ETS.\r\nhttps://github.com/PowerShell/PowerShell/blob/ee6bc9527c2596f048088fa7b396d2664a11ad08/src/System.Management.Automation/engine/TypeTable_Types_Ps1Xml.cs#L667\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/ee6bc9527c2596f048088fa7b396d2664a11ad08/src/System.Management.Automation/engine/TypeTable_Types_Ps1Xml.cs#L803\r\n",
+      "created_at": "2022-03-02T17:38:12Z",
+      "updated_at": "2022-03-02T17:38:50Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> > **TLDR** Basename is bug for .NET , the rest is by design.\r\n> \r\n> Basename is not .Net property, it comes from PowerShell ETS.\r\n> \r\n> https://github.com/PowerShell/PowerShell/blob/ee6bc9527c2596f048088fa7b396d2664a11ad08/src/System.Management.Automation/engine/TypeTable_Types_Ps1Xml.cs#L667\r\n> \r\n> https://github.com/PowerShell/PowerShell/blob/ee6bc9527c2596f048088fa7b396d2664a11ad08/src/System.Management.Automation/engine/TypeTable_Types_Ps1Xml.cs#L803\r\n\r\nThen that's my mistake. Should have looked harder - \r\n\r\n```\r\nif ($this.Extension.Length -gt 0){$this.Name.Remove($this.Name.Length - $this.Extension.Length)}  else{$this.Name};\r\n```\r\n \r\nI'd rewrite that as ` $this.name -replace '\\..*?$','' `   at line 809\r\n",
+      "created_at": "2022-03-02T22:20:08Z",
+      "updated_at": "2022-03-02T22:25:36Z"
+    },
+    {
+      "author": "jespergustinmsft",
+      "author_association": "NONE",
+      "body": "Thank you for the input and help! :)\r\n\r\nAnd just to be super clear - do we still think that:\r\n```\r\nPS> New-Item \"foo.bar\" | Out-Null; \"`\"$((Resolve-Path \"foo.bar   \").Path)`\"\"; Remove-Item \"foo.bar\";\r\n\"C:\\test\\foo.bar   \"\r\n```\r\nis not a bug, and does not need to be fixed? To me that is still quite weird as well. IMO Resolve-Path should actually resolve and return the *actual* file name, and not be affected by how the input is given!?",
+      "created_at": "2022-03-03T07:23:04Z",
+      "updated_at": "2022-03-03T07:23:04Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "A bit of double think here. I don't think it is strictly a bug, but I do agree that what we expect to come back is the actual path of the file. \r\n\r\nIn this example we would not expect something which comes back from `Resolve-Path`  and is deemed OK by `Test-Path` to produce something invalid when used with `Join-Path`\r\n```\r\n >$myDir = resolve-path  $SomeStringWeDoNotControl\r\n> if ($myDir -and (Test-Path $myDir) ) {$myPsDir = Join-Path $mydir \"PowerShell\"} else {Write-warning \"Bad Directory\"}\r\n> $mypsdir\r\nC:\\Users\\James\\Documents     \\PowerShell\r\n```\r\n\r\n.Net can't decide what to do.  It trims trailing spaces from the full path, but keeps them from the name.  It should trim both or neither. \r\n```\r\n Get-item 'C:\\Users\\James\\Documents\\PowerShell\\profile.ps1  ' | %{ \"'$($_.fullname)'\", \"'$($_.name)'\" }\r\n'C:\\Users\\James\\Documents\\PowerShell\\profile.ps1'\r\n'profile.ps1  '\r\n```\r\n\r\nSo `Get-Item` I would leave untouched but ask the .NET folks to be consistent, and I'd have **all** the `-path` commands trim their inputs **on the right only**  (I haven't checked if  `split-path` keeps or removes trailing spaces, but I'd guess it keeps them)\r\n \r\n\r\n",
+      "created_at": "2022-03-03T13:54:23Z",
+      "updated_at": "2022-03-03T13:54:23Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The engine WG reviewed this issue. It turns out to be an issue with `FileInfo` on Windows. Simply put, `FileInfo` somehow trims the path passed in when it should not. Then its `FullName` and `Extension` properties have the trailing spaces trimmed, but its `Name` property still has the trailing spaces kept. For details, see https://github.com/dotnet/runtime/issues/70524. Given that it's a .NET issue, we will resolve it as external.",
+      "created_at": "2022-06-09T22:24:50Z",
+      "updated_at": "2022-06-09T22:24:50Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as external and has not had any activity for **1 day**. It has been be closed for housekeeping purposes.",
+      "created_at": "2022-06-11T01:01:09Z",
+      "updated_at": "2022-06-11T01:01:09Z"
+    }
+  ],
+  "created_at": "2022-02-25T13:13:30Z",
+  "number": 16922,
+  "state": "closed",
+  "title": "Get-Item (Resolve-Path, and maybe others?) does not trim input, causing bad side-effects",
+  "updated_at": "2022-06-11T01:01:10Z"
+}

@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/1761",
+  "author": "SteveL-MSFT",
+  "body": "Jason Shirk:\nSome native commands like winrm use PowerShell hashtable syntax to pass configuration options, e.g.\n\nwinrm set winrm/config/client/auth @{Basic=\"true\"}\n\nIn this case, the PowerShell really passes\n\nwinrm set winrm/config/client/auth System.Colllections.Hashtable\n\nIf you add quotes around the hashtable, or use --%, the correct comand line is passed.\n\nIn this case, we can add a note property to the hashtable instance so we can get back the original command line, similar to what we do for other literals.\n",
+  "closed_at": "2020-07-02T18:36:41Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "TFS:7059653\n",
+      "created_at": "2016-09-29T20:23:20Z",
+      "updated_at": "2016-09-29T20:23:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Are there other examples of this?\nFor the sake of one utility no patch is needed.\n",
+      "created_at": "2016-11-17T09:52:31Z",
+      "updated_at": "2016-11-17T09:52:31Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I believe other tools may use a similar syntax - but it should be fixed because customers have opened tickets for product support because of this issue.\r\n\r\nA closely related issue comes up with `bcdedit` (and probably other tools - a guid is passed in curly braces, the same syntax as a script block, e.g.\r\n\r\n```\r\nbcdedit /displayorder {802d5e32-0784-11da-bd33-000476eba25f} /addlast",
+      "created_at": "2017-02-23T01:49:39Z",
+      "updated_at": "2017-02-23T01:49:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr, @SteveL-MSFT:\r\n\r\nBut aren't these scenarios precisely what the stop-parsing symbol (`--%`) is for?\r\n\r\nWouldn't attempting to fix this introduce parsing exceptions that further obscure what happens when you pass arguments to an external utility?\r\n\r\nThe current behavior is obscure to the uninitiated, but ultimately simple and therefore easy to remember: the arguments are stringified as they would be if they were embedded inside a double-quoted string.\r\n\r\n---\r\n\r\nIn the case of `@{Basic=\"true\"}`, however, there may be a solution that doesn't require a parsing exception: \r\n\r\nChange the current, virtually useless string-interpolation result, `System.Collections.Hashtable`, to a meaningful representation that emulates the input, which in simple cases such as this one would be equivalent.\r\n\r\nThis could be done via `.psobject.ToString()`, in line with how `[pscustomobject]` instances are already string-interpolated (which yields a hashtable-_like_ representation).\r\n\r\nHowever, this would affect all string-interpolation contexts, not just calling external utilities, and is therefore technically a breaking change - though given the uselessness of the current string representation, `System.Collections.Hashtable`, this may still be worth doing.\r\n\r\nAt the end of the day, however, it's still preferable for people to actually _understand_ how their arguments are passed by PowerShell, and that it differs - and _how_ it differs - from a traditional shell.\r\n\r\n---\r\n\r\nBy contrast, I think that changing the string interpolation of script blocks such as  `{802d5e32-0784-11da-bd33-000476eba25f}` is _not_ an option, because their current representation _is_ meaningful (everything between `{` and `}`).\r\n\r\n\r\n",
+      "created_at": "2017-03-02T14:40:57Z",
+      "updated_at": "2017-03-02T14:40:57Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "First, I'm not proposing changing the parser at all. I contributed to the idea behind `--%`, but I think it doesn't solve the problem in part because it's hard to discover and the concept is missing from other shells, so you'll rarely see examples.\r\n\r\nMy solution to this problem is elegant and robust. The parameter binder already has the Ast for the value - we can analyze the Ast to see if it's \"pure\" and if so, use the extent text instead of `ToString()` for certain types like `hashtable` or `scriptblock`.\r\n\r\n\"pure\" might have different meanings - e.g. a scriptblock expression is probably only pure if there is no whitespace at all.  A hashtable is probably \"pure\" if it references no variables and invokes no commands and has no whitespace.  Or something like that, I haven't thought enough about it yet.",
+      "created_at": "2017-03-02T17:19:57Z",
+      "updated_at": "2017-03-02T17:19:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  we can analyze the Ast to see if it's \"pure\" and if so, use the extent text instead of ToString() for certain types like hashtable or scriptblock.\r\n\r\nThat's the kind of logic I fear would introduce complexity to the point where no one will be able to remember what happens when.\r\n\r\nIt may be helpful when it does happen to work as a user expects, but it'll create confusion when it doesn't (such as a \"pure\" whitespace-less hashtable working, but breaking once you introduce whitespace, just to use your example).\r\n\r\nI don't think there's a subsitute for users needing to understand how PowerShell interfaces with external utilities, even if that involves growing pains.\r\n\r\n",
+      "created_at": "2017-03-02T17:38:27Z",
+      "updated_at": "2017-03-02T17:38:27Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "That is a valid point for sure.\r\n\r\nI used to feel the same as you - people just need to learn the new way, but these days I feel a softer approach is necessary because minimizing friction is important to getting new users.\r\n\r\nI opened this issue for three big reasons:\r\n\r\n* I get tripped up by this all the time - and I should know better than most anyone else\r\n* People less familiar with PowerShell have called Microsoft support - as in, paid support - on this issue\r\n* Very senior internal folks moving to PowerShell get tripped up by this too.\r\n\r\nFor the most part, external tool authors and blog/documentation writers can safely ignore PowerShell's differences, and users of PowerShell aren't all going to be experts in small corners like this that don't really come up often.\r\n\r\nSo you're right, this problem isn't 100% solvable and doing something might be confusing too, but my instinct thus far is that we can change something for the better without requiring command lines that differ from cmd/bash.",
+      "created_at": "2017-03-02T23:31:29Z",
+      "updated_at": "2017-03-02T23:31:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I hear you.\r\n\r\nI think the primary problem is that when invocation of an external utility fails, it's not at all obvious _why_, because users don't _see_ the actual command line that was ultimately used, because PowerShell constructs it _behind the scenes_.\r\n\r\nTo the untrained eye, `@{Basic=\"true\"}` getting translated into `System.Colllections.Hashtable` is faaaar from obvious - and, currently, _users never even get to see that_.\r\n\r\nI'm not sure what the right answer is, but if there were a way for PowerShell to reflect the synthesized-behind-the-scenes command line back to the user - such as by enriching error messages with that information, possibly with a link to further information - users might be guided toward understanding The Way of the PowerShell (if you will).\r\n\r\nThe precedent that comes to mind is the _suggestion_ you get when you invoke an executable that is not in the PATH, but in the current directory, which was a major departure - and pitfall - for users coming from `cmd.exe`:\r\n\r\n    Suggestion [3,General]:\r\n    The command <exe-name> was not found, but does exist in the current location. \r\n    Windows PowerShell does not load commands from the current location by default.\r\n    If you trust this command, instead type: \".\\<exe-name>\".\r\n    See \"get-help about_Command_Precedence\" for more details.",
+      "created_at": "2017-03-03T02:44:57Z",
+      "updated_at": "2017-03-03T03:18:26Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "> because users don't see the actual command line that was ultimately used\r\n\r\nWhich is one reason why PSCX has shipped with an echoargs.exe utility for ~10 years now.  This utility should probably come with PowerShell unless we manage to clear up all the \"invoking an exe with args\" issues (doubtful).  Here's the complete implementation of this utility:\r\n```csharp\r\nusing System;\r\n\r\nnamespace Pscx.Applications\r\n{\r\n    class EchoArgs\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            for (int i = 0; i < args.Length; i++)\r\n            {\r\n                Console.WriteLine(\"Arg {0} is <{1}>\", i, args[i]);\r\n            }\r\n\r\n            Console.WriteLine(\"\\nCommand line:\");\r\n            Console.WriteLine(Environment.CommandLine);\r\n            Console.WriteLine();\r\n        }\r\n    }\r\n}\r\n```\r\nGiving:\r\n```\r\n68:60ms> echoargs set winrm/config/client/auth @{Basic=\"true\"}\r\nArg 0 is <set>\r\nArg 1 is <winrm/config/client/auth>\r\nArg 2 is <System.Collections.Hashtable>\r\n\r\nCommand line:\r\n\"C:\\Users\\Keith\\Documents\\WindowsPowerShell\\Modules\\Pscx\\3.2.2\\Apps\\EchoArgs.exe\" set winrm/config/client/auth System.Collections.Hashtable\r\n```",
+      "created_at": "2017-03-03T03:24:22Z",
+      "updated_at": "2017-03-03T03:24:22Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "We should see about saving the command line in any error records written via native commands - that could be useful.",
+      "created_at": "2017-03-03T03:47:49Z",
+      "updated_at": "2017-03-03T03:47:49Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I wonder if it would be useful to have PowerShell detect that a native cmd failed based on the exit code and output an errorrecord that includes the actual cmdline passed?",
+      "created_at": "2017-03-03T17:05:08Z",
+      "updated_at": "2017-03-03T17:05:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think to be beginner-friendly, the information must surface _by default_, with advanced users having the ability to opt out - and back in, (temporarily) on demand.\r\n\r\nPerhaps we can generalize the suggestion feature:\r\n\r\n* Introduce a new `$SuggestionPreference` preference variable with a default value of `Continue`.\r\n\r\n* With `Continue`, in addition to the current you-cannot-run-an-exe-in-the-current-dir-by-name-only suggestion, you'd get a message that showing you what arguments were ultimately passed to an external command, _if_ that command fails (sets a nonzero exit code).\r\n\r\n  * Just like the existing suggestion, the new one should mention a help topic with relevant information.\r\n\r\nThat said, you may sometimes want to see the behind-the-scenes command line even when the external command (ostensibly) _succeeds_.\r\n\r\nNot sure how to handle that:\r\n\r\n* Perhaps a new `Always` value for `$SuggestionPreference`?\r\n* Perhaps a new magic parameter you can place before the command line?\r\n\r\nAs an aside: The current you-cannot-run-an-exe-in-the-current-dir-by-name-only suggestion (are there others?) operates outside the output-stream system - the message seems to go directly to the host and cannot be suppressed.\r\nTime for a suggestion stream? :)\r\n\r\n",
+      "created_at": "2017-03-05T15:39:14Z",
+      "updated_at": "2017-03-05T15:39:14Z"
+    }
+  ],
+  "created_at": "2016-08-12T19:45:44Z",
+  "number": 1761,
+  "state": "closed",
+  "title": "Hashtable passed to native command should not require quotes",
+  "updated_at": "2020-07-02T18:36:41Z"
+}

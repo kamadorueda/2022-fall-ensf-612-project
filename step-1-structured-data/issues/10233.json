@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10233",
+  "author": "IISResetMe",
+  "body": "# Summary of the new feature/enhancement\r\n\r\n`Write-EventLog` does not currently accept pipeline input, although it might be useful in situations where you want to log multiple events log entries of the same type:\r\n\r\n    Get-SomeInformation |Write-EventLog -LogName Application -Source -EventID 100\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\n - Update the [`Message` parameter attribute](https://github.com/PowerShell/PowerShell/blob/7e423e7451a4530060422aff1c821c0dc0712372/src/Microsoft.PowerShell.Commands.Management/commands/management/Eventlog.cs#L776) to set `ValueFromPipeline`\r\n - Override `ProcessRecord()` in `WriteEventLogCommand`\r\n - Move [`_myevent.WriteEntry()`](https://github.com/PowerShell/PowerShell/blob/7e423e7451a4530060422aff1c821c0dc0712372/src/Microsoft.PowerShell.Commands.Management/commands/management/Eventlog.cs#L845) call into `ProcessRecord()` implementation\r\n\r\nWe might optionally want to consider an alternative `InputObject` parameter in a separate set that passes non-string \"messages\" through `OutStringCommand` before writing them to the event log",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I believe `Write-EventLog` and other event log commands are not part of PS 7; we have the source code here, but [it's not compiled or shipped](https://github.com/PowerShell/PowerShell/blob/8f5b2c241ec1bc0e9c97176b591cf342dcc10da2/src/Microsoft.PowerShell.Commands.Management/Microsoft.PowerShell.Commands.Management.csproj#L18-L45). The `Write-EventLog` command available in PS 7 on Windows is from Windows PowerShell.\r\n\r\nThe easiest solution would probably be to create a wrapper module that overrides `Write-EventLog` and then routes the objects to the actual implementation internally.\r\n\r\nAlso I think [`New-WinEvent`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.diagnostics/new-winevent?view=powershell-6) is the recommended cmdlet to use now. We do build and ship that with PS 7.",
+      "created_at": "2019-07-26T17:24:20Z",
+      "updated_at": "2019-07-26T17:24:20Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "Fair enough, let's make [`New-WinEvent`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.diagnostics/new-winevent?view=powershell-6#inputs) pipeline friendly then! \ud83d\ude05 \r\n![image](https://user-images.githubusercontent.com/7413755/61987379-63b3af00-b016-11e9-8f10-786820ad7ebf.png)\r\n",
+      "created_at": "2019-07-27T00:30:07Z",
+      "updated_at": "2019-07-27T00:30:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@IISResetMe  Please update the issue description too.",
+      "created_at": "2019-07-29T07:03:24Z",
+      "updated_at": "2019-07-29T07:03:24Z"
+    },
+    {
+      "author": "trippwill",
+      "author_association": "NONE",
+      "body": "@PowerShellTeam I'd like to take this on. \r\n\r\nI did a bit of quick prototyping. There's a challenge with taking pipeline input on the Payload parameter.\r\n\r\nWhen the event template expects multiple inputs, you could currently invoke the cmdlet like this:\r\n```New-WinEvent -ProviderName Microsoft-Windows-PowerShell -Id 49153 -Payload @('Param1', 'Param2')```\r\n\r\nHowever, passing the Payload array as an object through the pipeline will not work the same:\r\n``` @('Param1', 'Param2') | New-WinEvent -ProviderName Microsoft-Windows-PowerShell -Id 49153```\r\nResults in each member of the input array being processed as individual records. Because of the way the pipeline input arrays get flattened, putting a payload array inside another array has the same result.\r\n\r\nTo overcome this, I'd like to propose that Payload take the value from the pipeline by Property name. This would then work as expected:\r\n```[pscustomobject]@{Payload=@('Param1', 'Param2')} | New-WinEvent -ProviderName Microsoft-Windows-PowerShell -Id 49153```\r\nWith the payload array being treated as a single input record. \r\n\r\nWe can expand on this approach, taking each Parameter as a pipeline value by property name. For example, sending different events to the same provider:\r\n```\r\n$a = [pscustomobject]@{Id=49153;Payload=@('Param1','Param2')}\r\n$b = [pscustomobject]@{Id=49152;Payload='Param1'}\r\n$a,$b | New-WinEvent -ProviderName Microsoft-Windows-PowerShell\r\n```\r\n\r\nOr even sending multiple events to different providers. This would require some additional refactoring to move the LoadProvider and LoadEventDescription calls into the ProcessRecord override. If we require that pipeline input all goes to one provider, then we would only need to load the provider once in BeginProcessing. This would reduce perf overhead, but limit flexibility.\r\n\r\nThe biggest drawback is a custom object has to be created. So sending simple single objects on the pipeline won't work, and there would be perf impacts if creating many events.\r\n\r\nWe could mitigate the single object scenario by taking more strongly typed parameters in separate parameter sets. With a string-only Payload parameter set, we could make this work:\r\n'One', 'Two', 'Three' | New-WinEvent -ProviderName Microsoft-Windows-PowerShell -Id 49153\r\n\r\nThis would multiply the complexity of the implementation, and each payload type we would want to support would need its own parameter set.\r\n",
+      "created_at": "2019-11-11T11:23:08Z",
+      "updated_at": "2019-11-11T11:43:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see .Net Core has API https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.eventlog.writeentry?view=netcore-3.0 to write to Windows Event logs.\r\nPerhaps we could simplify the cmdlet implementation.\r\n@SteveL-MSFT Can we use the API?\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.eventlog.writeentry\">EventLog.WriteEntry Method (System.Diagnostics)</a></strong></div><div>Writes an entry in the event log. </div></blockquote>",
+      "created_at": "2019-11-11T13:22:38Z",
+      "updated_at": "2020-03-29T06:09:05Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov as long as it's a documented API, it can be used.  Whether it's the right API to use, I'll defer to code review.",
+      "created_at": "2019-11-11T17:00:04Z",
+      "updated_at": "2019-11-11T17:00:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@CharlesWillis3 If you are interesting you would consider the referenced API for New-WinEvent. Maybe this will lead to the cmdlet redesign.\r\n",
+      "created_at": "2019-11-11T17:25:16Z",
+      "updated_at": "2019-11-11T17:25:16Z"
+    },
+    {
+      "author": "trippwill",
+      "author_association": "NONE",
+      "body": "Currently, New-WinEvent (and it's counterpart, Get-WinEvent) deal directly with ETW and ETW providers. EventLog.WriteEntry and related methods appear to interact with Windows Event Log at a higher level than ETW.\r\n\r\nIf I'm understanding everything correctly, it seems to me that using EventLog would fundamentally change the capabilities of the New-WinEvent cmdlet.",
+      "created_at": "2019-11-11T18:48:15Z",
+      "updated_at": "2019-11-11T18:48:15Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "If that new API only works against the old EventLog APIs and not the new ETW ones, then it's a subset of capability and shouldn't be used.",
+      "created_at": "2019-11-11T19:00:54Z",
+      "updated_at": "2019-11-11T19:00:54Z"
+    },
+    {
+      "author": "trippwill",
+      "author_association": "NONE",
+      "body": "It looks like EventLog goes all the way back to .NET FX 1.1. So not too new :-). \r\n\r\nThe changes to support the feature request should be pretty straightforward. I think most of the complexity is in deciding what exactly to support, and agreeing on the API.\r\n\r\nSo, I'd still like to take this on. I'm a big fan and major user of ETW, so making this work with pipeline input would be great.",
+      "created_at": "2019-11-11T19:10:49Z",
+      "updated_at": "2019-11-11T19:10:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I noticed this old API because old Write-EventLog looks more user friendly. I don\u2019t even remember that I used New-WinEvent once.\r\n",
+      "created_at": "2019-11-12T03:22:02Z",
+      "updated_at": "2019-11-12T03:22:02Z"
+    },
+    {
+      "author": "trippwill",
+      "author_association": "NONE",
+      "body": "According to the docs, Write-EventLog only works on \"classic\" event logs. Get-WinEvent and New-WinEvent are required for interacting with the logs from Vista forward. I think this is because the Window Event Log was rebuilt on top of ETW.\r\n\r\nI agree Write-EventLog looks more friendly. As a separate feature request, could be worth considering adding a cmdlet for simple logging. Possibly as a marketplace extensions, maybe even xplat?\r\n\r\nBut New-WinEvent has its uses. It's one of the easiest ways I know of to interact with existing ETW providers.",
+      "created_at": "2019-11-12T14:58:17Z",
+      "updated_at": "2019-11-12T14:58:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> As a separate feature request, could be worth considering adding a cmdlet for simple logging.\r\n\r\nWe could add new parameter set in the cmdlet (maybe to emulate old cmdlet). Notice, Get-WinEvent \r\n has -LogName.",
+      "created_at": "2019-11-12T15:03:07Z",
+      "updated_at": "2019-11-12T15:04:23Z"
+    }
+  ],
+  "created_at": "2019-07-26T12:44:30Z",
+  "number": 10233,
+  "state": "open",
+  "title": "Feature Request: Make New-WinEvent pipeline friendly",
+  "updated_at": "2020-03-29T06:09:05Z"
+}

@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5964",
+  "author": "SteveL-MSFT",
+  "body": "`wget -c` equivalent.  If told to `resume` we should be able to read the length of the current file and use the HTTP Range header to resume the download.  In the case where Range is not supported by the server, we would revert to restarting the download and output a warning.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\niwr http://someurl -outfile bigfile.zip\r\n// assume download gets stopped prematurely\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\niwr http://someurl -outfile bigfile.zip -resume\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nNeed to restart the download from the beginning\r\n```",
+  "closed_at": "2018-03-26T19:23:25Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "On remote endpoints where resume is not supported, do we want to over write the OutFile from the beginning? or do we want to skip the response stream forward and append? We might not get network IO gains, but we may save on Storage IO. It's not a trivial implementation, but could be done.",
+      "created_at": "2018-01-20T15:30:26Z",
+      "updated_at": "2018-01-20T15:30:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus I think we can start with the 80% case (which I assume is in this day and age resume is supported) and based on demand consider fallback later based on feedback",
+      "created_at": "2018-01-22T22:21:42Z",
+      "updated_at": "2018-01-22T22:21:42Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT What should we do in the following scenario:\r\n\r\nUser has supplied `iwr -uri http://test.io/file -OutFile c:\\temp\\out.txt -Resume`. `c:\\temp\\out.txt` is 100 bytes but `http://test.io/file` is 50 bytes. Server responds with `416 Range Not Satisfiable`. \r\n\r\nShould we error as usual? or should we \"special case\" this and provide the user something more palatable like \"The file supplied to -OutFile was unable to resume because the remote server was unable to comply. This can happen when the local file is not the same as the remote file.\"? The special case will add some complexity, but `416 Range Not Satisfiable` is a really unhelpful message.\r\n\r\nEither of the error scenarios would be in some conflict with how `-OutFile` currently works. Currently it overwrites the supplied file without complaint. So another option would be to have the cmdlets clear the range header, resubmit the request, download the whole file, and overwrite `-OutFile` without error, This would add complexity. Also, this action may not be what the user is expecting. It could warn on this action.\r\n\r\nAnother option is to have 2 params `-Resume` and `-ForceResume` (I hesitate to add just `-Force` for this feature as it has implications for other things that would not be supported by `-Force`).  `-ForceReumse` would overwrite the supplied `-OutFile` on `416` and `-Resume` would error.",
+      "created_at": "2018-01-29T10:48:37Z",
+      "updated_at": "2018-01-29T10:48:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus I think having a descriptive error would be good.  I think `-ForceResume` is a good switch as I'm not a fan of the generic `-Force` which doesn't provide context on what it actually does so, in my opinion, this is setting a good pattern we should adopt in the future.",
+      "created_at": "2018-01-30T18:29:51Z",
+      "updated_at": "2018-01-30T18:29:51Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus upon further consideration, I think `-AllowClobber` is better than `-ForceResume` with the expectation that what the user wants is: download this file, resume if possible, but restart download from beginning if necessary.\r\n\r\nHowever, if most usage is `-Resume -AllowClobber` then perhaps it should be `-NoClobber`.",
+      "created_at": "2018-01-31T00:18:14Z",
+      "updated_at": "2018-01-31T00:18:14Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Having `-AllowClobber` will be confusing. For example.. someone will run `iwr -OutFile c:\\ExstingFile.txt -AllowClobber $uri` (without `-Resume`) and expect it to overwrite (which is the current behavior)  but then `iwr -OutFile c:\\ExstingFile.txt $uri` (without `-Resume`) to *not* overwrite, which is not the case.. the file *would* be overwritten.\r\n\r\nWe have the the opposite problem `-NoClobber`, `iwr -OutFile c:\\ExstingFile.txt -NoClobber $uri` (without `-Resume`) one would expect it to not overwrite the existing file but it would. Also, `iwr -OutFile c:\\ExstingFile.txt -Resume $uri` would now be, by default, overwriting the file which would probably unexpected (the original issue which prompted my asking).\r\n\r\nWe could always validate that  `-NoClobber` or `-AllowClobber` are supplied only when `-Resume` is supplied... but we have to rely on run time checks so this isn't apparent in the syntax.\r\n\r\nI think both `-NoClobber` and `-AllowClobber` are undesirable unless we break how `-OutFile` works now (without `-Resume`) which we obviously can't do such a major breaking change until the next major version or until the Web Cmdlets are a separate project.  `-NoClobber` and `-AllowClobber`  are just generic and have implication for features outside of `-Resume` that they would not actual have any affect on. \r\n\r\nCurrently, we don't have `-Resume` so if we want to have it act like `-OutFile` does now where it overwrites all the time without warning we can. This will only happen a) the remote server does not support Resume, b) the local file is larger than the remote file. So long as we document the behavior, it might be fine.\r\n\r\nI should note we have no way to protect against a scenario where a user supplies an `-OutFile` that is not the same as the remote file but is smaller. For example `c:\\ExstingFile.txt` is 50 bytes `http://test.io/file` is 100 bytes. user does `iwr -outfile c:\\ExstingFile.txt -Resume -uri http://test.io/file`. In that scenario, since we hav no way of knowing whether remote and local are the same file, we would end up appending the remote file to the unrelated local file. Only way around this is to do what browsers do and track the downloaded files and only allow resume on file it knows has downloaded. or download random ranges from the remote file and check them with the local file to see if they match... all of which is way too complex to implement for what it's worth.\r\n\r\nI swear I'm not trying to make this complicated.... but this is a feature that once we put it in will be really hard to change in the future.",
+      "created_at": "2018-01-31T00:58:01Z",
+      "updated_at": "2018-01-31T00:59:55Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus you bring up some good points.  Let's keep this simple for now and only have `-resume` and document the behavior that:\r\n\r\n1. it doesn't check if the existing file is actual a partial download of the target, it just resumes after the last byte\r\n2. it overwrites if there is inconsistency or if the server doesn't support resume\r\n",
+      "created_at": "2018-01-31T03:47:10Z",
+      "updated_at": "2018-01-31T03:47:10Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "PR #6447",
+      "created_at": "2018-03-21T09:38:48Z",
+      "updated_at": "2018-03-21T09:38:48Z"
+    }
+  ],
+  "created_at": "2018-01-20T00:30:30Z",
+  "number": 5964,
+  "state": "closed",
+  "title": "webcmdlets should support resuming downloads",
+  "updated_at": "2018-03-27T03:44:35Z"
+}

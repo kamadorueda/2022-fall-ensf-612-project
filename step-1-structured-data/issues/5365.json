@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5365",
+  "author": "redoz",
+  "body": "Given an ```ExpandableStringExpressionAst``` node it is not possible to reconstruct the original code. The required data is only hidden away in the internal ```FormatExpression``` property.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n{ \"`$foo = $foo\" }.Ast.EndBlock.Statements[0].PipelineElements[0].Expression\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nValue              : $foo = $foo\r\nStringConstantType : DoubleQuoted\r\nNestedExpressions  : {$foo}\r\nStaticType         : System.String\r\nExtent             : \"`$foo = $foo\"\r\nParent             : \"`$foo = $foo\"\r\n```\r\n\r\n```NestedExpressions[0]``` is of type ```VariableExpressionAst``` which also has no information (beyond ```Extent``` to indicate where it came from.\r\n\r\nWith the properties exposed in the ast node there is no way of knowing which instance of ```$foo``` should be expanded (```Extent``` doesn't count)\r\n\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-beta.9\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-beta.9\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nFor what it's worth this also applies to PowerShell 5.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Are you saying the extent of NestedExpressions doesn't count?\r\n\r\nNot exposing `FormatExpression` is intentional - that should be considered an implementation detail, e.g. if some other formatting engine was used.",
+      "created_at": "2017-11-07T15:06:58Z",
+      "updated_at": "2017-11-07T15:06:58Z"
+    },
+    {
+      "author": "redoz",
+      "author_association": "NONE",
+      "body": "@lzybkr The Extent (as far as I could tell) is a \"this is where this came from in the source code\" which doesn't seem like something you'd want to rely on when trying to interpret the AST. \r\n\r\nEdit: \r\nIt also doesn't seem consistent with how the public constructor of ```ExpandableStringExpressionAst``` works:\r\n\r\n```\r\n[ExpandableStringExpressionAst]::new($nullExtent, \"```$foo = `$foo\",  [StringConstantType]::DoubleQuoted)\r\n\r\n\r\nValue              : `$foo = $foo\r\nStringConstantType : DoubleQuoted\r\nNestedExpressions  : {$foo}\r\nStaticType         : System.String\r\nExtent             : X3Extent\r\nParent             :\r\n```",
+      "created_at": "2017-11-07T15:11:04Z",
+      "updated_at": "2017-11-07T15:16:03Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "You're right, and many uses of Extent are wrong - I see this all the time in so many different tools, but in this case, I think it's reasonable.\r\n\r\nIt might help to understand what you're trying to do so I can offer the best guidance or if the api needs changes to enable your scenario.",
+      "created_at": "2017-11-07T15:27:32Z",
+      "updated_at": "2017-11-07T15:27:32Z"
+    },
+    {
+      "author": "redoz",
+      "author_association": "NONE",
+      "body": "Well it started out as an experiment of rewriting powershell through AST mutations, but then I realized the Extent property is static and doesn't reflect the actual tree. So I created a code generator/serializer: https://gist.github.com/redoz/659cbbcf2db1ce11cb6032f261d76d05 (still a poc/wip).\r\n\r\nI test it by parsing powershell files, serializing the AST back to code, parsing that code, then comparing the ASTs recursively. But I got stuck on the ```ExpandableStringExpressionAst``` node, I looked at the source and couldn't figure out how it even worked until I noticed the internal ```FormatExpression``` with accompanying constructors. ",
+      "created_at": "2017-11-07T15:43:38Z",
+      "updated_at": "2017-11-07T15:44:16Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It is a bit of a weak spot. I wrote an [instrumenting profiler](https://code.msdn.microsoft.com/Script-Line-Profiler-Sample-80380291) when first designing the Ast to make sure it was possible to generate a new Ast using only public apis and that exercise pointed out that expandable strings weren't possible at the time. I added the public constructor which was necessary, but maybe not sufficient.\r\n\r\nI still think use of the `Extent` of each `NestedExpression` is appropriate - as in, if we were to provide a more friendly api, I that's probably how it would work.\r\n\r\nThe bottom line - I'm open to suggestions for new apis, but need a lot more convincing if the api exposes an implementation detail like `FormatExpression`.",
+      "created_at": "2017-11-07T16:09:07Z",
+      "updated_at": "2017-11-07T16:09:07Z"
+    },
+    {
+      "author": "redoz",
+      "author_association": "NONE",
+      "body": "It might be an idea to simply split it into segments so \"`$foo = $foo\" contains two expressions, one constant string for \"$foo = \" and one variable reference for $foo, this would change the semantics but not the structure of the API. You would need a new constructor to clone it though, or make sure the backticks would be preserved in the ```Value``` property (as it is when using the current public constructor).\r\n\r\nOr the ```NestedExpressions``` property could be a list of wrappers, something like:\r\n```\r\nclass ExpansionPosition {\r\n   int Offset {get;}\r\n   int Length {get;}\r\n   ExpressionAst Expression {get;}\r\n}\r\n```\r\nOr if backwards compatibility is a concern, a ```ReadOnlyList``` of ```{Offset+Length}``` could be added to ```ExpandableStringExpressionAst```.\r\n\r\nI think my preference would be for including the constant string parts of the expandable string as nodes in the ```NestedExpressions``` property. But I don't know what the policy is on breaking changes here.\r\n",
+      "created_at": "2017-11-07T16:39:14Z",
+      "updated_at": "2017-11-07T16:45:58Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I don't see value in storing redundant data - the engine won't use that information at all.  I also want to reduce redundancy in what we store regarding position information - e.g. the filename is stored redundantly in every extent - it could be stored just once at the root of the ast.\r\n\r\nI could see adding an api that returns a new Ast like you suggest - consider it a form of lowering, e.g. the api could return the format expression that way, so\r\n\r\n```powershell\r\n\"`$foo = $foo\"\r\n```\r\n\r\nwould return an Ast that is equivalent, like:\r\n\r\n```powershell\r\n'$foo = {0}' -f $foo\r\n```\r\n\r\nI'm not sure what the extent of the StringLiteralAst in this new Ast  should be as it doesn't exactly correspond to anything in the source.\r\n\r\nNote that this could be a messy api to implement - expandable strings can be recursive:\r\n\r\n```powershell\r\n@\"\r\n$(\"`$foo = $foo\")\r\n\"@\r\n```",
+      "created_at": "2017-11-07T17:02:13Z",
+      "updated_at": "2017-11-07T17:02:13Z"
+    },
+    {
+      "author": "redoz",
+      "author_association": "NONE",
+      "body": "Well my suggestion was just to include the constant string parts as Ast nodes in the ```NestedExpressions``` list, now it seems the parser discards them and only keeps the constant part in the ```Value``` (and ```FormatExpression```) properties. That means you could drop the ```FormatExpression``` and simply concat the results of each node in the list to get the expanded string. This seems like it should also handle recursion without issue and each node could have a valid and correct ```Extent``` as well.",
+      "created_at": "2017-11-07T17:12:52Z",
+      "updated_at": "2017-11-07T17:12:52Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "One important design criteria was for there to be an obvious mapping from Ast node to something in the source script - at least as much as possible.\r\n\r\nWhy your proposal seems fine, I do think it goes against this design principle.",
+      "created_at": "2017-11-07T17:44:06Z",
+      "updated_at": "2017-11-07T17:44:06Z"
+    },
+    {
+      "author": "redoz",
+      "author_association": "NONE",
+      "body": "So just to ensure we're talking about the same thing, this is what I had in mind:\r\n```\r\n\"`$foo = $foo\"\r\n```\r\n would get parsed into an `ExpandableStringExpressionAst` with an extent corresponding to the whole string (just as it is now). \r\nThe `NestedExpressions` (or `Segments`?) property would contain two ast nodes, one\r\n`ConstantStringExpressionAst` which would have an extent of  \r\n```\r\n`$foo = \r\n```\r\nAnd a `VariableExpressionAst` with an extent of\r\n```\r\n$foo\r\n```\r\nIf the design principle violation is that there are `ConstantStringExpressionAst` in the list, the  `Segments` property could contain a list of `ExpandableStringSegment` objects which are either `ConstantStringSegment` or `ExpressionSegment`. The former could have a `string` `Value` property, and the latter a `ExpressionAst` `Expression`  property.  That way the number of Ast nodes remain the same as they are today, just the structure of how they are represented would be easier to work with.\r\n\r\nIn the end I just don't want to have to do string parsing/manipulation in order to figure out what parts of the `Value` I need to join up with the evaluated Expressions as the parser already did this when it parsed the expression.\r\n",
+      "created_at": "2017-11-09T13:10:38Z",
+      "updated_at": "2017-11-09T13:10:38Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I understand. It's definitely one way of thinking about it, but I also think it might be surprising or confusing to many who work with the ast.",
+      "created_at": "2017-11-09T14:42:26Z",
+      "updated_at": "2017-11-09T14:42:26Z"
+    },
+    {
+      "author": "redoz",
+      "author_association": "NONE",
+      "body": "As long as it will be possible to round-trip this node without resorting to using its Extent or accessing internal properties I'll be happy. Hopefully you can find an internal representation that keeps everyone happy.",
+      "created_at": "2017-11-09T15:07:02Z",
+      "updated_at": "2017-11-09T15:07:02Z"
+    }
+  ],
+  "created_at": "2017-11-07T14:58:40Z",
+  "number": 5365,
+  "state": "open",
+  "title": "ExpandableStringExpressionAst doesn't expose sufficient data to round-trip",
+  "updated_at": "2017-11-09T15:07:02Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14561",
+  "author": "mklement0",
+  "body": "The only type where a custom `.ToString()` is consistently honored appears to be `[pscustomobject]`.\r\n\r\nWith all others - irrespective of whether the script method is added at the _type_ level (`Update-TypeData`) or the _instance_ level (`Add-Member`) - only _explicit_ `.ToString()` calls honor the override; string interpolation and casts do not.\r\n\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n# Override the .ToString() method for [hashtable]\r\n# to output a compressed JSON representation.\r\nUpdate-TypeData -Force -TypeName System.Collections.Hashtable -MemberName ToString -MemberType ScriptMethod -Value { $this | ConvertTo-Json -Compress }\r\n\r\n$ht = @{ one = 1 }\r\n$htAsJson = $ht | ConvertTo-Json -Compress\r\n\r\n# Explicit .ToString() call: OK\r\n$ht.ToString() | Should -Be $htAsJson\r\n\r\n# !! BROKEN: [string] cast\r\n[string] $ht | Should -Be $htAsJson\r\n\r\n# !! BROKEN: string interpolation\r\n\"$ht\" | Should -Be $htAsJson\r\n```\r\n\r\n## Expected behavior\r\n\r\nAll tests should pass.\r\n\r\n## Actual behavior\r\n\r\nTests 2 and 3 fail, because the `.ToString()` override wasn't honored.\r\n\r\n```none\r\nStrings differ at index 0. Expected: '{\"one\":1}' But was:  'System.Collections.Hashtable'\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.2.0-preview.2\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> [string] $ht | Should -Be $htAsJson\r\n\r\nInteresting, what is expectations for:\r\n1. [string] $ht | Should -Be $htAsJson\r\n2. $ht -as [string]\r\n3. $ht.ToString()\r\n\r\nI wouldn't be surprised if all three options worked differently by design.",
+      "created_at": "2021-01-08T17:30:04Z",
+      "updated_at": "2021-01-08T17:30:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "`.ToString()` is the official stringification source for any .NET type, so there is no reason for these to function differently - and indeed they don't for _type-native_ `.ToString()` methods (and also not for ETS methods attached to `[pscustomobject]`).\r\n\r\n(That casts and string interpolation look for a `.ToString()` overload that takes a `System.IFormatProvider`  argument so that culture-invariant formatting can be requested is unrelated to this discussion. Also, the `-as` bug discussed in #8129 doesn't seem to affect `-as [string]`).\r\n",
+      "created_at": "2021-01-08T17:44:05Z",
+      "updated_at": "2021-01-08T17:44:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, to me this is clearly a bug.\r\n\r\nPlease either argue your point as to why these scenarios should behave differently or invite a subject-matter expert to weigh in on the design intent.\r\n\r\nIf the issue is labeled just \"Issue-Question\", I fear it will wither and die.\r\n",
+      "created_at": "2021-01-26T15:01:43Z",
+      "updated_at": "2021-01-26T15:02:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> If the issue is labeled just \"Issue-Question\", I fear it will wither and die.\r\n\r\nLabels are nothing, human resources are all \ud83d\ude04 ",
+      "created_at": "2021-01-26T15:29:10Z",
+      "updated_at": "2021-01-26T15:29:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well, let's go with _both_, just to be safe.",
+      "created_at": "2021-01-26T15:50:17Z",
+      "updated_at": "2021-01-26T15:50:17Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "I'm not sure if this helps with your scenario, but `[pscustomobject]` works as you expect:\r\n```\r\nPS> $a = [pscustomobject]@{ one = 1 }\r\nPS> [string]$a\r\n@{one=1}\r\nPS> $a.ToString()\r\n\r\nPS> add-member -input $a -MemberType ScriptMethod -Value { return (\"hey! {0}\" -f $this.one) } -Name ToString -Force\r\nPS> $a.ToString()\r\nhey! 1\r\nPS> [string]$a\r\nhey! 1\r\nPS> $a -as [string]\r\nhey! 1\r\nPS> $a | ft {\"$_\"}\r\n\r\n\"$_\"\r\n----\r\nhey! 1\r\n```\r\n\r\nI haven't checked the code, but I expect this is in our method dispatch code and to support the expected behavior we would need to prefer the call to an ETS defined method.",
+      "created_at": "2021-01-28T00:39:26Z",
+      "updated_at": "2021-01-28T00:40:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @JamesWTruher, but this wasn't about a specific scenario, and the fact that it does work for `[pscustomobject]` - only - is noted in the initial post.\r\n\r\nInstead, this is about _consistently_ honoring an ETS-overridden `.ToString()` method, across _all_ types, so, yes, consistently preferring an ETS method by the given name seems like the way to go.\r\n\r\n\r\n",
+      "created_at": "2021-01-28T01:30:14Z",
+      "updated_at": "2021-01-28T01:30:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Engine WG discussed this issue today. Our opinion is that the requested change is not likely to be trivial, as these different methods of casting happen at different points in the engine.\r\n\r\nWe agree it would make sense for these three casting methods to be consistently calling the ETS ToString() method, but it would be a breaking change to the existing behaviour at this point. \r\n\r\nWe would need to see a compelling use case where this is necessary to consider changing the existing behaviour and risk breaking existing scripts that may unintentionally be relying on the behaviour.",
+      "created_at": "2022-02-18T00:31:43Z",
+      "updated_at": "2022-02-18T00:31:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> We would need to see a compelling use case this is necessary to consider changing the existing behaviour\r\n\r\nCan I suggest a shift in perspective? We would need to see existing use cases that may break in order to justify keeping the existing, blatantly inconsistent behavior that is likely to trip up (future) users.\r\n\r\nAnd, if the answer _then_ turns out to be: We won't fix this:\r\n\r\n> We agree it would make sense\r\n\r\nAcknowledging that something is broken in the deep recesses of issues in this repo is insufficient.\r\nAs with all warts that are being retained for the sake of backward compatibility, _they need to be documented_.\r\n\r\n\r\n",
+      "created_at": "2022-02-18T02:58:16Z",
+      "updated_at": "2022-02-18T02:58:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We have an issue with a request to support _extension methods_. Many find that offer very desirable. But if we want extension methods we will fall in the issue as result.",
+      "created_at": "2022-02-18T04:21:10Z",
+      "updated_at": "2022-02-18T04:21:10Z"
+    }
+  ],
+  "created_at": "2021-01-07T17:25:28Z",
+  "number": 14561,
+  "state": "open",
+  "title": "ETS ToString() script methods aren't honored in expandable strings and casts",
+  "updated_at": "2022-02-18T04:21:10Z"
+}

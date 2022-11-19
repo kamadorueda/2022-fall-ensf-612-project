@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11571",
+  "author": "ritchxu",
+  "body": "In our particular case, we have a custom shell around `ConsoleShell` that upon start up loads `Microsoft.WindowsAzure.Storage.dll` into the current app domain. Once the shell is up, we couldn't import for example `Az.Accounts` module because it depends on a different version of `Microsoft.WindowsAzure.Storage.dll`. Since this is a more general problem with PowerShell Core, I posted the issue here instead of over at Azure PowerShell. Effectively, I'm looking for a workaround for issue https://github.com/PowerShell/PowerShell/issues/2083.\r\n\r\n## Attempt 1:\r\ncustom assembly resolve\r\n```\r\nusing Microsoft.PowerShell;\r\nusing System;\r\nusing System.Diagnostics;\r\nusing System.Reflection;\r\n\r\nnamespace Test\r\n{\r\n    class Program\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;\r\n\r\n            ConsoleShell.Start(\"Hello\", \"\", new string[0] { });\r\n        }\r\n\r\n        private static Assembly OnAssemblyResolve(object sender, ResolveEventArgs args)\r\n        {\r\n            Debugger.Launch();\r\n            return null;\r\n        }\r\n    }\r\n}\r\n```\r\n```\r\n<Project Sdk=\"Microsoft.NET.Sdk\">\r\n\r\n  <PropertyGroup>\r\n    <OutputType>Exe</OutputType>\r\n    <TargetFramework>netcoreapp3.1</TargetFramework>\r\n  </PropertyGroup>\r\n\r\n  <ItemGroup>\r\n    <PackageReference Include=\"Microsoft.PowerShell.SDK\" Version=\"7.0.0-rc.1\" />\r\n  </ItemGroup>\r\n\r\n  <ItemGroup>\r\n    <Reference Include=\"Microsoft.PowerShell.ConsoleHost\">\r\n      <HintPath>$(NuGetPackageRoot)\\microsoft.powershell.consolehost\\7.0.0-rc.1\\runtimes\\win\\lib\\netcoreapp3.1\\Microsoft.PowerShell.ConsoleHost.dll</HintPath>\r\n    </Reference>\r\n  </ItemGroup>\r\n\r\n</Project>\r\n```\r\n## Problem:\r\nWhen run two import (`Import-Module C:\\version1\\assembly.dll; Import-Module C:\\version2\\assembly.dll`) with different versions of the assembly, I hit error of `Import-Module: Assembly with same name is already loaded` but the `AssemblyResolve` event was not raised.  \r\n\r\n## Attempt 2:\r\nbinding redirect through config file\r\n```\r\n<assemblyBinding xmlns=\"urn:schemas-microsoft-com:asm.v1\">\r\n  <dependentAssembly>\r\n    <assemblyIdentity name=\"Microsoft.WindowsAzure.Storage\" publicKeyToken=\"31bf3856ad364e35\" culture=\"neutral\" />\r\n    <bindingRedirect oldVersion=\"0.0.0.0-9.3.3.0\" newVersion=\"9.3.3.0\" />\r\n  </dependentAssembly>\r\n</assemblyBinding>\r\n```\r\n## Problem:\r\nRun into the same error above\r\n\r\n## Attempt 3:\r\nrun any external commands with Invoke-Command -Session, this basically out-sourced the command on a different app domain and avoid the version collision.\r\n## Problem:\r\nThis seems to be the only workaround I can come up with, but it's really inconvenient to jump back and forth PS sessions.\r\n\r\n## Question:\r\nAny better workaround?",
+  "closed_at": "2020-02-02T00:00:19Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @daxian-dbw for information.",
+      "created_at": "2020-01-14T11:55:03Z",
+      "updated_at": "2020-01-14T11:55:03Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShellEditorServices had some similar issues, @rjmholt recently worked around that with `AssemblyLoadContext`'s.\r\n\r\n[Here's the load context class](https://github.com/PowerShell/PowerShellEditorServices/blob/81ba0c0b8efb7ee879f2ede511390ba73b0bc86e/src/PowerShellEditorServices.Hosting/Internal/PsesLoadContext.cs).\r\n\r\nAnd [here's where he sets it up for use](https://github.com/PowerShell/PowerShellEditorServices/blob/81ba0c0b8efb7ee879f2ede511390ba73b0bc86e/src/PowerShellEditorServices.Hosting/EditorServicesLoader.cs#L79-L109).",
+      "created_at": "2020-01-14T13:28:22Z",
+      "updated_at": "2020-01-14T13:28:22Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> into the current app domain\r\n\r\nThere's only one AppDomain in .NET Core, but as it happens this is much easier to make work in .NET Core than in .NET Framework (i.e. if you have a need to do this in .NET Framework you need inter-AppDomain serialisation and a whole lot of `ManagedByRefObject` work).\r\n\r\n> @rjmholt recently worked around that with AssemblyLoadContext's\r\n\r\nYeah, if you control the assembly load of your dependency, you can load it into a new assembly load context. In PSES we accomplish this as follows:\r\n\r\n- Compile the top level module against only the APIs we want to share with the default ALC (this means the dependencies won't be exposed to PowerShell, only the API of your own module)\r\n- Deploy the module with the dependency DLLs in a separate directory so that PowerShell won't find and load them itself\r\n- Define a new custom ALC in a new class with logic to look for requested assemblies in this isolated dependency directory\r\n- Add to the default ALC a new assembly resolve event handler for the top level DLL that we want to load into the default ALC (but with its dependencies in the custom ALC). This will load the top level assembly through the custom ALC into the default ALC (so it's loaded in both), but in such a way that its dependencies are only loaded into the custom ALC.\r\n\r\nThis assembly resolve setup means you don't need to use reflection anywhere, you just redirect loading through a new ALC at runtime. But it requires some layers:\r\n\r\n- PowerShell (owns the default ALC)\r\n- Assembly loaded immediately as part of module into the default ALC, where you set up custom ALC and resolve events. This is effectively a facade that does just enough to set up the ALCs and load your real API\r\n- The top level API DLL to be loaded through the custom ALC into the default ALC\r\n- Your dependencies, to be loaded into the custom ALC only\r\n\r\nWe've discussed getting this into PowerShell itself for modules, but it's quite complex and not planned currently, so unlikely to happen within the next 12 months at least.",
+      "created_at": "2020-01-14T21:35:35Z",
+      "updated_at": "2020-01-14T21:35:35Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I should say that if you're rehosting PowerShell, you can condense the layers I describe above; you'll just have:\r\n\r\n- Hosted PowerShell with the custom ALC\r\n- The wrapping API to load into the default ALC (it can't clash with the Az modules' API)\r\n- The clashing dependency to load into the custom ALC",
+      "created_at": "2020-01-14T21:43:43Z",
+      "updated_at": "2020-01-14T21:43:43Z"
+    },
+    {
+      "author": "ritchxu",
+      "author_association": "NONE",
+      "body": "@rjmholt first and foremost, thanks a ton for your details write-up, it's extremely helpful!\r\n\r\nSome clarification:\r\n- We're only interested in .NET Core/PowerShell Core, so I should rectify my original post with ALC's rather than AppDomain\r\n- We wish to avoid re-hosting PowerShell. Ideally just load the top level module into default ALC and potential conflicting dependencies to a custom ALC, so it won't clash with Az modules' dependencies\r\n\r\nFollow-up questions:\r\n> * This will load the top level assembly through the custom ALC into the default ALC (so it's loaded in both), but in such a way that its dependencies are only loaded into the custom ALC.\r\n\r\n1. Why do we need the top level assembly **loaded in both default ALC and the custom ALC**?\r\n2. Once our own module is loaded, if we intend to import Az modules and use it, it's going to be loaded to the default ALC. If so, how to avoid the assembly resolve event handler from kicking in? Do we simply `return null` to let the default ALC to resolve?\r\n3. Dummy question: the following doesn't seem to work for dynamically-loaded dependencies, why would I need a subclass of `AssemblyLoadContext`?\r\n```\r\n$customContext = [System.Runtime.Loader.AssemblyLoadContext]::new(\"Test\")\r\n$onAssemblyResolve = {\r\n    param($sender, $asmName)\r\n    Write-Host \"Resolving '$($asmName.Name)'\"\r\n    return $customContext.LoadFromAssemblyPath(\"$PSScriptRoot\\bin\\$($asmName.Name).dll\")\r\n}\r\n[System.Runtime.Loader.AssemblyLoadContext]::Default.add_Resolving($onAssemblyResolve)\r\n```",
+      "created_at": "2020-01-14T22:39:28Z",
+      "updated_at": "2020-01-14T22:39:28Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> I should say that if you're rehosting PowerShell, you can condense the layers I describe above; you'll just have:\r\n\r\nI want to point out that it won't work well to load PowerShell into a custom ALC. PowerShell depends on `Assembly.LoadFrom` heavily especially in module loading, but `Assembly.LoadFrom` will load an assembly to the default ALC, so it will result in conflicts.",
+      "created_at": "2020-01-14T22:40:49Z",
+      "updated_at": "2020-01-14T22:40:49Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> 3. Dummy question: the following doesn't seem to work for dynamically-loaded dependencies, why would I need a subclass of `AssemblyLoadContext`?\r\n> \r\n> ```\r\n> $customContext = [System.Runtime.Loader.AssemblyLoadContext]::new(\"Test\")\r\n> $onAssemblyResolve = {\r\n>     param($sender, $asmName)\r\n>     Write-Host \"Resolving '$($asmName.Name)'\"\r\n>     return $customContext.LoadFromAssemblyPath(\"$PSScriptRoot\\bin\\$($asmName.Name).dll\")\r\n> }\r\n> [System.Runtime.Loader.AssemblyLoadContext]::Default.add_Resolving($onAssemblyResolve)\r\n> ```\r\n\r\nThat's probably a scoping issue.  By the time your resolving handler is invoked, `$customContext` is no longer a variable.  You'd have to do something like `[System.Runtime.Loader.AssemblyLoadContext]::Default.add_Resolving($onAssemblyResolve.GetNewClosure())` but really you're better off doing it from C#.",
+      "created_at": "2020-01-14T22:47:22Z",
+      "updated_at": "2020-01-14T22:48:13Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I want to point out that it won't work well to load PowerShell into a custom ALC.\r\n\r\nOh sorry! To be clear, hosting PowerShell you should host it in the default ALC, but load the dependency into a custom ALC.\r\n\r\nAnyway, it sounds like you really just want a module here.\r\n\r\n> Why do we need the top level assembly loaded in both default ALC and the custom ALC?\r\n\r\nSo you don't really need this, but if you don't then the only way to use the dependency APIs you need is by using reflection, which is slower, more error prone and generally less convenient. But you need some unique way to call the API from one assembly and not the other. The two ways to do this are reflection or implicit runtime redirection through a facade API, since just calling the API the normal way in code running in the default ALC will result in you calling the other dependency API.\r\n\r\n> Once our own module is loaded, if we intend to import Az modules and use it, it's going to be loaded to the default ALC. If so, how to avoid the assembly resolve event handler from kicking in? Do we simply return null to let the default ALC to resolve?\r\n\r\nPowerShell has its own assembly resolve event that fires before yours. When you load the Az module, that loads its immediate assembly. That assembly then needs its dependencies, which aren't found in $PSHOME (.NET's app root here), so PowerShell's resolve event handler gets called, which looks in the directory where that first assembly is loaded.\r\n\r\nSo for example:\r\n\r\n- `OurModule\\`\r\n  - `OurModule.psd1`\r\n  - `OurModule.dll`\r\n  - `isolatedDeps\\`\r\n      - `FacadeApi.dll`\r\n      - `SharedDep.dll`\r\n- `AzModule\\`\r\n    - `AzModule.psd1`\r\n    - `AzModule.dll`\r\n    - `SharedDep.dll`\r\n\r\nWhen you load `OurModule`, you load `OurModule.dll` which creates the custom ALC and adds a resolve event that checks if `FacadeApi` is the requested assembly and if so looks in `isolatedDeps` to load `FacadeApi.dll` in the custom ALC and take the result of that and return it in the resolve event handler for the default ALC. The custom ALC just looks for anything its asked for in `isolatedDeps` and that's how it finds the `SharedDep.dll` in the `isolatedDeps` directory. When `OurModule` is loaded, PowerShell fires its resolve handler, looks in `OurModule\\` and finds nothing, so we go to your resolve event, which only looks for the `FacadeApi.dll`.\r\n\r\nWhen you load `AzModule`, whether before or after, PowerShell loads the module which directly loads `AzModule.dll`. That assembly depends on another particular version of `SharedDep.dll` (or could be the same one, doesn't matter). That's not loaded into the default ALC at any time, so always fires the resolve event, which PowerShell handles, looks for `SharedDep.dll` in `AzModule\\`, finds it, and successfully loads. If some assembly doesn't exist by does in the `isolatedDeps` dir and you fall back to your resolve event handler, you ensure you don't load that by having the resolve there only look for `FacadeApi.dll` and letting the custom ALC (which you can only get into through that DLL) handle any other dependencies.\r\n\r\nSo the two never clash. But it depends on the `FacadeApi.dll` existing and being unique to your module. It's the veil between the two contexts.\r\n\r\nThe other way to do it is to load your `SharedDep.dll` ahead of time in the custom ALC, but then you're forced to use reflection to call into its APIs.",
+      "created_at": "2020-01-14T22:57:22Z",
+      "updated_at": "2020-01-14T23:02:00Z"
+    },
+    {
+      "author": "ritchxu",
+      "author_association": "NONE",
+      "body": "@rjmholt I think I'm getting closer with your extremely useful explanation above \ud83d\ude47\r\n\r\nUsing the PSES as an example, if I understood correctly from the code, here is what happens:\r\n1. We create the custom ALC\r\n2. We load top-level module `Microsoft.PowerShell.EditorServices` using the custom ALC\r\n3. We rely on the custom ALC to load dependencies (by the logic in custom ALC's overwritten `Load` method).\r\n\r\nIf I understood correctly, when I applies the same logic in my code, the overwritten `Load` was not invoked, **any clue how that could happen?**\r\n\r\nAlternatively, I played with following approach instead:\r\n```\r\ntestContext = new AssemblyLoadContext(\"Test\");\r\nbinDirectory = @\"C:\\Test\\bin\";\r\nAssemblyLoadContext.Default.Resolving += (AssemblyLoadContext defaultLoadContext, AssemblyName asmName) =>\r\n{\r\n     Console.WriteLine($\"Resolving {asmName.Name}.dll\");\r\n     return testContext.LoadFromAssemblyPath(Path.Combine(binDirectory, $\"{asmName.Name}.dll\"));\r\n};\r\n```\r\n\r\nThis seems to be working, and here is what I assumed happening:\r\n1. My own top-level module and its dependencies are loaded in `testContext`\r\n2. When later importing `Az` module, PS will resolve all its dependencies to default ALC and no conflict occurred",
+      "created_at": "2020-01-16T21:12:17Z",
+      "updated_at": "2020-01-16T21:13:07Z"
+    },
+    {
+      "author": "ritchxu",
+      "author_association": "NONE",
+      "body": "The problem with the approach above is, (at least what seems to be), if I import `Az` module first and say it loads a dependency `dep.1.dll` which my module has a different version of, say `dep.2.dll`. When `dep.2.dll` was later loaded, it seems it's loading `dep.1.dll` instead of going through my custom ALC's `Load` method, hence jeopardize the separation. Why wouldn't the custom ALC's `Load` method not invoked in this case?",
+      "created_at": "2020-01-17T21:06:15Z",
+      "updated_at": "2020-01-17T21:06:15Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "So the important details are:\r\n\r\n- If you load an assembly into the default context (even if you loaded it via a custom ALC), it will now be the result of trying to load assemblies of the same name into the default ALC\r\n- The key to our custom ALC logic is that we hook a resolve event to only respond to a specific name and version of an assembly, fire up a custom ALC around it and then load it into the default context. So that assembly we check for in the resolve event is the bridge between the two ALCs. What I've been calling the facade assembly/API. In your snippet, you're trying to load **all** assemblies firing a resolve event through the custom ALC into the default ALC, which defeats the purpose of the custom ALC. You need two layers; one to resolve the bridging assembly and one to load the conflicting dependencies in isolation, so they never get pulled into the default ALC.\r\n\r\nFor example:\r\n\r\n```csharp\r\ns_customLoadContext = new MyLoadContext(s_isolatedBinDir)\r\nAssemblyLoadContext.Default.Resolving += (AssemblyLoadContext defaultLoadContext, AssemblyName asmName) =>\r\n{\r\n    Console.WriteLine($\"Resolving {asmName.Name}.dll\");\r\n    if (asmName.Name != s_facadeAsmName\r\n        || asmName.Version != s_facadeAsmVersion)\r\n    {\r\n        return null;\r\n    }\r\n\r\n    // Possibly s_customLoadContext.LoadFromAssemblyName(asmName) would work here too\r\n    // and deduplicate knowledge of the bin dir path\r\n    return s_customLoadContext.LoadFromAssemblyPath(Path.Combine(s_isolatedBinDir, $\"{s_facadeAsmName}.dll\"));\r\n};\r\n\r\ninternal class MyLoadContext : AssemblyLoadContext\r\n{\r\n    private readonly string _dependencyDirPath;\r\n\r\n    public MyLoadContext(string binDirPath)\r\n    {\r\n        _dependencyDirPath = binDirPath;\r\n    }    \r\n\r\n    protected override Assembly Load(AssemblyName assemblyName)\r\n    {\r\n        string asmPath = Path.Join(_dependencyDirPath, $\"{assemblyName.Name}.dll\");\r\n\r\n        if (File.Exists(asmPath))\r\n        {\r\n            return LoadFromAssemblyPath(asmPath);\r\n        }\r\n\r\n        return null;\r\n    }\r\n}\r\n```\r\n\r\nAlso, I'm not entirely sure why your custom ALC's load isn't being called, but the way I approached it was to log things everywhere to trace the logic",
+      "created_at": "2020-01-17T22:15:20Z",
+      "updated_at": "2020-01-17T22:18:30Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": ">  the overwritten Load was not invoked, any clue how that could happen?\r\n\r\nOne thought here: if an assembly is loaded into a context and you try to load another assembly of the same name into that context, it won't try to load the new one and there won't be any resolve event either. So it may be that you've already loaded the assembly you want into the default ALC, meaning no resolve event, meaning no load call on the custom ALC.",
+      "created_at": "2020-01-17T22:17:34Z",
+      "updated_at": "2020-01-17T22:17:34Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-02-02T00:00:17Z",
+      "updated_at": "2020-02-02T00:00:17Z"
+    }
+  ],
+  "created_at": "2020-01-13T19:13:24Z",
+  "number": 11571,
+  "state": "closed",
+  "title": "Workarounds in loading assembly with different versions",
+  "updated_at": "2020-02-02T00:00:19Z"
+}

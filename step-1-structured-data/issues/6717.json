@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6717",
+  "author": "GeeLaw",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```powershell\r\nNew-Object PSObject | Select-Object ab | Select-Object *a*, *b*\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nab\r\n--\r\n\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nSelect-Object : The property cannot be processed because the property \"ab\" already exists.\r\nAt line:1 char:42\r\n+ New-Object PSObject | Select-Object ab | Select-Object *a*, *b*\r\n+                                          ~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (@{ab=}:PSObject) [Select-Object], PSArgumentException\r\n+ FullyQualifiedErrorId : AlreadyExistingUserSpecifiedPropertyNoExpand,Microsoft.PowerShell.Commands.SelectObjectCommand\r\n\r\nab\r\n--\r\n\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.2\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nExplanation\r\n---------\r\n\r\nWhen user provides multiple patterns for `Select-Object`, he merely wants to select the disjunction of all these properties. The reproduction step here is just an example. In the real world, I was trying to take a summary of Outlook Contact object by `$contacts.Items | select *email*,*name*` and it `Write`s`-Error` because there are `EmailXDisplayName` properties for `X` = 1, 2, 3.\r\n\r\n`Select-Object` should simply ignore properties already included in the output object if it is matched again. I.e., selecting a property twice makes no effect. This specifically implies that an error should **not** be written if one `select`s ` -property a,a` -- this makes the life easier when the list of properties actually comes from merging two arrays.\r\n\r\n**This issue also reproduces in Windows PowerShell 5.1. Once confirmed, please also direct this issue to Windows PowerShell team.**\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@GeeLaw \r\n> Select-Object should simply ignore properties already included in the output object if it is matched again\r\n\r\nIn your example, you are clearly asking for _two_ properties when there is only one possible match. Continuing is obviously an error since it would only return one property when you explicitly asked for two. (I assume you asked for two because you actually expected two properties). So it seems to me that `Select-Object` is exhibiting the correct behaviour.",
+      "created_at": "2018-04-24T22:39:10Z",
+      "updated_at": "2018-04-24T22:39:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\nI think @GeeLaw's point is that if you use wildcard-based property-name matching, multiple wildcard expression may overlap in the property names they match and that `Select-Object` should simply _ignore_ such accidental duplicates among the resulting list of property names.\r\n(His real-life example was the `Email*` / `*Name*` wildcard-expression pair, one designed to match email-related properties, the other (presumably) person-related properties, yet they just happen to have overlapping matches.)\r\n\r\nIn other words: turn any resulting _multiset_ of property names into a _set_ for convenience.\r\n\r\nThis makes sense, given that property names must be unique, so no one should be surprised if duplicates are ignored.\r\n\r\nConversely, the current behavior of noisily complaining about duplicates is disruptive - and not always easy to anticipate.\r\n\r\n\r\n",
+      "created_at": "2018-04-24T22:59:55Z",
+      "updated_at": "2018-04-24T23:02:21Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 He _**explicitly specified**_ that he wanted two properties when there was only one. That's clearly an error and should be treated as such.  And you get the error spew because we don't require heterogeneous collections. \r\n\r\n> current behavior of noisily complaining about duplicates is disruptive - and not always easy to anticipate.\r\n\r\nErrors are, by their nature, unanticipated. And error messages are supposed to be disruptive because, well,  there's an _**error**_.\r\n",
+      "created_at": "2018-04-25T00:26:16Z",
+      "updated_at": "2018-04-25T00:26:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\n> He explicitly specified that he wanted two properties when there was only one.\r\n\r\nNo; from what I can tell the very point is to output _one_ property, _ignoring the duplicates_ in the _effective_ list of property names (even though the current sample command is flawed).  \r\n\r\nWe can let @GeeLaw clarify, but that is certainly what _I_ have been talking about.\r\n\r\nThe real-life example in the original post tells a better story, which I've tried to recap in my previous comment.\r\n\r\n> And you get the error spew because we don't require heterogeneous collections.\r\n\r\nWhat do you mean by _heterogeneous collections_?\r\n\r\n> Errors are, by their nature, unanticipated. \r\n\r\nIf you're using wildcards, you're playing in \"fuzzy land\", by definition - otherwise you'd use explicit names.\r\n\r\nWildcards _not_ matching anything already _is_ silent - as opposed to an error condition; e.g., `Get-Item / | Select-Object foo*` or, in the context of the file system, `Get-ChildItem *nosuch*`.\r\n\r\nBy analogy, two wildcards that happen to produce overlapping results too should not produce an _error_ - the sensible resolution _in the given context_ is to _quietly weed out duplicates_ : \r\n\r\n  * As stated, no one should be surprised at that, given  that it should be understood that property names on output objects must be unique.\r\n\r\n * The upside is that wildcard-based property-name matching can be applied safely, without needing to worry about accidental overlap.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-04-25T00:54:25Z",
+      "updated_at": "2018-04-25T00:54:25Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "In reply to @mklement0 (1st reply to the issue): Thanks for your reply. I mistyped the second command in the first snippet. It should have been `Select-Object ab`, and it's now fixed. \r\n\r\nIn reply to @BrucePay (2nd reply): See \"Explanation\" for a real-world example. The \"Steps to reproduce\" consists of a minimal reproduction. If you don't use Outlook object model, I'll write down a more familiar scenario:\r\n\r\n```PowerShell\r\n# Let's say the REST method returns JSON, which gives the following properties:\r\n# FirstName, LastName, FullName,\r\n# Email1Address, Email2Address, Email3Adddress,\r\n# Email1DisplayName, Email2DisplayName, Email3DisplayName,\r\n# Birthday, Notes, SignificantOther, Company, Anniversary\r\n$result = Invoke-RestMethod <# parameters ignored #>;\r\n$result | Select-Object -Property *name*, *email* | Out-GridView;\r\n```\r\n\r\nWhat I would like to do is to inspect properties related to name and emails. Since `Email1DisplayName` matches both pattern, `Select-Object` tries to add it to the resulting object twice.\r\n\r\nIf you are talking about `select a, a` case, I would suggest the cmdlet not detect such case (ignore the error, too) because of logical simplicity and the possible scenario of merging two sets of properties to select. If we were to detect error (not taking list merging into consideration), we must keep track of each property, whether it is selected by the following possible combinations:\r\n\r\n- none;\r\n- non-wildcard once;\r\n- non-wildcard multiple times;\r\n- wildcard once;\r\n- wildcard multiple times;\r\n- non-wildcard once, wildcard multiple times;\r\n- non-wildcard multiple times, wildcard once;\r\n- non-wildcard multiple times, wildcard multiple times.\r\n\r\nAnd we must define which of these cases produce an error. It'll be cumbersome in the code and for people. Instead, I suggest we keep it simple by ignoring re-selection.\r\n\r\nP.S. What I meant by list merging is:\r\n\r\n```PowerShell\r\n$mandatoryProps = @('a', 'b', 'c')\r\n$userProps = Get-PropertiesUserWantsToSee;\r\n$toSelect = $mandatoryProps + $userProps;\r\n$sourceObjects | Select-Object $toSelect | Out-GridView;\r\n```\r\n\r\nIt is possible to use `[System.Collections.Generic.HashSet[string]]` as a workaround, but you need to be careful -- construct the object with case-insensitive comparator or `.ToLowerInvariant()` when inserting the elements.\r\n\r\nIn reply to @mklement0 (3rd and 5th reply): Yes, your interpretation gets what I intended to convey.",
+      "created_at": "2018-04-25T01:16:31Z",
+      "updated_at": "2018-04-25T01:16:31Z"
+    },
+    {
+      "author": "frankfuu",
+      "author_association": "NONE",
+      "body": "@GeeLaw thanks for posting this example. I was trying to ask the same thing but all i can think of was contrived examples like why isn't `gci | select Name, Name` possible? \ud83d\ude22 \r\n\r\nI think the ability to do this makes reporting and discoverability of data alot clearer and convenient.\r\n\r\nWhat was your workaround?",
+      "created_at": "2018-06-26T16:17:17Z",
+      "updated_at": "2018-06-26T16:17:17Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@frankfuu I didn't try finding a workaround -- I suppose this is only an issue for interactive usage. For scripting scenarios, it would be better to know in advance the exact schema, eliminating the need to use a wildcard and even `Select-Object` to select properties.\r\n\r\nIf you really hate the `ErrorRecord`s, temporarily suppress them by `-ErrorAction Ignore`. Note that `Ignore` is better than `SilentlyContinue` if you are sure that the command would run through without problem if the issue were resolved, since `Ignore` does not put `ErrorRecord`s into the `$Error` automatic variable.",
+      "created_at": "2018-06-27T16:18:48Z",
+      "updated_at": "2018-06-27T16:18:48Z"
+    },
+    {
+      "author": "frankfuu",
+      "author_association": "NONE",
+      "body": "@GeeLaw this is great! I'll stick with temporary supression for interactive usage from now.",
+      "created_at": "2018-06-27T18:17:02Z",
+      "updated_at": "2018-06-27T18:17:02Z"
+    }
+  ],
+  "created_at": "2018-04-24T03:40:42Z",
+  "number": 6717,
+  "state": "open",
+  "title": "`Select-Object` writes errors when multiple patterns match the same property",
+  "updated_at": "2018-06-27T18:17:02Z"
+}

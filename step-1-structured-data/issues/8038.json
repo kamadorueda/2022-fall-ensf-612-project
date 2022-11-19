@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8038",
+  "author": "PaulHigin",
+  "body": "## PR Summary\r\n\r\nImplicit remoting is a feature in PowerShell where commands intended to be run on remote machines via Invoke-Command, are wrapped in proxy script commands.  That way the remote command can be run by simply typing it on the command line, and the proxy script takes care of invoking it on the remote target. \r\n The Import-PSSession cmdlet creates proxy command scripts for commands or module commands to be run on remote targets.\r\n\r\nThis is very convenient, but there can be performance problems with proxy commands.  If the output of one proxy command is piped to another proxy command, then the data makes an unnecessary round trip to the client and back to the target machine.  For example:\r\n\r\n```powershell\r\n# Perf issue.  All data from Get-ProcessProxy is returned to the client and then immediately sent back to remote machine for the Select-ObjectProxy cmdlet.\r\nPS > Get-ProcessProxy | Select-ObjectProxy -Property Name,Id\r\n```\r\n\r\nIf there is a lot of data involved, or the data is complex (such as a Process object), then the round tripping of data can take up a significant amount of time.\r\n\r\nThis experimental feature examines a command typed in the shell, and if all the commands are implicit remoting proxy commands that form a simple pipeline, then the commands are batched together and invoked as a single remote pipeline.\r\n\r\nExample:\r\n\r\n```powershell\r\n# Create remote session and import TestIMod module\r\n$s = nsn -host remoteMachine\r\nicm $s { ipmo 'C:\\Users\\user\\Documents\\WindowsPowerShell\\Modules\\TestIMod\\TestIMod.psd1' }\r\nImport-PSSession $s -mod testimod\r\n\r\n$maxProcs = 1000\r\n$filter = 'pwsh','powershell*','wmi*'\r\n\r\n# Without batching, this pipeline takes approximately 12 seconds to run\r\nMeasure-Command { Get-AllProcesses -MaxCount $maxProcs | Select-Custom $filter | Group-Stuff $filter }\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 0\r\nSeconds           : 12\r\nMilliseconds      : 463\r\n\r\n# But with the batching experimental feature enabled, it takes approximately 0.20 seconds\r\nMeasure-Command { Get-AllProcesses -MaxCount $maxProcs | Select-Custom $filter | Group-Stuff $filter }\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 0\r\nSeconds           : 0\r\nMilliseconds      : 209\r\n```\r\nAs seen above, with the batching experimental feature enabled, all three implicit remoting proxy commands, Get-AllProcesses, Select-Custom, Group-Stuff, run in the remote session and the only data returned to the client is the result from the pipeline.  This greatly decreases the amount of data sent back and forth between client and remote session, and also greatly reduces the amount of object serialization and de-serialization.  \r\n\r\nTo enable this feature, create this file as `experimental.json`\r\n\r\n```json\r\n            {\r\n                \"ExperimentalFeatures\": [\r\n\t\t  \"PSImplicitRemotingBatching\"\r\n                ]\r\n            }\r\n```\r\n\r\nThen start PowerShell with: `pwsh -settingsfile ./experimental.json`\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Change is not breaking](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` to the beginning of the title and remove the prefix when the PR is ready.\r\n- **User-facing changes**\r\n    - [x] Not Applicable\r\n    - **OR**\r\n    - [ ] User-facing [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed - Issue link:\r\n- **Testing - New and feature**\r\n    - [x] Not Applicable or can only be tested interactively\r\n    - **OR**\r\n    - [ ] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n        - [ ] [Add `[feature]` if the change is significant or affects feature tests](https://github.com/PowerShell/PowerShell/blob/master/docs/testing-guidelines/testing-guidelines.md#requesting-additional-tests-for-a-pr)\r\n",
+  "closed_at": "2018-10-30T16:55:40Z",
+  "comments": [
+    {
+      "author": "adityapatwardhan",
+      "author_association": "MEMBER",
+      "body": "@PaulHigin Can we add some tests here as well?",
+      "created_at": "2018-10-15T21:34:54Z",
+      "updated_at": "2018-10-15T21:34:54Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Since this is a perf improvement for special command lines, I don't see a good way to add reliable tests.",
+      "created_at": "2018-10-15T22:16:35Z",
+      "updated_at": "2018-10-15T22:16:35Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Actually, offline we decided that adding a test hook to test the TryRunAsImplicitBatch() method should be sufficient to test the code path.  I'll work on adding that.\r\n",
+      "created_at": "2018-10-15T22:28:43Z",
+      "updated_at": "2018-10-15T22:28:43Z"
+    },
+    {
+      "author": "mattpwhite",
+      "author_association": "NONE",
+      "body": "Does this avoid the intermediate serialization step entirely?  If so, then it\u2019s more than a perf improvement, it also enables things that are currently problematic.  In many cases a dead serialized property bag isn\u2019t valid pipeline input, but a live object is.  So Get | Set scenarios that didn\u2019t work with implicit remoting might start to work. \r\n\r\n",
+      "created_at": "2018-10-15T22:59:12Z",
+      "updated_at": "2018-10-15T22:59:12Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov  Yes, batching will work for any remote target that supports implicit remoting.",
+      "created_at": "2018-10-16T19:51:42Z",
+      "updated_at": "2018-10-16T19:51:42Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@mattpwhite , Whoops missed this comment.  Yes, batching the pipeline means \"live\" objects are passed and implicit commands that didn't work with de-serialized objects will likely work as batched.",
+      "created_at": "2018-10-17T14:43:09Z",
+      "updated_at": "2018-10-17T15:35:21Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@adityapatwardhan  Can you update your review?",
+      "created_at": "2018-10-18T21:43:38Z",
+      "updated_at": "2018-10-18T21:43:38Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@adityapatwardhan  Can you please merge these approved changes?  We have users who would like to try out the experimental feature.",
+      "created_at": "2018-10-30T16:18:09Z",
+      "updated_at": "2018-10-30T16:18:09Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@adityapatwardhan   Thanks!",
+      "created_at": "2018-10-30T17:51:10Z",
+      "updated_at": "2018-10-30T17:51:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It will be nice to share config file where the feature is turned on.",
+      "created_at": "2018-10-31T04:17:42Z",
+      "updated_at": "2018-10-31T04:17:42Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I created new issue to improve experimental features experience https://github.com/PowerShell/PowerShell/issues/8155",
+      "created_at": "2018-10-31T15:08:32Z",
+      "updated_at": "2018-10-31T15:08:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Thanks!\r\n\r\nI meant that attaching a sample file to the PR will help users.",
+      "created_at": "2018-10-31T15:36:08Z",
+      "updated_at": "2018-10-31T15:36:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov added example to the PR description",
+      "created_at": "2018-10-31T16:19:09Z",
+      "updated_at": "2018-10-31T16:19:09Z"
+    },
+    {
+      "author": "jpsnover",
+      "author_association": "CONTRIBUTOR",
+      "body": "Something is wrong here.\r\n\r\n```powershell\r\nPS C:\\temp\\PowerShell-6.2.0-preview.859-win-x64> Get-ExperimentalFeature\r\n\r\nName                                Enabled Source                              Description\r\n----                                ------- ------                              -----------\r\nPSImplicitRemotingBatching             True PSEngine                            Batch implicit remoting proxy comman...\r\n\r\n\r\nPS C:\\temp\\PowerShell-6.2.0-preview.859-win-x64> Import-PSSession $s -CommandName get-Process -Prefix r -verbose -AllowClobber\r\n\r\nModuleType Version    Name                                ExportedCommands\r\n---------- -------    ----                                ----------------\r\nScript     1.0        tmp_a4ox23yj.min                    Get-rProcess\r\n\r\n\r\nPS C:\\temp\\PowerShell-6.2.0-preview.859-win-x64> get-RProcess |where Name -like *ss\r\nPS C:\\temp\\PowerShell-6.2.0-preview.859-win-x64> $test = get-RProcess\r\nPS C:\\temp\\PowerShell-6.2.0-preview.859-win-x64> $test |where Name -like *ss\r\n\r\n NPM(K)    PM(M)      WS(M)     CPU(s)      Id  SI ProcessName\r\n ------    -----      -----     ------      --  -- -----------\r\n     25     1.90       1.86       7.20     752   0 csrss\r\n     32    11.32       5.30      72.31     868   1 csrss\r\n     85    19.81      24.61     935.81     104   0 lsass\r\n      3     0.57       0.62       0.27     416   0 smss\r\n\r\n\r\nPS C:\\temp\\PowerShell-6.2.0-preview.859-win-x64>\r\n```",
+      "created_at": "2018-10-31T21:31:53Z",
+      "updated_at": "2018-11-01T23:24:15Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "You need to enable the feature via the powershell.config.json file.\r\n\r\n```\r\nPS > Get-ExperimentalFeature\r\n\r\nName                                Enabled Source                              Description\r\n----                                ------- ------                              -----------\r\nPSImplicitRemotingBatching             True PSEngine                            Batch implicit remoting proxy comman...\r\n```\r\n\r\nI am not sure about applying a prefix to the proxy command, it seems like that should be Ok.  But the other two involving assignment and piping from a variable fail the \"simple pipeline\" checker used to determine if batching is allowed.\r\n\r\nI am adding a verbose output that reports the checker errors so it is easier to determine if the command line is batched or not, and make it easier to address these scenarios.",
+      "created_at": "2018-10-31T23:04:11Z",
+      "updated_at": "2018-10-31T23:04:11Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Whoops, left out the powershell.config.json example:\r\n\r\n```\r\n{\r\n    \"Microsoft.PowerShell:ExecutionPolicy\":\"RemoteSigned\",\r\n    \"ExperimentalFeatures\": [\r\n      \"PSImplicitRemotingBatching\"\r\n    ]\r\n}\r\n```",
+      "created_at": "2018-10-31T23:06:13Z",
+      "updated_at": "2018-10-31T23:06:13Z"
+    },
+    {
+      "author": "jpsnover",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sorry that the formatting got screwed up but if you look at my post, the very first command confirms that the feature is enabled.",
+      "created_at": "2018-11-01T22:15:01Z",
+      "updated_at": "2018-11-01T22:15:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@jpsnover I reformatted your comment by wrapping in:\r\n\r\n```none\r\n    ```powershell\r\n    <powershell stuff here>\r\n    ```\r\n```\r\n\r\nLooks like `get-RProcess |where Name -like *ss` failed to return anything.  I just build master which has @PaulHigin's commit and works for me:\r\n\r\n```powershell\r\nPS /Users/steve/repos/PowerShell> Get-rProcess | where name -like \"*pwsh*\"  \r\n\r\n NPM(K)    PM(M)      WS(M)     CPU(s)      Id  SI ProcessName\r\n ------    -----      -----     ------      --  -- -----------\r\n     50    55.58      84.09      32.27    3728   0 pwsh\r\n     63    49.50      96.32       2.48   10152   2 pwsh\r\n     61    46.90      92.68       2.36   14056   2 pwsh\r\n\r\n```\r\n",
+      "created_at": "2018-11-01T23:39:05Z",
+      "updated_at": "2018-11-01T23:39:51Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Turning on verbose output helps to see what is going on:\r\n\r\n```\r\n$VerbosePreference = \"Continue\"\r\nGet-rProcess | where Name -like *ss\r\nVERBOSE: Implicit remoting command pipeline has been batched for execution on remote target.\r\n```\r\nThis was batched successfully, however, Get-rProcess proxy command is not on the target machine.  I forgot to merge error stream so this error is not showing.  It is easy to fix the error stream merge, but I have to think about how to convert Get-rProcess proxy wrapper command to the name of the actual wrapped command.\r\n\r\n```\r\n$test = Get-RProcess\r\n$test | where Name -like *ss\r\n```\r\nNeither of these are pipelines that round trip data and don't need to be batched.\r\n\r\nHowever,\r\n```\r\nImport-PSSession $s -CommandName Get-Process -AllowClobber\r\n$VerbosePreference = \"Continue\"\r\n\r\nGet-Process | where Name -like *ss\r\nVERBOSE: Implicit remoting command pipeline has been batched for execution on remote target.\r\n\r\n$test = Get-Process | where Name -like *ss\r\nVERBOSE: Command is not a simple pipeline and cannot be batched.\r\n\r\n100 | Get-Process | where Name -like *ss\r\nVERBOSE: Command pipeline not supported for implicit remoting batching. : PipelineStartingWithExpressionNotSupported\r\n```\r\nThe last two lines are not being batched because they do not pass the simple pipeline check.  They are more complex and require parsing the AST and re-building complex commands, but I think they should be supported.",
+      "created_at": "2018-11-02T16:01:46Z",
+      "updated_at": "2018-11-02T16:01:46Z"
+    }
+  ],
+  "created_at": "2018-10-15T20:02:51Z",
+  "number": 8038,
+  "state": "closed",
+  "title": "Experimental feature: Implicit remoting batching perf improvement",
+  "updated_at": "2018-11-02T16:01:46Z"
+}

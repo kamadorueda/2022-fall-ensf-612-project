@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10932",
+  "author": "bstrautin",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\nfunction foo {\r\n  [cmdletbinding()]\r\n  Param([parameter(ValueFromPipeline)]$a)\r\n  Begin   {1}\r\n  Process {2}\r\n  End     {3}\r\n}\r\nWrite-Host -ForegroundColor Green 'Expected:'\r\n1..3|foo|%{$_} -pv x -ov y |select {$x},{$_},{$y}|out-host\r\n\r\nWrite-Host -ForegroundColor Green 'Actual:'\r\n1..3|foo       -pv x -ov y |select {$x},{$_},{$y}|out-host\r\n```\r\n\r\nOutput:\r\n\r\n```\r\nExpected:\r\n\r\n$x $_            $y\r\n-- --            --\r\n 1  1             1\r\n 2  2        {1, 2}\r\n 2  2     {1, 2, 2}\r\n 2  2  {1, 2, 2, 2}\r\n 3  3 {1, 2, 2, 2\u2026}\r\n\r\nActual:\r\n\r\n$x $_            $y\r\n-- --            --\r\n 1  1             1\r\n    2        {1, 2}\r\n    2     {1, 2, 2}\r\n    2  {1, 2, 2, 2}\r\n    3 {1, 2, 2, 2\u2026}\r\n```\r\n\r\n# Expected behavior\r\n\r\nAll output produced in any block (Begin, Process, or End) should be assigned to the PipelineVariable as it enters the pipeline. -OutVariable appears to behave correctly, i.e. it captures output that -PipelineVariable does not.\r\n\r\n# Actual behavior\r\n\r\nOnly output produced by the first block to exectute, and only on the first execution of that block is assigned to the PipelineVariable.\r\n\r\nExamples: \r\n\r\n* if a Begin block exists, the output from the Begin block will be assigned, but the output from the Process and End blocks will not.\r\n* if a Begin block does not exists, the output from the first execution of the Process block will be assigned, but the output from subsequent executions of the Process block will not, and the output of the End block will not.\r\n\r\nIn the wild, on 5.1:\r\n\r\nhttps://stackoverflow.com/questions/45782372/powershell-advanced-function-output-pipelinevariable-doesnt-work\r\n\r\nhttps://www.reddit.com/r/PowerShell/comments/doboko/support_for_pipelinevariable_in_advanced_function/\r\n\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.5\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.5\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-12-10T20:12:36Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Debug shows that we set the pipeline variable well.\r\nThen I discovered that formatting doesn't work as expected:\r\n```powershell\r\n1..3 | ft @{name=\"x\"; Expression={Get-Date}}\r\n1\r\n2\r\n3\r\n```",
+      "created_at": "2019-10-30T06:12:27Z",
+      "updated_at": "2019-10-30T06:12:27Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "After some debugging, and it appears that the problem is that the PipelineVariable is removed from the wrong scope when PSScriptCmdlet.RunClause calls ExitScope().\r\n\r\nExitScope() calls MshCommandRuntime.RemoveVariableListsInPipe(), which then calls _state?.PSVariable.Remove(this.PipelineVariable).\r\n\r\nIt looks like RemoveVariableListsInPipe is trying to make sure that PipelineVariable doesn't exist in the scope that is used to execute the function's functions (put in place by PSScriptCmdlet.EnterScope).\r\n\r\nBut the variable doesn't exist in that scope, so it ends up being removed from PSScriptCmdlet's Context.CurrentCommandProcessor._previousScope.Variables instead, and it's never re-added.\r\n\r\nMy guess for a fix would be relocating the calls to SetVariableListsInPipe() and RemoveVariableListsInPipe() from EnterScope() and ExitScope() to BeginProcessing() and DoEndProcessing(), respectively. I'd need to do more digging to understand whether that's reasonable or not.",
+      "created_at": "2020-04-27T01:43:16Z",
+      "updated_at": "2020-04-27T01:43:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps @SeeminglyScience and @vexx32 could have thoughts.",
+      "created_at": "2020-04-27T05:37:55Z",
+      "updated_at": "2020-04-27T05:37:55Z"
+    },
+    {
+      "author": "thlac",
+      "author_association": "CONTRIBUTOR",
+      "body": "Ran into this issue yesterday with the cmdlet \"Get-NetFirewallRule\", and used this post to verify that the issue seems to be the same. For my own sake I added an expression to the repro script provided in the original post to match the findings about the variable being removed.\r\n\r\nScript:\r\n```powershell\r\nfunction foo {\r\n  [cmdletbinding()]\r\n  Param([parameter(ValueFromPipeline)]$a)\r\n  Begin   {1}\r\n  Process {2}\r\n  End     {3}\r\n}\r\nWrite-Host -ForegroundColor Green 'Expected:'\r\n1..3|foo|%{$_} -pv x -ov y |select @{n=\"pv_set\";e={$_ ? $true : $false}},{$x},{$_},{$y}|out-host\r\n\r\nWrite-Host -ForegroundColor Green 'Actual:'\r\n1..3|foo       -pv x -ov y |select @{n=\"pv_set\";e={$x ? $true : $false}},{$x},{$_},{$y}|out-host\r\n\r\n```\r\n\r\nOutput:\r\n```\r\nExpected:\r\n\r\npv_set $x $_            $y\r\n------ -- --            --\r\n  True  1  1             1\r\n  True  2  2        {1, 2}\r\n  True  2  2     {1, 2, 2}\r\n  True  2  2  {1, 2, 2, 2}\r\n  True  3  3 {1, 2, 2, 2\u2026}\r\n\r\nActual:\r\n\r\npv_set $x $_            $y\r\n------ -- --            --\r\n  True  1  1             1\r\n False     2        {1, 2}\r\n False     2     {1, 2, 2}\r\n False     2  {1, 2, 2, 2}\r\n False     3 {1, 2, 2, 2\u2026}\r\n```\r\n",
+      "created_at": "2020-05-08T08:20:36Z",
+      "updated_at": "2020-05-08T13:15:07Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I've not really dug into how `-PipelineVariable` works, but this does pretty definitively seem broken to me \ud83e\udd37 ",
+      "created_at": "2020-05-08T12:21:22Z",
+      "updated_at": "2020-05-08T12:21:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@bstrautin's investigations seem promising to me. I've seen those code areas from working on #9900 and what they mention makes sense at least on first pass.\r\n\r\nWe have a few solid test cases here in this issue, so any potential solutions should be fairly easy to test out. Are you looking to make a PR for this one @bstrautin? If not I'm happy to take a stab, this should really be fixed sooner rather than later.\r\n\r\nEDIT: Also, might be good to get @daxian-dbw and/or @rjmholt's perspective here, if they're at all familiar with any of this code. I know it's some of the older code in the repo, so modifying it can at times be a little hairy.",
+      "created_at": "2020-05-22T14:56:47Z",
+      "updated_at": "2020-05-22T15:01:44Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "No imminent PR from me.\r\n\r\nI haven't spent the time to research the \"Why\"s of the current code, and expect that a robust fix can only be made by someone who does have a full understanding.",
+      "created_at": "2020-05-22T17:38:32Z",
+      "updated_at": "2020-05-22T17:38:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Further investigation:\r\n\r\n1. `EnterScope()` and `ExitScope()` are called at the start and end of `RunClause()`, so the pipeline variable seems to be added and removed in the correct places, or at least the reference to it appears to be in the right place.\r\n2. The pipeline variable implementation for compiled commands is slightly different, but it's not clear how much of it is really needed for script commands.\r\n\r\nCurrently have some promising results, I'll see if I can roll it in cleanly and get some tests added to cover this issue properly.",
+      "created_at": "2020-05-22T20:57:27Z",
+      "updated_at": "2020-05-22T20:57:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This seems to be all that's needed to ensure this is working correctly: https://github.com/vexx32/PowerShell/commit/8f13c8b4cad7b8dcd3bf8def7d3450b4dd2d3a7d\r\n\r\nI'll get some tests written in this evening to verify all is in order and then push a PR. \ud83d\ude42 ",
+      "created_at": "2020-05-22T21:02:18Z",
+      "updated_at": "2020-05-22T21:02:26Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "I think this falls into a bucket 3 breaking change.\r\n@PowerShell/powershell-committee  Please review",
+      "created_at": "2020-05-27T20:32:19Z",
+      "updated_at": "2020-05-27T20:32:19Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #12766, which has now been successfully released as `v7.2.0-preview.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.2)\n",
+      "created_at": "2020-12-15T21:38:44Z",
+      "updated_at": "2020-12-15T21:38:44Z"
+    }
+  ],
+  "created_at": "2019-10-29T14:47:06Z",
+  "number": 10932,
+  "state": "closed",
+  "title": "-PipelineVariable is only assigned output from the first execution of the first function block",
+  "updated_at": "2020-12-15T21:38:45Z"
+}

@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9837",
+  "author": "burkasaurusrex",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\n$Info = @(\r\n    'a',\r\n    'b',\r\n    'c'\r\n)\r\n\r\n0..3 | Add-Member -NotePropertyMembers @{'Info' = $Info[$_]} -PassThru | Select Info\r\n\r\n```\r\n\r\n# Expected behavior\r\n\r\n```powershell\r\n$Info = @(\r\n    'a',\r\n    'b',\r\n    'c'\r\n)\r\n\r\n0..3 | % { Add-Member -InputObject $_ -NotePropertyMembers @{'Info' = $Info[$_]} -PassThru } | Select Info\r\n```\r\n```none\r\nInfo\r\n----\r\na   \r\nb   \r\nc \r\n```\r\n\r\nOr, to illustrate the inconsistency, seemingly caused when you try to access `$_`:\r\n\r\n```powershell\r\n$Info = @(\r\n    'a',\r\n    'b',\r\n    'c'\r\n)\r\n\r\n0..3 | Add-Member -NotePropertyMembers @{'Info' = 'Info'} -PassThru | Select Info\r\n```\r\n```none\r\nInfo\r\n----\r\nInfo  \r\nInfo\r\nInfo\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nIndex operation failed; the array index evaluated to null.\r\nAt line:9 char:1\r\n+ 0..3 | Add-Member -NotePropertyMembers @{'Info' = $Info[$_]} -PassThr ...\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException\r\n    + FullyQualifiedErrorId : NullArrayIndex\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.0\r\nPSEdition                      Core\r\nGitCommitId                    6.2.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-10-03T12:00:38Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Hi @burkasaurusrex, as near as i can tell, you're getting the error because a) you have `set-strictmode -version latest` turned on and b) you're passing 4 objects into the pipeline but only have 3 objects in the `$info` array. This means that the last object in the pipeline will cause an out-of-bounds error. Now if strictmode was off, then the last note added would be bound to null rather than producing an error. Does this sound right or am I missing something?",
+      "created_at": "2019-06-06T08:49:05Z",
+      "updated_at": "2019-06-06T08:49:05Z"
+    },
+    {
+      "author": "burkasaurusrex",
+      "author_association": "NONE",
+      "body": "Thanks Bruce. I'm not running in strict mode and I'm still showing the same error if you only pass three objects:\r\n\r\n```powershell\r\n$Info = @(\r\n    'a',\r\n    'b',\r\n    'c'\r\n)\r\n\r\n0..2 | Add-Member -NotePropertyMembers @{'Info' = $Info[$_]} -PassThru | Select Info\r\n```\r\n\r\n```none\r\nIndex operation failed; the array index evaluated to null.\r\nAt line:7 char:1\r\n+ 0..2 | Add-Member -NotePropertyMembers @{'Info' = $Info[$_]} -PassThr ...\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException\r\n    + FullyQualifiedErrorId : NullArrayIndex\r\n```\r\n\r\nAre you not getting the same error? This feels like a bug where the pipeline object isn't getting picked up by `Add-Member`, so you have to explicitly set `-InputObject` to access `$_`",
+      "created_at": "2019-06-06T09:58:39Z",
+      "updated_at": "2019-06-06T09:58:39Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Not a bug. When you pipe something directly into a cmdlet, you don't have access to the `$_` variable. It doesn't exist in the bare pipeline context. It exists in ForEach-Object, and it _can_ exist for parameters defined as being pipeline-bindable either by value or by property name.\r\n\r\n**If** that were the case with `-NotePropertyMembers` (it isn't, I just checked the help page, that parameter doesn't work with pipeline input) you could do what you're trying to do by adding a script block around the value expression here:\r\n\r\n```powershell\r\n0..2 | Add-Member -NotePropertyMembers { @{'Info' = $Info[$_]} } -PassThru | Select Info\r\n```\r\n\r\nHowever, this parameter was not defined in this way, and likely also wasn't coded in the necessary fashion under the hood to enable this.\r\n\r\nThis absolutely could be done, I think, I don't immediately see a reason to avoid doing this, but it'd be an enhancement request rather than a bug fix.\r\n\r\nSo yeah, the issue is akin to doing, for example `$a | Get-ChildItem -Filter $_`\r\n\r\nThat variable isn't bound in the bare pipeline, only in scriptblock binding to pipeline parameters and the scriptblocks provided by ForEach-Object and the like.",
+      "created_at": "2019-06-06T10:21:44Z",
+      "updated_at": "2019-06-06T10:22:20Z"
+    },
+    {
+      "author": "burkasaurusrex",
+      "author_association": "NONE",
+      "body": "Appreciate the insight. Still seems strange to me that this works no problem:\r\n\r\n```powershell\r\n$Info = @(\r\n    'a',\r\n    'b',\r\n    'c'\r\n)\r\n\r\n0..2 | % { Add-Member -InputObject $_ -NotePropertyMembers @{'Info' = $Info[$_]} -PassThru } | Select Info\r\n```\r\n\r\nSo if you exclude `-InputObject $_` it errors out, but if you include it, it works. So even though `-NotePropertyMembers` doesn't have pipeline access, it can still access the `-InputObject` using `$_`? And if it can access the `-InputObject` using `$_`, isn't the normal behavior of `-InputObject` in other cmdlets to pick up the object from the pipeline?",
+      "created_at": "2019-06-06T23:06:51Z",
+      "updated_at": "2019-06-06T23:12:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This works because of the extra cmdlet you added. `%` isn't a language operation, it's an alias for the `ForEach-Object` cmdlet; this cmdlet is what's allocating value to `$_` within the scriptblock(s) you pass to it. \ud83d\ude42 \r\n\r\nYou are correct that `-InputObject` \"picks up\" pipeline input, but that doesn't automatically happen unless you're piping directly into that cmdlet. You're not piping into `Add-Member` there, you're piping into `ForEach-Object`, which then assigns the input object to `$_` so that `Add-Member` can utilise it.\r\n\r\nIt's a bit easier to demonstrate if we write it without aliases:\r\n\r\n```powershell\r\n$Info = @(\r\n    'a',\r\n    'b',\r\n    'c'\r\n)\r\n\r\n0..2 | ForEach-Object {\r\n    Add-Member -InputObject $_ -NotePropertyMembers @{ 'Info' = $Info[$_] } -PassThru\r\n} | Select-Object -Property Info\r\n```",
+      "created_at": "2019-06-06T23:44:00Z",
+      "updated_at": "2019-06-06T23:44:00Z"
+    },
+    {
+      "author": "burkasaurusrex",
+      "author_association": "NONE",
+      "body": "Yea, that part makes sense to me. I appreciate the back-and-forth - it's helped clarify why `Add-Member`'s pipeline behavior feels inconsistent.\r\n\r\nI probably should have called out a different example. Your example above works no problem, but this does not (removing `-InputObject $_`):\r\n\r\n```powershell\r\n$Info = @(\r\n    'a',\r\n    'b',\r\n    'c'\r\n)\r\n\r\n0..2 | ForEach-Object {\r\n    Add-Member -NotePropertyMembers @{ 'Info' = $Info[$_] } -PassThru\r\n} | Select-Object -Property Info\r\n```\r\nInstead it prompts for an InputObject:\r\n```none\r\ncmdlet Add-Member at command pipeline position 1\r\nSupply values for the following parameters:\r\nInputObject:\r\n\r\n```\r\n\r\nLooking at the parameters in different help files, it looks like `Add-Member`'s `-InputObject` is mandatory while other more pipeline-friendly cmdlets (`Select-Object`, `Measure-Object`, etc.) are optional (though all of them mention that there is no default value...). I haven't dug into the code yet, but I'm guessing `-InputObject` for `Select-Object` and others defaults to the pipeline object?\r\n\r\nGiven that `Add-Member` is used to manipulate objects like these other cmdlets, it would make sense to me to have similar pipeline treatment. I'm hoping that makes more sense? Thanks again for the patience.",
+      "created_at": "2019-06-07T00:10:19Z",
+      "updated_at": "2019-06-07T00:10:19Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "No problem! ^^\r\n\r\nThe scriptblock of a ForEach-Object command doesn't automatically pass the inputobject to all cmdlets executed within it. This would be a rather confusing if it did; imagine this case, for example:\r\n\r\n```powershell\r\n1..10 | ForEach-Object {\r\n    Get-ChildItem\r\n    Add-Member -NotePropertyMembers @{ 'Info' = $Info[$_] } -PassThru\r\n}\r\n```\r\n\r\nWhich command(s) should receive the complete pipeline input object? It's not clear what that would do if it behaved as you are expecting. This isn't Add-Member specific; all pipeline-capable cmdlets behave this way.\r\n\r\nYou can enter any number of commands in a ForEach-Object statement, it's just a regular old scriptblock like any other. Cmdlets within are not passed _any_ input from the pipeline without explicitly referencing the `$_` automatic variable (you'll also see it referred to as `$PSItem`; these are equivalent).\r\n\r\nWhere pipeline input is concerned, it's a pretty one-or-the-other; if you're _directly_ piping input into a cmdlet, you don't typically use `$_`. If you're putting the command(s) in a `ForEach-Object` cmdlet's scriptblock, you _must_ use `$_` to reference the input being passed in. This is because the ForEach-Object cmdlet itself is actually consuming the pipeline input and then assigning it to the `$_` variable inside its scriptblocks.",
+      "created_at": "2019-06-07T01:14:18Z",
+      "updated_at": "2019-06-07T01:14:57Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2019-10-03T12:00:37Z",
+      "updated_at": "2019-10-03T12:00:37Z"
+    }
+  ],
+  "created_at": "2019-06-06T03:38:55Z",
+  "number": 9837,
+  "state": "closed",
+  "title": "Add-Member's inconsistent pipeline input object behavior",
+  "updated_at": "2019-10-03T12:00:38Z"
+}

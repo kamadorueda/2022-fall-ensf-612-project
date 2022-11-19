@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14384",
+  "author": "AlexKichkailo",
+  "body": "I am trying to write a simple PowerShell cmdlet in C# that accepts an instance of ArrayList and adds an item to it. The issue I've encountered is that cmdlet receives a copy of the collection so modifying it inside the cmdlet does not work. I assume that  this is an intended behavior, but cannot find any proof for that in the documentation. I looked specifically here: https://docs.microsoft.com/en-us/powershell/scripting/developer/cmdlet/cmdlet-overview?view=powershell-7.1, but also read other sections. Below is a program to reproduce the issue. Can anyone point to the documentation or explain why cmdlet parameter binding works this way please?\r\n\r\n## Steps to reproduce\r\n\r\n```\r\nusing System;\r\nusing System.Collections;\r\nusing System.Collections.ObjectModel;\r\nusing System.Management.Automation;\r\nusing System.Management.Automation.Runspaces;\r\n\r\nnamespace CustomPowerShellCmdlet\r\n{\r\n    class Program\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            string powerShellScript = @\"\r\nWrite-Output ('PowerShell Version is ' + $PSVersionTable.PSVersion)\r\n\r\n$A  = New-Object System.Collections.ArrayList\r\n$A.Add('3') | Out-Null\r\nWrite-Output  ('Count is ' + $A.Count)\r\n\r\n$B  = New-Object System.Collections.ArrayList\r\nAdd-CollectionItem -Collection $B -Item '1'\r\nAdd-CollectionItem -Collection $B -Item '2'\r\nforeach ($Item in $B) {\r\n    Write-Output $Item\r\n}\r\nWrite-Output  ('Count is ' + $B.Count)\r\n\";\r\n\r\n            var output = RunPowerShellScript(powerShellScript);\r\n\r\n            foreach (PSObject psObject in output)\r\n            {\r\n                Console.WriteLine(psObject.BaseObject.ToString());\r\n            }\r\n        }\r\n\r\n        private static Collection<PSObject> RunPowerShellScript(string powerShellScript)\r\n        {\r\n            InitialSessionState initialSessionState = InitialSessionState.CreateDefault();\r\n            initialSessionState.Commands.Add(new SessionStateCmdletEntry(\"Add-CollectionItem\", typeof(AddCollectionItemCmdlet), null));\r\n\r\n            using (var runspace = RunspaceFactory.CreateRunspace(initialSessionState))\r\n            {\r\n                runspace.Open();\r\n\r\n                using (var ps = PowerShell.Create())\r\n                {\r\n                    ps.Runspace = runspace;\r\n\r\n                    ps.AddScript(powerShellScript);\r\n\r\n\r\n                    return ps.Invoke();\r\n                }\r\n            }\r\n        }\r\n\r\n        [Cmdlet(VerbsCommon.Add, \"CollectionItem\")]\r\n        public class AddCollectionItemCmdlet : Cmdlet\r\n        {\r\n            [Parameter(Mandatory = true)]\r\n            [AllowEmptyCollection]\r\n            public ArrayList Collection { get; set; }\r\n\r\n            [Parameter(Mandatory = true)]\r\n            public object Item { get; set; }\r\n\r\n            protected override void BeginProcessing()\r\n            {\r\n                Collection.Add(Item);\r\n            }\r\n        }\r\n    }\r\n}\r\n\r\n```\r\n\r\n## Expected behavior\r\n\r\n```Collection parameter is passed by reference\r\n```\r\n\r\n## Actual behavior\r\n\r\n```a copy of ArrayList is passed to cmdlet.\r\n\r\n```\r\n\r\n## Environment data\r\n\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```none\r\n\r\n```\r\n",
+  "closed_at": "2020-12-11T15:09:06Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "PowerShell, as C#, performs by-(variable)-value argument passing; if that value happens to be an object _reference_, (an instance of a _reference-type_), the object can potentially be modified by the callee.\r\n\r\nI didn't run your code as such, but this simplified _PowerShell_ code demonstrates that your cmdlet works as expected:\r\n\r\n```powershell\r\nAdd-Type @'\r\nusing System;\r\nusing System.Collections;\r\nusing System.Management.Automation;\r\n\r\n[Cmdlet(VerbsCommon.Add, \"CollectionItem\")]\r\npublic class AddCollectionItemCmdlet : Cmdlet\r\n{\r\n    [Parameter(Mandatory = true)]\r\n    [AllowEmptyCollection]\r\n    public ArrayList Collection { get; set; }\r\n\r\n    [Parameter(Mandatory = true)]\r\n    public object Item { get; set; }\r\n\r\n    protected override void BeginProcessing()\r\n    {\r\n        Collection.Add(Item);\r\n    }\r\n}\r\n'@ -PassThru | % Assembly | Import-Module\r\n\r\n$al = [System.Collections.ArrayList] @()\r\n\r\nAdd-CollectionItem -Collection $al -Item new\r\n\r\n$al\r\n```\r\n\r\nThis outputs `'new'`, as expected.\r\n\r\n",
+      "created_at": "2020-12-10T22:21:01Z",
+      "updated_at": "2020-12-10T22:21:01Z"
+    },
+    {
+      "author": "AlexKichkailo",
+      "author_association": "NONE",
+      "body": "@mklement0 thanks. This blows my mind actually. What is interesting is that if you change $al = [System.Collections.ArrayList] @() to New-Object System.Collections.ArrayList then it will output nothing. Is this a bug in PowerShell? ",
+      "created_at": "2020-12-11T07:31:49Z",
+      "updated_at": "2020-12-11T07:32:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @AlexKichkailo - I hadn't considered the `New-Object` angle, and it looks like you've hit a bug:\r\n\r\nI've opened #14394; if you agree that it is a summary of your problem, I suggest closing _this_ issue.\r\n",
+      "created_at": "2020-12-11T13:21:50Z",
+      "updated_at": "2020-12-11T13:21:50Z"
+    },
+    {
+      "author": "AlexKichkailo",
+      "author_association": "NONE",
+      "body": "Thank you very much, @mklement0 ! I am closing this issue then.",
+      "created_at": "2020-12-11T15:09:06Z",
+      "updated_at": "2020-12-11T15:09:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "My pleasure, @AlexKichkailo, thanks for finding and reporting the issue. Note that up-votes on issues matter when it comes to deciding what gets implemented / prioritized, so I suggest giving the linked issue a thumbs-up.\r\n\r\n",
+      "created_at": "2020-12-11T15:27:59Z",
+      "updated_at": "2020-12-11T21:09:07Z"
+    }
+  ],
+  "created_at": "2020-12-10T21:40:23Z",
+  "number": 14384,
+  "state": "closed",
+  "title": "Pass parameter by reference to a cmdlet written in C# ",
+  "updated_at": "2020-12-11T21:09:07Z"
+}

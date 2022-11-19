@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13064",
+  "author": "mklement0",
+  "body": "PR https://github.com/PowerShell/PowerShell/pull/12797 tried to implement support for _relative_ target paths for symbolic links (symlinks).\r\n\r\nOn Windows, this now works properly as of PowerShell Core 7.1.0-preview.4, including normalizing path separators to `\\`.\r\n\r\nOn Unix-like platforms, a relative input path is still unexpectedly converted to a full path and stored as such in the symlink.\r\n\r\nCuriously that doesn't happen when you use `\\` as a separator _on macOS_  - which must be normalized to `/` on Unix-like platforms - but the normalization doesn't happen and the `\\`-based relative path is stored as-is, which results in a broken symlink; on _Linux_, the unexpected conversion to an absolute path (with appropriate separators) takes place.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n# OK on Windows, FAILS on macOS and Linux.\r\nDescribe \"New-Item symlinks\" {\r\n  BeforeAll {\r\n    Push-Location testdrive:\r\n\r\n    $targets = \"./$PID.tmp\", \".\\$PID.tmp\"\r\n    $lnk = \"$PID-L.tmp\"\r\n\r\n    'foo' > $targets[0]\r\n\r\n  }\r\n\r\n  It \"Can create symlink with relative target <target>\" -TestCases @{ target = $targets[0] }, @{ target = $targets[1] } {\r\n    param([string] $target)\r\n\r\n    $null = New-Item -Type SymbolicLink  $lnk -Target $target  -Force\r\n\r\n    # Make sure the relative target path was recorded as such and uses\r\n    # the platform-appropriate separator.\r\n    (Get-Item $lnk).Target | Should -Be ($target -replace '[\\\\/]', [IO.Path]::DirectorySeparatorChar)\r\n\r\n  }\r\n\r\n  AfterAll {\r\n    Pop-Location\r\n  }\r\n}\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe tests should succeed on all platforms.\r\n\r\n## Actual behavior\r\n\r\nOn macOS and Linux, both tests fail:\r\n\r\nThe first test fails, because the relative path was converted to an absolute one.\r\n```\r\n      Expected: './95916.tmp'\r\n      But was:  '/private/t...'\r\n```\r\n\r\nOn macOS, the second test fails because `\\` wasn't normalized to `/`:\r\n\r\n```\r\n      Expected: './95916.tmp'\r\n      But was:  '.\\95916.tmp'\r\n```\r\n\r\nOn Linux, by contrast, the test fails because the relative path is again unexpectedly converted to an absolute one.\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.4\r\n```\r\n",
+  "closed_at": "2021-04-14T17:14:29Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I can not debug on Unix and investigate the issue. :-(\r\n\r\nIf you look tests in #12797 you can see that on MacOs we have to have a workaround for TestDrive - maybe it is related to the issue.\r\nAlso the fix is based on `SessionState.Internal.CurrentLocation.ProviderPath` - perhaps this works different on different platforms. ",
+      "created_at": "2020-06-30T17:47:26Z",
+      "updated_at": "2020-06-30T17:47:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov  I see. Not using `TestDrive:` (instead using a directory that isn't a symlink) on macOS doesn't make a difference - the tests still fail in the same way.\r\n",
+      "created_at": "2020-06-30T18:07:44Z",
+      "updated_at": "2020-06-30T18:07:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I looked on WSL. I think it is how `SessionState.Internal.CurrentLocation.ProviderPath` works. On Windows it contains a relative path, on Linux - absolute one, on MacOs - ???.",
+      "created_at": "2020-07-01T06:22:43Z",
+      "updated_at": "2020-07-01T06:22:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\nArguably, you shouldn't try to _resolve_ a relative path at all: you should only check it for syntactic validity (e.g., no illegal characters) and normalize the separators.\r\n\r\nNote that this ties in with #9067, which asks that it be possible to create symlinks to _nonexistent_ (not yet existent) targets.\r\n",
+      "created_at": "2020-07-01T12:39:35Z",
+      "updated_at": "2020-07-01T12:39:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "There is a fundamental problem - there is no way to verify that path is correct without accessing the OS therefore resolving paths is preferred. I believe  #9067 could be additive but _explicit_ to avoid erroneous links due to typos.",
+      "created_at": "2020-07-01T17:40:54Z",
+      "updated_at": "2020-07-01T17:40:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\nIt's fine to resolve for the purpose of _validation_, but when it comes to _creating_ the symlink, it's sufficient to use the given target path as-is, with only the separators normalized - this should fix the problem on macOS and Linux.\r\n\r\nIncidentally, #9067 seemingly _did_ get implemented in 7.0, perhaps accidentally, because it amounts to a _breaking change_: non-existent target paths are now _quietly accepted_ (try `New-Item -Type SymbolicLink tmpLnk -Target NoSuchTarget`) - in 6.x and in Windows PowerShell you get an error instead.\r\n\r\n",
+      "created_at": "2020-07-01T19:22:01Z",
+      "updated_at": "2020-07-01T19:22:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The macOS path-separator problem no longer occurs.\r\n\r\nI've created a new issue that focuses just on the relative-path issue and also has an updated (working in v5) Pester test: #15233",
+      "created_at": "2021-04-14T17:14:29Z",
+      "updated_at": "2021-04-14T17:15:08Z"
+    }
+  ],
+  "created_at": "2020-06-30T16:58:38Z",
+  "number": 13064,
+  "state": "closed",
+  "title": "New-Item Type SymbolicLink on Unix-like platforms: converts relative target paths to absolute ones, doesn't normalize path separators on macOS",
+  "updated_at": "2021-04-14T17:15:08Z"
+}

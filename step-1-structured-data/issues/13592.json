@@ -1,0 +1,209 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13592",
+  "author": "sba923",
+  "body": "When `ConvertFrom-JSON` guesses something in the input data can be converted to a `DateTime`, it (silently) does so.\r\n\r\nBut the conversion doesn't correctly interprets some strings.\r\n\r\n\r\n## Steps to reproduce\r\n\r\nI'm running this on a system that's on UTC+2 (CEST).\r\n\r\n```\r\nWrite-Host(\"PowerShell version: \" + $PSVersionTable.PSVersion.ToString())\r\n$date = \"2020-09-07T09:44:13.769Z\"\r\nWrite-Host (\"Original string: \" + $date)\r\nWrite-Host(\"Cast to Datetime: \" + [datetime] $date)\r\n$json = ('[{\"start\":\"' + $date + '\"}]') \r\nWrite-Host(\"JSON data: \" + $json)\r\n$data = $json |  ConvertFrom-Json\r\nWrite-Host($data[0].start.GetType().Name + \" resulting from ConvertFrom-JSON: \" + $data[0].start)\r\n```\r\n\r\n## Expected behavior\r\n\r\n```\r\nPowerShell version: 7.0.3\r\nOriginal string: 2020-09-07T09:44:13.769Z\r\nCast to Datetime: 09/07/2020 11:44:13\r\nJSON data: [{\"start\":\"2020-09-07T09:44:13.769Z\"}]\r\nDateTime resulting from ConvertFrom-JSON: 09/07/2020 11:44:13\r\n```\r\n\r\n## Actual behavior\r\n\r\n```\r\nPowerShell version: 7.0.3\r\nOriginal string: 2020-09-07T09:44:13.769Z\r\nCast to Datetime: 09/07/2020 11:44:13\r\nJSON data: [{\"start\":\"2020-09-07T09:44:13.769Z\"}]\r\nDateTime resulting from ConvertFrom-JSON: 09/07/2020 09:44:13\r\n```\r\n\r\n## Environment data\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.3\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nThe same issue is still present in 7.1.0-preview.6.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "FWIW, here's my current workaround:\r\n\r\n````\r\n$JSONdata = (Invoke-WebRequest $url).Content\r\n# workaround for https://github.com/PowerShell/PowerShell/issues/13592\r\n$marker = '#@#@#'\r\n$JSONdata2 = $JSONdata -replace '(\"timestamp\":\")([^\"]+)(\")', ('$1' + $marker + '$2' + $marker + '$3')\r\n$objects = ($JSONdata2 | ConvertFrom-Json).items | Foreach-Object { $_.timestamp= [datetime] ($_.timestamp-replace $marker, ''); $_ }\r\n````\r\n\r\nHTH\r\n\r\n",
+      "created_at": "2020-09-07T14:03:14Z",
+      "updated_at": "2020-09-07T14:04:26Z"
+    },
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "Confused. Are you sure on the expected behavior ? Isn't the original date string and the json converted string same ? Isn't that the expected behavior ?",
+      "created_at": "2020-09-07T15:30:34Z",
+      "updated_at": "2020-09-07T15:30:34Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Nope, the expected behavior is that the JSON deserializer converts any string representing a date **the exact same way** `[datetime]$string` does it.\r\n\r\n@SteveL-MSFT \r\n\r\nBTW, I wonder how that deserializer guesses that a certain field in the JSON is a date and has to be converted to a DateTime... (I know, I could look at the code...)",
+      "created_at": "2020-09-07T15:34:20Z",
+      "updated_at": "2020-09-07T15:34:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@sba923, `ConvertTo-Json` in v6+ creates a `[datetime]` instance with a `.Kind` value as follows:\r\n\r\n* `Unspecified`, if there is no time-zone information in the input string.\r\n* `Utc`, if the time-zone information is a trailing `Z`\r\n* `Local`, if the time-zone information is given as a trailing UTC _offset_ (e.g., `+02:00`), in which case the offset is properly converted to the caller-local equivalent.\r\n\r\nTherefore, in your example a `Utc` `[datetime]` instance is constructed.\r\n\r\nThe default output formatting / `.ToString()` output for such an instance does _not_ indicate the fact that it represents a UTC point in time, which is the source of the confusion.\r\n\r\nTo express such an instance as a _local_ (`.Kind` == `Local`) `[datetime]` instance, call its `.ToLocalTime()` method:\r\n\r\n```powershell\r\n('\"2020-09-07T09:44:13.769Z\"' | ConvertFrom-Json).ToLocalTime()\r\n```\r\n\r\nAs for what causes `ConvertFrom-JSON` in v6+ (via Json.NET) to interpret a _string_ value as a `[datetime]` instance: it is the _specific format_, that is an `\"o\"`-formatted (roundtrip format) string or a _prefix_ of it that at least includes everything up to the _seconds_ part (e.g., `2020-09-07T09:44:13`).",
+      "created_at": "2020-09-07T22:24:30Z",
+      "updated_at": "2020-09-08T13:54:21Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the clarifications.\r\n\r\nTwo comments:\r\n\r\n1. this cannot be guessed, and definitely not from the [documentation](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertfrom-json?view=powershell-6&WT.mc_id=ps-gethelp), so I submitted https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6597\r\n2. the `.ToLocalTime()` trick doesn't work for the _typical_ use case where `ConvertFrom-JSON` is used to convert something that represents an array of objects:\r\n\r\n````\r\nPS\u276f ('[{\"start\":\"2020-09-07T09:44:13.769Z\"}]' | ConvertFrom-Json).ToLocalTime()\r\n\r\nInvalidOperation: Method invocation failed because [System.Management.Automation.PSCustomObject] does not contain a method named 'ToLocalTime'.\r\n````\r\n",
+      "created_at": "2020-09-08T06:59:33Z",
+      "updated_at": "2020-09-08T07:04:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@sba923, thanks for opening the docs issue.\r\n\r\nNote that the new `System.Text.Json` API that is being considered as the future underpinning of the `*-Json` cmdlets - see #11198 - exhibits the same behavior.\r\n\r\nYes, it is nontrivial to convert all deserialized-as-`[datetime]` properties to local dates, especially _in place_ - see [this Stack Overflow answer](https://stackoverflow.com/a/69532663/45375).\r\n\r\nIt would be nice if `ConvertFrom-Json` had a parameter that requests that `[datetime]` instances of a given type should be returned.\r\n\r\n",
+      "created_at": "2020-09-08T18:49:52Z",
+      "updated_at": "2021-10-11T21:37:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@sba923, I've created a feature request for a `-DateKind` parameter for `ConvertFrom-Json` that would solve your problem: #13598\r\n\r\nI think you can therefore close this issue now.\r\n\r\n\r\n",
+      "created_at": "2020-09-08T20:35:23Z",
+      "updated_at": "2020-09-08T20:35:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Nope, the expected behavior is that the JSON deserializer converts any string representing a date the exact same way [datetime]$string does it.\r\n\r\nI am very amazed that you think so. NewtonSoft implementation is de-facto modern standard. New .Net implementation follow this. I believe users and developers expect that PowerShell follows the standard too and don't change the default behavior. As @mklement0 noted we could add new optional parameter to change the conversion but I'd prefer to see more feedback because I am sure it is again Formatting System task to show a data in a format user wants.\r\n",
+      "created_at": "2020-09-09T05:29:37Z",
+      "updated_at": "2020-09-09T05:29:37Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "I know there are two sides to this coin:\n- what data is returned by the conversion\n- how that data is formatted when displayed or otherwise converted to string\n\nPowerShell always has had a certain way to convert strings representing date and time to DateTime.\n\nThat's why with my PowerShell user hat on, I would expect that a string representing a date/time inside a JSON would be converted to DateTime the same way that same string would be converted outside a JSON container.\n\nEven if I'm not too familiar with the .Kind property of DateTime objects.\n\nNow there is another way of looking at things: apparently JSON users expect date/time conversions to behave a certain way that might not be the PowerShell way.\n\nWhich way should `ConvertFrom-JSON` be attracted?\n\n@Steve_MSFT, do you have 'a policy' on this? ",
+      "created_at": "2020-09-09T06:27:59Z",
+      "updated_at": "2020-09-09T06:27:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> do you have 'a policy' on this?\r\n\r\nThe cmdlet correctly converts a datetime string to Datetime type value. If you want to get a local value you can use Datetime.ToLocalTime() method, if you want to get UTC - ToUniversalTime() method.",
+      "created_at": "2020-09-09T09:24:19Z",
+      "updated_at": "2020-09-09T09:24:19Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Indeed, once you know that there _is_ a `.Kind` property, you can convert to the appropriate flavor:\r\n\r\n````\r\nWrite-Host(\"PowerShell version: \" + $PSVersionTable.PSVersion.ToString())\r\n$date = \"2020-09-07T09:44:13.769Z\"\r\nWrite-Host (\"Original string: \" + $date)\r\nWrite-Host(\"Cast to Datetime: \" + [datetime] $date)\r\n$json = ('[{\"start\":\"' + $date + '\"}]') \r\nWrite-Host(\"JSON data: \" + $json)\r\n$data = ($json |  ConvertFrom-Json)\r\nWrite-Host($data[0].start.GetType().Name + \" resulting from ConvertFrom-JSON: \" + $data[0].start)\r\nWrite-Host($data[0].start.GetType().Name + \" resulting from ConvertFrom-JSON -- '.Kind' property: \" + $data[0].start.Kind)\r\nWrite-Host($data[0].start.GetType().Name + \" resulting from ConvertFrom-JSON, with .ToLocalTime() applied: \" + $data[0].start.ToLocalTime())\r\n\r\nPowerShell version: 7.0.3\r\nOriginal string: 2020-09-07T09:44:13.769Z\r\nCast to Datetime: 09/07/2020 11:44:13\r\nJSON data: [{\"start\":\"2020-09-07T09:44:13.769Z\"}]\r\nDateTime resulting from ConvertFrom-JSON: 09/07/2020 09:44:13\r\nDateTime resulting from ConvertFrom-JSON -- '.Kind' property: Utc\r\nDateTime resulting from ConvertFrom-JSON, with .ToLocalTime() applied: 09/07/2020 11:44:13\r\n````\r\n\r\nbut if that's array data you get e.g. from some REST API, you'd have to iterate over _each and every_ `DateTime` object produced by `ConvertFrom-JSON` to apply `.ToLocalTime` to them.\r\n\r\nRather inconvenient if you ask me.\r\n",
+      "created_at": "2020-09-09T10:35:09Z",
+      "updated_at": "2020-09-09T10:35:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let's take a step back:\r\n\r\n**Use of `[datetime]`:**\r\n\r\n* `[datetime]` has several inherent limitations:\r\n  * It only specifies an _absolute_ point in time if its `.Kind` is `Utc`.\r\n  * With `Local`, it isn't self-contained: that is, only in relationship to the local time zone does it imply an absolute point in time.\r\n  * With `Unspecified`, it is an _abstract_ point in time that is interpreted _differently_ when you call `.ToLocalTime()` (assumed to be UTC) vs `.ToUniversalTime()` (assumed to be local).\r\n  * In terms of default formatting, a `Utc` instance _lacks any indication that the timestamp is indeed expressed in UTC_.\r\n\r\n* `[datetimeoffset]` overcomes these limitations, but for the sake of backward compatibility we're stuck with `[datetime]` in many cases.\r\n  * `[datetimeoffset]`  doesn't even have a proper PowerShell display format at the moment (just does `Format-List`) and also lacks proper integration with respect to serialization - see #3172\r\n\r\nIn short: If backward compatibility weren't in the picture, `[datetime]` should be considered obsolete and replaced with `[datetimeoffset]`.\r\n\r\n---\r\n\r\n**`[datetime] <string>` vs. `ConvertFrom-Json` behavior**\r\n\r\n* I agree that these two behaviors differ is surprising, and that implementing something PowerShell-idiomatic justifies deviation from underlying API behavior.\r\n\r\n* However, I find the behavior of `[datetime] <string>` (`[datetime]::Parse(<string>, $null)`) in itself counterintuitive behavior in that `[datetime]::Parse('2020-01-01')`, for instance, results in a instance with `.Kind` `Unspecified` rather than `Local`.\r\n   * More sensibly, `[datetimeoffset]::Parse('2020-01-01')` assumes that the date is in the _local_ time zone.\r\n\r\n---\r\n\r\nGiven the need for backward compatibility, I don't think we can change the current behavior, but what #13598 proposes should give you the desired functionality (asking that timestamps be normalized to UTC, local, or unspecified `[datetime]` or to `[datetimeoffset]` instances).\r\n\r\n",
+      "created_at": "2020-09-09T19:54:17Z",
+      "updated_at": "2020-09-09T19:59:34Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "> > do you have 'a policy' on this?\r\n> \r\n> The cmdlet correctly converts a datetime string to Datetime type value. If you want to get a local value you can use Datetime.ToLocalTime() method, if you want to get UTC - ToUniversalTime() method.\r\n\r\nWhat's your definition of \"correctly\"?\r\n\r\nThe whole point seems to be that some people want the conversion to be \"the same as PowerShell's `[datetime] $string`\", some other people want the conversion to be \"the usual way JSON is interpreted.\" \r\n\r\nAnd those two methods are different.\r\n\r\nNext to that, as I mentioned earlier, the behavior of `ConvertFrom-JSON` is very _inconvenient_ in the **typical** case where the JSON contains an **array of objects**. Hence the need for the workaround I shared above.",
+      "created_at": "2020-09-23T08:34:00Z",
+      "updated_at": "2020-09-23T08:34:00Z"
+    },
+    {
+      "author": "apsyspeople",
+      "author_association": "NONE",
+      "body": "I came to this post to understand why my JSON input containing an input of \"2014-12-05T14:11:15\" through ConvertFrom-Json (v. 7.1.0) ended up as \"05-12-2014  14:11:00\" (Danish format) hence I had to run my script with ISE to complete the task at hand. \r\n\r\n7.2-Consider-it-$eriously",
+      "created_at": "2020-12-02T18:17:16Z",
+      "updated_at": "2020-12-02T18:18:20Z"
+    },
+    {
+      "author": "Szeraax",
+      "author_association": "NONE",
+      "body": "@iSazonov asked for more feedback, so I'm back to share my issue. In my experience, a datetimeOffset with offset gets its offset totally blown away. The Ticks matches up to the correct instant, but I lose all power that comes from being able to see what timezone was previously there. Makes for a sad day.  When outputting back to JSON, it uses my local offset.  Perhaps I should be opening a new issue since this isn't the same as the original that is generally solved with `.Kind`. \r\n\r\n    '{\"date\":\"2020-12-19T15:34:49+01:00\"}' | ConvertFrom-Json | ConvertTo-Json -Compress\r\n    # Outputs: {\"date\":\"2020-12-19T07:34:49-07:00\"} # Notice that my offset has changed to local timezone.\r\n",
+      "created_at": "2020-12-22T17:38:23Z",
+      "updated_at": "2020-12-22T17:40:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Szeraax, note that there's already another issue with a specific proposal:  #13598; if implemented as proposed, you'd use `ConvertFrom-Json -DateKind Offset`, which would create `[datetimeoffset]` instances that preserve the original offset information.\r\n",
+      "created_at": "2020-12-22T17:45:04Z",
+      "updated_at": "2020-12-22T17:45:04Z"
+    },
+    {
+      "author": "Szeraax",
+      "author_association": "NONE",
+      "body": "Agreed, this would completely solve my issue. ",
+      "created_at": "2020-12-22T17:46:08Z",
+      "updated_at": "2020-12-22T17:46:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Glad to hear it, @Szeraax; since thumbs-ups matter as a gauge of interest the community has in seeing a proposal implemented, I invite you to up-vote  #13598",
+      "created_at": "2020-12-22T20:10:19Z",
+      "updated_at": "2021-10-11T21:39:00Z"
+    },
+    {
+      "author": "wilsoncg",
+      "author_association": "NONE",
+      "body": "> @sba923, `ConvertTo-Json` in v6+ creates a `[datetime]` instance with a `.Kind` value as follows:\r\n> \r\n> * `Unspecified`, if there is no time-zone information in the input string.\r\n> * `Utc`, if the time-zone information is a trailing `Z`\r\n> * `Local`, if the time-zone information is given as a trailing UTC _offset_ (e.g., `+02:00`), in which case the offset is properly converted to the caller-local equivalent.\r\n> \r\n\r\nThere is a bug in this logic, for example when running in British summer time (UTC + 1), the behaviour differs from dotnet. An offset of +00:00 should be treated the same as Z, for example some WebApi's return UTC as +00:00, but now `ConvertFrom-json` incorrectly returns as local time +0.\r\n\r\n```Powershell\r\nPS> \"{ date: '2021-06-30T00:00:00.0000000Z' }\" | ConvertFrom-json\r\ndate\r\n----\r\n30/06/2021 00:00:00\r\n\r\nPS> \"{ date: '2021-06-30T00:00:00.0000000+00:00' }\" | ConvertFrom-json\r\ndate\r\n----\r\n30/06/2021 01:00:00\r\n```\r\n\r\nCompare with dotnet/C# (which is correct)\r\n```csharp\r\npublic class Program\r\n{\r\n  public static void Main()\r\n  {\r\n    Console.WriteLine(System.DateTime.Parse(\"2021-06-30T00:00:00.0000000Z\"));\r\n    Console.WriteLine(System.DateTime.Parse(\"2021-06-30T00:00:00.0000000+00:00\"));\r\n  }  \r\n}\r\n\r\n06/30/2021 00:00:00\r\n06/30/2021 00:00:00\r\n```",
+      "created_at": "2021-07-21T14:43:36Z",
+      "updated_at": "2021-07-21T14:43:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@wilsoncg, there's no bug, just a _display_ problem, which is what prompted creation of this issue to begin with:\r\n\r\nThe first command's output is a `[datetime]` instance with a `Utc` `.Kind` value, whereas it is `Local` for the second one.\r\n\r\nThe only problem is that the _string representation_ of the UTC date _doesn't indicate that it is UTC_ and is therefore indistinguishable from a local date.\r\n\r\nBy contrast, `System.DateTime.Parse()` returns a `Local` instance in _both_ cases.\r\n",
+      "created_at": "2021-07-21T14:56:37Z",
+      "updated_at": "2021-07-21T14:56:52Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've been bitten once again by this issue, albeit a slightly different way.\r\n\r\nConsider this JSON file:\r\n\r\n```json\r\n{\"Count\":1,\"Items\":[{\"score\":\"2\",\"comment\":\"2\",\"adjectives\":\"slow\",\"timestamp\":\"2022-10-06T15:47:15.886Z\"}]}\r\n```\r\n\r\nIf I convert it using `ConvertFrom-JSON` with localtime == UTC+2 (in PowerShell 7.2.6 FWIW) I get:\r\n\r\n```powershell\r\nPS> (gc c:/tmp/items.json | convertfrom-json).items.timestamp\r\n\r\nThursday, 6 October, 2022 15:47:15\r\n```\r\n\r\nThe output is \"incorrect\" if you interpret it as localtime.\r\n\r\nSame if you're using `Out-GridView`:\r\n\r\n![image](https://user-images.githubusercontent.com/12860484/194899812-321be905-3015-48c1-bbfe-43fbd32811d8.png)\r\n\r\n\r\nThe `.Kind` property _is_ correct:\r\n\r\n```powershell\r\nPS>  (gc c:/tmp/items.json | convertfrom-json).items.timestamp.Kind\r\nUtc\r\n```\r\n\r\nbut this doesn't affect the _displayed_ output.\r\n\r\nWindows PowerShell 5.1 doesn't convert to `DateTime` so interpreting the displayed output is correct / unambiguous:\r\n\r\n```powershell\r\nPS>  (gc c:/tmp/items.json | convertfrom-json).items.timestamp\r\n2022-10-06T15:47:15.886Z\r\n```\r\n\r\n@SteveL-MSFT, any idea on how this could get improved?\r\n\r\n",
+      "created_at": "2022-10-10T15:21:02Z",
+      "updated_at": "2022-10-10T15:21:02Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@sba923 I think the solution to this is via https://github.com/PowerShell/PowerShell/issues/13598.  As noted, the actual object has correct content, but it's a matter of display and this is something that not everyone will agree upon.  I would suggest further discussion in the proposed new parameter.",
+      "created_at": "2022-10-11T00:01:50Z",
+      "updated_at": "2022-10-11T00:01:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@sba923, I agree with @SteveL-MSFT  that #13598 is the only non-breaking way forward.\r\n\r\nTo recap: \r\n\r\n * The _display_ problem you mention - the same as [previously reported by @wilsoncg ](https://github.com/PowerShell/PowerShell/issues/13592#issuecomment-884246533) - is unfortunate, but it is built into the `[datetime]` (`System.DateTime`) type - PowerShell is only the messenger here. That is, the  _string representation_ of a UTC date (a `[datetime]` instance with `.Kind` value `Utc`) _doesn't indicate that it is UTC_ and is therefore indistinguishable from a local date.\r\n\r\n * That `ConvertFrom-Json` parses `\"2022-10-06T15:47:15.886Z\"` as a `[datetime]` instance with `.Kind` value `Utc` is justifiable and arguably better than the behavior of `[datetime]::Parse(\"2022-10-06T15:47:15.886Z\")` (ditto with a PowerShell cast), which returns a  (properly adjusted) `Local` instance - even though that amounts to a perhaps surprising difference in behavior.\r\n\r\n* Using `[datetimeoffset]` instead of `[datetime]` would avoid these problems, which #13598, if/when implemented, would allow you to request, via `-DateKind Offset`.\r\n  * `-DateKind None` would give you compatibility with _Windows PowerShell_, i.e., timestamp strings would be passed through as _strings_.\r\n\r\n* One problem with `[datetimeoffset]` use is its current, needlessly verbose multi-line display representation, which should be  replaced with a single-line representation similar to that of `[datetime]`, albeit _with UTC offset_.\r\n  * See #18255\r\n\r\nAs for the status quo:\r\n\r\nYou can _mitigate_ the problem with how `[datetime]` instances with `.Kind` value `Utc` stringify by default, although this requires a modification you must make in every session (such as via `$PROFILE`):\r\n\r\n```powershell\r\n# In effect override the default formatting, via the .DateTime ETS property\r\nUpdate-TypeData -Force -TypeName System.DateTime -MemberType ScriptProperty -MemberName DateTime -Value {\r\n  if ((& { Set-StrictMode -Version 1; $this.DisplayHint }) -ieq \"Date\") {\r\n    \"{0}\" -f $this.ToLongDateString()\r\n  }\r\n  elseif ((& { Set-StrictMode -Version 1; $this.DisplayHint }) -ieq \"Time\") {\r\n    \"{0}\" -f $this.ToLongTimeString()\r\n  }\r\n  else {\r\n    # Date + time representation requested; if the instance at hand is a UTC timestamp, append \" (UTC)\"\r\n    # to distinguish it from a local timestamp.\r\n    (\"{0} {1}\" -f $this.ToLongDateString(), $this.ToLongTimeString()) + \r\n      $(if ($this.Kind -eq 'Utc') { ' (UTC)' })\r\n  }  \r\n}\r\n\r\n# Override the parameter-less .ToString() method.\r\nUpdate-TypeData -Force -TypeName System.DateTime -MemberType ScriptMethod -MemberName ToString -Value {\r\n  $this.psbase.ToString() + $(if ($this.Kind -eq 'Utc') { ' (UTC)' })\r\n}\r\n```\r\n\r\nExample stringifications with this modification in place - note the ` (UTC)` suffix:\r\n\r\n```powershell\r\nPS> Get-Date -AsUtc; '---'; (Get-Date -AsUtc).ToString()\r\n\r\nTuesday, October 11, 2022 4:26:54 AM (UTC)\r\n---\r\n10/11/2022 4:26:54 AM (UTC)\r\n```\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2022-10-11T04:29:31Z",
+      "updated_at": "2022-10-11T04:29:31Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "> @sba923 I think the solution to this is via #13598. As noted, the actual object has correct content, but it's a matter of display and this is something that not everyone will agree upon. I would suggest further discussion in the proposed new parameter.\r\n\r\nThis will affect the conversion, but not the display problem.\r\n\r\n@mklement0's mitigation tackles the latter.",
+      "created_at": "2022-10-11T18:14:11Z",
+      "updated_at": "2022-10-11T18:14:11Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "> You can _mitigate_ the problem with how `[datetime]` instances with `.Kind` value `Utc` stringify by default, although this requires a modification you must make in every session (such as via `$PROFILE`):\r\n\r\nThanks for sharing this, it works like a charm and does address my latest issue:\r\n\r\n```powershell\r\nPS> (gc c:/tmp/items.json | convertfrom-json).items\r\n\r\nscore comment adjectives timestamp\r\n----- ------- ---------- ---------\r\n2     2       slow       2022-10-06 15:47:15 (UTC)\r\n```\r\n\r\nbut not when using `Out-GridView` \ud83d\ude2d",
+      "created_at": "2022-10-11T18:17:32Z",
+      "updated_at": "2022-10-11T18:19:52Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "> but not when using `Out-GridView` \ud83d\ude2d\r\n\r\n@mklement0 is there a way to have this work?\r\n\r\n",
+      "created_at": "2022-10-12T12:24:58Z",
+      "updated_at": "2022-10-12T12:24:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@sba923, there is a workaround, but it is cumbersome:\r\n\r\nIf you wrap all `[datetime]` instances inside the object graph returned from `ConvertFrom-Json` in `[psobject]`, `Out-GridView` will honor the ETS `.ToString()` override (as a curious aside: _string interpolation_ (`\"...\"`) _never_ honors such an override).\r\n\r\nE.g.:\r\n\r\n```powershell\r\n# Honors the .ToString() override, but only due to the extra [psobject] case.\r\n[pscustomobject] @{ foo = [psobject] [datetime]::UtcNow } | Out-GridView\r\n```\r\n\r\nConceivably, you could write a wrapper (proxy) function for `Out-GridView` that recursively walks the properties of `[pscustomobject]` instances among its input and wraps those property values that are of type `[datetime]` in `[psobject]`.\r\nNeedless to say, you'll pay a performance penalty.\r\n\r\n",
+      "created_at": "2022-10-12T16:26:29Z",
+      "updated_at": "2022-10-12T16:26:29Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Please note that whatever improvements are made to `ConvertFrom-Json` must ripple over to other cmdlets that perform the same conversions, such as `Invoke-RestMethod`.",
+      "created_at": "2022-11-07T09:35:45Z",
+      "updated_at": "2022-11-07T09:35:45Z"
+    }
+  ],
+  "created_at": "2020-09-07T11:12:22Z",
+  "number": 13592,
+  "state": "open",
+  "title": "ConvertFrom-JSON incorrectly deserializes dates to DateTime",
+  "updated_at": "2022-11-07T09:35:45Z"
+}

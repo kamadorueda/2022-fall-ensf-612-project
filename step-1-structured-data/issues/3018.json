@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3018",
+  "author": "alx9r",
+  "body": "Steps to reproduce\r\n------------------\r\n```PowerShell\r\nfunction f { throw 'exception in f' }\r\nfunction g { f }\r\nfunction i { { f }.Invoke() }\r\nfunction j { { f }.InvokeReturnAsIs() }\r\nfunction k { { f }.InvokeWithContext(@{},$null) }\r\nfunction l { & { f } }\r\nfunction m { . { f } }\r\n\r\nDescribe 'stack trace' {\r\n    foreach ( $values in @(\r\n            @('normal','g'),\r\n            @('& call operator','l'),\r\n            @('. dot sourcing operator','m'),\r\n            @('.Invoke()','i'),\r\n            @('.InvokeReturnAsIs()','j'),\r\n            @('.InvokeWithContext()','k')\r\n        )\r\n    )\r\n    {\r\n        $name,$functionName = $values\r\n        Context $name {\r\n            It 'throws an exception' {\r\n                { & $functionName } | Should throw\r\n            }\r\n            It 'stack trace includes originating line' {\r\n                try\r\n                {\r\n                    & $functionName\r\n                }\r\n                catch\r\n                {\r\n                    $threw = $true\r\n                    $_.ScriptStackTrace | Should match 'at f'\r\n                }\r\n                $threw | Should be $true\r\n            }\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nExceptions raised in scriptblocks invoked using `.Invoke()`, `.InvokeReturnAsIs()`, and `.InvokeWithContext()` should include in the exception's stack trace the originating location of the exception.\r\n\r\nActual behavior\r\n---------------\r\n\r\n`.Invoke()`, `.InvokeReturnAsIs()` and `.InvokeWithContext()` do not include the originating location of the exception in the stack trace.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value                                           \r\n----                           -----                                           \r\nPSVersion                      6.0.0-alpha                                     \r\nWSManStackVersion              3.0                                             \r\nGitCommitId                    v6.0.0-alpha.14                                 \r\nPSRemotingProtocolVersion      2.3                                             \r\nCLRVersion                                                                     \r\nPSEdition                      Core                                            \r\nBuildVersion                   3.0.0.0                                         \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                         \r\nSerializationVersion           1.1.0.1                                         \r\n\r\n```\r\n",
+  "closed_at": "2018-08-07T23:16:34Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "`h` is an alias to `Get-History`. Command look prefers aliases over functions. So I think this is expected.",
+      "created_at": "2017-01-19T18:25:42Z",
+      "updated_at": "2017-01-19T18:25:42Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@lzybkr Oh that's embarassing.  I have updated the repro to avoid the use of `h`.  I think the problem of `.InvokeX()` omitting lines from the stack trace remains.",
+      "created_at": "2017-01-19T19:02:11Z",
+      "updated_at": "2017-01-19T19:02:11Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "This also affects `PowerShell.Invoke()`:\r\n\r\n```PowerShell\r\n$powershell = [powershell]::Create().AddScript({\r\n    function f {\r\n        throw 'some exception'\r\n    }\r\n    f\r\n})\r\n\r\ntry\r\n{\r\n    $powershell.Invoke()    \r\n}\r\ncatch\r\n{\r\n    $_.ScriptStackTrace\r\n}\r\n```\r\n\r\noutputs\r\n\r\n```none\r\nat <ScriptBlock>, C:\\Users\\un1\\Desktop\\test.ps1: line 10\r\nat <ScriptBlock>, <No file>: line 1\r\n```\r\n\r\nThere is no mention of `f` or lines 2 or 3.",
+      "created_at": "2018-08-07T22:47:47Z",
+      "updated_at": "2018-08-07T22:47:47Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "It looks like the inner `.ScriptStackTrace` is indeed available in `.Exception.InnerException.ErrorRecord`:\r\n\r\n```PowerShell\r\n$scriptblock = {\r\n    function f {\r\n        throw 'some exception'\r\n    }\r\n    f\r\n}\r\n\r\ntry\r\n{\r\n    $scriptblock.Invoke()    \r\n}\r\ncatch\r\n{\r\n    $_.Exception.InnerException.ErrorRecord | fl * -Force\r\n}\r\n```\r\n\r\noutputs\r\n\r\n```PowerShell\r\nPSMessageDetails      : \r\nException             : System.Management.Automation.RuntimeException: some exception\r\nTargetObject          : some exception\r\nCategoryInfo          : OperationStopped: (some exception:String) [], RuntimeException\r\nFullyQualifiedErrorId : some exception\r\nErrorDetails          : \r\nInvocationInfo        : System.Management.Automation.InvocationInfo\r\nScriptStackTrace      : at f, C:\\Users\\un1\\Desktop\\test.ps1: line 3\r\n                        at <ScriptBlock>, C:\\Users\\un1\\Desktop\\test.ps1: line 5\r\n                        at <ScriptBlock>, C:\\Users\\un1\\Desktop\\test.ps1: line 10\r\n                        at <ScriptBlock>, <No file>: line 1\r\nPipelineIterationInfo : {}\r\n```\r\n\r\nAfter looking at `.Exception` and `.Exception.InnerException` which are exceptions corresponding to the .Net `.Invoke()` call and scriptblock, respectively, I'm pretty sure that this behavior is how it should be.  \r\n\r\nI suppose such nested `.ScriptStackTrace`s could be special-cased by the logic decides what to output on the console for an `ErrorRecord`, but that would be a separate issue.",
+      "created_at": "2018-08-07T23:16:34Z",
+      "updated_at": "2018-08-07T23:16:34Z"
+    }
+  ],
+  "created_at": "2017-01-19T16:18:00Z",
+  "number": 3018,
+  "state": "closed",
+  "title": "Exceptions raised by {}.Invoke(), {}.InvokeReturnAsIs{}, and {}.InvokeWithContext{} omit originating line(s) from stack trace",
+  "updated_at": "2018-09-05T07:59:18Z"
+}

@@ -1,0 +1,139 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6057",
+  "author": "mklement0",
+  "body": "Note: Fixing this would be a breaking change, but arguably one that falls into [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).\r\n\r\n**Currently, when you use a `ValueFromPipelineByPropertyName` parameter attribute, the property named there is only bound when using _pipeline_ input and not also when passing the same object as a direct _argument_.**\r\n\r\nTo illustrate the discrepancy with a simple example:\r\n\r\n```powershell\r\n# Declare a function with a parameter that binds pipeline input by the value of \r\n# property .LiteralPath or its alias .PSPath\r\nfunction foo { \r\n  param(\r\n   [Parameter(ValueFromPipelineByPropertyName)]\r\n   [Alias('PSPath')]\r\n   [string[]] ${LiteralPath}\r\n  ) \r\n  \"`$LiteralPath: [$LiteralPath]\" \r\n}\r\n\r\n# Create object with a .PSPath property.\r\n$obj = [pscustomobject] @{ PSPath = 'pspath' }\r\n\r\n# Pass the object to the function, first via the pipeline, then as a direct argument\r\n$obj | foo\r\nfoo -LiteralPath $obj\r\n```\r\n\r\nThe output shows that the `.PSPath` property is bound es expected via the pipeline, but _not_ as a direct argument:\r\n\r\n```none\r\n$LiteralPath: [pspath]                       # OK (pipeline): .PsPath value was bound.\r\n$LiteralPath: [@{PSPath=pspath}]  # !! (argument): $obj was simply stringified (.ToString())\r\n```\r\n\r\nThe **binding of the direct _argument_ pays attention only to the parameter _type_**, causing it to simply _stringify_ `$obj` with `.ToString()` (not with default output formatting).\r\n\r\nThis discrepancy is not only surprising, it **can have grave consequences** when dealing with `[System.IO.FileInfo]` instances output by **`Get-ChildItem`**,  because the latter **often stringify to a _mere filename_**, potentially causing unexpected and destructive behavior with `-LiteralPath` cmdlets such as `Remove-Item`, `Move-Item` and `Copy-Item`:\r\n\r\n```powershell\r\n# Create sample file 'tmpFile' in subfolder 'tmpDir'; i.e.: tmpDir/tmpFile\r\n$null > (Join-Path (New-Item -force -Type Directory tmpDir) tmpFile)\r\n\r\n# Obtain a [System.IO.FileInfo] instance representing the new file.\r\n# Note that `Get-ChildItem tmpDir` rather than `Get-Item tmpDir/tmpFile` (or\r\n# `Get-ChildItem tmpDir/tmpFile` is purposely used, because it is only\r\n# `Get-ChildItem` without a filename component in the path that stringifies \r\n#  the resulting instances to their filename only.\r\n$f = Get-ChildItem tmpDir\r\n\r\n# Demonstrate that $f stringies to just 'tmpFile' - the mere filename.\r\n\"`$f stringifies to: [$f]\"\r\n\r\n# Now bind $f to the -LiteralPath parameter as a *direct argument* of \r\n# several cmdlets, which *fails*, because trying to locate the input object\r\n# as a *string* that is the *filename only* fails, given that file is in\r\n# a *subdirectory*.\r\nRemove-Item -WhatIf -LiteralPath $f\r\nMove-Item -WhatIf -LiteralPath $f foo\r\nCopy-Item -WhatIf -LiteralPath $f foo\r\n```\r\n\r\nThe last 3 calls fail unexpectedly; while this happens not to be destructive / make unexpected changes in this example, it would be the case if namesake files happened to exist in the current location.\r\n\r\n**The fact that whether this problem arises depends on the specific method through which the `[System.IO.FileInfo]`, `[System.IO.DirectoryInfo]` instances were obtained makes this behavior particularly insidious.**\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0 on macOS 10.13.2\r\nPowerShell Core v6.0.0 on Ubuntu 16.04.3 LTS\r\nPowerShell Core v6.0.0 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.674 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could get significant performance improvements if our cmdlets could accept not only string paths but also [FileInfo] objects - currently we do a lot of unnecessary work on the path objects obtained from the file system (globbing, normalization ...).",
+      "created_at": "2018-01-29T09:25:06Z",
+      "updated_at": "2018-01-29T09:25:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nThat's a great idea - is there an issue for that yet?\r\n\r\nWhat you propose would fix the problems for file-related cmdlets, but I feel that the general discrepancy between via-pipeline and by-argument parameter binding is worth addressing as such.\r\n",
+      "created_at": "2018-01-29T20:25:03Z",
+      "updated_at": "2018-01-29T20:25:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "No Issue. The nearest is #5789\r\nI don't know the code yet, and I'm moving forward very slowly. \ud83d\ude15 \r\n\r\nIf we implement using [FileInfo] internally then maybe your offer will look a little different (simpler).\r\n",
+      "created_at": "2018-01-30T05:00:48Z",
+      "updated_at": "2018-01-30T05:00:48Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "The big issue here is that we cannot assume anything about the providers. FileSystem is only one provider, and the common cmdlets are generic in how they work with respect to the providers.\r\n\r\nHowever, it's maybe not unreasonable to say that \"All Providers are equal, but some Providers (cough* FileSystem*cough) are more equal than others\".\r\n\r\nMaybe we should have special treatment for the FileSystem provider since is is verly likely not only the most used provider, but also a provider with large data sets.\r\n",
+      "created_at": "2018-01-30T10:24:22Z",
+      "updated_at": "2018-01-30T10:24:22Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The API is not public so we are free to enhance it or re-design to make it more flexible.",
+      "created_at": "2018-01-30T12:28:38Z",
+      "updated_at": "2018-01-30T12:28:38Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov What API specifically are you talking about here?",
+      "created_at": "2018-01-30T13:00:06Z",
+      "updated_at": "2018-01-30T13:00:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Mostly I meant our globbing and that #5789 API don't exist still.",
+      "created_at": "2018-01-30T14:44:37Z",
+      "updated_at": "2018-01-30T14:44:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@powercode:\r\n\r\nGood point about different providers: given that the items returned across providers don't implement a shared interface, we can't anticipate all item types using dedicated parameter sets.\r\n\r\nWhile giving preferential treatment to the FileSystem provider sounds sensible, wouldn't that require us to declare the `-LiteralPath` parameters as `[object]` and then reflect on the type (given that you can't have the same parameter name with different types in different parameter sets)?\r\nFor all other types, `.PSPath`-based could (continue to) be used, albeit with the fix proposed here for argument passing.\r\n\r\n@iSazonov:\r\n\r\n> If we implement using [FileInfo] internally then maybe your offer will look a little different (simpler).\r\n\r\nAgain, I feel the discrepancy discussed should be fixed in general, irrespective of the performance issues around file-related cmdlets.\r\n\r\nThere are two additional aspects:\r\n\r\n* For providers whose items are PowerShell-extended versions of general-use .NET types - `[System.IO.FileInfo]` again being a prime example - you don't get the `.PSPath` property if you instantiate such types directly (as opposed to obtaining instances via provider cmdlets) - see #4347.\r\n   * If a reflection-based `[object]` parameter is introduced to detect `[System.IO.FileInfo]`, `[System.IO.DirectoryInfo]` instances, that problem would go away for the FileSystem provider, but it could affect other providers too.\r\n\r\n* Arguably, for symmetry with `ValueFromPipelineByPropertyName`, a `ValueByPropertyName` parameter attribute should be introduced that allows the same type of property-name-based binding for _non_-pipeline parameters.\r\n\r\n",
+      "created_at": "2018-01-31T22:38:00Z",
+      "updated_at": "2018-03-01T17:44:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Note: in .Net Core 2.1 [File enumeration extensibility](https://github.com/dotnet/corefx/pull/26806). is expected",
+      "created_at": "2018-02-05T15:31:30Z",
+      "updated_at": "2018-02-05T15:31:30Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Some points: \r\n\r\n- The default position 0 parameter on commands that take paths is `Path` not `LiteralPath` so even if we enabled property binding from the command line it would have no effect.\r\n- It's `Path` not `LiteralPath` because people type paths and want to be able to use globbing.\r\n- It's of type string because that's what people type and that's what the providers consume universally.\r\n\r\nSo I don't see doing property binding from the command line as a win. On the other hand, this \r\n```powershell\r\nls -rec | foreach { test-path $_ }\r\n```\r\nis a recurring problem. Perhaps adding an argument transformation attribute to `Path` that converts `FileInfo` to a string by getting `.FullName` is the way to go. ",
+      "created_at": "2018-06-19T23:51:17Z",
+      "updated_at": "2018-06-19T23:51:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Perhaps adding an argument transformation attribute to Path that converts FileInfo to a string by getting .FullName is the way to go.\r\n\r\nWe could enhance `-Path` and `-LiteralPath` to accept FileInfo/DirectoryInfo/PathInfo/etc - it allow us to skip tons of re-parsings and tons of path normalizations.",
+      "created_at": "2018-06-20T04:48:12Z",
+      "updated_at": "2018-06-20T06:20:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\nGood point about the 1st positional argument binding to `-Path`, so adding an argument transformation for `FileInfo`  / `DirectoryInfo` to all cmdlets that accept filesystem items via `-Path` sounds like a great idea (it should probably bind via `.PSPath` for symmetry with how `-LiteralPath` pipeline input currently binds).\r\n\r\nLonger-term, @iSazonov's idea of supporting these types _directly_ is desirable (though as previously discussed, that may require `[object]` parameters combined with reflection, so as to remain provider-neutral - or is there a better alternative?).\r\n\r\nThat said, the general symmetry that this issue asks for - bind by property whether the object came from the pipeline or by argument - is still worth implementing.\r\n\r\nIn the case at hand, if someone used `-LiteralPath` / `-lp` with an argument, they'd expect reliable full-path binding too:\r\n\r\n```powershell\r\nls -rec | foreach { test-path -LiteralPath $_ }  # !! Currently also unreliable\r\n```\r\n---\r\n\r\nOn a side note:\r\n\r\nThe stringification behavior of `FileSystem` actually changed since v6.0.2  and it seems that `FileInfo` instances now consistently stringify to their full path.\r\nWhile this would help, I suspect it was an unintentional breaking change - see  #7132\r\n",
+      "created_at": "2018-06-21T16:14:12Z",
+      "updated_at": "2018-06-21T16:14:12Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Rather than making `-Path` and `-LiteralPath` take object, we could add another parameter set that took a `FileSystemInfo` object. That violates the egalitarian notion of all providers are equal but it solves the file system name problem.  However, even if we get the object into the cmdlet, using it more efficiently might be problematic as the entire provider infrastructure is based on the abstract notion of a path.",
+      "created_at": "2018-06-22T00:43:37Z",
+      "updated_at": "2018-06-22T00:43:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay: \r\n\r\nIrrespective of efficiency issues, wouldn't the parameter in that new parameter set have to have a _different name_?\r\n\r\nI guess we could bind to that parameter _positionally_, but introducing yet another parameter name may be confusing (`-FileSystemInfo` / `-FileInfo` / `-DirectoryInfo`?).\r\n\r\nAlso, many cmdlets only accept _file(s)_, so for them the type would have to be `FileInfo` only.",
+      "created_at": "2018-06-22T02:09:06Z",
+      "updated_at": "2018-06-22T02:09:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could have unified wrapper for all providers - `PathInfo`.",
+      "created_at": "2018-06-22T05:42:09Z",
+      "updated_at": "2018-06-22T05:42:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Here's a proof-of-concept (in PowerShell code) that makes do with the existing parameters and only requires attaching a new argument-transformation attribute to `-LiteralPath`.\r\n\r\nIt should work with all providers, given that they all decorate their items with a `.PSPath` property.\r\nThat said, I know little about providers, so there may be something I'm missing.\r\n\r\nThe approach relies on _non-string_ arguments seemingly getting bound to the parameter with the argument-transformation argument (`-LiteralPath`) even with _positional_ binding, which with _string_ input defaults to a different parameter, `-Path`, as per the default parameter set.\r\n\r\n```powershell\r\nusing namespace System.Management.Automation\r\n\r\n# Transforms objects that happen to have a  .PSPath property - assumed to be\r\n# PS provider items as returned by Get-Item / Get-ChildItem - to that property's\r\n# value.\r\n# Instances of all other types are passed through as-is.\r\nclass ProviderItemPathTransformationAttribute : ArgumentTransformationAttribute  {\r\n  [object] Transform([EngineIntrinsics] $engineIntrinsics, [object] $inputData) {\r\n    return $(foreach ($o in $inputData) { \r\n      if ($psPathProp = $o.psobject.Properties['PSPath']) {\r\n        $psPathProp.Value\r\n      } else {\r\n        $o\r\n      }\r\n    })\r\n  }\r\n}\r\n\r\nfunction pathdemo {\r\n\r\n  [CmdletBinding(DefaultParameterSetName='Path', PositionalBinding=$false)]\r\n  param (\r\n    [Parameter(Mandatory, Position=0, ParameterSetName='Path', ValueFromPipeline, ValueFromPipelineByPropertyName)]\r\n    [string[]] $Path\r\n    ,\r\n    [Parameter(Mandatory, Position=0, ParameterSetName='LiteralPath', ValueFromPipelineByPropertyName)]\r\n    [ProviderItemPathTransformation()]\r\n    [Alias('LP', 'PSPath')]\r\n    [string[]] $LiteralPath\r\n  )\r\n\r\n  process {\r\n    @\"\r\n    Path:        $Path\r\n    LiteralPath: $LiteralPath\r\n\"@\r\n\r\n  }\r\n}\r\n```\r\n\r\nSample calls:\r\n\r\n```powershell\r\n# String input by argument: bind to -Path, as before:\r\nPS> pathdemo 'foo'\r\n    Path:        foo  \r\n    LiteralPath: \r\n\r\n# String input from the pipeline: bind to -Path, as before:\r\nPS> 'foo' | pathdemo\r\n    Path:        foo  \r\n    LiteralPath: \r\n\r\n\r\n# NEW: Provider-item input by argument: bind to -LiteralPath, via .PSPath, \r\n# using the argument-transformation attribute.\r\nPS> pathdemo (Get-Item /)\r\n    Path:        \r\n    LiteralPath: Microsoft.PowerShell.Core\\FileSystem::/\r\n\r\n# Provider-item input from the pipeline: bind to -LiteralPath, via .PSPath, \r\n# using the by-property binding via the 'PSPath' parameter alias, as before.\r\nPS> Get-Item / | pathdemo\r\n    Path:        \r\n    LiteralPath: Microsoft.PowerShell.Core\\FileSystem::/\r\n\r\n```\r\n\r\nAgain, note that while this approach happens to restore symmetry in recognizing input objects with a `.PSPath` property from both the pipeline and an argument _in this specific case_, that symmetry should be implemented generically.",
+      "created_at": "2018-06-25T21:52:45Z",
+      "updated_at": "2018-06-25T21:52:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Thanks for the great sample!\r\n\r\nIf we extract a string from `PSPath` argument and assign it to `LiteralPath`, we have to parse this string again internally. Seems we need something like `PSPathObject` - may be with `PathInfo` type. Although in this case the new parameter set will be better to exclude overheads.",
+      "created_at": "2018-06-26T05:20:13Z",
+      "updated_at": "2018-06-26T05:22:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\nI fully agree that in the long run we should be passing _objects_ (as opposed to strings) around so as to also improve _performance_.\r\n\r\nMy approach was meant as an intermediate, easy-to-implement step in the right direction that at least addresses the _functional_ problem.\r\n\r\nIf someone is willing to take on the proper solution right away, that's great.\r\n\r\nAs for terminology: If we pass the output from, say, `Get-ChildItem` around, we're passing _items themselves_, not path-information objects.\r\n\r\nTherefore, my suggestion is to name the parameter `-Item`, and to implement a provider-independent item type named, e.g., `PSProviderItem`.\r\n\r\n",
+      "created_at": "2018-06-26T12:27:06Z",
+      "updated_at": "2018-06-26T12:27:06Z"
+    }
+  ],
+  "created_at": "2018-01-28T23:31:54Z",
+  "number": 6057,
+  "state": "open",
+  "title": "Property-based pipeline-parameter binding should be applied to argument-based parameter binding as well",
+  "updated_at": "2021-11-10T22:49:17Z"
+}

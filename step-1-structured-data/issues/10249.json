@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10249",
+  "author": "jschpp",
+  "body": "# Summary of the new feature/enhancement\r\nThere should be an easy option to validate path parameters.\r\n\r\n> As a developer I want to validate a path parameter with a keyword to stop using the same validation pattern over and over again.\r\n\r\nAt the moment I need to use this pattern all the time:\r\n```powershell\r\nparam (\r\n    [ValidateNotNullOrEmpty()]\r\n    [ValidateScript({\r\n        if(-not (Test-Path $_)){\r\n            throw\r\n        }\r\n    })]\r\n    [string]\r\n    $Path\r\n)\r\n```\r\n\r\nI would like to replace it with something like this:\r\n```powershell\r\nparam (\r\n    [ValidatePath()]\r\n    [string]\r\n    $Path\r\n)\r\n```\r\n\r\nThere was already a similarly issue #5647 which was bigger in scope than this.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nI'v tried my hand at creating this validator #10250 ",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Are you going to handle any PowerShell provider? Or just the `FileSystem` provider? `ValidatePath` as a parameter validator should handle any provider, not just files.\r\n\r\nI find myself wondering if this should be a validator. Internally if it requires invoking `Test-Path` again and again, that could be expensive when used at scale, and it's quite specific as far as validators go.\r\n\r\nSince it seems from your example, and from the PR the way it is written right now, that your interest is in file/directory validation, I wonder if it would be better to have:\r\n\r\n1. A pair of transformation attributes, `[FileInfo()]` and `[DirectoryInfo()]`, that can convert a string into a corresponding `FileInfo` or `DirectoryInfo` object (these objects support string conversion already, but transformation attributes are necessary if we want these to support PSPath syntax as well).\r\n\r\n1. A property validator, `[ValidateProperty('PropertyName','Value')]` that would validate that a particular object has a property with a particular value.\r\n\r\nThe property validator alone would be generally much more useful than `ValidatePath`, and would allow for something like this:\r\n\r\n```PowerShell\r\nfunction Use-Directory {\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(Position=0, Mandatory, ValueFromPipelineByPropertyName)]\r\n        [ValidateProperty('Exists',$true)]\r\n        [System.IO.DirectoryInfo]\r\n        [Alias('FullName')]\r\n        $Directory\r\n    )\r\n}\r\nGet-Item C:\\ | Use-Directory\r\n```\r\n\r\nIf you wanted PSPath support as well, you could use the proposed `[DirectoryInfo()]` transformation attribute, and write it like this instead:\r\n\r\n```PowerShell\r\nfunction Use-Directory {\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(Position=0, Mandatory, ValueFromPipelineByPropertyName)]\r\n        [ValidateProperty('Exists',$true)]\r\n        [System.IO.DirectoryInfo]\r\n        [DirectoryInfo()]\r\n        [Alias('PSPath')]\r\n        $Directory\r\n    )\r\n}\r\nGet-Item C:\\ | Use-Directory\r\n```",
+      "created_at": "2019-07-29T17:32:29Z",
+      "updated_at": "2019-07-29T17:32:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> As a developer I want to validate a path parameter with a keyword to stop using the same validation pattern over and over again.\r\n\r\nThe motivation is not clear because the pattern is as simple as Test-Path.",
+      "created_at": "2019-07-30T05:29:12Z",
+      "updated_at": "2019-07-30T05:29:12Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Correct. However, use of `[ValidateScript()]` is needlessly syntax-heavy and awkward for such a basic use case. PowerShell is an administration tool for computer systems; built-in validation for paths should be provided out of the box, in my opinion. Additionally, having parameter validation for paths run on pre-compiled code is probably likely to give some performance benefits in parameter binding for what seems to be very little cost. \ud83d\ude42 ",
+      "created_at": "2019-07-30T12:19:33Z",
+      "updated_at": "2019-07-30T12:20:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">having parameter validation for paths run on pre-compiled code is probably likely to give some performance benefits in parameter binding for what seems to be very little cost. \r\n\r\nThe attribute will only slow down. If we want to be fast we should move from string paths to objects with pre-processed paths (like `FileInfo`)",
+      "created_at": "2019-07-30T13:06:54Z",
+      "updated_at": "2019-07-30T13:06:54Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "More than ValidateScript? Really? \r\n\r\nThat kind of conversion could be done by the validation attribute anyway, couldn't it?",
+      "created_at": "2019-07-30T16:12:02Z",
+      "updated_at": "2019-07-30T16:12:02Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Potential problem with this idea.  If you send an entire pipeline full of paths, doesn't the validation have to succeed on all paths before command can commence?  In many cases that would not be desired to have all the paths checked before work starts, and that just one bad path prevents any of the process.  For single path arguments/pipelines its no big deal.   However, I think the thought process was that you could detect on your own if the path is bad, and display a better error message or take other action, better than just a simple validation.\r\n\r\nAdditionally, if the paths are validated at the binding of a large/long/slow script, the paths may be invalid by the time the script performs the work, so the script always needs to be prepared for dealing with the exception of a missing path anyway.\r\n\r\nValidation of other kinds of inputs makes sense, because they are not moving targets.\r\n\r\nSo in short, you shouldn't even be using ValidateScript to validate a moving target such as a file path at binding time.  Instead you should be prepared to deal with file path issues using try/catch/finally or trap.\r\n\r\nI could see wanting to validate if a path contains any invalid components or syntax, since on some OS's the syntax of a file path is different.\r\n\r\nBut these are just opinions...",
+      "created_at": "2019-07-30T18:02:27Z",
+      "updated_at": "2019-07-30T18:02:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@msftrncs indeed, but the same issue is faced with ValidateScript and Test-Path; it is up to the command implementor to determine if the path is critical or non-critical (whether it should terminate the whole pipeline as a parameter-binding issue).\r\n\r\nIn most cases where this would be used, the path argument would not be a pipeline parameter and typically critical to the command function. For example, a Write-Log command where it takes data / strings as pipeline input and writes to a single path.",
+      "created_at": "2019-07-30T18:12:24Z",
+      "updated_at": "2019-07-30T18:12:24Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 The key difference between `ValidateScript` and a `ValidatePath` attribute that internally invokes `Test-Path` is visibility of the performance hit. I think built-in validators should be very performant and not invoke PowerShell to do their validation.\r\n\r\nAlso would `ValidatePath` return true if the item behind the path exists? Or if the path was valid? What about validation against a specific provider, since many functions are written to only work with a limited set (often just one) of providers? What about wildcard validation? There are many validation scenarios, and a single `ValidatePath` validator does not unambiguously define which one it validates.\r\n\r\nFrom my perspective, I think there is a solution to be found that makes this easier going forward. I'm just not convinced that `ValidatePath` is that solution.",
+      "created_at": "2019-07-30T20:14:28Z",
+      "updated_at": "2019-07-30T20:15:25Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Plenty of validators allow parameters, we can simply leave it up to the command implementer to decide exactly what they're after.\r\n\r\n```powershell\r\nfunction Write-Thing {\r\n    param(\r\n        [Parameter(Mandatory)]\r\n        [ValidatePath(<# MustExist #> $true, <# ProviderName #> 'FileSystem')]\r\n        [string]\r\n        $Path,\r\n\r\n        [Parameter(Mandatory, ValueFromPipeline)]\r\n        [object]\r\n        $InputObject\r\n    )\r\n    process {\r\n        Set-Content -Value $InputObject -Path $Path\r\n    }\r\n}",
+      "created_at": "2019-07-30T21:35:42Z",
+      "updated_at": "2019-07-30T21:35:51Z"
+    }
+  ],
+  "created_at": "2019-07-29T16:16:40Z",
+  "number": 10249,
+  "state": "open",
+  "title": "Feature Request - ValidatePath option",
+  "updated_at": "2019-07-30T21:35:51Z"
+}

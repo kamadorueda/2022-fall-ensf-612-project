@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7155",
+  "author": "alx9r",
+  "body": "Consider the case where a handle to a resource that needs cleanup is obtained and assigned to a variable in a `try{}`.  Cleanup would customarily be performed in the associated `finally{}`.  However, if the `.Stop()` signal is sent during the obtain-and-assign step, the resource can be allocated without the handle being assigned.  This means that the `finally{}` can't clean up the resource because it has no handle to it.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n# a hashtable to track state\r\n$h = [ordered]@{\r\n    Begin = ''\r\n    End = ''\r\n    BeginFinally = ''\r\n    EndFinally   = ''\r\n}\r\n\r\n# an example IDisposable class\r\nclass c : System.IDisposable\r\n{\r\n    [bool] $Disposed = $false\r\n    [void] Dispose()\r\n    {\r\n        $this.Disposed = $true\r\n    }\r\n}\r\n\r\nfunction New-C {\r\n    $c = [c]::new() # this IDisposable gets created\r\n\r\n    sleep 1         # stop occurs here\r\n\r\n    $c              # this never gets returns\r\n}\r\n\r\n$powershell = [powershell]::Create().AddScript({\r\n    param($h)\r\n    try\r\n    {\r\n        $h.Begin = $true\r\n        $disposable = New-C # stop occurs during this call,\r\n                            # so $disposable is not assigned\r\n\r\n        $h.End = $true      # this line is never reached\r\n    }\r\n    finally\r\n    {\r\n        $h.BeginFinally = $true\r\n\r\n        $disposable.Dispose() # $disposable is null\r\n        \r\n        $h.Disposed = $disposable.Disposed\r\n        $h.EndFinally = $true\r\n\r\n        # we reach the end without $c ever being disposed\r\n    }\r\n}).AddParameter('h',$h)\r\n\r\n$invocation = $powershell.BeginInvoke() # invoke the script\r\nsleep -Milliseconds 500                 # wait until it's in New-C\r\n$powershell.Stop()                      # send the stop signal\r\n\r\n[pscustomobject]$h\r\n```\r\n\r\nExpected and Actual behavior\r\n-----------------\r\n\r\nThe actual behavior is the behavior I expect: `$c` is never disposed because it is not available in `finally{}`.\r\n\r\n```none\r\nBegin        : True\r\nEnd          : \r\nBeginFinally : True\r\nEndFinally   : True\r\nDisposed     : \r\n```\r\n\r\nBehavior I'm Hoping for\r\n---------------\r\n\r\nI'm hoping for some way to ensure that the call to `New-C` and assignment to `$disposable` is allowed to completed before `.Stop()` causes flow of control to jump to `finally()`.  That way `$c` can be disposed.\r\n\r\n```none\r\nBegin        : True\r\nEnd          : \r\nBeginFinally : True\r\nEndFinally   : True\r\nDisposed     :  True\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.688\r\nPSEdition                      Core\r\nGitCommitId                    v6.1.0-preview.688\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Seems we discussed this enhancement previously and have an opened Issue.",
+      "created_at": "2018-06-24T07:01:44Z",
+      "updated_at": "2018-06-24T07:02:09Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@iSazonov Do you have a reference to that issue?  Do you mean #6673?  #6673 seems to be about reliably cleaning up a resource to which a function has a handle.  This issue is about not being able to reliably obtain that handle in the first place.",
+      "created_at": "2018-06-24T15:21:29Z",
+      "updated_at": "2018-06-24T15:21:29Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov This a different issue than adding a dispose clause to functions.\r\n@alx9r No - there is currently no mechanism to block `Stop()`. Is this an actual problem you are hitting or is it theoretical only?  Remember, when you hit `Stop`, the state of the system is essentially unknown. Partially written files will still be there, processes that have started won't be stopped, etc. But the gc *will* (eventually) clean up and dispose allocated objects. If it's *really* important that this object gets disposed immediately, you could alter `New-C` to take care of this case. Something like:\r\n```powershell\r\nfunction New-C {\r\n    try {\r\n        $returned = $false\r\n        $c = [c]::new() # this IDisposable gets created\r\n\r\n        sleep 5         # stop occurs here\r\n\r\n        $c                # this never gets returns\r\n        $returned = $true\r\n    }\r\n    finally {\r\n        # gets cleaned up here...\r\n        if (-not $returned -and $c)\r\n        {\r\n            Write-Host \"Disposing c\"\r\n            $c.Dispose()\r\n        }\r\n    }\r\n}\r\n```\r\nAll that said, handling ctrl-C/SIGINT was in plan for V1. The `trap` statement was supposed to be able to handle  ctrl-c and decide if execution should proceed (`continue`) or terminate (`break`). (Note - it would trap the signal but explicit calls to `.Stop()` would go through). However this was never implemented and in all the time since it hasn't really been raised as an issue. Of course we now have a broader audience so perhaps we should reconsider adding it. (and `bash` has it)",
+      "created_at": "2018-06-26T18:58:14Z",
+      "updated_at": "2018-06-26T18:58:14Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@BrucePay \r\n\r\n> Is this an actual problem you are hitting or is it theoretical only?\r\n\r\nThe general problem of incomplete cleanup on `.Stop()` and ctrl-C is something I battle at least daily.  I've found it requires unusual diligence to craft PowerShell commands and tests such that they reliably avert meaningless results caused by vestigial state.  I think it's too early to say, though, whether this particular vulnerability of cleanup to the `.Stop()` signal will significantly slow the inner development loop on my projects.\r\n\r\n>...you could alter New-C to take care of this case.\r\n\r\nIs `$c = [c]::new()` atomic when subject to `.Stop()` or ctrl-C?",
+      "created_at": "2018-06-26T23:30:21Z",
+      "updated_at": "2018-06-26T23:30:35Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "`Stop()` is implemented by having the runtime check the `Stopping` flag in a bunch of places. Any long-running operation should check but we don't check for every operation as that would be too much overhead. I don't believe we check it for assignment statements (but I'd have to check the code). \r\n\r\n> The general problem of incomplete cleanup on .Stop() and ctrl-C is something I battle at least daily.\r\n\r\nI'm curious about what you're going that is causing such problems. And have you considered using DSC which has a declarative state model? ",
+      "created_at": "2018-06-27T00:32:26Z",
+      "updated_at": "2018-06-27T00:32:26Z"
+    }
+  ],
+  "created_at": "2018-06-23T23:51:39Z",
+  "number": 7155,
+  "state": "open",
+  "title": "Is there a way to protect a critical section against .Stop() to ensure cleanup?",
+  "updated_at": "2018-06-27T00:32:26Z"
+}

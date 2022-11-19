@@ -1,0 +1,321 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5576",
+  "author": "mklement0",
+  "body": "<sup>Updated later to include the problem with embedded double quotes.</sup>\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nEmbedded whitespace:\r\n\r\n```powershell\r\n'\"Hi!\"' > './t 1.ps1'; Start-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-file', './t 1.ps1'\r\n```\r\n\r\nEmbedded double quotes:\r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-command', '\"Hi!\"'\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nIn both cases:\r\n\r\n```none\r\nHi!\r\n```\r\n\r\nThat is, script file `./t 1.ps1` should execute, and double-quoted string literal `\"Hi!\"` should print.\r\n\r\nActual behavior\r\n---------------\r\n\r\nEmbedded whitespace:\r\n\r\nInvocation fails, because the `./t 1.ps1` is passed as _two_ arguments:\r\n\r\n```none\r\nThe argument './t' is not recognized as the name of a script file. Check the spelling of the name, or if a path was included, verify that the path is\r\ncorrect and try again.\r\n```\r\n\r\nThe only way to make this currently work is to _embed_ (potentially escaped) _double quotes_: `'\"./t 1.ps1\"'` or ``\"`\"./t 1.ps1`\"\"``; e.g.:\r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-file', \"`\"./t 1.ps1`\"\"\r\n```\r\n\r\n_Update_: Overall, the **best workaround** is to pass a _single_ string containing _all_ arguments to `-ArgumentList` and use embedded quoting and escaping as necessary:\r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile -file \"./t 1.ps1\"'\r\n```\r\n\r\n\r\nEmbedded double quotes:\r\n\r\nThe embedded double quotes are unexpectedly _removed_.\r\n\r\nThe only way to make this currently work is to `\\`-escape the embedded double quotes: \r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-command', '\\\"Hi!\\\"'\r\n```\r\n\r\n_Update_: Again, the best workaround is to use a _single_ string:\r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile -command \\\"Hi!\\\"'\r\n```\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-rc (v6.0.0-rc) on Microsoft Windows 7 Enterprise  (64-bit; v6.1.7601)\r\nWindows PowerShell v5.1.14409.1012 on Microsoft Windows 7 Enterprise  (64-bit; v6.1.7601)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "ZSkycat",
+      "author_association": "NONE",
+      "body": "I think it just executes `{filename} {ArgumentList.join(' ')}`\r\n\r\ntry this code\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh.exe -ArgumentList '-noprofile', '-file', '\"./t 1.ps1\"'\r\nStart-Process -Wait -NoNewWindow pwsh.exe -ArgumentList '-noprofile', '-file', '\"', './t 1.ps1', '\"'\r\n```",
+      "created_at": "2017-11-29T16:08:23Z",
+      "updated_at": "2017-11-29T16:08:23Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "The code where it deconstructs `-Argumentlist` to the Argument string for `ProcessStartInfo.Arguments` [here](https://github.com/PowerShell/PowerShell/blob/4bc52d2358222084738157a08907fac32d13bd3a/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs#L1863) and it simply joins the arguments by separating it with a space character. Therefore it sees `./t` and `1.ps1` as two separate arguments. As pointed out by @ZSkycat one has to correctly quote the file.",
+      "created_at": "2017-12-15T22:13:58Z",
+      "updated_at": "2017-12-15T22:20:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see the [feature is documented](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.processstartinfo.arguments?view=netcore-2.0):\r\n>Arguments are parsed and interpreted by the target application, so must align with the expectations of that application. For.NET applications as demonstrated in the Examples below, spaces are interpreted as a separator between multiple arguments. A single argument that includes spaces must be surrounded by quotation marks, but those quotation marks are not carried through to the target application. In include quotation marks in the final parsed argument, triple-escape each mark.\r\n\r\nI don't understand how we can fix this for all platforms and for an indefinite number of applications. If there is no standard to which we should follow I would rather expect a common way of passing arguments so that they reach the goal application in exactly the user specified form.",
+      "created_at": "2017-12-16T17:34:39Z",
+      "updated_at": "2017-12-16T17:34:39Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well, I guess we can only improve it (see my PR 5703) or maybe the better solution is to add an `-Arguments` parameter that is just a string to reduce complexity and leave the `-ArgumentList` parameter there only for legacy reasons.",
+      "created_at": "2017-12-16T20:31:24Z",
+      "updated_at": "2017-12-16T20:31:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@bergmeister: Thanks for taking this on in your PR, but there are additional edge cases to consider, such as tokens ending in `\\` - see https://github.com/PowerShell/PowerShell/issues/1995#issuecomment-330675421\r\n\r\nUltimately, the single string passed to `ProcessStartInfo.Arguments` should be constructed the same way that a direct call to an external program is handled, namely based on inverse of the [MSVC++ command-line parsing rules](https://docs.microsoft.com/en-us/cpp/cpp/parsing-cpp-command-line-arguments), as discussed in @TSlivede's [RFC proposal](https://github.com/PowerShell/PowerShell-RFC/pull/90).\r\n\r\nLonger-term, once https://github.com/dotnet/corefx/issues/23592 is implemented in CoreFx, PowerShell will simply be able to pass the array _through_. The linked issue also points to a utility method in the CoreFx code where the kind of array-to-command-line transformation that would be needed here is used internally.\r\n\r\nAnd, yes, this will break things, inevitably and in multiple scenarios, but I think if PowerShell wants to be taken seriously as a multi-platform shell, there's no way around that.\r\n\r\nWhile we may consider adding a new `-Arguments` parameter for someone who wants to pass a _single-string_, _pre-escaped_ command line (directly assignable to `ProcessStartInfo.Arguments` - which, notably, still needs to be split back into an array _before_ creating a process on _Unix_), it is `-ArgumentList` that must be fixed - which breaks things.\r\n\r\n\r\n",
+      "created_at": "2017-12-17T17:39:25Z",
+      "updated_at": "2017-12-17T17:39:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0  As far as I understand the shortest way to get this is to implement https://github.com/dotnet/corefx/issues/23592, isn't it?",
+      "created_at": "2017-12-18T11:12:14Z",
+      "updated_at": "2017-12-18T11:12:14Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Yes, with said proposal implemented, PowerShell could just use the new `ProcessStartInfo.ArgumentList` property directly and, on Windows, let CoreFX translate that into a single command line string with appropriate quoting.\r\n\r\n",
+      "created_at": "2017-12-18T12:13:24Z",
+      "updated_at": "2017-12-18T12:13:24Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Ok. Shall I close the PR then or do we want to consider it as an intermediate improvement?",
+      "created_at": "2017-12-18T12:53:26Z",
+      "updated_at": "2017-12-18T12:55:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think it is not critical and not a secure hole so we can wait and it is better to direct our efforts to other areas or contribute directly in CoreFX now.",
+      "created_at": "2017-12-18T18:44:13Z",
+      "updated_at": "2017-12-18T18:44:13Z"
+    },
+    {
+      "author": "Artoria2e5",
+      "author_association": "NONE",
+      "body": "On a related note, it seems to truncate at the `>` character too:\r\n```\r\nPS> Start-Process -Wait -NoNewWindow node -ArgumentList '-e', 'process.argv.slice(1).forEach((x) => console.log(x))'\r\n[eval]:1\r\nprocess.argv.slice(1).forEach((x)\r\n                                ^\r\nSyntaxError: missing ) after argument list\r\n```\r\n(Windows PS 7.0.0-preview3)\r\n\r\n* * *\r\n\r\nread the reply. ho boy... this is bad",
+      "created_at": "2019-09-18T08:19:26Z",
+      "updated_at": "2019-09-18T09:25:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Artoria2e5: The problem isn't `>`, the problem is that `process.argv.slice(1).forEach((x) => console.log(x))` isn't passed through as a _single argument_, it is broken into _3_ arguments by _whitespace_.\r\n\r\nThat is, your `node` command is effectively executed as follows, which explains the symptom:\r\n\r\n```\r\nnode -e 'process.argv.slice(1).forEach((x)' '=>' 'console.log(x))'\r\n```\r\n",
+      "created_at": "2019-09-18T09:05:04Z",
+      "updated_at": "2019-09-18T09:05:04Z"
+    },
+    {
+      "author": "felixfbecker",
+      "author_association": "CONTRIBUTOR",
+      "body": "This is very annoying when wrapping Linux command line tools. Could this be considered for PowerShell 7? It seems like the fix would be simple (just use `ProcessStartInfo.ArgumentList`). Using `System.Diagnostics.Process` in PowerShell directly works as expected, but is incredibly cumbersome.",
+      "created_at": "2019-11-08T15:50:44Z",
+      "updated_at": "2019-11-08T15:50:44Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> It seems like the fix would be simple (just use ProcessStartInfo.ArgumentList\r\n\r\nHaving used `ProcessStartInfo.Arguments` recently (had to support netstandard2.0), it's a very hard API to use.\r\n\r\nI'd second the recommendation to switch to ArgumentList if we can.",
+      "created_at": "2019-11-08T18:53:47Z",
+      "updated_at": "2019-11-08T18:53:47Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I have a PR to fix this, just need to add tests.\r\n\r\nIn the second example:\r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-command', '\"Hi!\"'\r\n```\r\n\r\nThis becomes: `pwsh -noprofile -command \"Hi!\"` so it should only print out `Hi!` without the quotes.  The quotes are needed to tell PowerShell this is a string and not a command.  After this fix, you still need to have nested double quotes if you want quotes:\r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-command', '\"\"\"Hi!\"\"\"'\r\n```\r\n",
+      "created_at": "2019-11-08T20:36:59Z",
+      "updated_at": "2019-11-08T20:36:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Glad to see that this is getting tackled.\r\n\r\n> This becomes: `pwsh -noprofile -command \"Hi!\"` so it should only print out Hi! without the quotes.\r\n\r\nAs a _shell command_ / Windows command line, `pwsh -noprofile -command \"Hi!\"`,  _fails_, because the the enclosing `\"` are removed during argument parsing, causing PowerShell to attempt to execute `Hi!`.\r\n\r\nWhat `Start-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-command', '\"Hi!\"'` _should_ translate to is:\r\n\r\nOn Windows:\r\n\r\n```\r\npwsh -noprofile -command \"\\\"Hi!\\\"\"\r\n```\r\n\r\nOn Unix, the array of verbatim tokens needs to be:\r\n\r\n`pwsh`, `-noprofile`, `-command`, `\"Hi!\"`\r\n\r\nThe collection-based [`ProcessStartInfo.ArgumentList`](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.processstartinfo.argumentlist) - not the single-string `ProcessStartInfo.Arguments` - should do all that for us.\r\n\r\n\r\n\r\n",
+      "created_at": "2019-11-08T20:52:16Z",
+      "updated_at": "2019-11-08T20:55:59Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Unfortunately, some bad news.  Use of `ArgumentList` makes this a breaking change.  Previously, you could do something like:\r\n\r\n```powershell\r\nstart-process ping -argumentlist \"-n 2 localhost\"\r\n```\r\n\r\nBut this becomes:\r\n\r\n```\r\nping \"-n 2 localhost\"\r\n```\r\n\r\nThis means I can't rely on `ArgumentList`.  Since the current code simply joins all elements of `ArgumentList` into a single string separated by a space, there is no way to determine what the user intended so I can't arbitrarily add quotes.  Seems like the only way to solve this in a non-breaking manner is to introduce a new parameter that is strictly treated as an array of arguments.  It's unfortunate that the current parameter is called `ArgumentList`.\r\n\r\nOn the topic of:\r\n\r\n```powershell\r\nStart-Process -Wait -NoNewWindow pwsh -ArgumentList '-noprofile', '-command', '\"Hi!\"'\r\n```\r\n\r\nAgain, this becomes:\r\n\r\n```\r\npwsh -noprofile -command \"Hi!\"\r\n```\r\n\r\nWe could double escape the quotes to get the desired behavior, but seems like something else will be broken.",
+      "created_at": "2019-11-08T21:33:30Z",
+      "updated_at": "2019-11-08T21:53:44Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "From a pure UX perspective, I think it would be much better to have `-ArgumentList` be strictly an actual **list** of arguments (so, it would map directly to `ArgumentList` in the code), and then introduce an additional parameter that mimics legacy behaviour.\r\n\r\nYes, it would break something, but given the difficulty of using the current behaviour correctly... I think we're rather better off breaking it here. \ud83d\ude15 ",
+      "created_at": "2019-11-09T03:19:07Z",
+      "updated_at": "2019-11-09T03:19:07Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Although I wish the parameter behaviour was better, I agree with Steve, that we cannot make a breaking change in such an important cmdlet because it is the foundation of a lot of code and use cases are quite often very generic. A classic example is the software of CI agents that needs to spawn processes, this software usually delegates some of its work from .net/java/C++ to something simpler like node/python/powershell for doing that. Because this piece of software is implicitly used by other users, it is not known how users will call into it and implicitly break peoples build or release pipelines.\r\nThe change will need to be in a non-breaking way or at least have some way to opt back into legacy behaviour.",
+      "created_at": "2019-11-09T16:28:49Z",
+      "updated_at": "2019-11-09T16:28:49Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It's way too likely people are doing:\r\n\r\n```powershell\r\nstart-process ping -argumentlist \"-n\",2,\"localhost\"\r\nstart-process ping -argumentlist \"-n 2\",\"localhost\"\r\nstart-process ping -argumentlist \"-n 2 localhost\"\r\n```\r\n\r\nwhere all 3 have the same behavior today since it's a simple concatenation with whitespace in between.  This is apparent to me looking at the test failures in my attempt to use `ProcessStartInfo.ArgumentList` that our tests do this.  Maybe `-LiteralArgumentList` is ok.",
+      "created_at": "2019-11-09T17:56:11Z",
+      "updated_at": "2019-11-09T17:56:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good points, @SteveL-MSFT  and @bergmeister, as much as I wish we could go with @vexx32's suggestion.\r\n\r\nIt does seem like a new parameter is the only non-breaking solution, but, to better reflect the distinction, I propose the following names\r\n\r\n* `-IndividualArguments` \r\n* alias `-iArgs` \r\n\r\nAdditionally, we could consider renaming `-ArgumentList` to `-Arguments`, making the former an alias of the latter, and highlighting the latter in the help topic (the `-Args` alias luckily already has the better name).\r\n\r\n",
+      "created_at": "2019-11-09T18:22:38Z",
+      "updated_at": "2019-11-09T18:22:38Z"
+    },
+    {
+      "author": "felixfbecker",
+      "author_association": "CONTRIBUTOR",
+      "body": "It's also not just `Start-Process`, argument splatting is also affected. I recently had this problem where I was calling a utility on macOS like `foo @bar`. One would expect this to call `foo` with exactly the array `$bar` as arguments, instead it joins the array into a string, then splits the string by spaces and passes that array as arguments. This broke the tool whenever I wanted to pass a string as first parameter that contained a space.\r\n\r\nA different parameter for `Start-Process` would not solve this usage, and it would be really annoying if we basically have to tell macOS and Linux users they cannot rely on calling commands directly and always need to use `Start-Process`.\r\n\r\nAlso related: #1995",
+      "created_at": "2019-11-15T16:52:16Z",
+      "updated_at": "2019-11-15T16:55:48Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@felixfbecker that's a different issue than this one, can you open a new issue or see if there is an existing one for that?",
+      "created_at": "2019-11-15T17:19:54Z",
+      "updated_at": "2019-11-15T17:19:54Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That seems like the same problem with #1995 (or at least the same possible fix, anyway).",
+      "created_at": "2019-11-15T17:33:29Z",
+      "updated_at": "2019-11-15T17:33:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I agree that splatting is incidental to the issue and that it comes down to #1995:\r\n\r\nAssume a `de.exe` executable that prints the full command line with which it is invoked:\r\n\r\n```powershell\r\nPS> de.exe '\"hi there\"' \r\n\"c:\\path\\to\\de.exe\" \"hi there\"   # broken: embedded \" weren't preserved\r\n\r\n# Ditto with splatting  (or direct passing of $a)\r\nPS> $a = , '\"hi there\"'; de.exe @a  \r\n\"c:\\path\\to\\de.exe\" \"hi there\"\r\n```\r\n\r\nYes, passing arguments with embedded double quotes is fundamentally broken, and always has been - because of existing workarounds, it's a problem to fix it now without breaking lots of code.\r\n\r\n@felixfbecker, please start reading at https://github.com/PowerShell/PowerShell/issues/1995#issuecomment-552223508 for the current state of the debate.\r\n\r\n",
+      "created_at": "2019-11-15T18:21:23Z",
+      "updated_at": "2019-11-15T18:21:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Since #1995 is still a big question, we definitely need to resolve the issue with Start-Process in the 7.1 milestone.\r\n\r\nI believe we can add a new `-Arguments` parameter. Internally, it will use `ProcessStartInfo.ArgumentList`, but this internal implementation is invisible to users and should not confuse them.\r\n\r\nAs option, we could rename (with alias) `ArgumentList` to `ArgumentString`.",
+      "created_at": "2020-07-30T11:27:34Z",
+      "updated_at": "2020-07-30T11:34:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "While I definitely welcome a fix for this, note that fixing `Start-Process` is no substitute for fixing #1995, given that `Start-Process` serves a different purpose than direct invocation, and notably isn't integrated with PowerShell's output streams - \r\nit is #1995 that needs urgent attention; you can work around the `Start-Process` bug at hand by supplying a _single_ string containing all arguments, with embedded `\"`-quoting.\r\n\r\nI like the idea of renaming (aliasing) to `ArgumentString`.\r\n\r\nAs for naming the new parameter  `-Arguments`, I see two problems:\r\n\r\n* We also need to think about a short parameter alias that parallels `-Args` - what would that be for `-Arguments`?\r\n\r\n* While PowerShell in general needn't mirror the underlying .NET APIs, I find it problematic that the semantics in this case would be the _exact opposite_ of the underlying .NET API's.\r\n\r\n`-IndividualArguments` / `-iArgs` solves / mitigates these problems. [_update_: see the tab-completion-friendlier alternative [ below](https://github.com/PowerShell/PowerShell/issues/5576#issuecomment-666566501)]\r\n\r\n---\r\n\r\nOne more thing we could do to avoid confusion, to complement the renaming to `-ArgumentString`:\r\n\r\n* Change the `-ArgumentList` parameter type to `string`, so that the syntax diagram and the documentation can suggest that only a _single string with all arguments_ should be passed.\r\n\r\n* So as not to break backward compatibility, decorate the re-typed parameter with a transformation attribute that stringifies an array argument by joining its elements with spaces - which is effectively what happens behind the scenes at the moment; something along the following lines (in the real implementation, existing internal helper methods and error messages would need to be used):\r\n\r\n```c#\r\n    public class StringArrayToScalarTransformationAttribute : ArgumentTransformationAttribute {\r\n      public override object Transform(EngineIntrinsics engineIntrinsics, object inputData) {\r\n        return inputData switch {\r\n          Array a => string.Join(' ', (object[]) inputData),\r\n          object o when o is IEnumerable && !(o is IDictionary) => throw new ArgumentException(\"Input type not supported.\"),\r\n          _ => inputData\r\n        };\r\n      }\r\n    }\r\n```\r\n\r\n",
+      "created_at": "2020-07-30T15:00:55Z",
+      "updated_at": "2020-07-30T18:07:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think it is better to avoid unneeded complicity - best is the enemy of good.\r\n\r\n> We also need to think about a short parameter alias that parallels -Args - what would that be for -Arguments?\r\n\r\nWith IntelliSense and tab-completion it is minor.\r\n\r\n> While PowerShell in general needn't mirror the underlying .NET APIs, I find it problematic that the semantics in this case would be the exact opposite of the underlying .NET API's\r\n\r\nYes, PowerShell users do not see and don't think about  underlying .NET API's. For developers we add docs and comments too.\r\n\r\nIf we blog post and enhance PSSA to recommend the new parameter I believe user adaptation will be easy. \r\n",
+      "created_at": "2020-07-30T16:29:55Z",
+      "updated_at": "2020-07-30T16:29:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @SteveL-MSFT @daxian-dbw for PowerShell Committee review.",
+      "created_at": "2020-07-30T16:30:51Z",
+      "updated_at": "2020-07-30T16:30:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\n> better to avoid unneeded complicity\r\n\r\nWhat unneeded complexity? If you're referring to re-typing `-ArgumentList` to `string`, there is minor implementation complexity and no added complexity to end users - on the contrary, it makes things clearer for them.\r\n\r\n> With IntelliSense and tab-completion it is minor.\r\n\r\nWe want go give power users an official short alias, irrespective of tab-completion, just like we do with `-Args` for `-ArgumentList`.\r\n\r\n> add docs and comments too.\r\n\r\nDocs, blog posts, and comments are only part of the puzzle: the parameter names themselves shouldn't be counterintuitive:\r\n\r\nWe can't fix the `-ArgumentList` / `-Args` name anymore (except to de-emphasize `-ArgumentList` in favor of\r\n`-ArgumentString`), but we can be more descriptive in the _new_ parameter's name:\r\n\r\n`-Arguments` is ambiguous, `-IndividualArguments` is not [_update_: see the tab-completion-friendlier alternative [ below](https://github.com/PowerShell/PowerShell/issues/5576#issuecomment-666566501)]\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-07-30T16:41:47Z",
+      "updated_at": "2020-07-30T18:10:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "With tab completion `Arguments` is more discoverable and more easy for adoption. Everything else does not make sense until the user reads the parameter description.\r\n",
+      "created_at": "2020-07-30T17:30:55Z",
+      "updated_at": "2020-07-30T17:30:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "If your concern is that `-IndividualArguments` doesn't start with the word \"Argument\" - a good point - here's another option:\r\n\r\n`-ArgumentArray` / `-Arga` \r\n\r\nNote that the `s` in the existing `-Args` alias can then be interpreted as referring to the \"String\" part of the renamed\r\n`-ArgumentString` (we could capitalize the final letter for clarity without breaking anyone).\r\n\r\nHere's a quick proof of concept:\r\n\r\n```powershell\r\nAdd-Type @'\r\n    using System;\r\n    using System.Management.Automation;\r\n\r\n    [Cmdlet(\"Start\", \"Process\", DefaultParameterSetName = \"ArgString\")]\r\n    public class StartProcessCommand : PSCmdlet {\r\n\r\n        [Parameter(Position = 0)]\r\n        public string FilePath { get; set; }\r\n\r\n        [Parameter(ParameterSetName = \"ArgArray\", Position = 1)]\r\n        [Alias(\"Arga\")]\r\n        public string[] ArgumentArray { get; set; }\r\n\r\n        [Parameter(ParameterSetName = \"ArgString\", Position = 1)]\r\n        [Alias(\"Args\", \"ArgumentList\")]\r\n        // string-array-to-string-scalar transformation attribute would go here.\r\n        public string ArgumentString { get; set; }\r\n\r\n        protected override void ProcessRecord() {\r\n          WriteObject(ParameterSetName);\r\n        }\r\n    }\r\n'@ -PassThru | % Assembly | Import-Module\r\n```\r\n\r\nTyping `Start-Process foo -a<tab>` then cycles through the parameters in the following order:\r\n`-ArgumentArray`, `-Arga`, `-ArgumentString`, `-Args`,  and, finally, the de-emphasized original parameter name,\r\n`-ArgumentList`.\r\n\r\nThat is, we would correctly prioritize the new parameter.\r\n\r\nSadly, the _positional_ use of the arguments parameter must continue to default to `-ArgumentList` (`-ArgumentString`), so as not to break existing code.\r\n",
+      "created_at": "2020-07-30T18:00:07Z",
+      "updated_at": "2020-07-30T18:13:51Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee need to review a new proposed parameter to accept an array of args passed as an array of args",
+      "created_at": "2020-07-30T22:44:40Z",
+      "updated_at": "2020-07-30T22:44:40Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, we would prefer to have a switch rather than a new parameter that changes the behavior to `-ArgumentList` rather than cause confusion to users between `-ArgumentList` vs `-ArgumentArray`.  However, we couldn't come up with a good switch name to describe the behavior to the user without being overly verbose so open to any suggestions.",
+      "created_at": "2020-09-16T22:53:05Z",
+      "updated_at": "2020-09-16T22:53:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "New behavior is a preferred behavior so the new switch looks like an extra parameter in scripts. \r\nHow are we going to get rid of it after the transition period? Maybe revert the switch logic? For backward compatibility users could add the switch.\r\nAlthough I would just prefer the new parameter ArgumentArray. I don't think that it will confuse users if we explicitly say in helps that user should use ArgumentArray instead of ArgumentList.\r\n",
+      "created_at": "2020-09-17T04:16:27Z",
+      "updated_at": "2020-09-17T04:16:27Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "The path through a new parameter rather than a switch seems clearer to me:\r\n\r\n- Add a new parameter `ArgumentArray` (or `Arguments`, or whatever) with a separate parameter set\r\n- Positional binding continues to be the old parameter\r\n- In a later PowerShell version we make the breaking change to make the positional argument refer to the new parameter",
+      "created_at": "2020-09-17T17:47:44Z",
+      "updated_at": "2020-09-17T17:47:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I also think that a new switch is the wrong way to go.\r\n\r\nNote that the feared name confusion could be minimized based on the [above proposal](https://github.com/PowerShell/PowerShell/issues/5576#issuecomment-666566501): rename `-ArgumentList` to\r\n`-ArgumentString` and make `-ArgumentList` an _alias_ for it, for _programmatic_ backward compatibility.\r\n\r\nWith the renamed parameter, the syntax diagram would then only show `-ArgumentString`, which can be documented as such.\r\n\r\n",
+      "created_at": "2020-09-17T18:07:24Z",
+      "updated_at": "2020-09-17T18:07:34Z"
+    },
+    {
+      "author": "Artoria2e5",
+      "author_association": "NONE",
+      "body": "The new parameter thing sounda good to me. Adding it to my PR to reduce the scope of that experimental switch.",
+      "created_at": "2020-09-19T09:44:54Z",
+      "updated_at": "2020-09-19T09:44:54Z"
+    },
+    {
+      "author": "trivalik",
+      "author_association": "NONE",
+      "body": "In my scripts I use\r\n`powershell Start regsvr32.exe -ArgumentList '\\\"C:\\Some Path With Spaces\\file.ocx\\\"','/s'`\r\nto preserve quotes. Not sure what here the problem.\r\n\r\nThe only issue I have is that `powershell Start` not return values.",
+      "created_at": "2021-03-30T11:45:17Z",
+      "updated_at": "2021-03-30T12:10:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The only issue I have is that powershell Start not return values.\r\n\r\nTo get direct results, do _not_ use `Start-Process` - use _direct invocation_ instead:\r\n`regsvr32.exe -ArgumentList 'C:\\Some Path With Spaces\\file.ocx' /s` or, in the context of a CLI call: \r\n`powershell -c  \"regsvr32.exe 'C:\\Some Path With Spaces\\file.ocx' /s\"`- see https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6239\r\n\r\nYour command is an example of a _workaround_, which _shouldn't be necessary_: Leaving the extra layer of `\"` escaping required due to the use of PowerShell's _CLI_ out of the picture, your command amounts to:\r\n\r\n```powershell\r\nStart-Process regsvr32.exe -ArgumentList '\"C:\\Some Path With Spaces\\file.ocx\"', '/s'\r\n```\r\n\r\nThis _embedded_ double-quoting shouldn't be necessary, because `Start-Process` should perform all necessary quoting automatically, behind the scenes, when it assembles the _single-string_ argument list for the target process (of necessity, on Windows). That is, you should be able to simply call:\r\n\r\n```powershell\r\nStart-Process regsvr32.exe -ArgumentList 'C:\\Some Path With Spaces\\file.ocx', '/s'\r\n```\r\nThat is, all you should have to focus on is to satisfy PowerShell's _own_ syntax requirements.\r\n\r\nIf we changed the behavior of `-ArgumentList` this way, existing workarounds such as yours would break.\r\nHence the need for a _new_ parameter (and _not_ fixing the current, broken behavior doesn't seem like a satisfactory solution to me).\r\n\r\n",
+      "created_at": "2021-03-30T13:45:01Z",
+      "updated_at": "2021-03-30T13:45:01Z"
+    },
+    {
+      "author": "trivalik",
+      "author_association": "NONE",
+      "body": "There are ways:\r\n- use a environment variable to opt out the new behavior\r\n- add workaround by checking first or in whole string that 2 characters are \\\"  then use old behavior\r\n\r\nAnyway I am for a break. If this break where already 3 years in past, probably nobody would complain now.\r\n\r\nThanks for you tip, but I need to elevate the process. Would be good if return value would work if `-Wait` is used.",
+      "created_at": "2021-03-31T06:05:50Z",
+      "updated_at": "2021-03-31T06:13:49Z"
+    },
+    {
+      "author": "ringerc",
+      "author_association": "NONE",
+      "body": "The underlying issue here has been improved somewhat in Powershell 7.2 by the experimental `PSNativeCommandArgumentPassing` feature, which makes the `&` command preserve quoting. See https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_automatic_variables?view=powershell-7.2#psnativecommandargumentpassing \r\n\r\nUnfortunately it does *not* affect `Start-Process`, which retains its `-ArgumentList` string-splatting.\r\n\r\nIt's a real shame that `Start-Process` was not updated along with `&` to respect `$PSNativeCommandArgumentPassing`. Example:\r\n\r\n```\r\n#!pwsh\r\n#Requires -Version 7.0.0\r\nSet-StrictMode -version 3\r\n$ErrorActionPreference = \"Stop\"\r\n$VerbosePreference = \"Continue\"\r\n\r\n# Make sure sane command passing is available, force shell restart if not\r\nif (-Not (Get-ExperimentalFeature -Name PSNativeCommandArgumentPassing).Enabled) {\r\n        Write-Error \"run `\"Enable-ExperimentalFeature -Name PSNativeCommandArgumentPassing`\" and retry\"\r\n        exit 1\r\n}\r\n\r\n# Make \"&\" preserve quoting (but not unfortunately StartProcess -ArgumentList)\r\n$PSNativeCommandArgumentPassing = \"Standard\"\r\n\r\n# Works but we have to enable an experimental feature first, and it doesn't\r\n# seem to be possible to enable it within the same shell that uses it...\r\nWrite-Output \"& with PSNativeCommandArgumentPassing=Standard\"\r\n&\"printf\" \"%s\\n\" \"arg1\" \"arg2 with spaces\" \"arg3 `\"with quotes`\" in it\" \"arg4 `${metachars:?shellexec} embedded\"\r\n\r\n# Still doesn't work. Sigh.\r\nWrite-Output \"`nStart-Process -ArgumentList\"\r\nStart-Process -FilePath \"printf\" -ArgumentList @(\"%s\\n\", \"arg1\", \"arg2 with spaces\", \"arg3 `\"with quotes`\" in it\", \"arg4 `${metachars:?shellexec} embedded\") -Wait -Passthru\r\n```\r\n\r\noutput:\r\n\r\n```\r\n& with PSNativeCommandArgumentPassing=Standard\r\narg1\r\narg2 with spaces\r\narg3 \"with quotes\" in it\r\narg4 ${metachars:?shellexec} embedded\r\n\r\nStart-Process -ArgumentList\r\narg1\r\narg2\r\nwith\r\nspaces\r\narg3\r\nwith quotes\r\nin\r\nit\r\narg4\r\n${metachars:?shellexec}\r\nembedded\r\n```\r\n\r\nGiven that, it seems an `-ArgumentVector` or similar is still needed.",
+      "created_at": "2022-05-16T04:43:00Z",
+      "updated_at": "2022-05-16T04:56:57Z"
+    },
+    {
+      "author": "jredfox",
+      "author_association": "NONE",
+      "body": "confirmed I tried 20 variations of this. it simply starts power shell and then closes instantly\r\n```\r\nstart-process powershell -ArgumentList \"`\"C:\\Users\\jredfox\\Desktop\\script s.ps1`\"\"\r\n```\r\nthe ps script which runs just fine using the powershell ide thing. but it's useless if I can't call it from a program to create a new powershell with UI and then start the script\r\n```\r\nStart-Process java -ArgumentList '-jar', 'C:\\Users\\jredfox\\Desktop\\Apps\\launcher-1.09_15.jar' -NoNewWindow\r\n````\r\n\r\nand the jar is found on betacraft.uk but is reproducible with any java application with a UI",
+      "created_at": "2022-05-20T01:44:48Z",
+      "updated_at": "2022-05-20T01:51:52Z"
+    },
+    {
+      "author": "jredfox",
+      "author_association": "NONE",
+      "body": "also calling it straight from java with powershell.exe /c needing to specify which exe to process the command the rest works in the powershell UI but not from java. if you were able to get the same characters from cmd you could also reproduce. powershell is broken for the start-process and maybe in general\r\n```java\r\n\t\tProcessBuilder pb = new ProcessBuilder(new String[]\r\n\t\t\t\t{\r\n\t\t\t\t\t\t\"powershell\",\r\n\t\t\t\t\t\t\"/c\",\r\n\t\t\t\t\t\t\"start-process\",\r\n\t\t\t\t\t\t\"powershell\",\r\n\t\t\t\t\t\t\"-ArgumentList\",\r\n\t\t\t\t\t\t\"'-File',\",\r\n\t\t\t\t\t\t\"'\\\"C:/Users/jredfox/Desktop/spacing test.ps1\\\"',\",\r\n\t\t\t\t\t\t\"'-ExecutionPolicy',\",\r\n\t\t\t\t\t\t\"'Bypass'\",\r\n\t\t\t\t\t\t\"-NoNewWindow\"\r\n\t\t\t\t}).inheritIO();\r\n\t\tProcess p = pb.start();\r\n\t\twhile(p.isAlive());\r\n\t\tfor(String s : pb.command())\r\n\t\t\tSystem.out.print(s + \" \");\r\n```",
+      "created_at": "2022-05-20T20:19:00Z",
+      "updated_at": "2022-05-20T20:19:18Z"
+    },
+    {
+      "author": "ringerc",
+      "author_association": "NONE",
+      "body": "@jredfox The backstory here is that Windows itself has absolutely insane command-line handling. See this classic 2011 blog, which still describes the state of the art for the Win32 API: https://docs.microsoft.com/en-us/archive/blogs/twistylittlepassagesallalike/everyone-quotes-command-line-arguments-the-wrong-way \r\n\r\nThis makes it very hard for Powershell to do the right thing in a general purpose way, so they just punted on the problem entirely, like the underlying .NET process creation calls did.\r\n\r\nThe pwsh 7.2 experimental feature I linked to above improves this for \"bare\" command invocation and for the \"&\" operator, but has no effect on `Start-Process`, so you cannot benefit from it in places where you want the control offered by `Start-Process`.\n\n<blockquote><div><strong><a href=\"https://docs.microsoft.com/en-us/archive/blogs/twistylittlepassagesallalike/everyone-quotes-command-line-arguments-the-wrong-way\">Everyone quotes command line arguments the wrong way</a></strong></div></blockquote>",
+      "created_at": "2022-05-23T04:49:06Z",
+      "updated_at": "2022-05-23T04:49:08Z"
+    }
+  ],
+  "created_at": "2017-11-29T15:48:38Z",
+  "number": 5576,
+  "state": "open",
+  "title": "Start-Process doesn't pass arguments with embedded whitespace and double quotes correctly",
+  "updated_at": "2022-05-23T04:49:08Z"
+}

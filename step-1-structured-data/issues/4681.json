@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4681",
+  "author": "mklement0",
+  "body": "BOM-less UTF-8 character encoding [is coming as the default for PowerShell Core on all platforms](https://github.com/PowerShell/PowerShell-RFC/issues/71#issuecomment-306614751).\r\n\r\nTwo attendant changes are required:\r\n\r\n* Preference variable `$OutputEncoding`, which currently defaults to ASCII, must default to `[System.Text.UTF8Encoding]::new()` (UTF-8 with no BOM), or, perhaps preferably, _not_ predefine this variable and default to that encoding (the internally used default) in its absence.\r\n\r\n  * `$OutputEncoding` tells PowerShell what character encoding to use when sending output _to_ external utilities.\r\n\r\n* Console / terminal character encoding:\r\n\r\n  * On _Windows_, `[Console]::InputEncoding` and `[Console]::OutputEncoding` must both be set to `[System.Text.UTF8Encoding]::new()`, which is the equivalent of configuring a console window to use code page `65001` (UTF-8) or executing `chcp 65001` _before_ PowerShell is launched.\r\n\r\n    * `[Console]::OutputEncoding` tells PowerShell what encoding to assume when reading output _from_ external utilities.\r\n\r\n    * On Windows, the Start Menu shortcut that is created during installation should be preconfigured to open a console window with code page `65001`.\r\n\r\n      * Conceivably, PowerShell should _automatically_ switch to the `65001` code page in case it is launched from a console window with a different active code page (such as from `cmd.exe`), though it is worth noting that this change in encoding by default remains in effect until the window is closed (even after exiting PowerShell and returning to `cmd.exe`; perhaps a warning could be issued on startup).\r\n\r\n  * On _Unix_ platforms with UTF-8-based locales, which are the norm these days, no action is required.\r\n\r\n     * To be determined: How should the rare event of being invoked from a terminal with a different active character encoding be handled? Changing the encoding on the fly, as on Windows, is not guaranteed to work. Perhaps a warning on startup is sufficient.\r\n\r\n---\r\n\r\nBefore the above is implemented, the **interim workaround** to make a console window / terminal use UTF-8 consistently is the following command:\r\n\r\n```powershell\r\n$OutputEncoding = [console]::InputEncoding = [console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\r\n\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.6\r\n```\r\n",
+  "closed_at": "2017-11-07T22:49:53Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is already addressed in https://github.com/PowerShell/PowerShell/pull/4119",
+      "created_at": "2017-08-28T05:59:15Z",
+      "updated_at": "2017-08-28T05:59:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov, good to see how far the work has progressed.\r\n\r\nHowever, as far as I can tell, #4119 addresses neither of the two issues raised here (which is why I called them _attendant_ changes).\r\n",
+      "created_at": "2017-08-28T14:19:09Z",
+      "updated_at": "2017-08-28T14:19:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "4119 was closed w/o merge - We are waiting new PR.",
+      "created_at": "2017-08-29T06:47:15Z",
+      "updated_at": "2017-08-29T06:47:15Z"
+    },
+    {
+      "author": "muzzar78",
+      "author_association": "NONE",
+      "body": "I noticed a difference between PS 5.1 and PS core 6 beta 7 using get-content and the -raw switch with a file that ended with a LF. In 5.1 the LF was read as part of the string and was the last character in my variable, where as in 6beta7 the LF was stripped. Is this by design? If I used \"-encoding binary\" then both 5.1 and 6 read the LF. This may cause some issues.",
+      "created_at": "2017-10-02T13:21:08Z",
+      "updated_at": "2017-10-02T13:21:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "`raw` should be raw including the EOL.  Seems like a bug to me.",
+      "created_at": "2017-10-02T22:28:46Z",
+      "updated_at": "2017-10-02T22:28:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: Indeed; please see #4980",
+      "created_at": "2017-10-03T02:18:23Z",
+      "updated_at": "2017-10-03T02:18:23Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "I'm not sure that setting outputEncoding to utf8 w/o bom is correct, at least on some platforms. Here's an example, from my MacBook; I have a compressed tar archive, which I would love to unspool as:\r\n`gc a.tgz | gunzip | tar xvf -`\r\n\r\nsetting `$outputEncoding` to utf8nobom doesn't do the trick:\r\n```powershell\r\nPS> $outputEncoding = $utf8                                                                                                                 \r\nPS> gc -raw f.tgz | gunzip | tar tfv -\r\ngunzip: unknown compression format\r\n```\r\nIt turns out there's a couple of problems;\r\nfirst when we read the content, we break up the output into lines, but I can fix that with `-raw`, but that still doesn't work. However, if I read the file and set `$outputEncoding` with encoding set to `iso-8859-1`, _viola_ it works (sort of)!\r\n```powershell\r\nPS> $outputEncoding = $enc\r\nPS> gc -raw -encoding $enc f.tgz | gunzip | tar tvf -                                                                                       \r\ngunzip: (stdin): trailing garbage ignored\r\n-rw-r--r--  0 james  wheel       2 Oct 31 12:39 1.txt\r\n-rw-r--r--  0 james  wheel       2 Oct 31 12:36 2.txt\r\n-rw-r--r--  0 james  wheel       2 Oct 31 12:36 3.txt\r\n...\r\n```\r\n\r\nThe last problem is that we seem to tack on [environment]::newline to whatever we push down the pipe (which is causing gunzip to complain about the trailing garbage).\r\n",
+      "created_at": "2017-10-31T20:06:19Z",
+      "updated_at": "2017-10-31T20:06:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@JamesWTruher: \r\n\r\n`$OutputEncoding` should only ever apply when sending _text_ to external utilities.\r\n\r\nThe real problem here - a separate issue - is that _PowerShell knows ONLY text_; it lacks support for passing _binary data_ through the pipeline.\r\n\r\n`Get-Content` is designed for reading _text_ files and `-Raw` makes matters worse in this case by reading the entire file _at once_.\r\n(I always thought `-Raw` was an unfortunate name for what this switch does.)\r\n\r\nWhile you might _think_ that something like  \r\n`Get-Content -AsByteStream f.tgz | gunzip | tar tfv -`  \r\nwould work, in reality PowerShell sends the _textual, decimal representations_ of the byte values through the pipeline.\r\n\r\nContrast that with Unix utility `cat`, which simply copies raw bytes from stdin to stdout - it has no concept of encoding.\r\n\r\nA \"binary pipeline\" ~~has apparently [partially been implemented - namely for direct external-utility-to-external-utility piping](https://github.com/PowerShell/PowerShell/issues?utf8=%E2%9C%93&q=is%3Aissue%20is%3Aopen%20binary%20pipeline#issuecomment-246429398)~~ [_update_: seemingly not, as of v6.2.0_] - but AFAIK there's currently still no way to send binary data _from a PowerShell command_ through the pipeline in raw binary format.\r\n\r\n\r\n",
+      "created_at": "2017-11-01T02:12:07Z",
+      "updated_at": "2019-04-26T15:33:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can we detect `-AsByteStream` and then consider  \"cmdlet | utility\" as binary pipeline?",
+      "created_at": "2017-11-01T05:07:10Z",
+      "updated_at": "2017-11-01T05:07:10Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "@mklement0 \r\na byte stream can be considered as a stream of characters. It is the dotnet coercion into an encoded string which is the issue, which is why my selection of iso-8859-1 works - it does not change the representation of bytes (in the case of unicode padded 0, or up to 5(!) bytes in the case of utf7)\r\n\r\nAt the base of all of this is that the method used to read the data from the process (in corefx) is rendered to a string, which means we need to find an encoding which does not alter the individual characters (as does utf8/unicode, etc) but pass them through unmolested as does iso-8859-1\r\n\r\nThe selection of iso-8859-1 as `$OutputEncoding` does what you are looking for, which is why my example as described works. I can get the contents of file in powershell and pipe it to native executables without issue - A binary pipeline",
+      "created_at": "2017-11-01T17:36:54Z",
+      "updated_at": "2017-11-01T17:36:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: I like the idea.",
+      "created_at": "2017-11-02T02:04:33Z",
+      "updated_at": "2017-11-02T02:04:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@JamesWTruher \r\n\r\n> if iso-8859-1 works - it does not change the representation of bytes\r\n\r\nYes, it does change the representation, you just have to find the right characters:\r\n\r\n```powershell\r\n> $outputEncoding = [System.Text.Encoding]::GetEncoding('iso-8859-1')\r\n> '\u20ac' | cat\r\n?\r\n> '\u20ac' | grep '\u20ac'  # no output\r\n```\r\n\r\n`\u20ac` has no representation in  iso-8859-1 (it is outside the 8-bit range in Unicode), so it gets transliterated to a literal `?`.\r\n\r\nNow let's try with UTF-8:\r\n\r\n```powershell\r\n> $outputEncoding = [System.Text.UTF8Encoding]::new()\r\n> '\u20ac' | cat\r\n\u20ac\r\n> '\u20ac' | grep '\u20ac'\r\n\u20ac\r\n```\r\nVoila: the UTF-16LE representation of `\u20ac` was correctly translated into its UTF-8 representation.\r\n\r\nThat's why when it comes to _text_, UTF-8 is the right default value for `$OutputEncoding`.\r\n\r\n---\r\n\r\nWhen _binary_ output is desired, by contrast, there is _no reason to bring character encodings into the picture at all_. \r\n\r\n`Get-Content -AsByteStream` is the closest thing we have to bypassing as-string processing, but you cannot send this byte stream through the pipeline as-is, as stated.\r\n\r\n@iSazonov's suggestion is promising, but I wonder if it goes far enough; there may be other cases where passing raw bytes through the pipeline _from PowerShell_ is needed.\r\n\r\n",
+      "created_at": "2017-11-02T02:18:02Z",
+      "updated_at": "2017-11-02T02:22:38Z"
+    },
+    {
+      "author": "stknohg",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hi.\r\nWe also need to think about non-English langauage, for example CJK.\r\n\r\n```powershell\r\n# PowerShell 6.0 Beta.9 on CentOS 7.4\r\nPS /> $outputEncoding = [System.Text.Encoding]::GetEncoding('iso-8859-1')\r\nPS /> '\u3053\u3093\u306b\u3061\u306f\u4e16\u754c' | cat\r\n???????\r\nPS /> $outputEncoding = [System.Text.UTF8Encoding]::new()\r\nPS /> '\u3053\u3093\u306b\u3061\u306f\u4e16\u754c' | cat\r\n\u3053\u3093\u306b\u3061\u306f\u4e16\u754c\r\n```\r\n\r\nI think `$OutputEncoding` should be same as `[Console]::OutputEncoding`.  \r\nFrom CoreFx sources, `[Console]::OutputEncoding` is UTF-8 on [Unix](https://github.com/dotnet/corefx/blob/v2.0.0/src/System.Console/src/System/ConsolePal.Unix.cs#L464-L468).\r\n`[Console]::OutputEncoding` depends on `GetConsoleOutputCP()` function on [Windows](https://github.com/dotnet/corefx/blob/v2.0.0/src/System.Console/src/System/ConsolePal.Windows.cs#L104-L107).",
+      "created_at": "2017-11-07T03:47:23Z",
+      "updated_at": "2017-11-07T03:47:23Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "with outputEncoding set in this way, the following scenario will not work\r\n`get-content archive.tgz | gunzip | tar xvf -`\r\n",
+      "created_at": "2017-11-07T18:47:55Z",
+      "updated_at": "2017-11-07T18:47:55Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@JamesWTruher understood, I think it's ok for 6.0.0 since that never worked correctly",
+      "created_at": "2017-11-07T18:56:45Z",
+      "updated_at": "2017-11-07T18:56:45Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Close via #5369",
+      "created_at": "2017-11-07T22:49:53Z",
+      "updated_at": "2017-11-07T22:49:53Z"
+    }
+  ],
+  "created_at": "2017-08-27T03:32:38Z",
+  "number": 4681,
+  "state": "closed",
+  "title": "Prepare for BOM-less UTF-8 default character encoding with respect to $OutputEncoding and console code page",
+  "updated_at": "2019-04-26T15:33:01Z"
+}

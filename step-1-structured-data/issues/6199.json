@@ -1,0 +1,251 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6199",
+  "author": "KarlGW",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\nQuick explanation, when describing it as slow and uses a lot of memory, I'm comparing `Invoke-RestMethod` from Windows PowerShell 5.1 with `Invoke-RestMethod` in PowerShell 6.0.1.\r\n\r\nI'm running the below snippt inside a function in my module:\r\n\r\n```\r\nwhile ($continue) {\r\n\r\n    $completed = $false\r\n    $retries = 0\r\n\r\n    # To retry until limit is reached.\r\n    while(-not $completed) {\r\n\r\n        try {\r\n            Write-Verbose \"Calling $uri\"\r\n            $call = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -Verbose:$false\r\n            $data += $call.data\r\n            $completed = $true\r\n        } catch {\r\n            if ($retries -ge $RetryCount) {\r\n                Write-Verbose \"API call failed after $retries retries.\"\r\n                $completed = $true\r\n            } else {\r\n                Write-Verbose \"API call failed. Retrying...\"\r\n                Start-Sleep -Milliseconds $RetryDelay\r\n                $retries++\r\n            }\r\n        }\r\n    }\r\n\r\n    if ([string]::IsNullOrEmpty($call.nextLink)) {\r\n        $continue = $false\r\n    } else {\r\n        $uri = $call.nextLink\r\n    }\t\r\n}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nExpected behaviour is that the same code snippet should take about the same time and memory usage when running.\r\n\r\nActual behavior\r\n---------------\r\n\r\nWhen running on Windows PowerShell the snippet takes about 4 minutes, and take about 1,5 GB RAM (some objects that are stored in memory to be transformed by another function).\r\n\r\nWith PowerShell 6.0.1 (both tried within a Docker Container, and with the `pwsh` executable locally). The snippet takes between 12-20 minutes, and RAM goes up to 4-5 GB.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.1\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\nIf any more information is needed, I can hopefully provide this.",
+  "closed_at": "2019-10-15T21:06:21Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "can you try your code without the extra stuff to eliminate other potential .NET Framework vs .NET Core differences?\r\n\r\nsomething simpler like this:\r\n\r\n```powershell\r\nMeasure-Command  {\r\n    $data = do {\r\n        $call = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -Verbose:$false\r\n        $uri = $call.nextLink\r\n        $call.data\r\n    } while ($uri) \r\n}\r\n```\r\n\r\n",
+      "created_at": "2018-02-20T13:33:11Z",
+      "updated_at": "2018-02-20T13:33:11Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "I ran your snippet (with the correct URIs of course):\r\n\r\n```\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 12\r\nSeconds           : 9\r\nMilliseconds      : 674\r\nTicks             : 7296743233\r\nTotalDays         : 0,00844530466782407\r\nTotalHours        : 0,202687312027778\r\nTotalMinutes      : 12,1612387216667\r\nTotalSeconds      : 729,6743233\r\nTotalMilliseconds : 729674,3233\r\n```\r\nIn 6.0.1.\r\n\r\nAnd for the case of comparison (5.1):\r\n\r\n```\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 3\r\nSeconds           : 16\r\nMilliseconds      : 401\r\nTicks             : 1964017691\r\nTotalDays         : 0,00227316862384259\r\nTotalHours        : 0,0545560469722222\r\nTotalMinutes      : 3,27336281833333\r\nTotalSeconds      : 196,4017691\r\nTotalMilliseconds : 196401,7691\r\n```\r\n\r\nAlso, 6.0.1 does not release the memory until I kill the process, or do a `[System.GC]::Collect()`.",
+      "created_at": "2018-02-20T14:02:33Z",
+      "updated_at": "2018-02-20T14:05:18Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Is the URI `localhost` by any chance (something like `http://localhost:8762/api/someendpoint`)? If so, there is a known issue with .NET Core and resolving localhost. Try switching it to `127.0.0.1` or `::1`. We ran into this in the tests inthe project and just switching to the IP brought the test runtimes down significantly.\r\n\r\nOn the memory usage, you can't really compare .NET Framework and .NET Core. The garbage collection works differently. Unless the memory is an issue (resource exhaustion), I wouldn't be concerned about the difference in ram usage between 5.1 and 6.0.1. ",
+      "created_at": "2018-02-20T14:22:43Z",
+      "updated_at": "2018-02-20T14:22:43Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "The URI is an external source, so not localhost.\r\n\r\nThe memory becomes somewhat of an issue if I'm running it inside a container in Docker, since it will kill the process. I can always increase the memory size of the container to mitigate that though.",
+      "created_at": "2018-02-20T14:25:05Z",
+      "updated_at": "2018-02-20T14:25:05Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": ".NET manages the memory for you so it should start garbage collection when it exhausts.\r\n\r\nWhat kind of data is being returned by the API? JSON, XML, plaint-text, binary?",
+      "created_at": "2018-02-20T14:29:19Z",
+      "updated_at": "2018-02-20T14:29:19Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "It returns it's data in JSON. In the form of\r\n```\r\n{\r\n    id: \"id\",\r\n    data: {\r\n        <more JSON with a lot of properties>\r\n    },\r\n    nextLink: <uri for next chunk of data>\r\n}\r\n```",
+      "created_at": "2018-02-20T14:34:02Z",
+      "updated_at": "2018-02-20T14:34:02Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Is it possible to share some details about the API? Perhaps some documentation and/or mocked/scrubbed JSON result? Everything I have tested shows 6.0.1 out-performing 5.1 in both time and memory consumption. So, I'm wondering if the slow down is in the JSON deserialization. That would be heavily dependent on the object shape but one change between 5.1 and 6.0.1 was the JSON engine.",
+      "created_at": "2018-02-20T15:02:55Z",
+      "updated_at": "2018-02-20T15:02:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We need live repo. Is the URI public?",
+      "created_at": "2018-02-20T15:05:13Z",
+      "updated_at": "2018-02-20T15:05:13Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "Yes, it's not our own API, but one provided by Microsoft.\r\n\r\nHere is a link to the documentation: https://docs.microsoft.com/en-us/rest/api/billing/enterprise/billing-enterprise-api-usage-detail\r\n\r\nThe JSON return is a bit down in the article. But I'll provide a mockup response (provided by the article) example below:\r\n\r\n```\r\n{\r\n    \"id\": \"string\",\r\n    \"data\": [\r\n        {                       \r\n        \"accountId\": 0,\r\n        \"productId\": 0,\r\n        \"resourceLocationId\": 0,\r\n        \"consumedServiceId\": 0,\r\n        \"departmentId\": 0,\r\n        \"accountOwnerEmail\": \"string\",\r\n        \"accountName\": \"string\",\r\n        \"serviceAdministratorId\": \"string\",\r\n        \"subscriptionId\": 0,\r\n        \"subscriptionGuid\": \"string\",\r\n        \"subscriptionName\": \"string\",\r\n        \"date\": \"2017-04-27T23:01:43.799Z\",\r\n        \"product\": \"string\",\r\n        \"meterId\": \"string\",\r\n        \"meterCategory\": \"string\",\r\n        \"meterSubCategory\": \"string\",\r\n        \"meterRegion\": \"string\",\r\n        \"meterName\": \"string\",\r\n        \"consumedQuantity\": 0,\r\n        \"resourceRate\": 0,\r\n        \"Cost\": 0,\r\n        \"resourceLocation\": \"string\",\r\n        \"consumedService\": \"string\",\r\n        \"instanceId\": \"string\",\r\n        \"serviceInfo1\": \"string\",\r\n        \"serviceInfo2\": \"string\",\r\n        \"additionalInfo\": \"string\",\r\n        \"tags\": \"string\",\r\n        \"storeServiceIdentifier\": \"string\",\r\n        \"departmentName\": \"string\",\r\n        \"costCenter\": \"string\",\r\n        \"unitOfMeasure\": \"string\",\r\n        \"resourceGroup\": \"string\"\r\n        }\r\n    ],\r\n    \"nextLink\": \"string\"\r\n}\r\n```",
+      "created_at": "2018-02-20T15:06:02Z",
+      "updated_at": "2018-02-20T15:10:10Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "@iSazonov unfortunately the API is not public, you need an enrollmentnumber and an API key.",
+      "created_at": "2018-02-20T15:08:40Z",
+      "updated_at": "2018-02-20T15:08:40Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "I did a test with `Invoke-WebRequest` and yes, you are correct, it's the part that converts the data to JSON that is significantly slower.",
+      "created_at": "2018-02-22T08:39:45Z",
+      "updated_at": "2018-02-22T08:39:45Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KarlGW In your test, did it include `ConvertFrom-Json`? ",
+      "created_at": "2018-02-22T09:07:44Z",
+      "updated_at": "2018-02-22T09:07:44Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "@markekraus Yes, in the tests after the mentioned one (first I only pulled the results), I put in a `ConvertFrom-Json` and time increased by a significant bit.",
+      "created_at": "2018-02-22T12:30:24Z",
+      "updated_at": "2018-02-22T12:30:24Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "OK. Do you have an estimate of the number of objects per page that API is returning? since it looks like the slowdown is in the JSON processing, We may be able to reproduce problem with the mockup.",
+      "created_at": "2018-02-22T22:19:36Z",
+      "updated_at": "2018-02-22T22:19:36Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "The API returns 1000 objects per page.",
+      "created_at": "2018-02-23T09:03:56Z",
+      "updated_at": "2018-02-23T09:03:56Z"
+    },
+    {
+      "author": "KarlGW",
+      "author_association": "NONE",
+      "body": "Any updates on this? I tried messing around a bit with it and comparing, and indeed seems to be with the JSON-processing.",
+      "created_at": "2018-04-18T12:12:48Z",
+      "updated_at": "2018-04-18T12:12:48Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "No Update from my end. I'm aware that there are a bunch of performance issue in the JSON cmdlets. I have some ideas of how to fix some of them (such as allowing for object models and direct NewtonSoft.Json calls) but nothing concrete. ",
+      "created_at": "2018-04-18T12:31:11Z",
+      "updated_at": "2018-04-18T12:31:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I could help if there is simple repos.",
+      "created_at": "2018-04-18T18:01:02Z",
+      "updated_at": "2018-04-18T18:01:02Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov  the example in https://github.com/PowerShell/PowerShell/issues/6199#issuecomment-367006327 if you duplicate that 1000 times you can repro the problem.\r\n\r\nWhat I would really like is for #6177 to be Implemented. Much of the slow down is likely in our code which is reinventing the wheel of what NewtonSoft.Json is doing internally (and better). Improving that looked to be a huge mess with a high risk of regression. Adding the feature to supply object models to the JSON cmdlets (also exposed so it can be consumed by internal APIs from Invoke-RestMethod) would allow us to fix 2 problems at once quickly and cheaply.\r\n\r\nWe'd still need to address performance in the normal deserailiztion code... but I think most instances where performance is a real issue could be solved with object models.",
+      "created_at": "2018-04-18T18:27:49Z",
+      "updated_at": "2018-04-18T18:27:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I suppose this wrapping comes from the fact that the .Net Framework was used earlier. Can anybody clarify - why we use `Newton.Json` today? Has CoreFX JSON support?",
+      "created_at": "2018-04-19T03:25:38Z",
+      "updated_at": "2018-04-19T03:25:38Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@isazonov seems there's a [debate](https://github.com/dotnet/corefx/issues/9162) on having JSON support as part of corefx.  Looks like System.Json is back, but only for compatibility reasons.  We used Newtonsoft.Json early on because dotnetcore 1.0 didn't have any json support.",
+      "created_at": "2018-04-19T05:51:59Z",
+      "updated_at": "2018-04-19T05:51:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "My concern is that if we use Newtonsoft.Json deeper, it won't be easy for us to go to CoreFX later.\r\n",
+      "created_at": "2018-04-19T07:14:03Z",
+      "updated_at": "2018-04-19T07:14:03Z"
+    },
+    {
+      "author": "kclinden",
+      "author_association": "NONE",
+      "body": "So is the problem when the REST Method returns JSON? \r\n\r\nMac Invoke Rest Method with PowerShell Core 6.1.1\r\n```\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 1\r\nSeconds           : 15\r\nMilliseconds      : 594\r\nTicks             : 755948676\r\nTotalDays         : 0.000874940597222222\r\nTotalHours        : 0.0209985743333333\r\nTotalMinutes      : 1.25991446\r\nTotalSeconds      : 75.5948676\r\nTotalMilliseconds : 75594.8676\r\n```\r\nServer 2016 Invoke Rest Method with PowerShell 5.1.14393.2189\r\n```\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 0\r\nSeconds           : 0\r\nMilliseconds      : 86\r\nTicks             : 867426\r\nTotalDays         : 1.00396527777778E-06\r\nTotalHours        : 2.40951666666667E-05\r\nTotalMinutes      : 0.00144571\r\nTotalSeconds      : 0.0867426\r\nTotalMilliseconds : 86.7426\r\n```\r\n",
+      "created_at": "2019-01-11T20:02:57Z",
+      "updated_at": "2019-01-11T20:02:57Z"
+    },
+    {
+      "author": "RealDrGordonFreeman",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT\r\n\r\nStill experiencing issues here with `Invoke-WebRequest` on WIN10-1809-x64.\r\n\r\nMy workaround was to use a new download function based on `[System.Net.HttpWebRequest]`. \r\n\r\nI think the PowerShell team needs to carefully review `Invoke-WebRequest` as there are many complaints about it's performance in multiple forums and sites, including here.",
+      "created_at": "2019-03-04T20:53:57Z",
+      "updated_at": "2019-03-04T20:53:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> there are many complaints about it's performance in multiple forums and sites\r\n\r\n@RealDrGordonFreeman could you please add references to these scenarios and use cases?",
+      "created_at": "2019-03-05T12:05:59Z",
+      "updated_at": "2019-03-05T12:05:59Z"
+    },
+    {
+      "author": "RealDrGordonFreeman",
+      "author_association": "NONE",
+      "body": "> \r\n> \r\n> > there are many complaints about it's performance in multiple forums and sites\r\n> \r\n> @RealDrGordonFreeman could you please add references to these scenarios and use cases?\r\n\r\nSure.\r\n\r\nhttps://stackoverflow.com/questions/28682642/powershell-why-is-using-invoke-webrequest-much-slower-than-a-browser-download\r\n\r\nhttps://stackoverflow.com/questions/48268279/powershell-invoke-webrequest-is-consistently-very-slow-how-can-i-fix-this\r\n\r\nhttps://stackoverflow.com/questions/14202054/why-is-this-powershell-code-invoke-webrequest-getelementsbytagname-so-incred\r\n\r\nhttps://github.com/PowerShell/PowerShell/issues/5284\r\n\r\nhttps://github.com/PowerShell/PowerShell/issues/2238\r\n\r\nAnd many more. This cmdlet has problems. I think it needs to be reviewed.\r\n\r\n(And also my own recent experiences with it. I had to write my own download function as a workaround.)",
+      "created_at": "2019-03-05T13:51:36Z",
+      "updated_at": "2019-03-05T13:52:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@RealDrGordonFreeman Thanks for links. Issue with ProgressBar was fixed. Please try _latest_ PowerShell Core version and report problems you find with it.",
+      "created_at": "2019-03-05T14:37:30Z",
+      "updated_at": "2019-03-05T14:37:30Z"
+    },
+    {
+      "author": "john8329",
+      "author_association": "NONE",
+      "body": "I have to add my own issue with this, unfortunately uploading a sequence of large files using this function results in the process using gigabytes of RAM and then showing clueless errors. This is the configuration I use:\r\n\r\n```powershell\r\nInvoke-WebRequest `\r\n                -Uri \"$url/$name\" `\r\n                -Credential $cred `\r\n                -Method Put `\r\n                -ContentType 'application/octet-stream' `\r\n                -InFile $File\r\n```\r\n\r\nThe issue is reproducible systematically, and it's just a simple webdav server on the endpoint.\r\nI know we're talking about Invoke-RestMethod, but it seems that they share the same code underneath.",
+      "created_at": "2019-08-29T12:00:27Z",
+      "updated_at": "2019-08-29T12:00:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@j0hnwhyte does that reproduce in the latest v7 preview releases?",
+      "created_at": "2019-08-29T12:20:00Z",
+      "updated_at": "2019-08-29T12:20:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@j0hnwhyte Please open new issue with repo steps.",
+      "created_at": "2019-08-29T12:35:43Z",
+      "updated_at": "2019-08-29T12:35:43Z"
+    },
+    {
+      "author": "john8329",
+      "author_association": "NONE",
+      "body": "I can confirm that the v7 preview does *not* exhibit the issue, therefore the thing seems to be solved. I'll also try v6 and see if that works as well. Thanks",
+      "created_at": "2019-08-30T01:18:42Z",
+      "updated_at": "2019-08-30T01:18:42Z"
+    },
+    {
+      "author": "david-tap",
+      "author_association": "NONE",
+      "body": "https://github.com/PowerShell/PowerShell/issues/7698 was closed as a duplicate for this issue, but converting a JSON file of 287MB is still taking 8GB of RAM on the latest preview.",
+      "created_at": "2019-11-18T22:40:40Z",
+      "updated_at": "2019-11-18T22:40:40Z"
+    },
+    {
+      "author": "9whirls",
+      "author_association": "NONE",
+      "body": "Reproduced this issue on 7.0.1 on Mac. \r\n```\r\nmeasure-command {Invoke-webrequest -Uri 'https://disease.sh/v2/states' }                                                                       \r\n                                                                                                                                                                                                      Days              : 0                                                                                                                                                                                 Hours             : 0                                                                                                                                                                                 Minutes           : 0                                                                                                                                                                                 \r\nSeconds           : 1\r\nMilliseconds      : 30\r\nTicks             : 10306922\r\nTotalDays         : 1.19293078703704E-05\r\nTotalHours        : 0.000286303388888889\r\nTotalMinutes      : 0.0171782033333333\r\nTotalSeconds      : 1.0306922\r\nTotalMilliseconds : 1030.6922\r\n\r\n\r\nmeasure-command {Invoke-restmethod -Uri 'https://disease.sh/v2/states' }\r\n\r\nDays              : 0\r\nHours             : 0\r\nMinutes           : 1\r\nSeconds           : 16\r\nMilliseconds      : 175\r\nTicks             : 761751440\r\nTotalDays         : 0.000881656759259259\r\nTotalHours        : 0.0211597622222222\r\nTotalMinutes      : 1.26958573333333\r\nTotalSeconds      : 76.175144\r\nTotalMilliseconds : 76175.144\r\n\r\nget-host\r\n\r\nName             : ConsoleHost\r\nVersion          : 7.0.1\r\nInstanceId       : 47287e23-00c2-4ba5-a503-cbaa155f27cc\r\nUI               : System.Management.Automation.Internal.Host.InternalHostUserInterface\r\nCurrentCulture   : en-US\r\nCurrentUICulture : en-US\r\nPrivateData      : Microsoft.PowerShell.ConsoleHost+ConsoleColorProxy\r\nDebuggerEnabled  : True\r\nIsRunspacePushed : False\r\nRunspace         : System.Management.Automation.Runspaces.LocalRunspace\r\n```",
+      "created_at": "2020-05-28T05:50:14Z",
+      "updated_at": "2020-05-28T05:50:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@9whirls Please check on latest PowerShell 7.1 Preview. If you will see the problem please open new issue. Also please check on other platforms if you can.",
+      "created_at": "2020-05-28T07:43:16Z",
+      "updated_at": "2020-05-28T07:43:16Z"
+    }
+  ],
+  "created_at": "2018-02-20T13:15:11Z",
+  "number": 6199,
+  "state": "closed",
+  "title": "Invoke-RestMethod is slow and uses a lot of memory",
+  "updated_at": "2020-05-28T07:43:16Z"
+}

@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11238",
+  "author": "dmitriyse",
+  "body": "# Steps to reproduce\r\n1) RemoteMachine:\r\nEnable WinRM, \r\nEnable PowerShell.7 WinRM configuration.\r\n\r\n2) ClientMachine\r\n```powershell\r\n    $psSession = New-PSSession $ipToConnect -Credential $cred -ConfigurationName \"PowerShell.7\"\r\n    Invoke-Command -Session $psSession {\r\n        $resolver = [System.Runtime.Loader.AssemblyDependencyResolver]::new(\"$PSHome\\pwsh.dll\")\r\n        Write-Host $resolver\r\n    }\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nSystem.Runtime.Loader.AssemblyDependencyResolver\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nMethodInvocationException: Exception calling \".ctor\" with \"1\" argument(s): \"Dependency resolution failed for component C:\\Program Files\\PowerShell\\7-preview\\pwsh.dll with error code -2147450750. Detailed error: Hostpolicy must be initialized and corehost_main must have been called before calling corehost_resolve_component_dependencies.\r\n\"\r\n```\r\n\r\n# Environment data\r\nRemoteMachine:\r\n<!-- provide the output of $PSVersionTable -->\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSEdition                      Core\r\nPSVersion                      7.0.0-preview.6\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPlatform                       Win32NT\r\nGitCommitId                    7.0.0-preview.6\r\nPSRemotingProtocolVersion      2.3\r\nOS                             Microsoft Windows 10.0.18363\r\nWSManStackVersion              3.0\r\nSerializationVersion           1.1.0.1\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@dmitriyse Can you reference a real scenario you want address?\r\nI guess it is a protection for remote session and it is by design.\r\nPerhaps @PaulHigin can add more info.",
+      "created_at": "2019-12-05T05:29:27Z",
+      "updated_at": "2019-12-05T05:29:27Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Hostpolicy must be initialized and corehost_main must have been called\r\n\r\nThe remoting plugin `pwrshplugin.dll` is a native entry point that hosts CoreCLR, and I'm sure it doesn't deal with anything related to `HostPolicy` (`hostpolicy.dll`).\r\nThe [hosting-layer-apis](https://github.com/dotnet/runtime/blob/master/docs/design/features/hosting-layer-apis.md) doc says `hostpolicy` library is for advanced hosting scenarios.",
+      "created_at": "2019-12-05T23:55:20Z",
+      "updated_at": "2019-12-05T23:55:20Z"
+    },
+    {
+      "author": "dmitriyse",
+      "author_association": "NONE",
+      "body": "One example scenario of usages of AssemblyDependencyResolver in powershell script is when you are trying to load plugin library into powershell, but this library is in the development stage and not yet published (located usually at ```bin\\Debug\\netcoreapp3.1\\```), and *.deps.json is required to load all dependencies of a plugin.\r\nThere are many ways to host .Net Core, but current WinRM plugin implementation uses simple way which don't initialized ```hostpolicy```. Unfortunately the current .Net Core implementation have strong dependency from AssemblyDependencyResolver API to ```hostpolicy``` and thus you cannot use *.deps.json to load plugins in development.\r\nThis case is not frequent, but to achieve my goals I was required to spend 2 more days to setup SSH channel instead WinRM in my development and production environments as a workaround. It was very disappointing.",
+      "created_at": "2019-12-12T22:25:07Z",
+      "updated_at": "2019-12-12T22:26:41Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> One example scenario of usages of AssemblyDependencyResolver in powershell script is when you are trying to load plugin library into powershell, but this library is in the development stage and not yet published (located usually at bin\\Debug\\netcoreapp3.1\\), and *.deps.json is required to load all dependencies of a plugin.\r\n\r\n@dmitriyse This sounds interesting. Do you put the plugin library, say `pluginlib.dll` and `pluginlib.deps.json`, in `$PSHOME` in your scenario?\r\nCan you please provide more details of the scenario? For example, how are you using `AssemblyDependencyResolver` in your script for the loading of `pluginlib.dll`?",
+      "created_at": "2019-12-12T22:49:58Z",
+      "updated_at": "2019-12-12T22:49:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @PaulHigin Perhaps you are interesting in the issue with WinRM too.",
+      "created_at": "2019-12-13T05:38:54Z",
+      "updated_at": "2019-12-13T05:38:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@dmitriyse ping.",
+      "created_at": "2020-01-31T12:15:30Z",
+      "updated_at": "2020-01-31T12:15:30Z"
+    },
+    {
+      "author": "dmitriyse",
+      "author_association": "NONE",
+      "body": "Assume the ```c:\\myproject\\bin\\myplugins``` is an output directory for the Plugin1 project.\r\nWhen Visual Studio compiles Plugin1 project there are some files in the ```c:\\myproject\\bin\\myplugins```:\r\n```Plugin1.dll```\r\n```Plugin1.dll.deps.json```\r\n```ProjectDep1.dll``` <- some dependencies are copied during the build\r\n```ProjectDep2.dll``` <-\r\nBut for example ```Newtonsoft.Json.dll``` is not copied to in the ```c:\\myproject\\bin\\myplugins```\r\nit's referenced through ```Plugin1.dll.deps.json``` and located some where in ```C:\\Program Files\\dotnet..```\r\n\r\nSo I need some trick to parse ```Plugin1.dll.deps.json``` and load ```Newtonsoft.json.dll``` from the correct location.\r\nFortunately in the .Net Core 3.0 we have ```AssemblyDependencyResolver``` class.\r\n\r\nTo load the non-published plugin in the PowerShell we need to use this code:\r\n```PowerShell\r\n$CSharpModuleRoutinesSrc = @\"\r\nusing System;\r\nusing System.Reflection;\r\nusing System.Runtime.Loader;\r\n\r\nnamespace Utils.PowerShellModule\r\n{\r\n    public class LoadContextForLibrary : AssemblyLoadContext\r\n    {\r\n        private readonly string _depsAssemblyPath;\r\n        private readonly AssemblyDependencyResolver _resolver;\r\n\r\n        public LoadContextForLibrary(string depsAssemblyPath)\r\n        {\r\n            _depsAssemblyPath = depsAssemblyPath;\r\n            _resolver = new AssemblyDependencyResolver(depsAssemblyPath);\r\n        }\r\n\r\n        public void SubscribeToResolve(AssemblyLoadContext otherContext){\r\n            AssemblyLoadContext.Default.Resolving += (context, asmName) =>\r\n            {\r\n                var asm = this.LoadFromAssemblyName(asmName);\r\n                return asm;\r\n            };\r\n        }\r\n        protected override Assembly Load(AssemblyName assemblyName)\r\n        {\r\n            string assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);\r\n            if (assemblyPath != null)\r\n            {\r\n                return LoadFromAssemblyPath(assemblyPath);\r\n            }\r\n\r\n            return null;\r\n        }\r\n\r\n        protected override IntPtr LoadUnmanagedDll(string unmanagedDllName)\r\n        {\r\n            string libraryPath = _resolver.ResolveUnmanagedDllToPath(unmanagedDllName);\r\n            if (libraryPath != null)\r\n            {\r\n                return LoadUnmanagedDllFromPath(libraryPath);\r\n            }\r\n\r\n            return IntPtr.Zero;\r\n        }\r\n    }\r\n}\r\n\"@\r\n Add-Type -TypeDefinition $CSharpModuleRoutinesSrc\r\n\r\n$myPluginPath = \"c:\\myproject\\bin\\myplugins\\Plugin1.dll\"\r\n\r\n$MyPluginLoadContext = \r\n    [Utils.PowerShellModule.LoadContextForLibrary]::new($myPluginPath)\r\n\r\n# This trick is required to make loaded dependencies visible for the PowerShell\r\n$MyPluginLoadContext = SubscribeToResolve([AssemblyLoadContext]::Default)\r\n        \r\n# Loading library in the default AssemblyLoadContext (which PowerShell also uses)\r\n# But all unresolved assemblies will be resolved with help of $MyPluginLoadContext according to ```Plugin1.dll.deps.json```\r\nAdd-Type -Path $myPluginPath\r\n\r\n# Happy using of plugin code!\r\n[MyPlugin1.MyType]::new()\r\n```\r\nThis example works goon on PowerShell 7.0-RC in the normal startup mode.\r\nBut when the powershell were initialized by pwrshplugin.dll (in WinRM remote session) the hostpolicy is not initialized and the AssemblyLoadContext API is not available.\r\n",
+      "created_at": "2020-02-03T02:18:47Z",
+      "updated_at": "2020-02-03T02:19:43Z"
+    },
+    {
+      "author": "dmitriyse",
+      "author_association": "NONE",
+      "body": "I am working on very complex docker-based emulator of the real cluster. The cluster management application consist from the combination of .Net Core and PowerShell code and it have no sense about run it in emulation or in a real cluster. Distributed powershell scripts uses PSSessions to manage cluster, it's very beneficial to mount development machine folders (with the visual studio output) in the emulated cluster nodes (docker containers) and run quick testing.\r\n\r\nSSH for me was suitable workaround, PowerShell Core started as a normal process when SSH is used.\r\n\r\nLater I found the option \r\n```XML\r\n<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>\r\n```\r\n(https://stackoverflow.com/questions/43837638/how-to-get-net-core-projects-to-copy-nuget-references-to-build-output)\r\nBut I haven't tried yet this approach.\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/43837638/how-to-get-net-core-projects-to-copy-nuget-references-to-build-output\">How to get .NET Core projects to copy NuGet references to build output?</a></strong></div><div>I'm trying to write a plugin system with .NET Core, and one of my requirements are to be able to distribute the plugin DLL along with it's dependencies to the user for install. However, I can't fig...</div></blockquote>",
+      "created_at": "2020-02-03T02:31:49Z",
+      "updated_at": "2020-02-03T02:31:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @PaulHigin @rjmholt if you have an interest.",
+      "created_at": "2020-02-03T03:32:34Z",
+      "updated_at": "2020-02-03T03:32:34Z"
+    }
+  ],
+  "created_at": "2019-12-02T23:45:13Z",
+  "number": 11238,
+  "state": "open",
+  "title": "PowerShell.7 WinRM environment does not allow to use System.Runtime.Loader.AssemblyDependencyResolver",
+  "updated_at": "2020-02-03T03:32:34Z"
+}

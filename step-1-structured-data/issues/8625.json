@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8625",
+  "author": "sonphnt",
+  "body": "Hi,\r\n\r\nI have installed PowerShell Core 6.1.1 from MSI file on my machine and its module locates by default at \r\nC:\\Program Files\\PowerShell\\6\\Modules.\r\n\r\nI open CMD with Powershell 6 and type \"$env:PSModulePath\". It returns\r\n\"C:\\Program Files\\PowerShell\\6\\Modules\" => Matched with my location this is correct.\r\n\"C:\\Program Files\\PowerShell\\Modules\"\r\n\"C:\\windows\\system32\\WindowsPowerShell\\v1.0\\Modules\"\r\n\r\nI write a .Net core 2.1 Console App with Powershell SDK 6.1.1 with simple testing \"$env:PSModulePath\"\r\n```\r\nusing (var ps = PowerShell.Create())\r\n{\r\n\tps.AddScript(\"$env:PSModulePath;\");\r\n\tvar results = ps.Invoke();\r\n\tforeach (var result in results)\r\n\t{\r\n\t\tvar itemPath = result.ToString();\r\n\t}\r\n}\r\n```\r\nAnd only get these. It seems the console app can not find my PS Core 6 path correctly.\r\n\"C:\\Program Files\\PowerShell\\Modules\"\r\n\"C:\\windows\\system32\\WindowsPowerShell\\v1.0\\Modules\"\r\n\r\nIs this a bug? Thanks\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+  "closed_at": "2021-03-01T18:59:42Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That is indeed an interesting omission (which I personally cannot explain): `$PSHOME\\Modules` isn't there when using the Core SDK.\r\n\r\n#6850 may be distantly related; the code that sets `$env:PSModulePath` in PS Core is in [ModuleIntrinsics.cs](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/Modules/ModuleIntrinsics.cs)",
+      "created_at": "2019-01-14T15:32:41Z",
+      "updated_at": "2019-01-14T15:32:41Z"
+    },
+    {
+      "author": "sonphnt",
+      "author_association": "NONE",
+      "body": "@mklement0  There are some weird responses on some PS commands if you run PS in CMD and run PS in .net core app.\r\n\r\nAnother example with this code\r\n```\r\nusing (var ps = PowerShell.Create())\r\n{\r\n\tps.AddScript(\"Get-PSRepository\");\r\n\tvar results = ps.Invoke();\r\n\tforeach (var result in results)\r\n\t{\r\n\t\tvar itemPath = result.ToString();\r\n\t}\r\n}\r\n```\r\n\r\nIt returns nothing in C# but if I run \"Get-PSRepository\" in CMD, I get 1 record with PSGallery row. That makes my scripts work fine in CMD but failed when running with c#.\r\n\r\nAnd I am not sure because of ModulePath issues?\r\n\r\n",
+      "created_at": "2019-01-15T10:58:26Z",
+      "updated_at": "2019-01-15T11:02:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Taking a step back, it seems that the SDK is designed to be _self-contained_ and independent of a regular PowerShell installation, if any.\r\n\r\nYet, that is at odds with SDK-invoked commands still seeing and respecting `$env:PSModulePath` with directory entries from a regular PowerShell installation.\r\n\r\nConversely, the SDK packages appear to lack modules such as `PowerShellGet` (which contains `Get-PSRepository`) and `microsoft.powershell.archive`.\r\n\r\n\r\nThe Core SDK _does_ dynamically add `$PSHome/Modules`  to `$env:PSModulePath`, yet it does so based on what _it_ considers `$PSHOME`, which is the (virtually useless) location of the platform-specific `System.Management.Automation.dll` file inside the locally cached relevant NuGet package.\r\n\r\nThe official docs (the ones I could find) offer little to clear up the confusion, and there appear to be multiple SDK-related NuGet packages, whose relationship is unclear:\r\n\r\n* Windows PowerShell: `Microsoft.PowerShell.5.ReferenceAssemblies` vs. `PowerShellStandard.Library`\r\n\r\n* PowerShell Core: `Microsoft.PowerShell.SDK ` vs. `System.Management.Automation`\r\n\r\n@SteveL-MSFT, can you shed some light on what the _expected_ behavior is?",
+      "created_at": "2019-01-21T23:14:51Z",
+      "updated_at": "2019-01-21T23:14:51Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I know this has come up before and directly related to SMA.dll being in a different folder being a nupkg.  I believe expectation is that the app needs to set appropriate `$env:PSModulePath` for itself since SMA.dll cannot determine which other modules are there in what paths (if being brought into the project as nupkgs themselves).  cc @adityapatwardhan ",
+      "created_at": "2019-01-22T18:05:04Z",
+      "updated_at": "2019-01-22T18:05:04Z"
+    },
+    {
+      "author": "adityapatwardhan",
+      "author_association": "MEMBER",
+      "body": "Yes, that is correct. Since we are using the SDK, the SMA.dll is being placed in nuget cache or in the publish folder, we cannot guess where `$PSHome` will be on the system even as a relative path. As @SteveL-MSFT recommended, the module path must be updated by the application to resolve this.\r\n\r\n@mklement0 - Short description about the various packages.\r\n\r\n`Microsoft.PowerShell.5.ReferenceAssemblies` - Used for building Windows PowerShell application.\r\n`PowerShellStandard.Library` - Used for building PowerShell Core application compatible with Windows PowerShell.\r\n`Microsoft.PowerShell.SDK` - Used for building PowerShell Core application.\r\n`System.Management.Automation` - Not recommended to use directly.\r\n",
+      "created_at": "2019-01-22T18:43:39Z",
+      "updated_at": "2019-01-22T18:43:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SteveL-MSFT  and @adityapatwardhan.\r\n\r\n---\r\n\r\nRe documentation:\r\n\r\nCan I suggest:\r\n\r\n* first, amending the descriptions of the NuGet packages to contain this information? E.g., package `PowerShellStandard.Library` just states `Contains the reference assemblies for PowerShell Standard 5` and `System.Management.Automation` does not indicate that it shouldn't be used directly.\r\n\r\n* second, compiling this information in documentation that covers all editions and platforms? All I could find was - outdated - WinPS information ([Installing the Windows PowerShell SDK](https://docs.microsoft.com/en-us/powershell/developer/windows-powershell)) and nothing re Core; though https://github.com/PowerShell/PowerShell-Docs suggests that may already be underway.\r\n\r\n---\r\n\r\nRe behavior:\r\n\r\n* As for `$env:PSModulePath`: it almost sounds like the SDK should disregard this variable altogether, given that it only has meaning for a _regular_ PS installation (which is related to the discussions in https://github.com/PowerShell/PowerShell/issues/6850 and https://github.com/PowerShell/PowerShell/issues/8635, where it is cross-_edition_ use of `$env:PSModulePath` that causes problems, and a distinct variable for Core is being considered in a yet-to-be-written-RFC).\r\n\r\n* If the SDK is to be self-contained (no dependency on a regular installation), things like the package management modules, the compression (archive) module, and the thread-job module:\r\n   * appear to be missing from the `Microsoft.PowerShell.SDK` package['s dependencies]\r\n   * even if present, the SDK doesn't find them.\r\n       * It seems that `Start-PSBootstrap` when you build the PS Core repo from source installs these packages (`packagemanagement`, `powershellget`, `microsoft.powershell.archive`, `threadjob`), which, incidentally, aren't directly available as NuGet packages themselves; what these packages have in common is that they're PowerShell _modules_.\r\n\r\nAs a result, calling commands such as `Install-Module` from the SDK doesn't work.\r\n\r\n\r\n",
+      "created_at": "2019-01-22T22:32:45Z",
+      "updated_at": "2019-01-22T22:32:45Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 submitted [PR](https://github.com/PowerShell/PowerShellStandard/pull/57) to fix PowerShell Standard description",
+      "created_at": "2019-01-22T22:48:45Z",
+      "updated_at": "2019-01-22T22:48:45Z"
+    }
+  ],
+  "created_at": "2019-01-11T15:53:58Z",
+  "number": 8625,
+  "state": "closed",
+  "title": ".Net core 2.1 Powershell SDK 6.1.1 can not get correct PSModulePath",
+  "updated_at": "2021-03-01T18:59:42Z"
+}

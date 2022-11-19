@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10476",
+  "author": "mklement0",
+  "body": "Note that the symptom only occurs when redirecting to _another stream_, either via `2>&1` or `*>&1`.\r\n\r\nBy contrast, redirecting to a _file_ works as expected.\r\n\r\n# Steps to reproduce\r\n\r\nRun the following Pester test:\r\n\r\n```powershell\r\n# Create a string with a command that writes to all streams.\r\n$cmd = '1; write-error 2; write-warning 3; write-verbose -vb 4; write-debug -debug 5; write-information -infa continue 6'\r\n# Make sure that all streams can be directed to the success output stream (1).\r\n(Invoke-Expression $cmd *>&1).Count | Should -Be 6\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe test should pass - all 6 streams should show up in the success output stream.\r\n\r\n# Actual behavior\r\n\r\n```none\r\nExpected 6, but got 5.\r\n```\r\n\r\nThat is, the error output was _quietly discarded_, as you 'll see if you run the command inside `(...)` in isolation\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.3\r\nWindows PowerShell v5.1.18362.145 on Microsoft Windows 10 Pro (64-bit; Version 1903, OS Build: 18362.295)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "bad-samaritan",
+      "author_association": "NONE",
+      "body": "@mklement0,  thanks for posting this issue.\r\nI was pulling my hair off wondering what I did wrong.\r\n\r\nAnother simple repro steps:\r\n```\r\nPS> Invoke-Expression \"cmd.exe /c echo 123\"\r\n123\r\n\r\nPS> Invoke-Expression \"cmd.exe /c nonexistingcommand 123\"\r\n'nonexistingcommand' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n\r\nPS> Invoke-Expression \"cmd.exe /c echo 123\" *>&1\r\n123\r\n\r\nPS> Invoke-Expression \"cmd.exe /c nonexistingcommand 123\" *>&1\r\n\r\nPS>\r\n```\r\nWhere did last command's output go?\r\n\r\nWorkaround I'm currently using:\r\n```\r\nPS > . \"cmd.exe\" \"/c nonexistingcommand 123\" *>&1\r\ncmd.exe : 'nonexistingcommand' is not recognized as an internal or external command,\r\nAt line:1 char:1\r\n+ . \"cmd.exe\" \"/c nonexistingcommand 123\" *>&1\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: ('nonexistingcom...ternal command,:String) [], RemoteException\r\n    + FullyQualifiedErrorId : NativeCommandError\r\n\r\noperable program or batch file.\r\n```\r\nIt's not exactly the same and it makes automation harder (because you have to separate command and arguments) but it's something...\r\nProof of the workaround working:\r\n```\r\nPS > . \"cmd.exe\" \"/c nonexistingcommand 123\" *>&1 | ForEach-Object { \"> $_\" }\r\n> 'nonexistingcommand' is not recognized as an internal or external command,\r\n> operable program or batch file.\r\n```\r\n\r\nTested on:\r\n```\r\nPowerShell Version : 5.1.18362.1110\r\n```",
+      "created_at": "2020-11-01T17:34:30Z",
+      "updated_at": "2020-11-01T17:36:36Z"
+    },
+    {
+      "author": "PHeonix25",
+      "author_association": "NONE",
+      "body": "Just ran into this myself wondering where `Write-Error` output went!? Thanks for making the issue!\r\n\r\nMy $PSVersionTable for reference:\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+      "created_at": "2021-01-06T11:50:17Z",
+      "updated_at": "2021-01-06T11:50:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for confirming, @PHeonix25 - the bug is also still in the latest preview, PowerShell Core 7.2.0-preview.2.\r\n\r\n@bad-samaritan, a simpler workaround is to embed the redirection in the command string:\r\n\r\n```powershell\r\n$cmd  = \"cmd.exe /c nonexistingcommand 123\"\r\n\r\nInvoke-Expression \". { $cmd } 2>&1\"\r\n```\r\n\r\n(Also, for commands that you construct in memory, for later execution, it's better to use script blocks:\r\n```powershell\r\n$cmd  = { cmd.exe /c nonexistingcommand 123 }\r\n\r\n. $cmd 2>&1\r\n```\r\n)\r\n\r\n",
+      "created_at": "2021-01-06T12:36:26Z",
+      "updated_at": "2021-01-06T12:36:26Z"
+    },
+    {
+      "author": "onlyann",
+      "author_association": "NONE",
+      "body": "I experience this issue on Powershell 7.1\r\n\r\n@mklement0  The workaround you suggest doesn't work for me. As soon as I try to redirect the error stream somewhere, nothing happens\r\n```\r\n(& nonexistingcommand 123) 2>&1 >> logs.txt\r\n# logs.txt is empty\r\n\r\n$cmd  = { cmd.exe /c nonexistingcommand 123 }\r\n\r\n. $cmd 2>&1 >> logs.txt\r\n#  log is still empty\r\n```\r\n\r\nHow can I capture errors from commands ran by Powershell Core?\r\n\r\nThere has to be a way, I can't think such a core issue would be open for over a year without workaround.",
+      "created_at": "2021-01-11T01:09:53Z",
+      "updated_at": "2021-01-11T01:17:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@onlyann: the workaround doesn't apply to  a _nonexistent_ command, because trying to invoke such a command triggers a statement-_terminating_ error, which requires `try` / `catch` to handle (as opposed to an _existing_ command that is an external program that _can be executed_ but happens to write to stderr during execution):\r\n\r\n```\r\n& { try { nonexistingcommand 123 } catch { write-error $_ } } 2>&1 >> logs.txt\r\n```\r\n\r\nFor an overview of PowerShell's surprisingly complex error handling, see [this GitHub docs issue](https://github.com/PowerShell/PowerShell-Docs/issues/1583).\r\n\r\n> such a core issue would be open for over a year without workaround.\r\n\r\nTo be clear: the issue described in the OP isn't a core issue, given that [`Invoke-Expression` should generally be avoided](https://blogs.msdn.microsoft.com/powershell/2011/06/03/invoke-expression-considered-harmful/), and that [legitimate uses are rare](https://stackoverflow.com/a/51252636/45375).\r\n\r\n\r\n",
+      "created_at": "2021-01-11T01:50:55Z",
+      "updated_at": "2021-01-11T01:50:55Z"
+    },
+    {
+      "author": "onlyann",
+      "author_association": "NONE",
+      "body": "To give some context of what lead me here is that I was attempting to capture the error stream from running a npm command (`npm run task ...`) from PowerShell Core.\n\nI still haven't found a way to do that and I have been assuming, from this issue, that error redirection from external commands is sort of broken in Powershell Core.\n\nHowever, from your answer @mklement0 , it sounds like there is a way to do it that doesn't involve Invoke-Expression. \nWould you please share how to do that?\n",
+      "created_at": "2021-01-11T10:30:58Z",
+      "updated_at": "2021-01-11T10:30:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Redirection of stderr from external programs with `2>` in _direct invocation_ works fine, it's only combining `2>` with `Invoke-Expression` that is the problem.\r\n\r\nThe command in the previous comment, based on your own command, shows how to _merge stdout and stderr_ and append the results to a file; to redirect just stderr, use `2>>logs.txt`\r\n\r\nIf you're willing to assume that `npm` is present, you don't need the `try` / `catch` statement and the script block and can use something like `npm run task ... 2>&1 >>logs.txt` or  `npm run task ... 2>>logs.txt` directly.\r\n\r\n\r\n",
+      "created_at": "2021-01-11T12:17:58Z",
+      "updated_at": "2021-01-11T12:24:24Z"
+    },
+    {
+      "author": "onlyann",
+      "author_association": "NONE",
+      "body": "@mklement0  Somehow, it wasn't working in a PowerShell Core console but was fine on Windows PowerShell. Now that I try to reproduce, it works in both. I must have been doing something stupid... \r\nThank you @mklement0 for your help!",
+      "created_at": "2021-01-12T00:01:52Z",
+      "updated_at": "2021-01-12T00:01:52Z"
+    }
+  ],
+  "created_at": "2019-09-02T16:25:45Z",
+  "number": 10476,
+  "state": "open",
+  "title": "Invoke-Expression: redirecting the error stream to the success stream discards error output",
+  "updated_at": "2021-01-12T00:01:52Z"
+}

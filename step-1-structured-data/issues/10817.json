@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10817",
+  "author": "mklement0",
+  "body": "When you declare a non-mandatory parameter and do not pass an argument on invocation, the parameter variable is _implicitly_ `$null` - even if its declared type is a (non-numeric) _value type_ (instances of which cannot contain `$null`).\r\n\r\n```powershell\r\nPS> & { param([datetime] $dt) $null -eq $dt } # no value is passed to -dt\r\n\r\nTrue  # $dt was $null, even though a [datetime] instance cannot be $null\r\n```\r\n\r\n<sup>Note: By contrast, _numeric_ value types default to `0`, i.e. the type's default value. This inconsistency is problematic in itself, but it's presumably too late to change that.</sup>\r\n\r\n\r\nHowever, if you want to allow _explicit_ passing of `$null`, the same approach does _not_ work:\r\n\r\n```powershell\r\nPS> & { param([AllowNull()] [datetime] $dt) $null -eq $dt } -dt $null # !! FAILS\r\n\r\nCannot process argument transformation on parameter 'dt'. Cannot convert null to type \"System.DateTime\".\r\n```\r\n\r\nSimilarly, _numeric_ value-type parameters effectively coerce the `$null` to the type's default value, `0`, meaning that `$null` as a \"signal value\" is lost:\r\n\r\n```powershell\r\nPS> & { param([AllowNull()] [int] $i) $null -eq $i } -i $null\r\n\r\nFalse # !! $false, because $i becomes 0\r\n```\r\n\r\nThe - cumbersome - workaround is to use `[Nullable[datetime]]` as the parameter type instead - and note that if the parameter is _mandatory_, you _also_ need `AllowNull()`.\r\n\r\nExplicit use of nullable types in the context of parameter declarations shouldn't be necessary in PowerShell; I suspect that many PowerShell users may not even be aware of the distinction between reference types and value types.\r\n\r\nAs for a real-world use case: It's conceivable to have a _mandatory_ parameter - one you want to force the users to pass a value _intentionally_ to - that still supports `$null` - even with value types - as an explicit signal that a default value should apply.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n{ & { param([AllowNull()] [datetime] $dt) $null -eq $dt } -dt $null } | Should -Not -Throw\r\n\r\n& { param([AllowNull()] [int] $i) $null -eq $i } -i $null | Should -Be $true\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe tests should pass.\r\n\r\n# Actual behavior\r\n\r\nThe 1st test fails:\r\n\r\n```none\r\nExpected no exception to be thrown, but an exception \"Cannot process argument transformation on parameter 'dt'. Cannot convert null to type \"System.DateTime\".\" was thrown ...\r\n```\r\n\r\nThe 2nd test fails:\r\n\r\n```none\r\nExpected $true, but got $false.\r\n```\r\n\r\nThat is, `$i` became `0` rather than being retained as `$null`.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.4\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "So, to summarize in brief -- you're proposing that `[AllowNull()][int]` automatically implies we should transform that parameter into `[Nullable[int]]`?\r\n\r\nI mean, that seems fairly sensible. \ud83d\udc4d ",
+      "created_at": "2019-10-17T18:12:44Z",
+      "updated_at": "2019-10-17T18:12:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32: \r\n\r\n_Conceptually_ that is a good summary.\r\n\r\nHowever, I don't think that it is _technically_ necessary:\r\n\r\nWhat seems to be happening in the _implicit_ case is that the parameter variable is simply not _initialized_, which is what makes its value `$null` by default.\r\n\r\nHowever, the type constraint _is_ in effect, and _is_ enforced if you later try to assign to that variable (although you typically wouldn't do that with a _parameter_ variable):\r\n\r\n```powershell\r\nPS> & { param([datetime] $dt) $dt = $null } # FAILS, because $dt, despite being initially $null, IS type-constrained\r\n\r\nCannot convert null to type \"System.DateTime\".\r\n```\r\n\r\nWhile I'm not familiar with the plumbing, my guess is that we can apply this non-initialization technique in the explicit case too - without needing to involve `Nullable<T>`.\r\n",
+      "created_at": "2019-10-17T18:41:46Z",
+      "updated_at": "2019-10-17T18:41:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32: I've since realized that the non-initialization to `$null` only applies to _non-numeric_ value types. With _numeric_ ones you get `0`, which presents a different problem with `[AllowNull()]`: passing `$null` quietly converts to `0` - I've updated the OP accordingly.",
+      "created_at": "2019-10-18T17:48:41Z",
+      "updated_at": "2019-10-18T17:48:41Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm, interesting. Given that `[nullable[T]]` doesn't let Mandatory parameters accept null values, and with the odd behaviour with numeric inputs there...\r\n\r\nI'm not really sure what the optimal solution is there. I think I'm still partial to having `[AllowNull()]` make it a `[nullable[T]]` implicitly, I think, as that would probably be a fairly minimal and least-likely-to-break-something change, and neatly skirts the slightly awkward syntax for `[nullable[int]]$Count` etc.\r\n\r\nBut yes, it's not necessarily the idea solution. I'm also not sure simply \"not initializing\" the value is something we can do without taking some extra care, because I wouldn't be surprised if trying to do that excludes it from `$PSBoundParameters`; and for those parameters where you want to be able to detect the difference between \"not specified\" and \"null\", that is a fairly critical piece of plumbing.",
+      "created_at": "2019-10-18T18:02:19Z",
+      "updated_at": "2019-10-18T18:02:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32: \r\n\r\nFirst, as an aside: that non-bound value-type parameters behave differently depending on whether they're numeric (default to `0`) or not (default to `$null`) is problematic in itself, but it's probably too late to fix that inconsistency.\r\n\r\n> `[nullable[T]]` doesn't let Mandatory parameters accept null values\r\n\r\nMaybe I'm misreading your comment, but `[Nullable[T]]` _does_ work as a workaround even with numeric value types:\r\n\r\n```powershell\r\nPS> & { param([Parameter(Mandatory)] [AllowNull()] [nullable[int]] $i) $null -eq $i } -i $null\r\n\r\nTrue\r\n```\r\n\r\n\r\n>  I'm also not sure simply \"not initializing\" the value is something we can do without taking some extra care\r\n\r\nFair point - we certainly want `$PSBoundParameters` to continue to tell the truth.\r\n\r\nI don't know enough about PowerShell's variable plumbing to be of help there, but I do see that trying to initialize a `[datetime]` variable with `$null` does _not_ work:\r\n\r\n```powershell\r\n# Borrow a [datetime] argument-transformation attribute from a regular variable.\r\n[datetime] $dt = 0; $ta = (Get-Variable dt).Attributes[0]\r\n\r\n# !! FAILS\r\n[psvariable]::new(\r\n  'foo', \r\n  $null,  # initial value\r\n 'None', \r\n [System.Collections.ObjectModel.Collection[System.Attribute]] $ta\r\n) \r\n```\r\n\r\nThat said, the `.Value` property of `System.Management.Automation.PSVariable` instances is `object`-typed, so I think it's at least _possible_ to initialize to `$null`.\r\n\r\nBut perhaps `[Nullable[T]]` is indeed the answer. If it is, we should make sure it doesn't peek from behind the curtain or at least doesn't cause obscure variations in behavior.\r\n\r\n",
+      "created_at": "2019-10-18T18:39:21Z",
+      "updated_at": "2019-10-18T19:46:08Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I mean that `[nullable[T]]` _without_ using `[AllowNull()]` doesn't work. But yes, that is a currently available workaround, if one that feels very redundant. \ud83d\ude42 \r\n\r\nYour example with datetime there makes me wonder if we may simply are missing some checks for the `[allownull()]` attribute when setting variables, though, if we can't even initialize them like that. Note that this also fails:\r\n\r\n```powershell\r\n[AllowNull()][datetime]$value = $null\r\n```\r\n\r\nPotentially we need to simply add a check for whether the variable has the `[AllowNull()]` attribute before we try to create an instance of `[datetime]` (or anything else) with a null value...",
+      "created_at": "2019-10-18T18:52:59Z",
+      "updated_at": "2019-10-18T18:52:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, I've noticed that `[AllowNull()][datetime]$value = $null` fails, and so does later assigning `$null` to a parameter variable declared this way.\r\n\r\nSo it sounds like in a manner of speaking we could roll our own nullable types, without actually needing to use `[Nullable[T]]`, correct?\r\n\r\nThat is, if the `[AllowNull()]` attribute is set on a value-type-constrained variable, allow assigning `$null` as-is (make `.Value` return `null`) rather than attempting to convert `$null` to the type.\r\n",
+      "created_at": "2019-10-18T19:04:55Z",
+      "updated_at": "2019-10-18T19:04:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Aye, I think either we need to do that, or if that is unfeasible or ends up being more misleading, we may want to make `[AllowNull()]` imply the use of `[nullable[T]]` instead.",
+      "created_at": "2019-10-18T19:32:41Z",
+      "updated_at": "2019-10-18T19:32:41Z"
+    }
+  ],
+  "created_at": "2019-10-17T18:00:33Z",
+  "number": 10817,
+  "state": "open",
+  "title": "[AllowNull()] should be usable with value-type parameters too",
+  "updated_at": "2019-10-18T19:46:08Z"
+}

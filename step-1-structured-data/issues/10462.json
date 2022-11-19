@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10462",
+  "author": "JamesWTruher",
+  "body": "TLDR; I'm unhappy with the view for `gci` on my Mac so I did something about it\r\n\r\n# Summary of the new feature/enhancement\r\n\r\nI've been thinking that the `Get-ChildItem` experience on Linux/Mac is not providing as much information as I would like. We don't report user, group or a real mode, and size for directories is not reported.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nConsider the difference between `ls -ld /opt` and `Get-Item /opt` (this is the same for files, but I am attempting to avoid a large amount of output).\r\n```bash\r\nPS> /bin/ls -ld /opt\r\ndrwxr-xr-x  3 root  wheel  96 Mar 16 14:14 /opt\r\n```\r\n\r\n```powershell\r\nPS> gi /opt\r\n\r\n\r\n    Directory: /\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\nd-r--           3/16/2019  2:14 PM                opt\r\n```\r\n\r\nThere's a _useful_ mode description, as well as owner/group info. The LastWriteTime is a bit tidier (imo) and then there's a length reported for a directory. All that extra info is down to the `stat` API which provides all this information. Unfortunately, the `stat` API is _way_ different between platforms; the struct property layout is different, some of the properties are different types (inode can be an int or a long), etc), so it's a bit of a mess and you can't just simply wrap stat in c# and be portable.\r\n\r\nI spent a little time in constructing a common stat structure which could smooth out the underlying differences between platforms and present useful data which could be used in the filesystem provider and provide a better (to me, anyway) experience.\r\n\r\nHere's what I've got so far:\r\n\r\n```powershell\r\nPS> gi /opt | ft -view childrenWithUnixStat\r\n\r\n\r\n    Directory: /\r\n\r\nUnixMode   User       Group       LastWriteTime           Size Name\r\n--------   ----       -----       -------------           ---- ----\r\ndrwxr-xr-x root       wheel        Mar 16 02:14             96 opt\r\n```\r\nIt handles the usual pipes, char/block devices\r\n``` powershell\r\nPS> ls /dev/zero\r\n\r\n\r\n    Directory: /dev\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-----           8/14/2019  5:31 PM              0 zero\r\n\r\nPS> ls /dev/zero | ft -view childrenWithUnixStat\r\n\r\n\r\n    Directory: /dev\r\n\r\nUnixMode   User       Group       LastWriteTime           Size Name\r\n--------   ----       -----       -------------           ---- ----\r\ncrw-rw-rw- root       wheel        Aug 14 05:31              0 zero\r\n```\r\n\r\nMy implementation leads to some cool side effects:\r\n\r\n```powershell\r\nPS> gci /dev | group group\r\n\r\nCount Name                      Group\r\n----- ----                      -----\r\n    1 _windowserver             {/dev/xcpm}\r\n   43 operator                  {/dev/disk0, /dev/disk0s1, /dev/disk0s2, /dev/disk1\u2026}\r\n    1 staff                     {/dev/console}\r\n   12 tty                       {/dev/ptmx, /dev/ttys000, /dev/ttys001, /dev/ttys002\u2026}\r\n  301 wheel                     {/dev/fd, /dev/afsc_type5, /dev/auditpipe, /dev/auditsessions\u2026}\r\n\r\nPS> gci /dev | group unixmode\r\n\r\nCount Name                      Group\r\n----- ----                      -----\r\n   17 brw-r-----                {/dev/disk0, /dev/disk0s1, /dev/disk0s2, /dev/disk1\u2026}\r\n    1 cr--r--r--                {/dev/io8logmt}\r\n   17 crw-------                {/dev/afsc_type5, /dev/auditpipe, /dev/autofs, /dev/autofs_control\u2026}\r\n   11 crw--w----                {/dev/ttys000, /dev/ttys001, /dev/ttys002, /dev/ttys003\u2026}\r\n   17 crw-r-----                {/dev/rdisk0, /dev/rdisk0s1, /dev/rdisk0s2, /dev/rdisk1\u2026}\r\n    2 crw-r--r--                {/dev/auditsessions, /dev/fsevents}\r\n    1 crw-rw----                {/dev/xcpm}\r\n  288 crw-rw-rw-                {/dev/autofs_homedirmounter, /dev/autofs_notrigger, /dev/autofs_nowait, /dev/cu.Bluetooth-Incoming-Port\u2026}\r\n    1 dr-xr-xr-x                {/dev/fd}\r\n    3 lr-xr-xr-x                {/dev/stderr, /dev/stdin, /dev/stdout}\r\n\r\nPS> gci / | group { $_.UnixStat.HardLinkCount}\r\n\r\nCount Name                      Group\r\n----- ----                      -----\r\n    1 3                         {/opt}\r\n    1 5                         {/System}\r\n    1 6                         {/Users}\r\n    1 65                        {/Library}\r\n    1 84                        {/Applications}\r\n\r\n```\r\n\r\nI have done the _barest_ of performance analysis, but I'm not seeing much impact.\r\n\r\nImplementation wise, I did this in PowerShell-Native where I smoothed out stat to be x-plat and then extended the native calls in CorePsPlatform, and called them from ProviderBase,  extended types in Types_Ps1Xml and created a new format in FileSystem_format_ps1xml.\r\n\r\nMy question to you all: Do you think this has legs? Should I spend more time on it? I'm already _personally_ finding it useful, but not sure whether anyone really cares.\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "I very much like the idea of surfacing platform-specific and useful information from `gci`.  On Linux, it is currently of limited use.  I find I'm falling back to `ls` a lot for something that seems like it should be supported directly by PS.",
+      "created_at": "2019-08-30T04:20:14Z",
+      "updated_at": "2019-08-30T04:20:14Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "Very related to #6410. ",
+      "created_at": "2019-09-02T23:58:51Z",
+      "updated_at": "2019-09-02T23:58:51Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "One of the things that's somewhat interesting is that POSIX doesn't require files to track creation time. Some of the more modern file systems (ext4, for example) allow for it, but it's not part of the stat call. MacOS supports this in their stat call, but I didn't implement it because it wasn't universal. On Linux, you need to use `debugfs` to get it(!).",
+      "created_at": "2019-09-04T17:00:43Z",
+      "updated_at": "2019-09-04T17:00:43Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "First is the \u201cwhy\u201d: the original PS team (including you :-)) created the gci output based on what the Windows OS provides without performance bottlenecks: in Windows, there is no directory size so it has to be computed which is very time consuming (or does folder \u201csize\u201d reports just the number of files which might be easier to report?). The owner information, too, is not part of the directory info but instead a separate security API call. So I can totally see *why* gci output is this limited (for performance reasons). \r\nThen is the question about regression: does your implementation run on Windows? All the massive effort to create a cross-platform script language would easily be counter-striked if core cmdlets output was platform specific and not/not as readily available on all platforms.\r\nSo in a nutshell, if you target something that makes gci output richer on all platforms without causing incompatibilities or performance hits, that\u2019s awesome. I can see an enhanced mode display, or even a different DateTime format (although for consistency, this calls for a change in the DateTime.toString() on engine level rather than implemented just for one specific cmdlet). \r\n\r\nIf gci output became platform specific, I\u2019d recommend using the *nix \u201cls\u201d command in the first place. That would clearly hint that the solution is designed for a specific platform.\r\nMaybe a compromise could be a set of ps1xml files (i.e. linuxPack) that tweaks the object display for that platform for those who are predominantly working with that platform and want to feel more at home.\r\n\r\nI just wonder: if gci output shows useful props such as \u201cSize\u201d (that may only be avail on some platforms due to tech reasons), then people will inevitably start using these props in scripts, too, and these scripts will start to be platform specific again. Is that what we want?\r\n\r\nOr did I misunderstand the question?",
+      "created_at": "2019-09-13T07:05:18Z",
+      "updated_at": "2019-09-13T07:05:18Z"
+    },
+    {
+      "author": "Grendo92",
+      "author_association": "NONE",
+      "body": "I love this idea, combines both get-acl and get-childitem into one command for us. It's definitely handy if you are perusing through folders. Definitely kills two birds with one stone.",
+      "created_at": "2019-09-16T21:28:31Z",
+      "updated_at": "2019-09-16T21:28:31Z"
+    },
+    {
+      "author": "JoseRa-KnowIT",
+      "author_association": "NONE",
+      "body": "I very much like this proposal, even me as a windows guy I tend to use the native `ls` command on wsl or linux, because GCI well... the point was already said, so I can\u00b4t even imagine the feeling of a purist brave-heart linux guy trying to give a chance to pwsh.\r\n\r\nBut I think as @TobiasPSP wisely exposed, all commands should be standard and consistent on every platform, so there must be a kind of in-between solution that benefit users of all platforms.",
+      "created_at": "2019-10-03T01:45:27Z",
+      "updated_at": "2019-10-03T01:45:27Z"
+    }
+  ],
+  "created_at": "2019-08-29T20:31:12Z",
+  "number": 10462,
+  "state": "open",
+  "title": "Feature Request - Provide more UNIX-like view of files/directories",
+  "updated_at": "2021-11-30T11:07:51Z"
+}

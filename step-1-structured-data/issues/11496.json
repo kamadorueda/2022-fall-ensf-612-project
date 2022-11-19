@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11496",
+  "author": "rayzorben",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n**Note**: the issue happens with `Start-Job` as well but `Start-ThreadJob` will show you the issue 8x faster! :)\r\n\r\nThe following outputs 1..10 to the pipeline. It writes 'foo' to the console, and 'out 1..10'\r\n```powershell\r\n$jobs = 1..10 | %{ $_ | Start-ThreadJob -ScriptBlock { Write-Host \"foo\"; $input } }; $jobs | Receive-Job -Wait -AutoRemoveJob | ForEach-Object { Write-Host \"out $_\" }\r\n```\r\nThe following does not output anything to the pipeline. It prints 'input 1..10' to the screen, but no 'out 1..10' is printed.\r\n```powershell\r\n$jobs = 1..10 | %{ $_ | Start-ThreadJob -ScriptBlock { Write-Host \"input $input\"; $input } }; $jobs | Receive-Job -Wait -AutoRemoveJob | ForEach-Object { Write-Host \"out $_\" }\r\n```\r\n\r\nEven just `$var = $input.Item` causes the same issue. Once `$input` is accessed it can no longer be written out to the pipeline.\r\n\r\nEven assigning to another variable, that variable can't be output to the pipeline. Example from my code:\r\n\r\n```powershell\r\n{\r\n    $item = $input\r\n    $test = $item.Entity\r\n    $item\r\n}\r\n```\r\n# Expected behavior\r\n\r\n```none\r\nI would expect the first one to output $input e.g., 1..10 to the pipeline.\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\n1..10 is not output to the pipeline.\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.1\r\nOS                             Linux 5.4.7-zen1-1-zen #1 ZEN SMP PREEMPT Tue, 31 Dec 2019 17:20:2\u2026\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`$input` is not the same as `$_`; `$input` is an _enumerator_ variable containing all the as-yet-unused pipeline values. As soon as you read a value from `$input`, that value is no longer available from `$input`. It's better to treat `$input` as a function that outputs a value once rather than something you can continually pull the current value from.\r\n\r\nNot sure why `$input` needs to be used here, I would think `$_` is a more natural choice, especially since it doesn't have this rather annoying pitfall. Perhaps @PaulHigin can speak to the design decision there.\r\n\r\nIn my opinion, using `$input` for threadjobs is probably not the best idea, but if that's how it's presently designed... \ud83e\udd37\u200d\u2642 ",
+      "created_at": "2020-01-05T20:52:58Z",
+      "updated_at": "2020-01-05T20:52:58Z"
+    },
+    {
+      "author": "rayzorben",
+      "author_association": "NONE",
+      "body": "I found a workaround but I wasted 3 days dealing with inconsistent behavior because this isn't documented anywhere I can find, nor is it expected behavior in any programming language i've used that once you simply access a variable, you can no longer use it. For now I do\r\n\r\n```powershell\r\n-ScriptBlock {\r\n    switch ($input) {\r\n        { $true } {\r\n             $foo = $_\r\n             $_\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nAnd now I can use `$_` just like I would expect to be able to.\r\n\r\nI would love for `$_` to be how you refer to the pipeline input, but that option doesn't seem to be available. For example this does nothing\r\n\r\n```$jobs = 1..10 | %{ $_ | Start-ThreadJob -ScriptBlock { $_ } }; $jobs | Receive-Job -Wait -AutoRemoveJob | ForEach-Object { Write-Host \"out $_\" }```\r\n\r\nHonestly I am considering writing a wrapper around `Start-ThreadJob` to dynamically modify the ScriptBlock and add in a `switch` statement automatically, if I could only now figure out how to parse the Ast :)\r\n\r\n",
+      "created_at": "2020-01-05T20:59:59Z",
+      "updated_at": "2020-01-05T20:59:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I found a workaround but I wasted 3 days dealing with inconsistent behavior because this isn't documented anywhere I can find, nor is it expected behavior in any programming language i've used that once you simply access a variable, you can no longer use it.\r\n\r\nThat's not really what's happening.  You can still access it, it'll even still be the same exact object, it's state is just different.  It's sort of like if you've ever used `adsisearcher`.  If you've already ran a `Find` method you wouldn't expect it to automatically reset itself so you can get the same object back when you run the method again.  Same thing here, `$input` is an enumerator; after you enumerate, it's not going to reset itself.\r\n\r\nAll that said, I'd recommend just pretending `$input` doesn't exist. It's basically the only place in PowerShell you need to actually know what an enumerator is and how it works for anything to be consistent.  There's not much that can be done about it now since changing it would be a breaking change, but I really wish that was never an enumerator.\r\n\r\nInstead, use a process block:\r\n\r\n```powershell\r\nGet-ChildItem | Start-ThreadJob { process { $_ } } | Receive-Job -Wait -AutoRemoveJob\r\n```\r\n\r\n(Also note that this doesn't really have anything to do with jobs, `gci | & { $input; $input }` has the same problems)",
+      "created_at": "2020-01-06T15:38:53Z",
+      "updated_at": "2020-01-06T15:41:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @bergmeister Perhaps PSSA could address the problem.",
+      "created_at": "2020-01-07T05:39:20Z",
+      "updated_at": "2020-01-07T05:39:20Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "PSSA has the `AvoidAssignmentToAutomaticVariable` for that but at the moment only read-only automatic variables are part of it as some automatic variables can be assigned to by design. I agree though that `$input` should be added to the list, with a lower severity though.",
+      "created_at": "2020-01-07T08:14:57Z",
+      "updated_at": "2020-01-07T17:44:05Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@bergmeister I think the request is for a new rule that warns against enumerating `$input` multiple times.\r\n\r\n```powershell\r\n# First enumeration\r\n$allInput = $input | ForEach-Object { $_ }\r\n\r\n# Warn\r\n$allInput = foreach ($obj in $input) { $obj }\r\n\r\n# Warn\r\n$asString = \"$input\"\r\n\r\n# Don't warn\r\n$input.Reset()\r\n\r\n# Don't warn\r\n$enumerator = $input\r\n\r\n# Don't warn\r\ngci | & { $input }\r\n```\r\n\r\nTbh it seems incredibly difficult to create such a rule without either missing most cases or creating a *whole lot* of false positives.  It would be really cool though.\r\n\r\nI could also see a (opt-in) rule that just straight up recommends against using `$input` period.",
+      "created_at": "2020-01-07T12:46:01Z",
+      "updated_at": "2020-01-07T12:46:01Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think the issue here is partially design decision (`-InputObject` is _only_ assigned to `$input`, not `$_`, in a scriptblock sent to a Start-Job or Start-ThreadJob cmdlet) and part documentation -- the _only_ example in [the documentation](https://docs.microsoft.com/en-us/powershell/module/threadjob/start-threadjob?view=powershell-6) using `-InputObject` also recommends using `$input` rather than a `process{}` block as you illustrated.\r\n\r\nWe've kinda sent folx directly into the pitfall here. ",
+      "created_at": "2020-01-07T14:09:37Z",
+      "updated_at": "2020-01-07T14:09:37Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I think the issue here is partially design decision (`-InputObject` is _only_ assigned to `$input`, not `$_`, in a scriptblock sent to a Start-Job or Start-ThreadJob cmdlet)\r\n\r\nPart of the complication there is that if you are going to set `$_`, then you can't really have named blocks.  Otherwise actually adding `process` block is confusing.  Also if you're going to make it an implicit process block (or rather, act like one) similar to `ForEach-Object` then that (to me) implies that it's creating a job per pipeline object.\r\n\r\nAfaik there's no way to directly set `$_` without using one of the `ScriptBlock.Invoke*` methods, none of which will allow explicit named blocks.  Even if there is another way, I'm not sure what it would set it to. For example, in a `begin` block, there wouldn't be anything to set it to.\r\n\r\n> and part documentation -- the _only_ example in [the documentation](https://docs.microsoft.com/en-us/powershell/module/threadjob/start-threadjob?view=powershell-6) using `-InputObject` also recommends using `$input` rather than a `process{}` block as you illustrated.\r\n> \r\n> We've kinda sent folx directly into the pitfall here.\r\n\r\nI'd like to see that changed, but I don't really blame whoever wrote that.\r\n\r\n1. At a glance, `$input` seems to do what you want.  That's why it's an easy trap to fall into, even for experienced folks\r\n\r\n1. Folks with a CS background don't think twice about it (I assume anyway).  I imagine enumerators are a concept that's taught pretty early on, so it's probably routine\r\n\r\n1. I can't recall seeing anyone else talk about why it's confusing, nor can I remember seeing other folks recommend against it's use.  I'm not sure that it is a popular sentiment",
+      "created_at": "2020-01-07T14:41:37Z",
+      "updated_at": "2020-01-07T14:41:37Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Ok, I see. Yes, I agree writing a useful PSSA rule is too hard with too little benefit.\r\nThis sounds more like something that should be better documented. Otherwise we'd end up creating rules for all possible combinations of how to shoot yourself into the foot.",
+      "created_at": "2020-01-07T17:50:50Z",
+      "updated_at": "2020-01-07T17:50:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Please anybody open the doc issue.",
+      "created_at": "2020-01-07T18:54:24Z",
+      "updated_at": "2020-01-07T18:54:24Z"
+    }
+  ],
+  "created_at": "2020-01-05T18:54:53Z",
+  "number": 11496,
+  "state": "open",
+  "title": "Accessing the $input variable in Start-Job/Start-ThreadJob causes the $input value not to be output to the pipeline.",
+  "updated_at": "2020-01-07T18:54:40Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8129",
+  "author": "mklement0",
+  "body": "<sup>Related: #6989</sup>\r\n\r\n_Casts_ from _strings_ use the _invariant_ culture whenever the underlying type has a static `::Parse()` method that accepts an `IFormatProvider` parameter.\r\n\r\nSurprisingly, the `-as` operator does _not_ exhibit this behavior and instead exhibits _culture-sensitive_ behavior, but does so _inconsistently_.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n[cultureinfo]::CurrentCulture = 'fr-FR'\r\n\r\n[double] '1,2.3'\r\n'1,2.3' -as [double]\r\n\r\n[datetime] '10/20/2018 1:22:33 AM'     # OK, invariant culture is used.\r\n'10/20/2018 1:22:33 AM' -as [datetime] # Yields $null, because the *current* culture is used.\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\n12,3\r\n12,3\r\n\r\nsamedi 20 octobre 2018 01:22:33\r\nsamedi 20 octobre 2018 01:22:33\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n12,3\r\n12,3\r\nsamedi 20 octobre 2018 01:22:33\r\n# !! No output, because the string wasn't recognized as a date.\r\n```\r\n\r\nThat is, `-as [datetime]` only works with strings that are formatted according to the rules of the _current_ culture; `'20 octobre 2018 01:22:33' -as [datetime]` would work, for instance.\r\n\r\nBy contrast, `'1,2.3'` _was_ consistently interpreted according to the rules of the _invariant_ culture (where `,` is the grouping char., and `.` the decimal mark; with `fr-FR` in effect, the culture-sensitive `[double]::parse('1,2.3')` would fail).\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core 6.2.0-preview.1 on macOS 10.14\r\nPowerShell Core 6.2.0-preview.1 on Ubuntu 16.04.5 LTS\r\nPowerShell Core 6.2.0-preview.1 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.165)\r\nWindows PowerShell v5.1.17134.228 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.345)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "RichardSiddaway",
+      "author_association": "NONE",
+      "body": "I can confirm this behaviour\r\n\r\nI'm using en-GB culture   so dates are day/month/year\r\n\r\n```\r\n\r\nPS> [datetime]'25/12/2018 1:00:00 PM'\r\nCannot convert value \"25/12/2018 1:00:00 PM\" to type \"System.DateTime\". Error: \"String was not recognized as a valid\r\nDateTime.\"\r\nAt line:1 char:1\r\n+ [datetime]'25/12/2018 1:00:00 PM'\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [], RuntimeException\r\n    + FullyQualifiedErrorId : InvalidCastParseTargetInvocationWithFormatProvider\r\n\r\n```\r\n\r\nfails as expected. The .NET constructor wants month/day/year so\r\n\r\n```\r\nPS> [datetime]'12/25/2018 1:00:00 PM'\r\n\r\n25 December 2018 13:00:00\r\n\r\n```\r\n\r\nThis is known .NET related issue since PowerShell v1\r\n\r\nThe -as operator\r\n\r\n```\r\nPS> '25/12/2018 1:00:00 PM' -as [datetime]\r\n\r\n25 December 2018 13:00:00\r\n\r\n```\r\naccepts and uses the culture specific date format\r\n\r\nwhereas\r\n\r\n'12/25/2018 1:00:00 PM' -as [datetime]\r\n\r\nreturns null\r\n\r\nChecked this on\r\nPowerShell v5.1, v6.1, v6.2 preview 1 on Windows 10 1803 Build 17134.345\r\n\r\nMy PowerShell v6.1 on WSL uses en-US culture so I get these results\r\n\r\n\r\nPS /home/Richard> '25/12/2018 1:00:00 PM' -as [datetime]\r\nPS /home/Richard> '12/25/2018 1:00:00 PM' -as [datetime]\r\n\r\nTuesday, December 25, 2018 1:00:00 PM\r\n\r\nand\r\n\r\n[datetime]'12/25/2018 1:00:00 PM'\r\n[datetime]'25/12/2018 1:00:00 PM'\r\n\r\n\r\nwork as previously shown as expected\r\n\r\n\r\n\r\n",
+      "created_at": "2018-10-26T09:53:49Z",
+      "updated_at": "2018-10-26T09:53:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for confirming the issue, @RichardSiddaway.\r\n\r\n> The .NET constructor wants month/day/year so\r\n> This is known .NET related issue since PowerShell v1\r\n\r\nIt's actually _PowerShell_ that _by design_ opts for interpreting strings using the _invariant culture_, for predictability across cultures.\r\n\r\nAlso note that there's no _constructor_ involved in this case (there is none that accepts a _string_): PowerShell calls the `[datetime]` type's static `.Parse()` method, and explicitly chooses the overload that allows it to pass the invariant culture as the culture to interpret the input string by.\r\n\r\nFor instance, behind the scenes,\r\n\r\n```powershell\r\n[datetime] '12/25/2018 1:00:00 PM'\r\n```\r\n\r\nis effectively translated to:\r\n\r\n```powershell\r\n[datetime]::Parse('12/25/2018 1:00:00 PM', [cultureinfo]::InvariantCulture)\r\n```\r\n\r\nAlso note that, fortunately, it isn't just US-style month-first dates that the invariant culture recognizes; there are formats that are less confusing to international audiences; e.g.:\r\n\r\n```powershell\r\n[datetime] '2018-12-25 13:00:00'\r\n```\r\n\r\n",
+      "created_at": "2018-10-26T14:00:08Z",
+      "updated_at": "2018-10-26T14:00:22Z"
+    },
+    {
+      "author": "RichardSiddaway",
+      "author_association": "NONE",
+      "body": "Irrespective of the exact mechanism there is still a mismatch between cast and -as as shown in both sets of examples",
+      "created_at": "2018-10-26T14:17:10Z",
+      "updated_at": "2018-10-26T14:17:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, @RichardSiddaway: that's precisely why I opened this issue, and it's what the original post demonstrates.\r\n\r\nNote that a similar mismatch affects parameter binding in cmdlets vs. advanced functions - see #6989.",
+      "created_at": "2018-10-26T14:28:00Z",
+      "updated_at": "2018-10-26T14:28:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I guess that unification here will big breaking change.\r\nPerhaps we could resolve all related issues introducing globally \"invariant culture mode\" like .Net Core now has. Only we have to review all code and add Culture parameter in most of cmdlets.",
+      "created_at": "2018-10-26T19:08:10Z",
+      "updated_at": "2018-10-26T19:08:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I assume you're referring to [.NET Core Globalization Invariant Mode](https://github.com/dotnet/corefx/blob/master/Documentation/architecture/globalization-invariant-mode.md); correct, @iSazonov?\r\n\r\nFrom my limited understanding this is a per-application configuration setting.\r\n\r\nCan you say more about how this could fit into PowerShell, and what the `-Culture` parameters would do?\r\n",
+      "created_at": "2018-10-26T22:32:58Z",
+      "updated_at": "2018-10-26T22:32:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, I thought that we could set CurentCulture to Invariant. I don't think about this in depth but it could be interesting.",
+      "created_at": "2018-10-27T09:02:45Z",
+      "updated_at": "2018-10-27T09:02:45Z"
+    },
+    {
+      "author": "RichardSiddaway",
+      "author_association": "NONE",
+      "body": "This has the potential to be a huge breaking change.  As a first step I'd suggest that the PowerShell documentation should be revised to reflect the difference in behaviour between cast and -as",
+      "created_at": "2018-10-27T12:16:57Z",
+      "updated_at": "2018-10-27T12:16:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Re documenting the behavior: good idea - see https://github.com/PowerShell/PowerShell-Docs/issues/3193 and, for #6989, https://github.com/PowerShell/PowerShell-Docs/issues/3194",
+      "created_at": "2018-10-27T17:37:07Z",
+      "updated_at": "2018-10-27T17:37:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To make matters worse, I just realized that even the behavior of `-as` itself is internally inconsistent:\r\n\r\nE.g., using `-as [double]` is again culture-_invariant_ (I've added an example to the OP) - unlike `-as [datetime]`.\r\n\r\nI haven't dug deeper to see what logic underlies this discrepancy.",
+      "created_at": "2019-04-24T13:40:06Z",
+      "updated_at": "2019-04-24T13:40:23Z"
+    }
+  ],
+  "created_at": "2018-10-26T05:18:45Z",
+  "number": 8129,
+  "state": "open",
+  "title": "-as operator is unexpectedly selectively culture-sensitive, unlike casts",
+  "updated_at": "2021-10-07T14:42:52Z"
+}

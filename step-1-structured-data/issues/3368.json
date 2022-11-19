@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3368",
+  "author": "PetSerAl",
+  "body": "Steps to reproduce\r\n------------------\r\n```powershell\r\nPS> $a = 1..10\r\nPS> $b = [System.Collections.ArrayList]::new($a)\r\nPS> $c = [System.Collections.Generic.List[Object]]::new($a)\r\nPS> $a, $b, $c | ForEach-Object {\r\n>>>     $_.GetType().FullName\r\n>>>     foreach($i in $_) {\r\n>>>         \"$i, $($ForEach.MoveNext()), $($ForEach.Current), $($ForEach.MoveNext()), $($ForEach.Current)\"\r\n>>>     }\r\n>>> }\r\nSystem.Object[]\r\n1, True, 2, True, 3\r\n4, True, 5, True, 6\r\n7, True, 8, True, 9\r\n10, False, , False,\r\nSystem.Collections.ArrayList\r\n1, True, 2, True, 3\r\n4, True, 5, True, 6\r\n7, True, 8, True, 9\r\n10, False, , False,\r\nSystem.Collections.Generic.List`1[[System.Object, System.Private.CoreLib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=7cec85d7bea7798e]]\r\n1, True, 1, True, 2\r\n2, True, 3, True, 4\r\n3, True, 5, True, 6\r\n4, True, 7, True, 8\r\n5, True, 9, True, 10\r\n6, False, , False,\r\n7, False, , False,\r\n8, False, , False,\r\n9, False, , False,\r\n10, False, , False,\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nInteracting with `$ForEach` automatic variable should affect `foreach` loop.\r\n\r\nActual behavior\r\n---------------\r\nWhen enumerator implemented as value type, it seems that PowerShell copy enumerator by value, when assigning it to `$ForEach` automatic variable, and that disjoin it from enumerator, which PowerShell using internally for `foreach` loop.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSEdition                      Core\r\nSerializationVersion           1.1.0.1\r\nGitCommitId                    v6.0.0-alpha.17-18-gedecf7e04d65f7183cd1d278daa5ebed2970813f\r\nCLRVersion\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0, 5.0, 5.1.10032.0, 6.0.0}\r\nWSManStackVersion              3.0\r\nPSVersion                      6.0.0-alpha\r\nBuildVersion                   3.0.0.0\r\nPSRemotingProtocolVersion      2.3\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Does the same thing happen with the `$switch` variable in the switch statement?",
+      "created_at": "2017-03-20T13:04:42Z",
+      "updated_at": "2017-03-20T13:07:11Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "`$switch` should have the same problem - they share the key part of the implementation [here](https://github.com/PowerShell/PowerShell/blob/30eb61e3b9b36130da051fb315201f208d9ee0a2/src/System.Management.Automation/engine/parser/Compiler.cs#L4107).\r\n\r\nMutable valuetypes are difficult to get right in PowerShell because everything tends to get boxed, and that is exactly what happens here. We can't know ahead of time what the type of the enumerator is, so code is generated using `IEnumerable`, which requires boxing.",
+      "created_at": "2017-03-20T23:08:46Z",
+      "updated_at": "2017-03-20T23:08:46Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@PetSerAl Nice catch by the way ",
+      "created_at": "2017-03-21T14:55:20Z",
+      "updated_at": "2017-03-21T14:55:20Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@powercode It is not actually my catch. I see the [problem](https://windowsserver.uservoice.com/forums/301869/suggestions/11113494) some time ago. And as it not fixed yet and I do not find same issue here, I decide to repost it here.",
+      "created_at": "2017-03-21T16:07:09Z",
+      "updated_at": "2017-03-21T16:07:09Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr IMHO, boxing is not a problem, but part of solution. If you pass boxed instance around as object or as interface, then all references would point to the same boxed instance. The problem is that PowerShell try to preserve copy by value semantic for value types in some cases (for example, assigning value to variable), but does not provide any option to opt-out from this behavior.\r\n```powershell\r\nPS> Add-Type -TypeDefinition 'public interface I { } public struct S : I { }'\r\nPS> $S = [S]::new()\r\nPS> $A = [Object[]]::new(1)\r\nPS> $A[0] = $S\r\nPS> [Object]::ReferenceEquals($A[0], $S)\r\nTrue\r\nPS> $B = [I[]]::new(1)\r\nPS> $B[0] = $S\r\nPS> [Object]::ReferenceEquals($B[0], $S)\r\nTrue\r\nPS> $C = $S\r\nPS> [Object]::ReferenceEquals($C, $S)\r\nFalse\r\n```",
+      "created_at": "2017-03-21T17:46:41Z",
+      "updated_at": "2017-03-21T17:46:41Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If the value was boxed, we would unbox when calling a method. At runtime, we don't really pay attention to the fact that an object implements an interface, we just look for the appropriately named method in the class/struct, and correct code gen that way would require an unbox.",
+      "created_at": "2017-03-21T19:37:05Z",
+      "updated_at": "2017-03-21T19:37:05Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr I am confused now. How does enumerator advance then? I mean I call `$ForEach.MoveNext()` where `$ForEach` is boxed value type. Is it unbox `$ForEach` and call method on unboxed copy? But that should left `$ForEach` boxed copy unaffected.",
+      "created_at": "2017-03-21T19:47:52Z",
+      "updated_at": "2017-03-21T19:47:52Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I haven't looked closely to see exactly what's going on, but if we copied once to a strongly typed field/variable, but did not box, I think that would explain the behavior I see in the repro.\r\n\r\nBut I could easily be wrong here, my point was mostly to point out how boxing causes problems with mutable structs, it has been a problem in the past.",
+      "created_at": "2017-03-21T19:56:23Z",
+      "updated_at": "2017-03-21T19:56:23Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Something that came as a surprise to me it the difference in behavior between these two examples:\r\nShould the parenthesis around the command have to be there?\r\nSeems like a bug.\r\n```\r\n# unexpected repeated output\r\nswitch -Regex (cmd /c dir){\r\n     '.*' {\r\n        $_\r\n        while ($switch.MoveNext()){  \r\n            \r\n            '--' + $switch.Current            \r\n        }\r\n     }\r\n}\r\n\r\n# second - expected result\r\nswitch -Regex ((cmd /c dir)){\r\n     '.*' {\r\n        $_\r\n        while ($switch.MoveNext()){  \r\n            \r\n            '--' + $switch.Current            \r\n        }\r\n     }\r\n}\r\n\r\n```\r\n",
+      "created_at": "2017-04-08T23:37:48Z",
+      "updated_at": "2017-04-08T23:37:48Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Looking at this again, I think I understand what is going on.\r\nIn the first case, we get an value type enumerator, producing extra output, and in the latter case we get a ref type enumerator.\r\nSo the wrapping in `()` yields a collection while the first example iterates on the command output directly (on a value type enumerator)",
+      "created_at": "2017-07-11T09:18:58Z",
+      "updated_at": "2017-07-11T09:18:58Z"
+    }
+  ],
+  "created_at": "2017-03-19T13:40:04Z",
+  "number": 3368,
+  "state": "open",
+  "title": "$ForEach automatic variable does not work properly with value types enumerators",
+  "updated_at": "2017-07-11T09:18:58Z"
+}

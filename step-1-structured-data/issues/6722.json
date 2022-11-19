@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6722",
+  "author": "rjmholt",
+  "body": "https://github.com/PowerShell/PowerShell/issues/2074 and https://github.com/PowerShell/PowerShell/issues/3641 and https://github.com/PowerShell/PSScriptAnalyzer/issues/850 discuss type resolution in PowerShell classes.\r\n\r\nThe examples they use involve types that are required to be known (because they are field/property/method-return types) at compile time (in order to compile the class to IL).\r\n\r\nBut, we also do type checking in method bodies, even though we don't need to. Example:\r\n```powershell\r\n> class MyClass { [string] GenStr() { return [Foo]::new().ToString() } }\r\nAt line:1 char:45\r\n+ class MyClass { [string] GenStr() { return [Foo]::new().ToString() }  ...\r\n+                                             ~~~\r\nUnable to find type [Foo].\r\n+ CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\r\n+ FullyQualifiedErrorId : TypeNotFound\r\n```\r\n\r\nIn the above, we don't need to compile against `[Foo]` at all, so this should be a runtime error. /cc @daxian-dbw.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt @daxian-dbw @lzybkr The goal with classes is to be **_substantially more rigorous_** than normal PowerShell. We wanted to catch as many errors at compile time as possible. If you have an unresolved type in a method at compile time, then add the necessary `using module` statement so the type resolves. That way you won't have an unresolved type exception at runtime. Dongbo questioned the inconsistency with commands which are resolved at runtime. I don't know - maybe we should make you add `using module` statements for cmdlets that aren't part of the PowerShell core.",
+      "created_at": "2018-04-24T17:23:14Z",
+      "updated_at": "2018-04-24T17:23:14Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay \r\n> I don't know - maybe we should make you add `using module` statements for cmdlets that aren't part of the PowerShell core.\r\n\r\nLets say I have the following `MyModule.psm1`:\r\n\r\n```powershell\r\nEnum MyEnum {\r\n    A\r\n    B\r\n}\r\n\r\nclass MyClass {\r\n    [MyEnum]$Prop1\r\n\r\n    MyClass () {\r\n        $This.Prop1 = Get-MyEnumPrivate\r\n    }\r\n}\r\n\r\nfunction Get-MyClassPublic {\r\n    [CmdletBinding()]\r\n    [OutputType([MyClass])]\r\n    param ()\r\n    end {\r\n        [MyClass]::New()\r\n    }\r\n}\r\nExport-ModuleMember -Function Get-MyClassPublic\r\n\r\nfunction Get-MyEnumPrivate {\r\n    [CmdletBinding()]\r\n    [OutputType([MyEnum])]\r\n    param ()\r\n    end {\r\n        [MyEnum]::B\r\n    }\r\n}\r\n```\r\n\r\nIf checking for unresolved commands and compile time resulted in an error, would that mean module authors would now need to ensure the private functions a method consumes exists or is defined before the class is compiled? That would seem troubling.",
+      "created_at": "2018-04-24T17:40:10Z",
+      "updated_at": "2018-04-24T17:40:10Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Why? It's already the case for functions i.e. functions must be defined before they can be used. Alternatively we could build the AST for the module, find all the function definitions in the ast and then check the methods to make sure all of the directly called functions are defined, either in the module or through `using module` statements. And for dynamic dispatches, you could still use the call (`&`) operator. \r\n",
+      "created_at": "2018-04-25T00:16:12Z",
+      "updated_at": "2018-04-25T00:16:12Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay \r\n> It's already the case for functions i.e. functions must be defined before they can be used.\r\n\r\nPerhaps I'm misunderstanding here, but weren't you suggesting with this \r\n\r\n> I don't know - maybe we should make you add using module statements for cmdlets that aren't part of the PowerShell core.\r\n\r\nThat the PowerShell classes would error at compile time if a method body contained a function that is not already defined? That is a different from a function calling another function at runtime. I can define a function that calls another function that is not yet defined and that will only cause an error at runtime. it does not, however, cause an error at definition time.\r\n\r\n> Alternatively we could build the AST for the module, find all the function definitions in the ast and then check the methods  [snip]\r\n\r\nYes. That's where I was going with this, but I just wanted clarity first. ",
+      "created_at": "2018-04-25T00:30:22Z",
+      "updated_at": "2018-04-25T00:30:22Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "> That the PowerShell classes would error at compile time if a method body contained a function that is not already defined?\r\n\r\nRight. This is different than the dynamic behaviour of functions but we've had a lot of asks for essentially static function resolution at compile time. (I implemented it once to see if it would make dispatch faster - at the time it didn't). Since we've had this idea that classes would exhibit more traditional programming language semantics, having static function resolution seems appropriate.\r\n",
+      "created_at": "2018-04-25T00:39:17Z",
+      "updated_at": "2018-04-25T00:39:17Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "So long as the module author doesn't need to care too deeply about the order in which the Classes, Enums, and functions are defined in the module, I'm on board with it being stricter. ",
+      "created_at": "2018-04-25T01:02:49Z",
+      "updated_at": "2018-04-25T01:02:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Being strict is fine, but if we have to start being incredibly picky about the order of definition it would quickly become nothing more than a nuisance. So... yes go for it.",
+      "created_at": "2018-08-14T14:47:44Z",
+      "updated_at": "2018-08-14T14:47:44Z"
+    }
+  ],
+  "created_at": "2018-04-24T17:01:14Z",
+  "number": 6722,
+  "state": "open",
+  "title": "Type checking in PowerShell class method bodies is not needed",
+  "updated_at": "2018-08-14T14:47:44Z"
+}

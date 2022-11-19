@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5832",
+  "author": "alx9r",
+  "body": "Consider the following treatments of `$x`:\r\n\r\n```PowerShell\r\n$x -eq $RHS\r\n$x -contains $RHS\r\n\r\nfunction f { param([Parameter(ValueFromPipeline)]$y) process{$y} }\r\n$x | f\r\n\r\nfunction g { param([Parameter(Position=1)]$y) $y }\r\ng $x\r\n```\r\n\r\nThere are conditions of `$x` which results in PowerShell enumerating `$x` for each of these treatments.  Setting `$x=1,2`, for example, causes `$x` to be enumerated by `-eq` and `-contains`, at the input to `f`, and at the output of `g`.  On the other hand, setting `$x='12'`, results in no enumeration.\r\n\r\n1. Are the rules that decide whether or not `$x` is enumerated the same for the pipeline and those comparison operators that perform conditional enumeration?\r\n2. The value of `[LanguagePrimitives]::GetEnumerator($x)` _seems_ to be non-null iff `$x` gets enumerated by those treatments.  Is this a mere coincidence, a rule PowerShell aspires to, or true by construction?\r\n3. Are there other (user-observable) parts of the language (aside from operators and the pipeline) that perform conditional enumeration?  If so, are the rules used by those parts the same?\r\n  ",
+  "closed_at": "2018-02-03T18:16:35Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "1. The rules are intended to be the same.\r\n\r\n    For operators, the rules are implemented [here](https://github.com/PowerShell/PowerShell/blob/bcb725271245049124e5d9eea145348ee638c20e/src/System.Management.Automation/engine/runtime/Binding/Binders.cs#L563), and I apologize that the code is not necessarily easy to understand.\r\n\r\n    For the pipeline, the decision is made by `LanguagePrimitives.GetEnumerator`, you can see the call [here](https://github.com/PowerShell/PowerShell/blob/4bc52d2358222084738157a08907fac32d13bd3a/src/System.Management.Automation/engine/pipeline.cs#L1140).\r\n\r\n2. True by construction for pipelines, rule to aspire to for operators.\r\n\r\n3. Parameter binding comes to mind - e.g. when to bind to a parameter of type `object` versus `object[]`. To the best of my knowledge and memory, operators all rely on `PSEnumerableBinder.IsEnumerable` (there are many uses) and everything else relies on `LanguagePrimitives.GetEnumerator`.",
+      "created_at": "2018-01-09T22:33:46Z",
+      "updated_at": "2018-01-09T22:33:46Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Thanks @lzybkr.  With respect to parameter binding, do you mean that\r\n\r\n```PowerShell\r\nfunction f {\r\n    [CmdletBinding(DefaultParameterSetName='scalar')]\r\n    param\r\n    (\r\n        [Parameter(ParameterSetName = 'scalar',\r\n                   Position = 1)]\r\n        [int]\r\n        $Scalar,\r\n\r\n        [Parameter(ParameterSetName = 'array',\r\n                   Position = 1)]\r\n        [int[]]\r\n        $Array\r\n    )\r\n    return $PSCmdlet.ParameterSetName\r\n}\r\n\r\nf 1\r\nf 1,2\r\nf ([System.Collections.ArrayList]@(1,2))\r\nf ([System.Collections.Queue]@(1,2))\r\n```\r\n\r\ndecides on the parameter set based on the result of  `LanguagePrimitives.GetEnumerator` for the argument?\r\n\r\nThe first three calls to `f` seem consistent with that.  However, `f ([System.Collections.Queue]@(1,2))` tries (and fails) to bind to `$Array` despite non-null `LP.GetEnumerator` for the argument.  `Trace-Command` mentions \"Argument type Queue is not IList, treating this as scalar\" in that case.  That business seems to happen in [`EncodeCollection`](https://github.com/PowerShell/PowerShell/blob/b5f84c2b3920c8f242d8d33ea30171bed26da06a/src/System.Management.Automation/engine/ParameterBinderBase.cs#L1488) which seems to try to convert the argument to an array.  I didn't spot a call to `GetEnumerator` leading up to or in `EncodeCollection`, however.  It seems like this decision hinges on whether the argument is `IList` rather than `LP.GetEnumerator`.  Is that interpretation correct?",
+      "created_at": "2018-01-10T01:46:04Z",
+      "updated_at": "2018-01-10T01:46:04Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Right - I forgot that it's not quite the same - I don't know the reason why though.",
+      "created_at": "2018-01-10T01:57:03Z",
+      "updated_at": "2018-01-10T01:57:03Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@lzybkr \r\n\r\n>For operators, the rules are implemented here, and I apologize that the code is not necessarily easy to understand.\r\n> ...\r\n> True by construction for pipelines, rule to aspire to for operators.\r\n\r\nDo these statements also apply to the `.` (property) operator?  That operator has some behavior whose rules I haven't quite worked out.  It seems to enumerate according to `LP.GetEnumerator`, but only in some cases.  For example,\r\n\r\n```PowerShell\r\n$x = '1','2'\r\n\r\n$x.Chars\r\n$x.Length\r\n```\r\n\r\nenumerates `$x` in `$x.Chars` but not `$x.Length`.  Can you shed some light on this?",
+      "created_at": "2018-01-10T18:01:27Z",
+      "updated_at": "2018-01-10T18:01:27Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "For property access or method invocation, if the object has the property/method, no enumeration takes place.\r\n\r\n`Count` and `Length` are special - they are assumed to exist on all objects - if the object has the property, it is used, otherwise the sane value is returned (0 for null, 1 otherwise).",
+      "created_at": "2018-01-10T18:28:59Z",
+      "updated_at": "2018-01-10T18:28:59Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Ok.  That seems to explain the behavior for all properties and methods I've tested except `Length`.  The behavior for `Length` seems less like `Count` and more like other properties.  Consider the following:\r\n\r\n```PowerShell\r\n$y = [System.Collections.Queue]@('123','1234')\r\n$y.Length\r\n$y.Count\r\n```\r\n`$y.Length` is `3,4` which seems to correspond to the synthesized `.Length` for each of the strings. `$y.Count`, on the other hand, is `2`.  I _think_ that `('1','2').Length` is `2` (from my prior example) because `[array]` has a `.Length` property for some reason.\r\n",
+      "created_at": "2018-01-11T02:58:25Z",
+      "updated_at": "2018-01-11T02:58:25Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Ah, right. If the object is enumerable, then we enumerate. Array adds an alias so it has both Count and Length, but other enumerable types do not, so it's not entirely consistent.\r\n\r\nIn hindsight, maybe we should have only added Count and not Length to every object.",
+      "created_at": "2018-01-11T03:12:25Z",
+      "updated_at": "2018-01-11T03:12:25Z"
+    }
+  ],
+  "created_at": "2018-01-09T16:59:30Z",
+  "number": 5832,
+  "state": "closed",
+  "title": "Are the rules for conditional enumeration the same for comparison operators and the pipeline?",
+  "updated_at": "2018-02-08T06:29:19Z"
+}

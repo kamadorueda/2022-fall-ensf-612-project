@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9564",
+  "author": "msftrncs",
+  "body": "I found this by accident, left the `.` property reference while testing ideas.\r\n\r\nI think it is incorrect that this code goes without any errors, and also generates no result.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n$Departments = @'\r\nAlpha\r\nBeta\r\nGamma\r\nZulu\r\n'@. -split '\\r'\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nAt line:6 char:4\r\n+ '@.\r\n+    ~\r\nMissing property name after reference operator.\r\n+ CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\r\n+ FullyQualifiedErrorId : MissingPropertyName\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\n\r\n```\r\nExactly, nothing happens, no error, no result.  Any unary operator seems to do this.  A non-unary operator will generate two error messages, missing property, and unexpected token (for the right operand).\r\n\r\n# Environment data\r\n\r\nPowerShell 6.2 on Windows 10 1809\r\nWindows PowerShell 5.1 (same OS)\r\n",
+  "closed_at": "2019-10-01T03:50:18Z",
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I suppose the property reference is consuming the result of the unary operation?  This is kind of unexpected, as I wouldn't expect it to accept such a result without something like parenthesis around it or something ...",
+      "created_at": "2019-05-08T16:56:47Z",
+      "updated_at": "2019-05-08T16:56:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "What seems to be happening is the PS _ignores whitespace_ immediately after a property accessor. This case in the parser is meant to handle things like this:\r\n\r\n\r\n```powershell\r\n$ReallySillyLongName.PropertyOneThatIsLong.\r\n    MethodName()\r\n```\r\n\r\nBut it does seem to be a bug that if you follow it with whitespace and then a defined operator that it simply processes the property name with either just whitespace or possibly an empty string. This is because the hyphen that starts such an operator is actually a token-separating character and isn't usable as a property name character without encloding is in quotes.\r\n\r\nSo it's trying to be lenient and helpful and ignore the space, but the subsequent breaking character leaves it with a whitespace-only property name -- which it presumably trims to an empty string -- which isn't a defined property name at all, so it gives back $null as you're not working in StrictMode. _Then_ the split operation is actually applied, but it already has nothing to work with, and also returns $null.\r\n\r\n/cc @daxian-dbw seems like a parser bug where it forgets that this should be a parse error if the token is ended before it gets any characters to use for a property name?",
+      "created_at": "2019-05-08T17:15:56Z",
+      "updated_at": "2019-05-08T17:18:45Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I was thinking maybe it was going to use the result of the -split unary operator as a member name, but I cannot seem to prove its doing that either.\r\n\r\n```PowerShell\r\n@{hello=3}. -split 'hello' # result is $null\r\n@{hello=3}. 'hello' # result is 3\r\n```\r\n\r\n",
+      "created_at": "2019-05-08T19:08:57Z",
+      "updated_at": "2019-05-08T19:08:57Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah if the operator didn't need the hyphen it _would_. But since the hyphen is a character that effectively creates a token boundary it seems to end up with a null property name. Even this fails:\r\n\r\n```powershell\r\nPS> @{'  -split \"hello\"' = \"tricks\"}.  -split \"hello\"\r\n# no result\r\n```",
+      "created_at": "2019-05-08T19:12:42Z",
+      "updated_at": "2019-05-08T19:12:42Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I also tried:\r\n```PowerShell\r\n@{hello=3}.(-split 'hello') # result is $null\r\n@{hello=3}.('hello') # result is 3\r\n```",
+      "created_at": "2019-05-08T19:21:22Z",
+      "updated_at": "2019-05-08T19:21:22Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "If you leave off the operand for the split operator, the error message will imply that the operator was of the unary type, so its clearly looking for an expression, to which if the first term is an operator, it must be unary.",
+      "created_at": "2019-05-08T19:22:43Z",
+      "updated_at": "2019-05-08T19:22:43Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "This works:\r\n```PowerShell\r\n@{hello=3}.$(-split 'hello') # result is 3\r\n```",
+      "created_at": "2019-05-08T19:26:35Z",
+      "updated_at": "2019-05-08T19:26:35Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@msftrncs you are right that it's using the unary expression as the member of the `MemberExpression`. It's more obvious if you look at the ASTs:\r\n```\r\n$s = @\"\r\n@'\r\nAlpha\r\nBeta\r\nGamma\r\nZulu\r\n'@. -split '\\r'\r\n\"@\r\n$a = [System.Management.Automation.Language.Parser]::ParseInput($s, [ref]$null, [ref]$null)\r\n$a.EndBlock.Statements[0].PipelineElements[0].Expression.Member.GetType()\r\n\r\n> IsPublic IsSerial Name                                     BaseType\r\n> -------- -------- ----                                     --------\r\n> True     False    UnaryExpressionAst                       System.Management.Automation.Language.ExpressionAst\r\n```\r\nThe `UnaryExpression` `-split '\\r'` will be evaluated first and the result will be used as the member name, which is `\\r`. The member doesn't exist, and thus the `MemberExpression` returns `$null`.\r\n\r\nIt's not that obvious, but the behavior should be by design.",
+      "created_at": "2019-05-10T23:41:00Z",
+      "updated_at": "2019-05-10T23:41:00Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw, I had gathered this so far, but it seems that this doesn't work as designed, because I provided further examples showing that it does not work, specifically with `-split`.  I have since realized that it does work with `-join`.\r\n\r\nExamples:\r\n```PowerShell\r\n@{hello=3}.(-split 'hello') # result is $null\r\n@{hello=3}.('hello') # result is 3\r\n@{hello=3}.$(-split 'hello') # result is 3\r\n@{hello=3}. -join 'hello' # result is 3\r\n```\r\n\r\nThere seems to be something special going on with `-split` when it supplies the member expression without a full sub-statement context.  This is what I have determined.  `-split` normally returns an array object, but since PowerShell normally unwraps single element arrays, this particular example appears to only output 1 string, but using `get-member -in (-split 'hello')` I can see the array. I am guessing the unwrap doesn't occur when `-split`'s result is passed to the accessor lookup, and it cannot handle the array result, as the operation is not defined.  Using the substatement causes the unwrap, and then the lookup can occur.\r\n\r\nI also want to say that I think this is a bad design.  It leads to confusion as to what later member accesses will actually be accessing.  Of course, this is easy to clarify, by wrapping the expression in parenthesis, but I think the user/programmer should be forced to do that to disambiguate the reference.\r\n\r\n```PowerShell\r\n@{hello=3}. -join 'hello'.ToString() # result is [int]3\r\n@{hello=3}.( -join 'hello').ToString() # result is [string]3\r\n```\r\nAbove (first line), the `.ToString()` works against the `'hello'` of the `-join`, and further accessors against the original expression will not happen.   We should be forced to disambiguate this, up front.  When a language is too lax, it can create problems that become hard to troubleshoot.\r\n\r\nAnyway, this is just my opinion.  I do wonder, even without strict mode, if an error shouldn't be raised on certain inputs to the accessor member lookup.   What good does an array object, or even numeric values, provide to an accessor member lookup?\r\n\r\nI have learned things from this at any rate.\r\n1. member access is actually an operand (or said as the `.` (or `::`) operator followed by an operand, though it has a strict syntax where the operator must immediately follow the prior object).  I already understood the index access worked that way, and that is easy to see, this was not.  Also, must clarify that this particular operand permits unquoted non-expandable strings, which is what is normally used.\r\n2. any operand can start with a unary operator (while it might seem obvious, its easy to want to just consider pre-unary operators as straight operators, but once you realize they are actually part of the operand, processing syntax suddenly becomes so much easier)\r\n\r\nThis is important because I will use this information in https://github.com/PowerShell/EditorSyntax/pull/156 to improve both the accessor syntax scoping and the general operation in expression mode.",
+      "created_at": "2019-05-11T04:55:36Z",
+      "updated_at": "2019-05-11T04:55:36Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> There seems to be something special going on with `-split` when it supplies the member expression without a full sub-statement context.\r\n\r\nIt's not `-split`, but `hashtable` has something special going on. For a dynamic member access, powershell evaluates the dynamic member expression, and then converts the result to a string. But when the target is an `IDictionary`, it's handled specially -- no string conversion, the result is used directly as the key because `IDictionary` takes an object key. See the code here\r\nhttps://github.com/PowerShell/PowerShell/blob/06391330533c65b464e0c5a62bc3303564ccd324/src/System.Management.Automation/engine/runtime/Binding/Binders.cs#L1340-L1351\r\n\r\nThe following would work:\r\n```\r\n$s = -split 'hello'\r\n@{$s = 3}. $s\r\n> 3\r\n```\r\n\r\n> I also want to say that I think this is a bad design. It leads to confusion as to what later member accesses will actually be accessing.\r\n\r\nThe dynamic member accessing feature is very useful with a variable expression as the member, something like `$obj.$member`. Yes, it provides the ability to use any expression as the member, but we shouldn't abuse it if we want clear and readable code :)\r\n\r\nI do find a bug with indexing a Hashtable, see https://github.com/PowerShell/PowerShell/issues/9580",
+      "created_at": "2019-05-12T04:47:24Z",
+      "updated_at": "2019-05-12T04:47:24Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yikes, I don't know why I didn't see this earlier, but hashtables accept any kind of object for a key (it seems).  The EditorSyntax grammar doesn't recognize that.\r\n\r\nSince the key can contain the [string[]] object returned by `-split 'hello'` I can see then that's why it doesn't work in the original cases.\r\n\r\n`[string[]]'hello' !== [string]'hello'`\r\n\r\nLittle confusing why this doesn't work:\r\n\r\n```PowerShell\r\n@{-split 'hello'=4}. -split 'hello'\r\n```\r\nYet when you put it in a variable, and use the variable it does.   That almost makes it look like its using the reference, and if the reference isn't the same, it doesn't work??  In the above, `-split 'hello'` in both places is not the same reference, though they produce the same result.\r\n\r\n\r\n",
+      "created_at": "2019-05-12T05:46:57Z",
+      "updated_at": "2019-05-12T05:46:57Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Little confusing why this doesn't work: `@{-split 'hello'=4}. -split 'hello'`\r\n\r\nWell, those two `-split 'hello'` returns two different arrays, which have different hashcode values. So `Hashtable` doesn't think the latter points to the same key. That's how `Hashtable` works.",
+      "created_at": "2019-05-12T06:01:44Z",
+      "updated_at": "2019-05-12T06:01:44Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think the real crux of the confusion here is that this works without a subexpression operator, and as such there's no visible differentiator that would indicate that the operator is behaving as unary.\r\n\r\nIn my own opinion, it would make more sense for this behaviour to _require_ a subexpression operator to be used, and syntax error in all other cases where a member-access operator is followed by a unary operator.\r\n\r\ni.e., this should be fine, it's pretty clear what's happening:\r\n\r\n```\r\nPS> $thing.$(-split 'hello')\r\n```\r\n\r\nWhereas this is only ever confusing in terms of what it's operating on, how it ought to behave, and what the result should ever be, if anything:\r\n\r\n```\r\nPS> $thing. -split 'hello'\r\n```",
+      "created_at": "2019-05-12T06:05:12Z",
+      "updated_at": "2019-05-12T06:05:12Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's all fine and dandy  \u2026  but the average user doesn't see it that way \u2026  the result is the same, and what makes it any more likely that two constants to follow those rules \u2026  that's why this stuff confuses us low level programmers...   'hello'  = 'hello' because I compared every bit.    obviously the difference is that [valuetype]'s do compare directly, but all others use their instance generated hashcodes for comparison. (actually [valuetype]s just generate the same hashcode when their bits match.)\r\n\r\nI can also understand the basis for dynamic member access \u2026 but if you cannot truly access certain members dynamically \u2026 whats the value?  Of course from a processing standpoint, it makes for a simple rule.  `.` followed by an operand.  operand can be a unary operator and its operand.  that operand then can be a unary operator, and so that repeats.  any operand is valid.  `$a` is an operand.  `@(x,x)` is an operand.  The unquoted non expanding string `hello` is an operand.  and so on.  There would be no way to say, `$variable` is an acceptable operand, but `@(x,x,x)` is not.\r\n\r\nOriginally I only thought there was a few things that was accepted, the unquoted non-expanding string, or a variable or a quoted string (I have been using all 3).  I didn't realize it accepted an entire expression.  And now I know there are some very big gotchas when that expression doesn't result in a [valuetype].\r\n\r\n(and my reference to [valuetype] is probably not accurate, as strings are not [valuetype])",
+      "created_at": "2019-05-12T06:14:52Z",
+      "updated_at": "2019-05-12T06:18:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Is a conclusion \"by design\"?",
+      "created_at": "2019-09-29T16:56:12Z",
+      "updated_at": "2019-09-29T16:56:12Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "while it is surprising, I do think it is by design.",
+      "created_at": "2019-10-01T03:12:01Z",
+      "updated_at": "2019-10-01T03:12:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Ok, until we get more UX negative feedback and I close with \"By-Design\" label.",
+      "created_at": "2019-10-01T03:50:18Z",
+      "updated_at": "2019-10-01T03:50:18Z"
+    }
+  ],
+  "created_at": "2019-05-08T16:53:51Z",
+  "number": 9564,
+  "state": "closed",
+  "title": "missing property reference error ignored if followed by unary operator",
+  "updated_at": "2019-10-01T03:50:31Z"
+}

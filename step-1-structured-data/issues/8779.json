@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8779",
+  "author": "iSazonov",
+  "body": "## PR Summary\r\n\r\nRelated #8715.\r\n\r\n1. Replace EnterReadLock() with TryEnterReadLock().\r\nEnterReadLock() might never return.\r\n2. Increase the number of read file lock attempts.\r\nReduce inter-process race condition probability.\r\n3. Use WaitForFile() for write file lock.\r\nReduce inter-process race condition probability.\r\n4. Replace EnterWriteLock() with TryEnterWriteLock().\r\nEnterWriteLock() might never return.\r\n5. Return default if the config file can not be read (added `catch (IOExeption)`).\r\n\r\n## PR Context  \r\n\r\nCurrently we see race condition failures in xUnit tests. The race conditions can be inter-thread and inter-process.\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Change is not breaking](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.  \r\n- **User-facing changes**\r\n    - [x] Not Applicable\r\n    - **OR**  \r\n    - [ ] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed: <!-- Number/link of that issue here -->\r\n- **Testing - New and feature**\r\n    - [ ] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [x] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n        - [ ] [Add `[feature]` to your commit messages if the change is significant or affects feature tests](https://github.com/PowerShell/PowerShell/blob/master/docs/testing-guidelines/testing-guidelines.md#requesting-additional-tests-for-a-pr)\r\n",
+  "closed_at": "2019-03-10T01:57:52Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT I think we can not release 6.2 without fixing the race condition.",
+      "created_at": "2019-02-07T04:45:00Z",
+      "updated_at": "2019-02-07T04:45:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT @adityapatwardhan @daxian-dbw Friendly ping - I think it is important to fix before RC. ",
+      "created_at": "2019-02-08T06:57:49Z",
+      "updated_at": "2019-02-08T06:57:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw The PR is aimed only at intra-thread race conditions that we catch in xUnit tests. I want to keep the PR as simple as possible and move intra-process lock fixes to follow PR.\r\nI believe it is important that these two PR must be made before we release 6.2.\r\nPerhaps the second PR will replace most of changes of the PR. I didn't think it over deep. For now, in short, I think we could do the same as in AnalisisCache.",
+      "created_at": "2019-02-20T05:36:02Z",
+      "updated_at": "2019-02-20T05:36:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> I think we could do the same as in AnalisisCache\r\n\r\nWe cannot do the same as in AnalysisCache. For AnalysisCache, the cache file is only for perf, and we are able to get the accurate metadata even without the cache file. Therefore, we can ignore the cache file if read/write operation fails.",
+      "created_at": "2019-02-20T06:47:15Z",
+      "updated_at": "2019-02-20T06:47:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  Therefore, we can ignore the cache file if read/write operation fails.\r\n\r\nWhat should be the behavior for the configuration file?\r\nMy main concern now is that if someone has blocked this file, then all PowerShell Core processes will terminate abnormally (We should consider side-by-side and hosting scenarios too). This means that the only reliable scenario is to always rely on the default settings and/or current settings and ignore the settings file if we cannot read it (or write) for the allotted time (preferably in the background process).",
+      "created_at": "2019-02-20T07:31:02Z",
+      "updated_at": "2019-02-20T07:31:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> My main concern now is that if someone has blocked this file, then all PowerShell Core processes will terminate abnormally\r\n\r\nUsing default values for settings is fine except for security settings. So one option is to use the most secure values for the security settings when the file is not accessible, and the default values for other settings. So when the file is deliberately locked, a new pwsh instance can be started, but with all security features configurable via `powershell.config.json` turned on. But say the new pwsh instance want to set value for a setting, that will fail, and how to deal with that would be another problem.\r\n\r\nThere are two set of problems:\r\n1. Reduce chance of race condition among processes, and mitigate the race condition when it happens.\r\n    - Reading the config file only once and cache the whole `JObject` for future use is a way to reduce race condition\r\n    - The `WaitForFile` change you made is a way to mitigate the race condition when it happens.\r\n2. Handle the worst scenario where it's impossible to access the file within the reasonable time period.\r\n\r\nThe problem 2 is a hard one, we definitely cannot get to it for 6.2.\r\nCurrently, RC release is targeting end of this month, so I don't think there's enough time for the 'caching JObject' idea.\r\n",
+      "created_at": "2019-02-20T19:14:03Z",
+      "updated_at": "2019-02-20T19:14:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Using default values for settings is fine except for security settings. \r\n\r\nThe default hard-coded config _must_ be secure by default - yes? \r\nIn other words, if a process cannot read a file at startup, it uses internal default values \u200b\u200bthat are safe. If the process cannot read them while running, it uses the current values.\r\n\r\n> Reading the config file only once and cache the whole JObject for future use is a way to reduce race condition\r\n\r\nWe need to look LastWriteTime and try read only if the file was changed.\r\n\r\n> The problem 2 is a hard one, we definitely cannot get to it for 6.2.\r\n\r\nI think we can address this as I said above. ",
+      "created_at": "2019-02-21T03:44:02Z",
+      "updated_at": "2019-02-21T03:44:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> The default hard-coded config _must_ be secure by default - yes?\r\n\r\nThere will be two set of default values for security settings\r\n- One set is used when we are able to read the config file and the security settings are not configured. In this case, powershell assumes the security settings are not enforced.\r\n- The other set is used when we are not able to read the config file. In this case, powershell assumes all security settings should be enforced.\r\n\r\n> We need to look LastWriteTime and try read only if the file was changed.\r\n\r\nI'm not super sure about this. I would love to always use the cache data (some settings only care about the first-read-in values anyways), but it might be wrong for some other settings. This is just an idea that need to be further explored.",
+      "created_at": "2019-02-21T17:45:26Z",
+      "updated_at": "2019-02-21T17:45:26Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I looked at the current changes in this PR again, and I think the only change that should be kept is changing `new FileStream` to `WaitForFile` in `UpdateValueInFile`. All rest changes should be reverted, at least for now. Would you like to make that only change in this PR? Or, do you want to close this one and submit a new one around the \"default value\" idea at a later time?",
+      "created_at": "2019-03-06T19:03:52Z",
+      "updated_at": "2019-03-06T19:03:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Would you like to make that only change in this PR?\r\n\r\nOk, will do.",
+      "created_at": "2019-03-06T19:56:53Z",
+      "updated_at": "2019-03-06T19:56:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Done.",
+      "created_at": "2019-03-07T03:59:52Z",
+      "updated_at": "2019-03-07T03:59:52Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "~@iSazonov Can you please resolve the CI failure?~\r\n\r\nThe failure seems not related to the change. Restarted the build.",
+      "created_at": "2019-03-07T21:50:58Z",
+      "updated_at": "2019-03-08T03:43:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Do you want me to continue with defaults?\r\n\r\nSo if I have questions before I begin.\r\nWe need read the config at start time. Current waiting timeouts is good. Yes? If we can not read we use precompiled defaults.\r\nHow should we re-read the config - can we do this in background while monitoring the file is changed?\r\nIf we can not re-read the file we use _current_ used values.\r\nThoughts?",
+      "created_at": "2019-03-10T05:57:35Z",
+      "updated_at": "2019-03-10T05:57:35Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov Let me read your RFC again before commenting",
+      "created_at": "2019-03-10T22:15:42Z",
+      "updated_at": "2019-03-10T22:15:42Z"
+    }
+  ],
+  "created_at": "2019-01-29T10:18:53Z",
+  "number": 8779,
+  "state": "closed",
+  "title": "Reduce race condition probability for config file access",
+  "updated_at": "2019-03-10T22:15:42Z"
+}

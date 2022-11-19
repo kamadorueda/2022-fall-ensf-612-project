@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5375",
+  "author": "alx9r",
+  "body": "I am experimenting with capturing variables for use in a different runspace for [this certificate validation callback scriptblock](https://github.com/PowerShell/PowerShell/issues/4899#issuecomment-337782867).  For variable capture to be very useful in this case, the command setting up the callback would have to capture the variables local to the site where the scriptblock is defined.  It would have to do so _even_ if the scriptblock was first passed around through various commands and modules.  Such behavior would be consistent with the way `ForEach-Object`, for example, scopes access to variables for scriptblocks it invokes.  (In contrast, `Start-Job` seems to capture `$using:` variables using the `Start-Job` call site rather than the scriptblock definition site.)\r\n\r\nIt seems like accessing SessionState for a scriptblock's definition site would make it possible for a command to access variables local to the scriptblock's definition site.  That would make it possible to make those variables available in the callback.  Is there a way get such definition-local SessionState for a scriptblock if all I have is a reference to the scriptblock?  Is there some other way to access the variables local to a scriptblock?  It seems like `ForEach-Object` must be doing something like this but I confess I don't understand PowerShell internals enough to follow that bit of code.\r\n\r\nHere is a mocked-up example demonstrating what I'm trying to do:\r\n\r\n```PowerShell\r\nNew-Module m1 {\r\n    $v = 'm1 value'\r\n    function f {\r\n        param($sb)\r\n        g -sb $sb\r\n    }\r\n} | Import-Module\r\n\r\nNew-Module m2 {\r\n    $v = 'm2 value'\r\n    function g {\r\n        param($sb)\r\n        # I want to be able to get the PSVariable named v whose\r\n        # value is 'definition-local value' from this command.\r\n\r\n        # None of these commands work to do that.\r\n        Get-Variable v # 'm2 value'\r\n        Get-Variable v -Scope 1 # 'm2 value'\r\n        Get-Variable v -Scope 2 # 'outer value'\r\n    }\r\n} | Import-Module\r\n\r\n$v = 'outer value'\r\n\r\n& {\r\n    $v = 'definition-local value'\r\n\r\n    f -sb { $v }\r\n}\r\n```\r\n\r\nI'm trying to access the `$v` that is local to the definition of `$sb` from inside `g`.  I thought there might be some way to use `Get-Variable -Scope`, but there seems to be cases where the variables local to the scriptblock's definition aren't accessible.",
+  "closed_at": "2017-11-19T23:52:53Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Module scope links directly to global scope, and when you invoke a command inside a module, it's scope (say `g's` scope) links to the module scope.\r\n\r\nSo you have `g => m2 => global`. You won't find your local scope in that chain because it was considered too fragile to have dynamic scoping to search anything other than the module and global scope.\r\n\r\nTo accomplish true closures, you'll need to make changes to the PowerShell engine.\r\n\r\nIt probably makes sense to add an attribute so that the parameter binder could create the closure before changing the scope, e.g.\r\n\r\n```powershell\r\nparam([Closure()][ScriptBlock]$sb)\r\n```",
+      "created_at": "2017-11-08T06:00:11Z",
+      "updated_at": "2017-11-08T06:00:11Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "> It probably makes sense to add an attribute so that the parameter binder could create the closure before changing the scope...\r\n\r\nInteresting.  Would `[Closure()]` mean that given\r\n\r\n```PowerShell\r\nNew-Module m {\r\n    $v = 'm value'\r\n    function k {\r\n        param($sb)\r\n        & $sb.Module { Get-Variable v -ValueOnly}\r\n    }\r\n    function l {\r\n        param([Closure()][scriptblock]$sb)\r\n        & $sb.Module { Get-Variable v -ValueOnly}\r\n    }\r\n} | Import-Module\r\n\r\n$v = 'outer value'\r\n\r\n& {\r\n    $v = 'definition-local value'\r\n    k -sb {}.GetNewClosure()\r\n    l -sb {}\r\n}\r\n```\r\nthe invocations of `k` and `l` would each output `definition-local value`?",
+      "created_at": "2017-11-08T15:48:08Z",
+      "updated_at": "2017-11-08T15:49:55Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Yes, that's what I had in mind.",
+      "created_at": "2017-11-09T04:27:36Z",
+      "updated_at": "2017-11-09T04:27:36Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "I can imagine some use cases for that and I would welcome `[Closure()]`.  It doesn't seem to solve the problem from my original post, however. For example,\r\n\r\n```PowerShell\r\nNew-Module m {\r\n    $v = 'm value'\r\n    function n {\r\n        param($sb) # if this line used [Closure()]...\r\n        & $sb.Module { Get-Variable v -ValueOnly }\r\n    }\r\n} | Import-Module\r\n\r\nNew-Module SomeUserModule {\r\n    $v = 'user module value'\r\n    function o {\r\n        param($sb)\r\n        n -sb $sb.GetNewClosure() # ...it would be like this line used .GetNewClosure()\r\n    }\r\n} | Import-Module\r\n\r\n$v = 'outer value'\r\n\r\n& {\r\n    $v = 'definition-local value'\r\n    o -sb {}\r\n}\r\n```\r\n\r\noutputs `outervalue`.  In other words, the variables are captured at the call site of the function using `[Closure()]` _not_ the definition site of the scriptblock.  The latter is the way scope seems to work for scriptblocks invoked using `ForEach-Object`.  The way `ForEach-Object` works seems intuitive to me.  If nothing else, `ForEach-Object`'s scope rules are familiar to other PowerShell users.",
+      "created_at": "2017-11-09T16:47:23Z",
+      "updated_at": "2017-11-09T16:47:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r It sounds like you are asking for the `SessionState` property on `ScriptBlock` to be made public.  As long as the scope that the script block was defined in is still active `$sb.SessionState.PSVariable.Get` would work like you describe.\r\n\r\nI've definitely ran into a few situations where that property being public would have been very helpful.  Alternatively if the script block isn't associated with a module, the only other way I know of to get the session state is by getting `$PSCmdlet` from the call stack.  But you'd need to know which frame the script block was defined in, and that frame would have to use `CmdletBinding`.\r\n\r\n    New-Module {\r\n        function Test-Function {\r\n            param([scriptblock] $sb)\r\n            (Get-PSCallStack)[1].GetFrameVariables().PSCmdlet.Value.SessionState.PSVariable.Get('v')\r\n        }\r\n    } | Import-Module\r\n\r\n    $v = 'outer'\r\n    & {\r\n        [CmdletBinding()]\r\n        param()\r\n        $v = 'local'\r\n        Test-Function {}\r\n    }",
+      "created_at": "2017-11-09T22:28:31Z",
+      "updated_at": "2017-11-09T22:28:56Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">It sounds like you are asking for the SessionState property on ScriptBlock to be made public. As long as the scope that the script block was defined in is still active $sb.SessionState.PSVariable.Get would work like you describe.\r\n\r\n@SeeminglyScience Is [this](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.sessionstate?view=powershellsdk-1.1.0) the SessionState class you mean?  It sure seems like having access to a SessionState object like that for the scriptblock would provide access to the variables I need.",
+      "created_at": "2017-11-09T22:50:55Z",
+      "updated_at": "2017-11-09T22:52:08Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Exposing SessionState worries me. For a long time (since it was introduced in V2 for modules) I've felt that it gets in the way of implementing real closures and multi-threading. For example, it basically forces us to clone script blocks so you can run them on other threads.\r\n\r\nIf we expose SessionState, you'll be stuck with this problem forever.\r\n\r\nImagine we always created a closure - with the understanding that certain things can't be captured (e.g. calls to Get-Variable) - that seems like it would solve a lot of problems, right?",
+      "created_at": "2017-11-10T05:52:38Z",
+      "updated_at": "2017-11-10T05:52:38Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">Exposing SessionState worries me. For a long time (since it was introduced in V2 for modules) I've felt that it gets in the way of implementing real closures and multi-threading.\r\n\r\nI prefer a future with better language support for multi-threading.\r\n\r\n> Imagine we always created a closure - with the understanding that certain things can't be captured (e.g. calls to Get-Variable) - that seems like it would solve a lot of problems, right?\r\n\r\nDo you mean that it would be as though every scriptblock definition implicitly called `.GetNewClosure()`.  So\r\n\r\n```PowerShell\r\nNew-Module m {\r\n    $v = 'm value'\r\n    function n {\r\n        param($sb)\r\n        & $sb.Module { Get-Variable v -ValueOnly }\r\n    }\r\n} | Import-Module\r\n\r\n$v = 'outer value'\r\n\r\n& {\r\n    $v = 'definition-local value'\r\n    n -sb {} # .GetNewClosure() would be implicit\r\n}\r\n```\r\n\r\nwould output `definition-local value`?",
+      "created_at": "2017-11-11T17:19:11Z",
+      "updated_at": "2017-11-11T17:19:11Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "FWIW I settled on a combination of `$using:` and `.GetNewClosure()` to capture the value of variables from user-defined scriptblocks.  Calls to [`Save-WebFile`](https://github.com/alx9r/BootstraPS/blob/30bf72d6cd1605c3aaedf610374810262972c94f/BootstraPS.psm1#L1271-L1366) involving user variables in the certificate validation scriptblock look like this:\r\n\r\n```PowerShell\r\n$githubCaName = 'GeoTrust*'\r\n\r\n#...\r\n\r\n'https://github.com/alx9r/BootstraPS/blob/master/LICENSE' |\r\n    Save-WebFile -Path c:\\temp\\LICENSE -CertificateValidator {\r\n        $_ | Assert-RootCaName $using:githubCaName\r\n    }.GetNewClosure()\r\n\r\n#...\r\n```\r\n\r\nThis style is prone to forgetting `.GetNewClosure()` but that is mostly mitigated by `Save-WebFile` checking for the presence of `$githubCaName` in the closure.  It is also prone to forgetting `using` in the same manner as `Invoke-Command` and `Start-Job`.",
+      "created_at": "2017-11-19T23:52:53Z",
+      "updated_at": "2017-11-19T23:52:53Z"
+    }
+  ],
+  "created_at": "2017-11-08T02:38:22Z",
+  "number": 5375,
+  "state": "closed",
+  "title": "Is there a way to access variables local to a scriptblock's definition site in a manner similar to ForEach-Object?",
+  "updated_at": "2017-11-19T23:52:54Z"
+}

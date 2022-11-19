@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8946",
+  "author": "mklement0",
+  "body": "`-match` and `-replace` accept a pre-constructed `[regex]` instance in lieu of a _string_, respecting whatever options (or absence thereof) the instance was constructed with.\r\n\r\nBy contrast, `switch -regex` does not, which has two implications:\r\n\r\n* the specific options (or absence thereof) baked into the `[regex]` instance are _lost_ during matching,\r\n\r\n* presumably because the regex is converted to a _string_ first and then _recreated_ using PowerShell's _default_ options (i.e., `IgnoreCase`, `CultureInvariant`)\r\n\r\nAside from exhibiting unexpected _behavior_, performance suffers as well, due to the unnecessary recreation.\r\n\r\n# Steps to reproduce\r\n\r\nRun the following Pester tests:\r\n\r\n```powershell\r\nDescribe \"Support for predefined [regex] instances\" {\r\n  BeforeAll {\r\n    # Create a case-SENSITIVE regex\r\n    $regex = [regex]::new('A') \r\n  }\r\n  It \"-match uses the [regex] instance as-is\" {\r\n    'a' -match $regex | Should -Be $False\r\n    'A' -match $regex | Should -Be $True\r\n  }\r\n  It \"-replace uses the [regex] instance as-is\" {\r\n    'a' -replace $regex, 'replaced' | Should -Be 'a'\r\n    'A' -replace $regex, 'replaced' | Should -Be 'replaced'\r\n  }\r\n  It \"-switch uses the [regex] instance as-is\" {\r\n    $(switch -Regex ('a') { $regex { 'matched' } }) | Should -BeNullOrEmpty\r\n    $(switch -Regex ('A') { $regex { 'matched' } }) | Should -Be 'matched'\r\n  }\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\nAll tests should pass.\r\n\r\n# Actual behavior\r\n\r\nThe `switch -regex` test fails as follows:\r\n\r\n```none\r\n[-] -switch uses the [regex] instance as-is 21ms\r\n      Expected $null or empty, but got matched.\r\n```\r\n\r\nThat is, `switch -Regex ('a') { $regex { 'matched' } }` unexpectedly returned `'matched'`, even though it shouldn't have matched had it respected the case-sensitivity of the `$regex` instance.\r\n\r\n# Environment data\r\n\r\n\r\n```none\r\nPowerShell Core v6.2.0-preview.4 on macOS 10.14.2\r\nPowerShell Core v6.2.0-preview.4 on Ubuntu 18.04.1 LTS\r\nPowerShell Core v6.2.0-preview.4 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\nWindows PowerShell v5.1.17134.407 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "This only occurs when there's a mismatch between the case-sensitivity of the `switch` and the `[regex]` instance. \r\n\r\nTo illustrate what this means in practice, see this example:\r\n\r\n```powershell\r\n# [regex] case-sensitive, ignores whitespace in pattern\r\n$TwoLLNoSpace = [regex]::new('\\p{Ll} \\p{Ll}', 'IgnorePatternWhitespace') #case\r\n\r\n# Case-sensitivity is the same, will work as expected\r\nswitch -Regex -CaseSensitive ('a b', 'ab') {\r\n  $TwoLLNoSpace {\r\n    $_\r\n  }\r\n}\r\n\r\n# Case-sensitivity mismatch, regex recreated with IgnoreCase as only option, matches on wrong input\r\nswitch -Regex ('a b', 'ab') {\r\n  $TwoLLNoSpace {\r\n    $_\r\n  }\r\n}\r\n```\r\n\r\nAt the very least we should copy the existing `Options` value and only add/subtract the `IgnoreCase` flag as dictated by `-CaseSensitive`, [something like this](https://github.com/IISResetMe/PowerShell/commit/cc252613b189ed3925761f5638562ef75c71b3a0) perhaps... but I'm not sure I agree that individual cases should be allowed to override the behavior of the parameter.",
+      "created_at": "2019-02-23T16:28:02Z",
+      "updated_at": "2019-02-23T16:28:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the sleuthing, @IISResetMe - you've found [the crux of the inconsistency](https://github.com/PowerShell/PowerShell/blob/5d54f1aa3871a826409496437e25856dc263ccc4/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L2304-L2309):\r\n\r\n* `switch -regex [-casesensitive]` makes its own (implied) case-sensitivity override the options of the predefined `[regex]` instance.\r\n\r\n* whereas `-match` == `-imatch` / `-cmatch` and `-replace` = `-ireplace` / `-creplace` do not - they respect whatever options are built into the `[regex]`\r\n\r\nTo wit (applies to `-replace` too):\r\n\r\n```powershell\r\nPS> 'a' -cmatch ([regex]::new('A', 'IgnoreCase'))\r\nTrue # The 'c' in -cmatch was ignored in favor of the options built into the [regex]\r\n```\r\n\r\nI created this issue based on this expectation, given that I'd always seen `-match` and `-replace` operate that way (also in Windows PowerShell).\r\n\r\nWhile you could argue that the inconsistency should be resolved the way that `switch -regex` works, doing so would be a breaking change. [_Update_: of course, as would changing the behavior of `switch -regex` be].\r\n\r\nWhile there is undoubtedly a contradiction, I think it is defensible - though requires documentation - to give precedence to the options baked into a predefined `[regex]` instance.\r\n\r\nPredefining a `[regex]` is an advanced technique anyway, whose primary purpose to me is as a _performance optimization_ with _high iteration counts_, so as to use the given instance _as-is_, without incurring the cost of regex construction.\r\n\r\nHowever, note that even with matching options ~~[the precompiled / predefined `[regex]` instance is _not_ used as-is](https://github.com/PowerShell/PowerShell/blob/5d54f1aa3871a826409496437e25856dc263ccc4/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L2312)~~ the code doesn't run any faster, at least in PowerShell _Core_ - see #8976.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-02-25T16:50:25Z",
+      "updated_at": "2019-02-25T19:51:37Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "> However, note that even with matching options [the precompiled / predefined `[regex]` instance is _not_ used as-is](https://github.com/PowerShell/PowerShell/blob/5d54f1aa3871a826409496437e25856dc263ccc4/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L2312), at least in PowerShell _Core_ - see #8976.\r\n\r\nI think that's inaccurate - when case-sensitivity is aligned, the passed-in `[regex]` instance is indeed used https://github.com/PowerShell/PowerShell/blob/5d54f1aa3871a826409496437e25856dc263ccc4/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L2306-L2309",
+      "created_at": "2019-02-25T19:14:23Z",
+      "updated_at": "2019-02-25T19:14:23Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @IISResetMe - I had misread the source code; I've updated my previous comment accordingly; that said, the problem of the optimization _not being effective_ remains - any idea why?\r\n",
+      "created_at": "2019-02-25T19:20:58Z",
+      "updated_at": "2019-02-25T19:20:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Please discuss the problem in #8976.",
+      "created_at": "2019-02-25T19:41:20Z",
+      "updated_at": "2019-02-25T19:41:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: No, this should remain a separate issue, because its focus is (now) on the _inconsistent behavior_ between `-match` / `-replace` on the one hand, and `switch -regex` on the other.\r\n\r\nTo resolve this, we need to decide on:\r\n\r\n* whether to change existing behavior - which would be a breaking change either way (changing `switch -regex`'s behavior to that of `-match` / `-replace` or vice versa).\r\n\r\n   * Sticking with `switch -regex`'s current behavior would still require _fixing_ it, though, given that, as @IISResetMe demonstrated above, options _other_ than case-sensitivity aren't being honored (copied over when recreating the regex); @IISResetMe has prototyped that fix [here](https://github.com/IISResetMe/PowerShell/commit/cc252613b189ed3925761f5638562ef75c71b3a0).\r\n\r\n* whether to simply _document_ the inconsistency.\r\n\r\n",
+      "created_at": "2019-02-25T19:45:58Z",
+      "updated_at": "2019-02-25T20:33:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 My comment was about \"any idea why?\".",
+      "created_at": "2019-02-25T19:57:06Z",
+      "updated_at": "2019-02-25T19:57:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Got it, @iSazonov, thanks; on the bright side, my misinterpretation of your comment got me to summarize _this_ issue...",
+      "created_at": "2019-02-25T19:59:52Z",
+      "updated_at": "2019-02-25T19:59:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> my misinterpretation of your comment got me to summarize this issue...\r\n\r\n:-) I am ready add more comments for you.",
+      "created_at": "2019-02-25T20:09:15Z",
+      "updated_at": "2019-02-25T20:09:15Z"
+    }
+  ],
+  "created_at": "2019-02-21T21:28:09Z",
+  "number": 8946,
+  "state": "open",
+  "title": "switch -regex, unlike -match and -replace, doesn't respect the options of predefined [regex] instances",
+  "updated_at": "2019-02-25T20:33:16Z"
+}

@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15417",
+  "author": "erinlah-ms",
+  "body": "## Summary of the new feature/enhancement\r\n\r\n<!-- \r\nA clear and concise description of what the problem is that the new feature would solve.\r\nTry formulating it in user story style (if applicable):\r\n'As a user I want X so that Y.' with X being the being the action and Y being the value of the action.\r\n-->\r\n\r\nRequesting support for passing arguments via command line to be passed to the command the user is requesting to be executed. Compare with python:\r\n\r\n```\r\npython.exe -c \"import sys; print(sys.argv[1])\" \"It's `your`, not `you're`\"\r\n```\r\n\r\n**NOTE:** this request is not about invoking PowerShell from within PowerShell as a cmdlet. I'm aware that there's special processing there that translates -Command / -Args to the command line parameters -encodedCommand and -encodedArguments. This is specifically regarding creating a process where the native command line arguments passed to the process include -Command and -Args -- e.g. invoking PowerShell form some other shell, such as bash or cmd.\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nPropose extending `-Command` to support `-Args` when passed as command line arguments to the PowerShell host. This would apply any time that:\r\n1. The argument immediately following -Command starts with '{' and ends with '}', once whitespace has been trimmed.\r\n2. The 2nd argument after -Command is the argument -Args (ordinal case insensitive)\r\n3. -Args is followed by zero or more additional command line arguments.\r\n\r\nWhen this occurs, the $Args value will be bound with an array of the remaining command line arguments following the -Args argument. \r\n\r\nBackwards compat risk: estimated to be small, but non-zero. When attempting to use -Command with the first argument being a script block scring, I found no way to pass -Args afterward and result in a correcltly parsing powershell command, let alone a useful one. I suspect it can be done, but is unlikely to be practical. If nothing else, the change is definitely smaller in impact than the breaking changes to Set-Content between pwhs 5.1 and 6.0. \r\n\r\nNote: proposing no change to -Command or -Args parsing when invoking the Powershell function/commandlet from within powershell. That behavior will remain unchanged -- namely, when invoking PowerShell from within Powershell, the -Command and -Args arguments are replaced with -encodedCommand and -encodedArguments before the process is launched. This already has full fidelity today.\r\n\r\n## Rationale\r\n\r\nNote that this greatly simplifies string escaping. Being able to pass arguments after the command allows the user to only have to deal with one level of string escaping -- the current shell they're interacting with. \r\n\r\nIn contrast, schemes like `powershell.exe -Command \"{ param($a) echo $a }\" -A 'my example'`, the argument `my example` gets parsed twice -- first in your current shell (e.g. PowerShell, Bash, or Windows Command Shell), and then again by the powershell parser when parsing it as part of the `-Command` argument. This makes it prohibitively difficult to forward arguments between scripts, or invoke PowerShell via exec/CreateProcess from another program.\r\n\r\nFor example, passing the string \"It's \\`your\\`, not \\`you're\\`\" PowerShell through another script is exceedingly difficult, e.g. if embedded in the -Command argument. For instance, if you don't quote the string, PowerShell will treat the whitespace as argument separators. Also, PowerShell will parse the \"\\`\" characters as escapes, and the \"'\" characters as unescaped string literals. This is on top of the unescaping the outer shell has already performed on the user input -- e.g. in bash, the user probably wrapped the above in single or double quotes in order to be able to include spaces in the argument.\r\n\r\nAs discussed in issue https://github.com/PowerShell/PowerShell/issues/15410, Powershell only support passing arguments to a -command when invoked as a function from within powershell, not when invoked externally.\r\n\r\n## Examples in other script environments:\r\n\r\n- Python (invoked from cmd)\r\n    > $ c:\\bin\\Python26\\python.exe -c \"import sys; print(sys.argv[1])\" \"It's `your`, not `you're`\"\r\n    > It's `your`, not `you're`\r\n- JavaScript/node (invoked from cmd)\r\n    > $ c:\\bin\\node.exe -e \"console.log(process.argv[1])\" \"It's `your`, not `you're`\"\r\n    > It's `your`, not `you're`\r\n- sh (invoked from cmd)\r\n    > $ C:\\bin\\busybox.exe sh -c \"echo $0\" \"It's `your`, not `you're`\"\r\n    > It's `your`, not `you're`\r\n- bash (invoked from PowerShell)\r\n    > bash -c 'echo $0' \"It's ``your``, not ``you're``\"\r\n    > It's `your`, not `you're`\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It makes sense to support this.  To avoid breaking the current design where everything after `-Command` is part of the command, we can just support specifying `-Args` before `-Command`.  This will be a bit confusing to users, but we should just have good examples in the docs.",
+      "created_at": "2021-05-18T17:52:43Z",
+      "updated_at": "2021-05-18T17:52:43Z"
+    },
+    {
+      "author": "erinlah-ms",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT I hear your concern about breaking changes -- while I can't think of a case where `-Args` is valid, I have to admit PowerShell constantly impresses me with its principle of most surprise. \r\n\r\nBut if `-Args` appears before `-Command`, how do you know if `-Command` is an argument to the script vs an argument to the host? In other languages, all args after the command are eaten up and passed to the script, even if they match host command line args.\r\n\r\nCounter-proposal:\r\n- add a new argument `-Command1`. This works like `-Command`, except that it only gobbles up a single argument, instead of all subsequent arguments. \r\n- add a new argument `-ArgsN`. This works like `-Args`, except instead of accepting a single argument (which may be an array when invoked from powershell), it gobles up all remaining arguments into an array.\r\n\r\nE.g. `powershell -Command1 C -ArgsN 1 2 3` would pass 3 arguments to the command \"C\"\r\n\r\nBasically, just flip the gobbling behavior of the two switches in the new versions",
+      "created_at": "2021-05-19T17:50:42Z",
+      "updated_at": "2021-05-19T17:51:15Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@aaronla-ms I was thinking that the value of `-Args` would have to be a comma separated string with quotes, if there is whitespace.  However, I like your proposal better.  Maybe it should be `-CommandWithArgs` which accepts a single string and then `-Args` can take everything after it and pass to the command.",
+      "created_at": "2021-05-27T02:46:39Z",
+      "updated_at": "2021-05-27T02:46:39Z"
+    },
+    {
+      "author": "erinlah-ms",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT Exactly. Comma separated makes so many things unnecessarily difficult: (a) difficult to forward %* args to powershell from batch scripts (b) complications with passing commas in arguments when invoking powershell (e.g. how do i pass \"a,b\" as a single argument to powershell?) (c)... should i go on?\r\n\r\nWith your new proposal, would the powershell commandlet work the same way? E.g. in powershell could I say `-CommandWithArgs { echo $args[1] } -Args one two` and it would print `two`? I think it would be very counterintuitive is -CommandWithArgs/-Args was vararg externally, but single-array-arg internally.",
+      "created_at": "2021-05-27T17:16:27Z",
+      "updated_at": "2021-05-27T17:17:08Z"
+    },
+    {
+      "author": "erinlah-ms",
+      "author_association": "NONE",
+      "body": "FYI, for folks looking for a short term workaround, I'm using [Environment]::GetCommandLineArgs and a carefully placed line comment to work around this limitation for now. Posting here as it might help others with the same issue.\r\n\r\n**Workaround**: https://github.com/aaronla-ms/powershell-tips-and-tricks/blob/main/examples/embed.cmd\n\n<blockquote><img src=\"https://opengraph.githubassets.com/b6f200674acc2b4cb52c639d031780debd47c75dbb186598aa4134ecf422c901/aaronla-ms/powershell-tips-and-tricks\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/aaronla-ms/powershell-tips-and-tricks\">aaronla-ms/powershell-tips-and-tricks</a></strong></div><div>Contribute to aaronla-ms/powershell-tips-and-tricks development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2021-05-28T22:38:42Z",
+      "updated_at": "2021-05-28T22:38:44Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm super confused. This is just asking for there to be an **explicit** named `-Args` parameter which is literally ignored.\r\n\r\nYou can already do this. From CMD, for instance:\r\n```PowerShell\r\npowershell -command Get-ChildItem %UserProfile% -File\r\n```\r\n\r\nThe limitation in #15410 is not on passing parameters, it's on passing script blocks. There's no way to pass a scriptblock like `{param(...) ... }` to PowerShell -- so an `-Args` parameter would not help you at all.",
+      "created_at": "2021-09-30T16:13:43Z",
+      "updated_at": "2021-09-30T16:13:43Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "For what it's worth, apart from GetCommandLineArgs, the other way to pass through %* to your powershell code is to **have an actual file or command** and actually pass %* to it. I've frequently used this trick.\r\n\r\nThe in-line version is like this:\r\n```CMD\r\n@PowerShell.exe -ExecutionPolicy Unrestricted -NoProfile -Command function hello {param($User, $Greeting); Write-Host \"$Greeting, $User! How are you?\"}; hello %*\r\n```\r\nIf you call that like: `.\\hello.cmd Joel Welcome` it should work fine.\r\n\r\nI've also used it to wrap large scripts by embedding the script at the bottom of the .cmd file after a `GOTO :EOF` and then copying the file within the batch:\r\n\r\n```CMD\r\n:: <# BEGIN POWERSHELL AS BATCH HEADER\r\n@ECHO OFF\r\ncopy %0 %0.ps1 >nul\r\nPowerShell.exe -ExecutionPolicy Unrestricted -NoProfile -Command function :: {}; %0.ps1 %*\r\ndel %0.ps1 >nul\r\n:: To avoid potentially leaving a window hanging, you could EXIT\r\n:: This is much nicer if you're calling this from an existing cmd window\r\nGOTO :EOF\r\n:: END POWERSHELL AS BATCH HEADER #>\r\n## Write whatever PowerShell script you want ...\r\n## The dot-source plus @Args is a hack to let you use a param block even though the first line of the file is ::\r\n. {\r\n\r\nparam($User='Nobody', $Greeting='Greetings')\r\nWrite-Host \"$Greeting, $User! How are you?\"\r\n\r\n} @Args\r\n```\r\n\r\nThe `function :: {}` lets PowerShell ignore the `::` on the first line.",
+      "created_at": "2021-09-30T17:09:44Z",
+      "updated_at": "2021-09-30T17:09:44Z"
+    },
+    {
+      "author": "erinlah-ms",
+      "author_association": "NONE",
+      "body": "@Jaykul writes\r\n> For what it's worth, apart from GetCommandLineArgs, the other way to pass through %* to your powershell code is to **have an actual file or command** and actually pass %* to it. I've frequently used this trick.\r\n> \r\n> The in-line version is like this:\r\n> \r\n> ```batchfile\r\n> @PowerShell.exe -ExecutionPolicy Unrestricted -NoProfile -Command function hello {param($User, $Greeting); Write-Host \"$Greeting, $User! How are you?\"}; hello %*\r\n> ```\r\n\r\nDO NOT USE THIS CODE, it is vulnerable to code injection attacks:\r\n\r\n```\r\naaronla@aaronla-rabbit:scratch$ dir /b a.txt\r\na.txt\r\n\r\naaronla@aaronla-rabbit:scratch$ hello.cmd \"$(del a.txt)\"\r\n ! How are you?\r\n\r\naaronla@aaronla-rabbit:scratch$ dir /b a.txt\r\nFile Not Found\r\n```\r\n\r\nAgain, I'm emphasizing, passing arguments via command line is _very *very*_ hard to do correctly in powershell. Request a feature to do so instead of risk getting it dangerously wrong.\r\n\r\n> copy %0 %0.ps1 >nul\r\n\r\nNow you can't run two copies of the script in parallel. Or the location the script is running from may not be writable.\r\n\r\nAgain, it shouldn't require a temporary file just to pass command line arguments to a script.",
+      "created_at": "2021-09-30T18:03:32Z",
+      "updated_at": "2021-09-30T18:06:11Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "> aaronla@aaronla-rabbit:scratch$ hello.cmd \"$(del a.txt)\"\r\n\r\nLOL, as if you needed to pass `DEL` from dos into PowerShell to run it \ud83d\ude09 there's no need to nitpick my rusty DOS skills (yeah, I should have used `%~s0` and should have done `'%1' '%2'` instead of `%*` to quote the results). The first example clearly shows that you can pass arguments _without_ creating an extra file, and that was the whole point.\r\n\r\nOn top of that, it's **the same thing** that would happen when calling the command that way from PowerShell, so the sub-expression is somewhat irrelevant to the discussion at hand.\r\n\r\nTo be clear, my point is that you don't need an -Args\r\n\r\n##  You can already pass parameters fine by just sticking them on the end of the line.\r\n\r\n![image](https://user-images.githubusercontent.com/192942/135566184-e9e5e15b-d8a3-4ece-be5f-e5f81005c9a8.png)\r\n\r\nThe fact that PowerShell parses sub-expressions in parameters is a **feature** of PowerShell which you can only avoid by escaping or single-quoting the parameters, not by giving them a different name. \r\n\r\n\r\nIn PowerShell:\r\n```PowerShell\r\npwsh -noprofile -command '&{param($first,$last) Write-Host \"\"Welcome $Last, $First!\"\" }' \"Joel\" '''$(del foo.ps1)'''\r\n```\r\n\r\nIn DOS:\r\n```batch\r\npwsh -noprofile -command \"&{param($first,$last) Write-Host \"\"Welcome $Last, $First!\"\" }\" \"Joel\" \"'$(del foo.ps1)'\"\r\n```\r\n\r\nAs a side note -- if we did add an `-Arguments` parameter, it would **have** to come before the `-Command` parameter to avoid breaking the existing syntax for parameters. And yes, many core PowerShell commands already take parameters named (or aliased as) `Args`. Try `Get-Command -ParameterName Args`",
+      "created_at": "2021-10-01T04:46:25Z",
+      "updated_at": "2021-10-01T05:04:09Z"
+    },
+    {
+      "author": "erinlah-ms",
+      "author_association": "NONE",
+      "body": "> LOL, as if you needed to pass `DEL` from dos into PowerShell to run it \ud83d\ude09 \r\n\r\nThis _has_ happened before. Use your favorite search engine to search for \"script injection attack\".\r\n\r\n> there's no need to nitpick my rusty DOS skills (yeah, I should have used `%~s0` and should have done `'%1' '%2'` instead of `%*` to quote the results). The first example clearly shows that you can pass arguments _without_ creating an extra file, and that was the whole point.\r\n\r\nNo nitpicking intended. I only mean to clarify that there's a bug in the proposed program, and it has security implications. You didn't show a possible solution to the stated problem -- your program improperly handles some possible argument values, and failed to print `$(del a.txt)! How are you.` in the demonstrated case. Even worse, the program deleted a file in the process. \r\n\r\n> On top of that, it's **the same thing** that would happen when calling the command that way from PowerShell, so the sub-expression is somewhat irrelevant to the discussion at hand.\r\n\r\nRed herring... I'm not asking about what happens if you paste that literal batch/cmd command string into a PowerShell shell. I'm asking about passing command line options. I have a literal string I want to pass to my script, and am asking how to do so in way  where it won't be misinterpreted. E.g. I could be building a dedicated program in C# that launches the PowerShell command using `Process.Create`, for instance. It still shouldn't delete the file.\r\n\r\nSecondly, It's _not_ what happens when calling the command \"that way\" from PowerShell. Take my `embed.cmd` example above -- observe that the argument _is_ passed correctly without being interpreted if you quote the string correctly>\r\n\r\n```\r\nPS C:\\scratch> Test-Path a.txt\r\nTrue\r\nPS C:\\scratch> .\\embed.cmd '$(del a.txt)'\r\nargcount=1\r\nargs0=$(del a.txt)\r\nPS C:\\scratch> Test-Path a.txt\r\nTrue\r\n```\r\n\r\nAnd observe what happens if I call your script from PowerShell in a similar manner:\r\n\r\n```\r\nPS C:\\scratch> Test-Path a.txt\r\nTrue\r\nPS C:\\scratch> .\\hello.cmd '$(del a.txt)'\r\n ! How are you?\r\nPS C:\\scratch> Test-Path a.txt\r\nFalse\r\n```\r\n\r\n> The fact that PowerShell parses sub-expressions in parameters is a **feature** of PowerShell which you can only avoid by \r\nescaping or single-quoting the parameters, not by giving them a different name.\r\n\r\nYes. I understand.\r\n\r\nMy question was how to pass arguments literally. That is, how to _not_ invoke that feature.\r\n\r\nPlease note that if you call powershell from powershell using the -Command / -Args pattern, that feature does _not_ activate:\r\n\r\n```\r\nPS C:\\scratch> powershell -noprofile -command { param($first,$last) Write-Host \"Welcome $Last, $First!\" } -Args 'Joel','$(del foo.ps1)'\r\nWelcome $(del foo.ps1), Joel!\r\n```\r\n\r\n\r\n",
+      "created_at": "2021-10-01T16:33:57Z",
+      "updated_at": "2021-10-01T16:40:44Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Please note that if you call powershell from powershell using the -Command / -Args pattern, that feature does not activate:\r\n\r\nLike I said. The solution is to wrap it in single quotes, as I showed above. It has *nothing* to do with Args.",
+      "created_at": "2021-10-02T17:56:41Z",
+      "updated_at": "2021-10-02T17:56:41Z"
+    },
+    {
+      "author": "erinlah-ms",
+      "author_association": "NONE",
+      "body": "> > Please note that if you call powershell from powershell using the -Command / -Args pattern, that feature does not activate:\r\n> \r\n> Like I said. The solution is to wrap it in single quotes, as I showed above. It has _nothing_ to do with Args.\r\n\r\nPlease illustrate how to handle passing the arg if %1 already contains single quotes? E.g. if the user input is `',(del a.txt),'`, such that the resulting powershell command contains `'',(del a.txt),''`. You still have an input sanitization issue.",
+      "created_at": "2021-10-04T16:58:52Z",
+      "updated_at": "2021-10-04T16:59:46Z"
+    }
+  ],
+  "created_at": "2021-05-18T00:54:44Z",
+  "number": 15417,
+  "state": "open",
+  "title": "Feature Request: Support passing command line args with -Command option.",
+  "updated_at": "2021-10-04T16:59:46Z"
+}

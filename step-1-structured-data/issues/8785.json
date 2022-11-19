@@ -1,0 +1,209 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8785",
+  "author": "powercode",
+  "body": "By not doing excessive amounts of extra work, formatting can be sped up quite significantly.\r\nThe main change comes from adding new, more efficient, primitive to query an object for the existence of an instance member.\r\nThe formatting system has been checking for if an object has properties other than some decorated properties added by PS remoting, and it doesn't this by retrieving all properties which results in heavy allocations and wasted cycles.\r\nBy adding `GetFirstOrDefault` to `PSObject` and similar primitives to the underlying Adapters, we are able to return early, without having to get all properties back.\r\n\r\nTest script:\r\n```powershell\r\n$files = gci -ea:0 c:\\windows -Recurse -File\r\n$files | format-table Name, LastAccessTime, Length | out-null\r\n```\r\nversion | time | speedup\r\n-- | -- | --\r\n6.1 | 35.5s | 1.0x\r\nPR 8785 | 4.5s | 8x\r\n\r\n<!-- Anything that looks like this is a comment and can't be seen after the Pull Request is created. -->  \r\n\r\n## PR Summary\r\n\r\n<!-- Summarize your PR between here and the checklist. -->  \r\n\r\n## PR Context  \r\n\r\n<!-- Provide a little reasoning as to why this Pull Request helps and why you have opened it. -->\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Change is not breaking](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [ ] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.  \r\n- **User-facing changes**\r\n    - [x] Not Applicable\r\n    - **OR**  \r\n    - [ ] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed: <!-- Number/link of that issue here -->\r\n- **Testing - New and feature**\r\n    - [ ] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [ ] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n        - [x] [Add `[feature]` to your commit messages if the change is significant or affects feature tests](https://github.com/PowerShell/PowerShell/blob/master/docs/testing-guidelines/testing-guidelines.md#requesting-additional-tests-for-a-pr)\r\n",
+  "closed_at": "2019-03-21T01:43:53Z",
+  "comments": [
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT To be honest, I've done an embarrassingly small amount of testing. Except for running `Start-PSPester`.",
+      "created_at": "2019-01-30T12:27:07Z",
+      "updated_at": "2019-01-30T12:27:27Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Note to reviewers: @BrucePay @daxian-dbw \r\n\r\nI tried another route in this second PR, by adding another delegate for member lookup. It is less intrusive in the previous functionality, so the risk should be lower.\r\nI wonder if you, when you review this, can try to think about if the same things could be accomplished in a smarter way? I'm adding a way to check for the existence of _any_ property in a reasonably efficient way. But in reality, we only use it to check if there exist any property other than our magic remoting note properties. ~~for very _specific_ properties.~~ ~~(The different stream names, and the remoting properties). In the stream case, it is also important which stream it is, but we don't need a PSNoteProperty for that. For example, the 7 boolean flags in PSObject could become bit fields. Maybe we could encode this information there?~~\r\n\r\nI have refactored PSObject to use flags instead of Booleans. I also removed some unused fields, and have plans for using the available padding for speeding up the handling of the remoting properties. I added a field for the stream to use by the formatting system - this was previously magically named PSNoteProperties - and the lookup of these was expensive during formatting.\r\n\r\nAs you can see, I've implemented a special case of a the Linq operator `FirstOrDefault`, but I chose not to make this an iterator as I wanted to keep allocations to a minimum. Not sure it's the right call, just trying to explain where I come from :)\r\n\r\nI'm a bit weak on the serialization, so that is an area that could need some scrutiny to see if I've messed anything up.",
+      "created_at": "2019-01-31T08:20:45Z",
+      "updated_at": "2019-02-06T23:47:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> the 7 boolean flags in PSObject could become bit fields. Maybe we could encode this information there?\r\n\r\nIt can break remoting/serialization and backward compatibility.",
+      "created_at": "2019-02-02T18:30:05Z",
+      "updated_at": "2019-02-02T18:30:05Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "> It can break remoting/serialization and backward compatibility.\r\n\r\nI think that is just an implementation detail. We may need to handle that in the deserializer - but good to keep in mind when doing it.\r\nBut I don't think these fields are serialized at all - they seem to be set in the constructor when deserializing.",
+      "created_at": "2019-02-03T21:59:55Z",
+      "updated_at": "2019-02-03T22:04:17Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I have a sample implementation here - https://github.com/powercode/PowerShell/tree/PSObjectFlags\r\n\r\nEdit:\r\nAll but the remoting implementation is merged into this PR. I know a bit to little about the remoting to be confident to make that change now.",
+      "created_at": "2019-02-03T22:06:39Z",
+      "updated_at": "2019-02-06T23:56:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I have a sample implementation here - https://github.com/powercode/PowerShell/tree/PSObjectFlags\r\n\r\nLooks great at first short review! (We'll need measurement of CPU/memory benefits. And main complicity is that we have to manually test remoting and serialization.)",
+      "created_at": "2019-02-04T03:24:07Z",
+      "updated_at": "2019-02-04T03:24:07Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov @SteveL-MSFT Any chance we can turn of the hungarian notation warnings from Code Factor? It has nearly 100% false positives.\r\n\r\nI don't intend to fix the remaining code factor issues.",
+      "created_at": "2019-02-07T00:04:34Z",
+      "updated_at": "2019-02-07T00:04:34Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@powercode I believe we're eventually moving off CodeFactor and over to Codacy.  Agree the false positives on hungarian are annoying.",
+      "created_at": "2019-02-07T01:52:39Z",
+      "updated_at": "2019-02-07T01:52:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Codacy reports tons of false-positives. We need to merge Dongbo's PR that resolve most CodeFactor issues.",
+      "created_at": "2019-02-07T04:03:51Z",
+      "updated_at": "2019-02-07T04:03:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 I don't look but if you comments is for copy-pasted (not new) code we shouldn't fix it in the PR - it is complicate code review.",
+      "created_at": "2019-02-08T04:39:40Z",
+      "updated_at": "2019-02-08T04:39:40Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Please take a moment to see if you can find a better way to accomplish what I try to do. The question we need to answer is if there are any properties that should be rendered. The formatting system excludes the remoting properties by default, so we can think of multiple fast paths. For example, we could store a bool per type (somewhere) caching this result, and only do the heavy lifting when needed. Most CLR types has properties, so we could quickly return \"Yes, you have properties to render\". If the cache says false, we may still have attached properties, and need to do the more expensive enumeration, but most core scenarios would be improved.",
+      "created_at": "2019-02-26T07:02:26Z",
+      "updated_at": "2019-02-26T07:02:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can our TypeCatalog help for design analyze and the cache?",
+      "created_at": "2019-02-26T13:59:33Z",
+      "updated_at": "2019-02-26T13:59:33Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov Isn't the type catalog just a mapping to the types fullnames? I'm not fully up to speed on this part of the codebase. ",
+      "created_at": "2019-02-27T13:12:13Z",
+      "updated_at": "2019-02-27T13:12:13Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@powercode Yes, types to dll-s. My thought was that there is \"all\" types and we could enhance it with properties to get static cache you need.",
+      "created_at": "2019-02-27T14:28:27Z",
+      "updated_at": "2019-02-27T14:28:27Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw I agree completely with your take on `PSPropertyAdapter` and partially with the overload.\r\n\r\nGood catch, again :) I hadn't considered that scenario.\r\n\r\nIf we should add an overload, which I think we should do only when the need arises, I think it should look like this:\r\n```\r\nprotected abstract void GetMembers<T>(\r\n    object obj, \r\n    MemberNamePredicate predicate, \r\n    PSMemberInfoInternalCollection<T> resultingMembers)   where T : PSMemberInfo;\r\n```\r\n\r\nThat way, the collection may be reused by a client with more knowledge about how the it is used. Otherwise we force an allocation of the collection on every call.\r\n\r\nThis is especially important in the scenario where the predicated doesn't match any member. That should be an allocation free operation. But with the collection as a return value, it isn't. \r\n\r\nThen consider when the predicate matches a single member. If the caller can reuse the collection, the operation is basically just replacing an item in the collection, instead of creating new, fairly expensive, collections. And this is something that may be done many times for each object in the pipeline. It really adds up.\r\n\r\nYou may have the other version too, but implemented as \r\n```\r\nPSMemberInfoInternalCollection<T> GetMembers<T>(\r\n    object obj, \r\n    MemberNamePredicate predicate ) where T : PSMemberInfo\r\n{\r\n    var res = new PSMemberInfoInternalCollection<T>();\r\n    GetMembers(obj, predicate, res);\r\n    return res;\r\n}\r\n```\r\nThe important thing is that there should always be a variant where the caller can be responsible for the allocations.",
+      "created_at": "2019-03-12T00:14:09Z",
+      "updated_at": "2019-03-12T00:45:21Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I completely agree. It's important to make it possible to be allocation free instead of always forcing allocation. We should use the signature you suggested when the need comes, but no need to implement that in this PR.\r\nI actually submitted a PR to your branch https://github.com/powercode/PowerShell/pull/1 to rename the new overloads such as `GetMember`, `DoGetProperty` to `GetFirstXXXOrDefault`.\r\n\r\nI plan to go through the changes again and probably will submit a follow-up PR to your branch to make some changes.",
+      "created_at": "2019-03-12T00:33:30Z",
+      "updated_at": "2019-03-12T00:34:03Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw  I _really_ like how GitHub enables cooperation on code!",
+      "created_at": "2019-03-12T00:51:35Z",
+      "updated_at": "2019-03-12T00:51:35Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@powercode I submitted another PR to your branch for some fixes and refactoring: https://github.com/powercode/PowerShell/pull/2. Please take a look when you have time.",
+      "created_at": "2019-03-13T04:06:10Z",
+      "updated_at": "2019-03-13T04:06:10Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Looks good! ",
+      "created_at": "2019-03-13T15:32:54Z",
+      "updated_at": "2019-03-13T15:32:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems we need rename the PR from\r\n> Faster formatting by having better primitives on PSObject \r\n\r\nto\r\n> Improve performance by having better primitives on PSObject \r\n\r\n",
+      "created_at": "2019-03-16T09:16:32Z",
+      "updated_at": "2019-03-16T09:16:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can we move style changes to #9149 to follow our best practice?",
+      "created_at": "2019-03-20T04:03:05Z",
+      "updated_at": "2019-03-20T04:03:39Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I have reviewed all changes in this PR and all look good. Separating the refactoring changes will not only cost extra efforts to resolve conflicts but also require another pass of review to make sure no mistake made during those changes. I don't think it worth the effort.",
+      "created_at": "2019-03-20T04:34:30Z",
+      "updated_at": "2019-03-20T04:38:18Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "All issues reported by Codacy are false alarms.",
+      "created_at": "2019-03-20T04:39:08Z",
+      "updated_at": "2019-03-20T04:39:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  I don't think it worth the effort.\r\n\r\nWe agreed to write this in our guide. This allows us to maintain a clear history of functional changes without style ones. Of course it takes effort.\r\nIt is not blocking comment.",
+      "created_at": "2019-03-20T05:19:38Z",
+      "updated_at": "2019-03-20T05:19:38Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> This allows us to maintain a clear history of functional changes without style ones. Of course it takes effort.\r\n\r\nI agree that will get us a clear view of the functional change history. But I think it's more appropriate to bring this up at very early stage of the PR life cycle.\r\nWhen we reach the end stage of a PR, it's too costly to do this.",
+      "created_at": "2019-03-20T19:10:35Z",
+      "updated_at": "2019-03-20T19:10:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I think it's more appropriate to bring this up at very early stage of the PR life cycle.\r\n\r\nAt early stage we haven't all style changes. \r\nFrom my experience we ready to do this near to finish - and rebase (1) to get new tests, (2) remove unrelated changes.\r\n\r\nThe main benefit is that the commits are clean.\r\nOtherwise in a few months the details will be forgotten and we will have to figure it out again, not to mention those who will do code analysis in this place for the first time.\r\n\r\n> When we reach the end stage of a PR, it's too costly to do this.\r\n\r\nIn previous powercode's PR you did this :-) \r\n ",
+      "created_at": "2019-03-21T06:17:36Z",
+      "updated_at": "2019-03-21T06:17:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@powercode Thanks for the great improvement!",
+      "created_at": "2019-03-21T06:18:37Z",
+      "updated_at": "2019-03-21T06:18:37Z"
+    },
+    {
+      "author": "kborowinski",
+      "author_association": "NONE",
+      "body": "@powercode This is outstanding work here!",
+      "created_at": "2019-03-21T12:41:05Z",
+      "updated_at": "2019-03-21T12:41:05Z"
+    }
+  ],
+  "created_at": "2019-01-29T22:44:03Z",
+  "number": 8785,
+  "state": "closed",
+  "title": "Improve performance by having better primitives on PSObject",
+  "updated_at": "2019-03-21T12:41:06Z"
+}

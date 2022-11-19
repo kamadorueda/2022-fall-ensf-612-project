@@ -1,0 +1,244 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/1527",
+  "author": "PaulHigin",
+  "body": "## Steps to reproduce\n1.  Build and setup SSH based remoting (see docs) on a Linux machine\n2.  Start an interactive  remote session to the same machine\n    Enter-PSSession -HostName <HostName> -UserName <UserName>\n    [<HostName>] C:> sudo ls /proc/powershell\n## Expected behavior\n\nsudo command to run in remote interactive session.\n## Actual behavior\n\n```\nsudo : sudo: no tty present and no askpass program specified\n    + CategoryInfo          : NotSpecified: (sudo: no tty pr...ogram specified:String) [], RemoteException\n    + FullyQualifiedErrorId : NativeCommandError\n```\n## Environment data\n\nName                           Value\n\n---\n\nPSVersion                      5.1.10032.0\nPSEdition                      PowerShellCore\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\nBuildVersion                   3.0.0.0\nGitCommitId                    v0.6.0-392-ga5b5dc576b8006c0d0a83a5c538f382d9fa65dc6\nCLRVersion\nWSManStackVersion              3.0\nPSRemotingProtocolVersion      2.3\nSerializationVersion           1.1.0.1\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "Hit this trying to implement a way to run the Azure Arc for Server agent (which requires `sudo`) over a PSRP session... It'd be really great to have this.",
+      "created_at": "2020-08-07T15:52:39Z",
+      "updated_at": "2020-08-07T15:52:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "https://www.shell-tips.com/linux/sudo-no-tty-present-and-no-askpass-program-specified/\n\n<blockquote></blockquote>",
+      "created_at": "2020-08-07T15:54:55Z",
+      "updated_at": "2020-08-07T15:54:57Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT @TylerLeonhardt I see this issue has been open for many years now, probably because there is no easy fix. This is pretty much the only major limitation of pwsh on Linux to make it a viable shell alternative. Is this ticket the best place to discuss actively working towards making it happen?\r\n\r\nI suppose one approach could be to make a special \"pwsh-askpass\" that could really just be \"pwsh\" launched in \"--askpass\" mode, where it would implement a regular askpass interactive prompt. The twist would be that we'd detect the parent pwsh shell, and use one of the PowerShell mechanisms for IPC, allowing us to somehow prompt interactively in the PowerShell client side.\r\n\r\nBonus points for properly delegating credentials over PSRP such that they never appear in logs anywhere (actually, that should be a requirement, but an intermediate solution would be acceptable). What do you think?",
+      "created_at": "2020-10-26T16:09:30Z",
+      "updated_at": "2020-10-26T16:09:30Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "Conceptually that makes sense to me. Assuming a `pwsh-askpass` can connect to the parent `pwsh` where the actual remote host is, we'd maybe do something similar to what `Get-Credential` or `Read-Host -AsSecureString` does:\r\n\r\n![image](https://user-images.githubusercontent.com/2644648/97376932-f0819400-187b-11eb-9b66-d75f0053993f.png)\r\n",
+      "created_at": "2020-10-28T00:44:06Z",
+      "updated_at": "2020-10-28T00:44:06Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TylerLeonhardt do you think this would require an improvement to the PowerShell remoting protocol? I know MS-PSRP treats credentials differently when transferring them to the remote system, maybe all we need is to use a secure string to benefit from that. What you suggested looks perfectly fine in terms of usability at least for a V1 (right now it is just plain unusable).\r\n\r\nFor a V2, I wonder if we couldn't go one step further and make it possible to override the client-side \"askpass\" implementation, to allow PowerShell clients to either show a GUI prompt, or even make a special module that would grab the username+password from one of the new secret management modules.\r\n\r\nAnyway, back to just getting a V1 done for now. Here is my understanding:\r\n- an 'askpass' program just prompts for the password, and outputs it to stdout, which is captured by the parent process\r\n- \"pwsh-askpass\" could detect its parent pwsh process id, and then somehow attach to a runspace inside that parent\r\n- once attached to the parent pwsh, find a way to trigger the dynamic password prompt inside the current shell (is it possible?)\r\n- when the password prompt completes, pwsh-askpass outputs the password to stdout, and everybody is happy.\r\n\r\nI'm thinking that one could literally try making a PoC using a single PowerShell script called \"pwsh-askpass\" that you make executable. One quicky and dirty way to get started would be to make it output a hardcoded password just to see if the plumbing is done right at the \"askpass\" level. Once that is confirmed, we can work towards prompting the password for real.\r\n\r\nAs for attaching to the parent pwsh runspace, I don't know if it is feasible the way I described, but this presentation on PowerShell Remoting Internals does show a lot of interesting things that could be used as a starting point: https://www.youtube.com/watch?v=MyQGk29w-BM&t=780s",
+      "created_at": "2020-10-28T12:58:56Z",
+      "updated_at": "2020-10-28T12:58:56Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "Yep this all sounds great to me. In PowerShell, you can get the parent process by doing:\n\n```pwsh\n(Get-Process $PID).Parent\n```\n\nWe'd probably continue grabbing `.Parent` until we find another PowerShell... Then use `Enter-PSHostProcess` to enter said parent.\n\nThat's when it gets interesting. I don't know how to trigger that secure string prompt but it's possible that all you need to do is the `Read-Host` without having to go into another runspace...\n\n\n\n.... This actually could work. ",
+      "created_at": "2020-10-28T14:16:38Z",
+      "updated_at": "2020-10-28T14:16:38Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@awakecoding, @TylerLeonhardt  thanks for reviving this.  What is discussed here sounds possible.  I too was thinking about using askpass to provide the password, but I am not very knowledgeable about it.  I suspect the remoting protocol (PSRP) will have to be updated as mentioned above.",
+      "created_at": "2020-10-28T21:49:54Z",
+      "updated_at": "2020-10-28T21:49:54Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "So I fiddled with this a tad...\r\n\r\n```\r\n\u276f\u276f\u276f Enter-PSSession $windows\r\n[tyleonha-desk1.redmond.corp.microsoft.com]: PS C:\\Users\\tyleonha\\Documents> $rs = [runspacefactory]::CreateRunspace($Host)\r\n[tyleonha-desk1.redmond.corp.microsoft.com]: PS C:\\Users\\tyleonha\\Documents> $rs.Open()\r\n[tyleonha-desk1.redmond.corp.microsoft.com]: PS C:\\Users\\tyleonha\\Documents> $ps = [PowerShell]::Create($rs)\r\n[tyleonha-desk1.redmond.corp.microsoft.com]: PS C:\\Users\\tyleonha\\Documents> $ps.AddCommand(\"Read-Host\").AddParameter(\"AsSecureString\").Invoke()\r\nWARNING: A script or application on the remote computer TYLEONHA-DESK1.REDMOND.CORP.MICROSOFT.COM is asking to read a line securely. Enter sensitive information, such as your credentials, only if you trust the remote computer and the application or script that is requesting it.\r\n****\r\nSystem.Security.SecureString\r\n[tyleonha-desk1.redmond.corp.microsoft.com]: PS C:\\Users\\tyleonha\\Documents>\r\n```\r\n\r\nLooks like as long as the _other_ runspace has the RemoteHost, then it might work...\r\n\r\n```\r\n$host.UI.ReadLineAsSecureString()\r\n```\r\n\r\nis also an option...\r\n\r\nThe outstanding questions I have are:\r\n\r\n* Can another runspace get a reference to the `PSHost` object we need?\r\n* Is it thread safe?\r\n\r\n",
+      "created_at": "2020-10-28T22:34:30Z",
+      "updated_at": "2020-10-28T22:34:30Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "I did some further experimentation and discussed it with some of the people in #powershell-help. For the first step, which is to get sudo to use our own askpass program, it turns out that you need to do two things:\r\n\r\n- Add '-A' or \"--askpass\" as an argument to sudo, which is often done using an alias in bash.\r\n- Set the SUDO_ASKPASS variable (only works with -A), but this can also be set in sudo.conf\r\n\r\nI do not yet know of a way to make it accept our own askpass program without adding the -A argument, but I would consider this a minor issue for now that we can solve later. The end goal is to make it without having to modify scripts calling sudo directly. As a matter of fact, I came up with a quick and dirty solution to work around it for now, using a fake \"sudo\" program that I added at the beginning of PATH such that it would get picked up instead of the real one.\r\n\r\nI created a directory called \"/yolo\" and placed two simple scripts in there:\r\n- simple 'askpass' script that echoes my password to stdout\r\n- simple 'sudo' script that sets SUDO_ASKPASS and calls the real sudo, adding -A\r\n\r\nHere is what it looks like:\r\n\r\n```\r\nexport PATH=/yolo:$PATH\r\nwayk@pwsh-demo:~$ sudo whoami\r\nroot\r\nwayk@pwsh-demo:~$ cat /yolo/sudo\r\n#!/bin/sh\r\nexport SUDO_ASKPASS=/yolo/askpass\r\n/usr/bin/sudo -A -n $@\r\nwayk@pwsh-demo:~$ cat /yolo/askpass \r\n#!/bin/sh\r\necho \"password\"\r\n```\r\n\r\nI consider the first part of the PoC (finding a way to inject our own askpass program that gets picked up by sudo) completed with the above, moving on to getting the askpass program to prompt inside the parent PowerShell runspace. We can come back to finding better, less hackish ways to achieve the same result afterwards.",
+      "created_at": "2020-10-29T01:36:35Z",
+      "updated_at": "2020-10-29T01:36:35Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Just to add some more info to the conversation here is a quick and dirty script that @SeeminglyScience wrote (slightly tweaked)\r\n\r\n```powershell\r\n#!/usr/bin/env pwsh\r\n\r\n# Parent is sudo, grandparent is the pwsh process\r\n$parentPid = (Get-Process -Id $pid).Parent.Parent.Id\r\n\r\n$ci = [Management.Automation.Runspaces.NamedPipeConnectionInfo]::new($parentPid)\r\n$rs = $ps = $null\r\ntry {\r\n    $rs = [runspacefactory]::CreateRunspace($ci)\r\n    $rs.Open()\r\n    $ps = [powershell]::Create()\r\n    $ps.Runspace = $rs\r\n    $null = $ps.AddScript{\r\n        $rs = Get-Runspace 1\r\n        $remoteHost = $rs.GetType().GetProperty('Host', 60).GetValue($rs)\r\n        $remoteHost.UI.ReadLine()\r\n    }\r\n\r\n    return $ps.Invoke()\r\n} finally {\r\n    if ($null -ne $ps) {\r\n        $ps.Dispose()\r\n    }\r\n\r\n    if ($null -ne $rs) {\r\n        $rs.Dispose()\r\n    }\r\n}\r\n```\r\n\r\nMaking that executable will allow `sudo` to prompt the user for the password and will work over a PSRemoting session. While this \"works\" it is not a workable solution because:\r\n\r\n* `ReadLine()` echos the input characters to the console exposing your password\r\n* Because the user input is read as a string then the data transferred across the wire is the plaintext value\r\n    * The transport may be encrypted but if using a recording device you have now exposed the password\r\n* There's no indication that the user is being prompted, should be solved by just writing a message to the host beforehand, might be something that the askpass interface provides\r\n    * I think the process args may contain the prompt message which would be helpful\r\n* It access' the PSHost through an internal property, would be nice to have a public way of getting this\r\n\r\nThe last 2 issues aren't the end of the world and should be easily fixed but the first 2 are problematic. I was hoping to utilise secure strings as PSRP has a really nice mechanism to exchange the values themselves. Unfortunately it seems like the secure string session key exchange in PSRP does not work on Linux so I can't call [ReadLineAsSecureString](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.host.pshostuserinterface.readlineassecurestring?view=powershellsdk-7.0.0).\r\n\r\nUsing secure strings across PSRemoting should be achievable cross platform as it doesn't rely on DPAPI but rather an ephemeral 16 byte key that's encrypted using an RSA public key. All these things should be achievable in OpenSSL so hopefully it could be implemented one day.\r\n\r\nJust for further info on secure strings through PSRemoting this is the error I get when trying to copy one to a remote session\r\n\r\n```powershell\r\n$cred = Get-Credential\r\nInvoke-Command hostname -ScriptBlock { $using:cred }\r\n\r\nOpenError: \r\n\r\n\r\n$Error[0] | Select *\r\n\r\nPSMessageDetails      : \r\nException             : System.Management.Automation.Internal.PSCryptoException\r\n                           at System.Management.Automation.Internal.PSCryptoNativeUtils.CryptAcquireContext(PSSafeCryptProvHandle& phProv, \r\n                        String szContainer, String szProvider, UInt32 dwProvType, UInt32 dwFlags)\r\n                           at System.Management.Automation.Internal.PSRSACryptoServiceProvider.GenerateKeyPair()\r\n                           at System.Management.Automation.Internal.PSRemotingCryptoHelperClient.ExportLocalPublicKey(String& publicKeyAsString)\r\n                           at System.Management.Automation.Remoting.ClientRemoteSessionImpl.StartKeyExchange()\r\nTargetObject          : server2019.domain.test\r\nCategoryInfo          : OpenError: (server2019.domain.test:String) [], PSCryptoException\r\nFullyQualifiedErrorId : PSSessionStateBroken\r\nErrorDetails          : \r\nInvocationInfo        : \r\nScriptStackTrace      : \r\nPipelineIterationInfo : {}\r\n\r\n\r\n$error[0].Exception | Select *\r\n\r\nTargetSite     : Boolean CryptAcquireContext(System.Management.Automation.Internal.PSSafeCryptProvHandle ByRef, System.String, System.String, \r\n                 UInt32, UInt32)\r\nStackTrace     :    at System.Management.Automation.Internal.PSCryptoNativeUtils.CryptAcquireContext(PSSafeCryptProvHandle& phProv, String \r\n                 szContainer, String szProvider, UInt32 dwProvType, UInt32 dwFlags)\r\n                    at System.Management.Automation.Internal.PSRSACryptoServiceProvider.GenerateKeyPair()\r\n                    at System.Management.Automation.Internal.PSRemotingCryptoHelperClient.ExportLocalPublicKey(String& publicKeyAsString)\r\n                    at System.Management.Automation.Remoting.ClientRemoteSessionImpl.StartKeyExchange()\r\nMessage        : \r\nData           : {}\r\nInnerException : \r\nHelpLink       : \r\nSource         : System.Management.Automation\r\nHResult        : -2146233088\r\n```",
+      "created_at": "2020-10-29T02:50:03Z",
+      "updated_at": "2020-10-29T02:50:03Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Looks like https://github.com/PowerShell/PowerShell/pull/11185 has fixed the SecureString issue making it cross platform. I still need to test the latest preview to make sure but it definitely seems to be possible.",
+      "created_at": "2020-10-29T03:09:49Z",
+      "updated_at": "2020-10-29T03:09:49Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks for looking into this.  Yes, PowerShell remoting does now support passing SecureString objects over all platforms, but unfortunately was only added to 7.1+ versions.\r\n\r\nI am not worried about prompting for sudo password over a remote session, that can be handled with remote host calls, and probably an update to the protocol (PSRP).  My main concern was how to interface with sudo, and it looks like @awakecoding 'AskPass' is the mechanism to use.  It would be nice if there was some sort of API hook, but the above PoC may be workable.",
+      "created_at": "2020-10-29T16:00:47Z",
+      "updated_at": "2020-10-29T16:00:47Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "![make it so](https://media.giphy.com/media/bKnEnd65zqxfq/giphy.gif)\r\n\r\nAnyone interested in prototyping this?",
+      "created_at": "2020-11-05T21:00:54Z",
+      "updated_at": "2020-11-05T21:00:54Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Slight bump, since pwsh 7.1 is out I've tweaked the script for `SUDO_ASKPASS` to use a secure string\r\n\r\n```pwsh\r\n#!/usr/bin/env pwsh\r\n\r\n# Parent is sudo, grandparent is the pwsh process\r\n$parentPid = (Get-Process -Id $pid).Parent.Parent.Id\r\n\r\n# First arg is the prompt from sudo itself\r\n$sudoPrompt = $args[0]\r\n\r\n$ci = [Management.Automation.Runspaces.NamedPipeConnectionInfo]::new($parentPid)\r\n$rs = $ps = $null\r\ntry {\r\n\r\n    $rs = [runspacefactory]::CreateRunspace($ci)\r\n    $rs.Open()\r\n    $ps = [powershell]::Create()\r\n    $ps.Runspace = $rs\r\n    $null = $ps.AddScript({\r\n        $rs = Get-Runspace 1\r\n        $remoteHost = $rs.GetType().GetProperty('Host', 60).GetValue($rs)\r\n        $remoteHost.UI.Write($args[0])\r\n        $remoteHost.UI.ReadLineAsSecureString()\r\n    }).AddArgument($sudoPrompt)\r\n\r\n    $output = $ps.Invoke()\r\n\r\n    if ($output) {\r\n        $pass = [PSCredential]::new('noop', $output[0]).GetNetworkCredential().Password\r\n        return $pass\r\n    }\r\n} finally {\r\n    if ($null -ne $ps) {\r\n        $ps.Dispose()\r\n    }\r\n\r\n    if ($null -ne $rs) {\r\n        $rs.Dispose()\r\n    }\r\n}\r\n```\r\n\r\nConnecting over SSH PSRemoting this is what happens\r\n\r\n```\r\n[192.168.0.66]: PS /home/jborean> $env:SUDO_ASKPASS = '/tmp/askpass.ps1'\r\n[192.168.0.66]: PS /home/jborean> sudo -A whoami\r\n[sudo] password for jborean: ********\r\nroot\r\n```\r\n\r\nWe can see that the actual sudo prompt appears and the password that I typed in is hidden behind `*` as the remote Host UI call is `ReadLineAsSecureString`. This solves the more serious problems I had with the implementation but there are a few other things that should be solved\r\n\r\n1. The current script logic just get's the pid of the grandparent process.\r\n\r\nThis is fine if `sudo` was called from `pwsh` directly, but say you are running a script which calls sudo then this won't work. We would need to work up the process tree until it comes to the PSRemoting `pwsh` process. In reality a less brittle way would be to smuggle in that information into the `askpass.ps1` script, maybe through an env var, so we aren't 2nd guessing ourselves\r\n\r\n2. You need to call `sudo` with `-A`\r\n\r\nWithout `-A` then `sudo` won't call the askpass script defined in the env var. Existing scripts would need to be modified We could find a way to make a custom `sudo` script that just recalls `sudo -A` higher in the PATH priority but now `sudo` called with an absolute path won't work.\r\n\r\nMaybe someone knows a `sudo` configuration that sets `-A` as the default\r\n\r\n3. The Runspace ID is hardcoded to 1\r\n\r\nThis works fine for a normal `Enter-PSSession` but we probably want to smuggle in the actual Runspace GUID so we use the correct attached PSHost. This would probably involve some more env vars that need to be smuggled in like the pwsh PID.\r\n\r\n4. We have to use reflection to get the Host\r\n\r\nIdeally it would be great if we could get the PSHost without relying on any private/protected properties but I'm unsure if that's going to be possible.\r\n\r\nThere are some UX concerns I have as well, namely\r\n\r\n1. This script needs to be on the remote host somewhere and set as executable\r\n2. The user needs to set the `SUDO_ASKPASS` env var\r\n3. Probably some more friendly error messages for bad scenarios in the `askpass.ps1`. Luckily exceptions and errors raised in the script appear in the output normally\r\n3. Maybe `sudo -A` configuration needs to tweaking by the user\r\n\r\nIn my mind this should all be transparent to the end user but even that is fraught with danger.",
+      "created_at": "2020-11-26T01:48:58Z",
+      "updated_at": "2020-11-26T02:04:38Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Oh and because feedback on failures is also important, here is what happens when you put in the wrong password\r\n\r\n```\r\n[192.168.0.66]: PS /home/jborean> sudo -A whoami\r\n[sudo] password for jborean: ****\r\nSorry, try again.\r\n[sudo] password for jborean:\r\n```\r\n\r\nAlso when you press CTRL+C\r\n\r\n```\r\n[192.168.0.66]: PS /home/jborean> sudo -A whoami\r\n[sudo] password for jborean: ****\r\nSorry, try again.\r\n[sudo] password for jborean: no password was provided\r\nsudo: 1 incorrect password attempt\r\n```",
+      "created_at": "2020-11-26T02:05:15Z",
+      "updated_at": "2020-11-26T02:05:15Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "@jborean93 this is awesome. This completely proves that this solution is the right way forward.\n\nMy thinking on your UX concerns... Most of the concerns can be solved with a module + overriding `sudo` with a `sudo` function...although it feels weird.\n\nTheoretically a user could install a module (called `pseudo`? \ud83d\ude05). that module has a psm1 that contains a single exported function called `sudo`. \n\n> This script needs to be on the remote host somewhere and set as executable\n\nModule installation is simple, and in the psm1 the call to chmod to make the file executable could be done (chmod might require sudo in some cases...)\n\n> The user needs to set the SUDO_ASKPASS env var\n\nAgain in the psm1 we can set this env var.\n\n> In reality a less brittle way would be to smuggle in that information into the askpass.ps1 script, maybe through an env var, so we aren't 2nd guessing ourselves\n\nWe could do this in the `sudo` function. Set a `POWERSHELL_PID_FOR_SUDO` env var before calling the sudo exe.\n\n> In reality a less brittle way would be to smuggle in that information into the askpass.ps1 script, maybe through an env var, so we aren't 2nd guessing ourselves\n\nSame deal. A `POWERSHELL_RUNSPACE_FOR_SUDO` env var. These should get cleaned up after invocation... Though, tbh... This is not a very important work item. Runspace 1 should exist in most of not all scenarios.\n\n> We have to use reflection to get the Host\n\nA PowerShell API feature request. This should be a separate issue... But I totally agree.\n\n@jborean93 interested in throwing a module up on the Gallery for this?",
+      "created_at": "2020-11-29T08:17:49Z",
+      "updated_at": "2020-11-29T08:17:49Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> Most of the concerns can be solved with a module + overriding sudo with a sudo function...although it feels weird.\r\n\r\nWhile it does still help in these scenarios I think this request goes beyond just calling `sudo` in PowerShell itself. If you want just a generic function that invokes the command with sudo this will definitely work but there are other ways to pass in a password to `sudo` that doesn't involve creating a file, e.g. `'password' | sudo -S @arguments`.\r\n\r\nWhat I feel like this example solves is a way to automatically get the prompt from `sudo` regardless of how it's called back to the PSHost. That allows me to run a bash script that may contains `sudo my_command` like `./my_script.sh` in PowerShell and it would work like it does through other shells/ssh. For this to occur today you would have to have a user call a script like the below to set up the environment but it would be nice if this wasn't needed (although I don't see how based on how PSRP works today).\r\n\r\n```powershell\r\nFunction Enable-SudoPrompt {\r\n    [CmdletBinding()]\r\n    param()\r\n\r\n    $tempPath = [IO.Path]::GetTempFileName()\r\n    \r\n    # Probably a better way but just for testing\r\n    $cleanupAction = [ScriptBlock]::Create(\"Remove-Item -Path '$tempPath'\")\r\n    $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action $cleanupAction\r\n    \r\n    $askPassScript = '@\r\n#!/usr/bin/env pwsh\r\n\r\n# Parent is sudo, grandparent is the pwsh process\r\n$parentPid = {0}\r\n\r\n# First arg is the prompt from sudo itself\r\n$sudoPrompt = $args[0]\r\n\r\n$ci = [Management.Automation.Runspaces.NamedPipeConnectionInfo]::new($parentPid)\r\n$rs = $ps = $null\r\ntry {\r\n\r\n    $rs = [runspacefactory]::CreateRunspace($ci)\r\n    $rs.Open()\r\n    $ps = [powershell]::Create()\r\n    $ps.Runspace = $rs\r\n    $null = $ps.AddScript({\r\n        $rs = Get-Runspace -InstanceId '{1}'\r\n        $remoteHost = $rs.GetType().GetProperty('Host', 60).GetValue($rs)\r\n        $remoteHost.UI.Write($args[0])\r\n        $remoteHost.UI.ReadLineAsSecureString()\r\n    }).AddArgument($sudoPrompt)\r\n\r\n    $output = $ps.Invoke()\r\n\r\n    if ($output) {\r\n        $pass = [PSCredential]::new('noop', $output[0]).GetNetworkCredential().Password\r\n        return $pass\r\n    }\r\n} finally {\r\n    if ($null -ne $ps) {\r\n        $ps.Dispose()\r\n    }\r\n\r\n    if ($null -ne $rs) {\r\n        $rs.Dispose()\r\n    }\r\n}\r\n'@ -f ($pid, [Runspace]::DefaultRunspace.InstanceId)\r\n\r\n    chmod +x $tempPath\r\n    $env:SUDO_ASKPASS = $tempPath\r\n}\r\n```\r\n\r\nIt still needs to solve the fact that you need to call `sudo` with `sudo -A` but it at least sets up the environment properly.",
+      "created_at": "2020-11-29T20:22:03Z",
+      "updated_at": "2020-12-02T20:49:54Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TylerLeonhardt @jborean93 a module could be suitable to get something with older versions of PowerShell, but I think we should consider a built-in solution that comes with PowerShell, and not externally distributed or added on top.\r\n\r\n@jborean93 is correct when he says that wrapping the command inside PowerShell would only work when calling \"sudo\" from PowerShell and wouldn't fix the issue of non-PowerShell scripts or native programs that call sudo directly. Of course, there is the issue of existing scripts that call \"sudo\" without \"sudo -A\", but this is still something that can be worked with. For instance, you can call sudo a first time to get prompted and run the unmodified script, the second sudo won't trigger the prompt because of the sudo cache, etc. We can also look into adding the sudo alias in bash, or look into advanced sudo configuration options. In any case, if sudo -A works, it would be a zillion times better than the current state of things.\r\n\r\nAs for wrapping and cleaning up afterwards, let's just look at the alternative: a guaranteed broken sudo when called from a PowerShell remoting session. I say we should automatically modify the environment to set SUDO_ASKPASS to point to a \"pwsh-askpass\" program in the PowerShell remoting server. As for the pwsh-askpass program itself, rather than distribute it as an external module, it should probably be part of the distributed PowerShell files.\r\n\r\nThe first issue we face is that SUDO_ASKPASS works with an executable, and not an executable with a parameter. The ideal solution would be to add an \"-AskPass\" parameter to the pwsh executable, such that the automatic SUDO_ASKPASS injection would point to the same PowerShell executable as the current PowerShell server. Here's the trick to make it work: just make a \"pwsh-askpass\" relative symbolic link to make it point to its corresponding \"pwsh\" executable. In the pwsh executable, all we would need to is inspect argv[0] which contains the executable name. When called through the pwsh-askpass symlink, argv[0] would contain \"pwsh-askpass\" instead of pwsh, making it easy to run pwsh as if it was called with the -AskPass parameter. I should note that PowerShell $arg[0] is the first parameter is not the executable, but in the pwsh executable I am sure we can extract the same information as it is normally available in C.\r\n\r\nSUDO_ASKPASS is not something that is set in most cases, so I suggest we set it automatically unless it is already set, making it possible to override through some global system configuration.\r\n\r\nAs for helper environment variables to let pwsh-askpass find the parent pwsh to attach to, PowerShell should simply be modified to create and set those environment variables by default. We should take special care of setting the PID for the right process, which I understand should be the one containing the PowerShell remoting server, not some nested pwsh session inside a PowerShell remoting server.\r\n\r\nI suggest the following names for the automatic environment variables to set that would be used by pwsh-askpass:\r\nPWSH_ASKPASS_PROCESS_ID\r\nPWSH_ASKPASS_RUNSPACE_ID\r\n\r\nAlso, even if we can make a working pwsh-askpass script, I suggest we drop the .ps1 extension because we don't necessarily wish it to remain a script. All you need is to make it executable and add the following line at the beginning:\r\n\r\n#!/usr/bin/env pwsh\r\n\r\nHowever, I would rather have pwsh-askpass point to pwsh -AskPass, and implement askpass inside pwsh. Maybe we could plan this for PowerShell 7.2, and make a simple pwsh-askpass script that does best effort detection for PWSH_ASKPASS_PROCESS_ID and PWSH_ASKPASS_RUNSPACE_ID.  The script could be installed globally on the system, and modifications to the OpenSSH server configuration could be used to set SUDO_ASKPASS in the PowerShell remoting environment by default. This way we have something that works right now, and it would become a built-in feature in PowerShell 7.2.",
+      "created_at": "2020-11-29T22:20:07Z",
+      "updated_at": "2020-11-29T22:20:07Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "Like a lot of things we consider to be the main package, if we _can_ have it on the Gallery first, that is the first step.\n\nActually, the perfect model for such a function would be:\nhttps://www.powershellgallery.com/packages/Microsoft.PowerShell.RemotingTools/0.1.0\n\n@SteveL-MSFT @PaulHigin where is that repo? \n\n<blockquote><img src=\"https://powershellgallery.com/Content/Images/Branding/PackageDefaultIcon.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://powershellgallery.com/packages/Microsoft.PowerShell.RemotingTools/\">Microsoft.PowerShell.RemotingTools 0.1.0</a></strong></div><div>\r\nThis module contains remoting tool cmdlets.\r\n\r\nEnable-SSHRemoting cmdlet:\r\n--------------------------\r\nPowerShell SSH remoting was implemented in PowerShell 6.0 but requries SSH (client) and SSHD (service) components \r\nto be installed.  In addition the sshd_config configuration file must be updated to define a PowerShell endpoint\r\nas a subsystem.  Once this is done PowerShell remoting cmdlets can be used to establish a PowerShell remoting\r\nsession over SSH that works across platforms.\r\n\r\n$session = New-PSSession -HostName LinuxComputer1 -UserName UserA -SSHTransport\r\n\r\nThere are a number of requirements that must be satisfied for PowerShell SSH based remoting:\r\n  a. PowerShell 6.0 or greater must be installed on the system.\r\n       Since multiple PowerShell installations can appear on a single system, a specific installation can be selected.\r\n  b. SSH client must be installed on the system as PowerShell uses it for outgoing connections.\r\n  c. SSHD (ssh daemon) must be installed on the system for PowerShell to receive SSH connections.\r\n  d. SSHD must be configured with a Subsystem that serves as the PowerShell remoting endpoint.\r\n\r\nThe Enable-SSHRemoting cmdlet will do the following:\r\n  a. Detect the underlying platform (Windows, Linux, macOS).\r\n  b. Detect an installed SSH client, and emit a warning if not found.\r\n  c. Detect an installed SSHD daemon, and emit a warning if not found.\r\n  d. Accept a PowerShell (pwsh) path to be run as a remoting PowerShell session endpoint.\r\n       Or try to use the currently running PowerShell.\r\n  e. Update the SSHD configuration file to add a PowerShell subsystem endpoint entry.\r\n\r\nIf all of the conditions are satisfied then PowerShell SSH remoting will work to and from the local system.\r\n</div></blockquote>",
+      "created_at": "2020-11-29T23:17:11Z",
+      "updated_at": "2020-11-29T23:17:13Z"
+    },
+    {
+      "author": "awakecoding",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TylerLeonhardt totally agree, I think we should make it available as a separate component in a first step, then consider including it in the main package. On the long run, I do think this is something that should be built-in to PowerShell, it looks a bit odd to have to install a separate package to get sudo to work in a PowerShell remoting session, which is something most users would expect to work out of the box.\r\n\r\nI suggest we make a first pwsh-askpass executable as a PowerShell script that would do best-effort detection of PWSH_ASKPASS_PROCESS_ID and PWSH_ASKPASS_RUNSPACE_ID when not available. For my own usage I think I would just \"install\" it manually in /usr/bin/pwsh-askpass and set SUDO_ASKPASS to 'pwsh-askpass' in my OpenSSH server environment. Once this script-based pwsh-askpass solution has had the chance of being used by some people, we could plan for possible inclusion in the main pwsh executable.\r\n\r\nDo this sound like a good plan?",
+      "created_at": "2020-11-30T00:23:16Z",
+      "updated_at": "2020-11-30T00:26:27Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "@jborean93 do you want to add what you have to this module?\r\n\r\nhttps://github.com/PowerShell/Modules/tree/master/Modules/Microsoft.PowerShell.RemotingTools\r\n\r\nThen we can start getting feedback.\n\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/11524380?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/Modules\">PowerShell/Modules</a></strong></div><div>Contribute to PowerShell/Modules development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2020-11-30T22:36:34Z",
+      "updated_at": "2020-11-30T22:36:36Z"
+    },
+    {
+      "author": "thukk",
+      "author_association": "NONE",
+      "body": "> Thanks for looking into this. Yes, PowerShell remoting does now support passing SecureString objects over all platforms, but unfortunately was only added to 7.1+ versions.\r\n> \r\n> I am not worried about prompting for sudo password over a remote session, that can be handled with remote host calls, and probably an update to the protocol (PSRP). My main concern was how to interface with sudo, and it looks like @awakecoding 'AskPass' is the mechanism to use. It would be nice if there was some sort of API hook, but the above PoC may be workable.\r\n\r\nSo, Since PS 7.0.3 is LTS (support lasts longer than 7.1), how can those of us that use/require an LTS version utilize sudo in a PSSession?  Since security is of utmost importance, the script above that utilizes `Readline()` is not preferred.",
+      "created_at": "2020-12-02T03:31:55Z",
+      "updated_at": "2020-12-02T03:31:55Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "> the script above that utilizes Readline() is not preferred.\r\n\r\nWhy is that not preferred? I don't see how it would work without that.",
+      "created_at": "2020-12-02T05:49:23Z",
+      "updated_at": "2020-12-02T05:49:52Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "@TylerLeonhardt 7.1+ can use `ReadLineAsSecureString` which means the inputted characters are not echo'd back in the PSHost. Unfortunately older versions don't support secure strings over PSRemoting on non-Windows hosts so 7.0 is stuck with just `ReadLine`.",
+      "created_at": "2020-12-02T06:13:34Z",
+      "updated_at": "2020-12-02T06:13:34Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "Ahh that's right. I forgot about that fix. Also it's too complex to backport to 7.0 so unfortunately you are out of luck. Maybe we could \"fake it\" with reading characters one at a time and using some vt100 to clear the character typed... But that sounds so painful.",
+      "created_at": "2020-12-02T06:22:28Z",
+      "updated_at": "2020-12-02T06:22:28Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "The other issue is that the types of calls you can make over a remote PSHost is limited. You are limited to just the ones listed at https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/ddd2a4d1-797d-4d73-8372-7a77a62fb204. Any of the methods that return a secure string will be out of luck with 7.0 :( Maybe you could have some sort of complex manual buffer manager at the RawUI layer but honestly I have no desire to investigate this :)\r\n\r\nFor people on 7.0 they could just do `'my password' | sudo -S something` in PowerShell to cache your sudo credential so subsequent calls don't prompt you for it. Not ideal but it's what we have to work with.\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/ddd2a4d1-797d-4d73-8372-7a77a62fb204\">[MS-PSRP]: Host Method Identifier</a></strong></div><div>This data type represents a method to be executed on a host.  This data type is an enum (as specified in section 2.2.5.2.7) based on the default</div></blockquote>",
+      "created_at": "2020-12-02T06:26:11Z",
+      "updated_at": "2020-12-02T18:47:39Z"
+    },
+    {
+      "author": "thukk",
+      "author_association": "NONE",
+      "body": "> For people on 7.0 they could just do `'my password' | sudo -s something` in PowerShell to cache your sudo credential so subsequent calls don't prompt you for it. Not ideal but it's what we have to work with.\r\n\r\nWhich would honestly be fine, *if* the following worked (which it doesn't).\r\n```\r\n$creds = Get-Credential\r\n$session = New-PSSession -hostname Workstation1 -Username foo -SSHTransport\r\nInvoke-Command -Session $session {param($creds) Invoke-Expression \"echo $creds.password | sudo -S whoami\"} -Argumentlist $creds\r\n```\r\n\r\nIn 7.0, I cannot find a single way to pass secure strings to a PSSession, so scripting a `sudo` command is not possible.  That sound about right?\r\n\r\nOutside of a PSSession, it *is* possible to run something like `ssh -t foo@Workstation1 'sudo whoami'` and be prompted for 2 passwords, but it would be nice to do this within the confines of PSSession in 7.0.",
+      "created_at": "2020-12-02T13:08:40Z",
+      "updated_at": "2020-12-02T13:15:41Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> Which would honestly be fine, if the following worked (which it doesn't).\r\n\r\nThat's because you are trying to send a secure string across which doesn't work on non-Windows hosts until 7.1. If the password was plaintext like so then it would work\r\n\r\n```powershell\r\n$creds = Get-Credential\r\n$sudoPass = $creds.GetNetworkCredential().Password\r\n$session = New-PSSession -hostname Workstation1 -Username foo -SSHTransport\r\n\r\nInvoke-Command -Session $session {\r\n    param(\r\n        [String]\r\n        $SudoPass\r\n    )\r\n\r\n    $null = $SudoPass | sudo -S whoami\r\n    if ($LastExitCode -ne 0) {\r\n        Write-Error -Message \"Failed to cache sudo password\"\r\n        return\r\n    }\r\n\r\n    # Now you have cached your sudo password you should be able to call it normally (up to whatever\r\n    # timeout you have configured)\r\n    sudo whoami\r\n} -Argumentlist $sudoPass\r\n```\r\n\r\nNote this is not tested and it may require some better logic to check for failures but it should work. I will agree it's also not good to send passwords as plaintext across the wire but at least SSH encrypts the traffic. There's nothing that can be done about this unless you are on 7.1+ as we've mentioned. Even then on 7.1+ the SecureString will not be encrypted in memory on the remote process due to how SecureStrings work on non-Windows hosts. The 2 benefits 7.1 provides are:\r\n\r\n* SecureStrings are encrypted with a unique session key when traversing the wire. If someone was able to decrypt or monitor the plaintext SSH packets then the password will still be encrypted\r\n* You can use the PSHost SecureString prompts as we've mentioned before\r\n\r\nIt's up to the PowerShell team to backport the changes in https://github.com/PowerShell/PowerShell/pull/11185. I have no idea what the general policy is for this for this project so I can't really comment on it more.\r\n\r\nAlso your example had `Invoke-Expression`, that is not needed at all. You typically don't need to use iex to call a native binary as all iex does is runs the specified string as a PowerShell command which you already have.",
+      "created_at": "2020-12-02T18:45:49Z",
+      "updated_at": "2020-12-02T18:46:59Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "@jborean93 in your example [here](https://github.com/PowerShell/PowerShell/issues/1527#issuecomment-735448305) you do:\n\n```\n\u200b#\u00a0Parent\u00a0is\u00a0sudo,\u00a0grandparent\u00a0is\u00a0the\u00a0pwsh\u00a0process\u200b\n\u200b$parentPid\u00a0=\u00a0(Get-Process\u00a0-Id\u00a0{0}).Parent.Parent.Id\n```\nWhere that `{0}` will be formatted as `$pid` of the process that called this cmdlet.\n\nDo you still need to do the `.Parent.Parent.Id`?",
+      "created_at": "2020-12-02T20:18:54Z",
+      "updated_at": "2020-12-02T20:19:58Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Good catch, that should just be `$parentPid = {0}` or `$parentPid = $env:SOMETHING`. Was a leftover when I was just getting the grandparent PID which wouldn't work in all situations.",
+      "created_at": "2020-12-02T20:49:32Z",
+      "updated_at": "2020-12-02T20:49:32Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "@jborean93 do you have interest in contributing that cmdlet to the [RemotingTools module](https://github.com/PowerShell/Modules/tree/master/Modules/Microsoft.PowerShell.RemotingTools) so we can start getting validation? Your own separate module would also be totally cool.",
+      "created_at": "2020-12-02T21:26:53Z",
+      "updated_at": "2020-12-02T21:26:53Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I would be interested but I don't have any spare time in the current week. I would probably only be able to work on it properly in about 2 weeks or so. People are more than welcome to take what I have and work on it if I'm taking too long :).",
+      "created_at": "2020-12-02T21:48:45Z",
+      "updated_at": "2020-12-02T21:48:45Z"
+    },
+    {
+      "author": "IanEMartin",
+      "author_association": "NONE",
+      "body": "Haven't seen any movement on this but see it as still open.  I just started trying to manage *nix systems with remote PS sessions and this is a definite blocker.",
+      "created_at": "2021-07-09T16:29:05Z",
+      "updated_at": "2021-07-09T16:29:05Z"
+    }
+  ],
+  "created_at": "2016-07-26T22:44:25Z",
+  "number": 1527,
+  "state": "open",
+  "title": "sudo command does not work in remote session to Linux machine",
+  "updated_at": "2021-07-09T16:29:05Z"
+}

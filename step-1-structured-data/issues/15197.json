@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15197",
+  "author": "mklement0",
+  "body": "\r\n## Steps to reproduce\r\n\r\n```powershell\r\n(1, 2) -is [System.Collections.Generic.IEnumerable`1]\r\n```\r\n\r\nNote: Only a _closed_ generic type works (`(1, 2) -is [System.Collections.Generic.IEnumerable[object]]`)\r\n\r\n## Expected behavior\r\n\r\nEither a meaningful statement-terminating error, or, preferably, `$true`, i.e., it would be nice if a test like this actually worked.\r\n\r\n## Actual behavior\r\n\r\nThe following error occurs:\r\n\r\nFrom a script:\r\n\r\n```none\r\nOperationStopped: Late bound operations cannot be performed on fields with types for which Type.ContainsGenericParameters is true.\r\n```\r\n\r\nFrom an interactive prompt, the error is unspecific:\r\n\r\n```\r\nParentContainsErrorRecordException: An error occurred while creating the pipeline.\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.2.0-preview.4\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This likely won't be possible.\r\n\r\nEven in C# this generates a compiler error, see [this SharpLab](https://sharplab.io/#v2:CYLg1APgAgTAjAWAFBQAwAIpwCwG5nJQDMmM6AwugN7Lp2YkBGA9swDboCyAFM4wFYBTAMYAXdMwCU6ALwA+CegCWAZ0xwiAHjn4kAXyA===).\r\n\r\nFor IEnumerable<T> specifically, you can just check `-is [System.Collections.IEnumerable]`-- `IEnumerable<T>` inherits from `IEnumerable`.",
+      "created_at": "2021-04-10T20:03:19Z",
+      "updated_at": "2021-04-10T20:04:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @vexx32. Yes, for ``IEnumerable`1`` use of the non-generic  `IEnumerable` instead  is a workaround, but it's not a general solution.\r\n\r\nThe problem is definitely solvable, albeit not with direct use of C# `is` / IL `isinst`:\r\n\r\n```powershell\r\nPS> [System.Collections.Generic.List[string]]::new().GetType().GetGenericTypeDefinition() -eq [System.Collections.Generic.List`1]\r\nTrue\r\n```\r\n\r\nThe question is whether it's worth it to automatically provide this functionality via the `-is` operator.\r\n\r\nIf not, we should emit a clear, specific error message.\r\n",
+      "created_at": "2021-04-10T20:11:28Z",
+      "updated_at": "2021-04-10T21:18:44Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I think a clear error message is probably the way to go here.  A simple `Type.HasGenericParameters` check with a custom fail message.",
+      "created_at": "2021-04-11T20:25:03Z",
+      "updated_at": "2021-04-11T20:25:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience, that would definitely be an improvement.\r\n\r\nI don't feel strongly either way, but is your preference not to support this scenario more about how exotic it is, or are the performance concerns?",
+      "created_at": "2021-04-11T20:33:38Z",
+      "updated_at": "2021-04-11T20:33:38Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "no error with these syntaxes :\r\n```powershell\r\n$Type=[System.Collections.Generic.IEnumerable`1]\r\n@(1, 2) -is $Type\r\n#False\r\n@(1, 2) -is 'System.Collections.Generic.IEnumerable`1'\r\n#False\r\n\r\n[System.Collections.Generic.List[Int]]$List=@(1..2)\r\n$List -is 'System.Collections.Generic.IEnumerable[int]'\r\n#True\r\n$List -is 'System.Collections.Generic.IEnumerable`1'\r\n#False\r\n```",
+      "created_at": "2021-04-12T16:21:32Z",
+      "updated_at": "2021-04-12T16:21:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @LaurentDardenne: via an intermediate variable assignment or coercion from a string the error goes away - but the resulting behavior is arguably even more problematic than the outright error.\r\n\r\nSo we can either: \r\n\r\n* report an error in _both_ scenarios.\r\n* or support them both.\r\n\r\nAnd in order to make the right call, we need to understand (a) if this is a common enough use case and (b) if so, if there are implementation / performance concerns.\r\n",
+      "created_at": "2021-04-12T16:31:36Z",
+      "updated_at": "2021-04-12T17:20:00Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I don't feel strongly either way, but is your preference not to support this scenario more about how exotic it is, or are the performance concerns?\r\n\r\nI don't think it's useful in enough situations to justify the custom - not really true - behavior (i.e. `object[]` isn't actually `IEnumerable<T>` even though it is `IEnumerable<object>`).",
+      "created_at": "2021-04-12T16:41:30Z",
+      "updated_at": "2021-04-12T16:41:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well, it _is_ true, just at a higher level of abstraction: if something is an (interface) implementation of a closed (concrete, with generic type parameters bound) type, it is by definition also an implementation of the more abstract open type (with unbound generic type parameters), and that's indeed how interfaces are reported via a type-info object's `.GetInterface(s)()` methods:\r\n\r\n```powershell\r\nPS> ([object[]] (1..2)).GetType().GetInterface('IEnumerable`1').Name\r\nIEnumerable`1\r\n```\r\n\r\n\r\nAnd at least in the abstract (no pun intended) I can see it being useful.\r\n\r\nCase in point: it would be useful for allowing PowerShell to determine whether an instance is a generic dictionary, irrespective of its specific key and value types (though, obviously, PowerShell would solve that problem in C#), to decide whether it should be enumerated in the pipeline - see #15204.\r\nIn that issue, @iSazonov links to a [blog post](https://tmont.com/blargh/2011/3/determining-if-an-open-generic-type-isassignablefrom-a-type) that states, \"If you're asking why you might need to ever do something like this, you clearly haven't worked with enough Inversion of Control frameworks.\"\r\n\r\nGranted, those scenarios may be less interesting in PowerShell code.\r\n\r\n---\r\n\r\nIf we decide not to support it, it sounds like @LaurentDardenne's findings imply that a _runtime_ check is also called for, so that _all_ of the following calls result in the same error message:\r\n\r\n```powershell\r\n(1, 2) -is [System.Collections.Generic.IEnumerable`1]                # already fails, but obscurely \r\n(1, 2) -is 'System.Collections.Generic.IEnumerable`1'                # misleadingly reports $false\r\n(1, 2) -is ($var = [System.Collections.Generic.IEnumerable`1])       # misleadingly reports $false\r\n```\r\n\r\n",
+      "created_at": "2021-04-12T18:18:05Z",
+      "updated_at": "2021-04-12T18:18:30Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> that's indeed how interfaces are reported via a type-info object's `.GetInterface(s)()` methods:\r\n\r\nThe property `Type.Name` doesn't include generic parameters or arguments. `Type.FullName` will include them, and in this case show the constructed type.\r\n\r\n> Granted, those scenarios may be less interesting in PowerShell code.\r\n\r\nYeah, I know you were mainly replying to @iSazonov here, but I've definitely had use for it.  Never in PowerShell though, and exceedingly rarely outside of it as well.",
+      "created_at": "2021-04-12T18:40:53Z",
+      "updated_at": "2021-04-12T18:43:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> If you look at `FullName` you'll see it returns the constructed type.\r\n\r\nGood point, thanks for clearing that up. However, the point about it being true in an abstract, meaningful sense stands, as evidenced by the fact that you can _query_ by the abstract name (which you don't disagree with in principle, it sounds).\r\n\r\nSo, going with the report-an-error scenario:\r\n\r\n* Do you agree that _all_ of the command forms (type literal, string literal, variable) should result in the same error?\r\n* Given that the type-literal scenario is a _parsing_ error, whereas the other two would have to be _runtime_ errors, if I understand correctly, how would we handle this?\r\n",
+      "created_at": "2021-04-12T18:49:31Z",
+      "updated_at": "2021-04-12T18:49:31Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Good point, thanks for clearing that up. However, the point about it being true in an abstract, meaningful sense stands, as evidenced by the fact that you can _query_ by the abstract name (which you don't disagree with in principle, it sounds).\r\n\r\nYou can query by the type name which is the same no matter what generic args are or are not specified.\r\n\r\nFor the record I'm definitely not saying it's impossible to determine, or that an API can't be written to query it. I'm not really sure what exactly is implied to be proven if that API did happen to work that way.\r\n\r\n> * Do you agree that _all_ of the command forms (type literal, string literal, variable) should result in the same error?\r\n\r\nYeah, though it would be a breaking change. I don't have a strong opinion on if it's worth it.\r\n\r\n> * Given that the type-literal scenario is a _parsing_ error, whereas the other two would have to be _runtime_ errors, if I understand correctly, how would we handle this?\r\n\r\nIt looks like compile time to me, e.g. ```$sb = { $list -is [Collections.Generic.IEnumerable`1] }``` doesn't throw, but first invoke will before any statements are executed.\r\n\r\nIdeally all of the errors would be runtime, maybe with classes as an exception.",
+      "created_at": "2021-04-12T19:20:44Z",
+      "updated_at": "2021-04-12T19:21:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> You can query by the type name which is the same no matter what generic args are or are not specified.\r\n\r\nIndeed. Just to clarify the terminology, you can query for an interface by the name of its generic type _definition_ (which you can also call an _open_ generic type, though the two aren't strictly the same), i.e. a generic type whose type parameters haven't been bound yet, as opposed to one whose have, making it _constructed_ generic type (which, if the type arguments themselves also have all their generic type parameters bound, if applicable, makes it a _closed_ constructed generic type).\r\n\r\n<sup>Note: The above was updated to use more precise terms.</sup>\r\n\r\n> not saying it's impossible to determine, or that an API can't be written to query it.\r\n\r\nWe already know that it's possible:\r\n\r\nFor interfaces:\r\n\r\n```powershell\r\n$null -ne ([object[]] (1..2)).GetType().GetInterface('IEnumerable`1')\r\n```\r\n\r\nFor concrete types:\r\n\r\n```powershell\r\n([System.Collections.Generic.List[int]]::new()).GetType().GetGenericTypeDefinition() -eq [System.Collections.Generic.List`1]\r\n```\r\n\r\n---\r\n\r\nBut leaving that aside, I'd personally be happy with a consistently reported _error_.\r\n\r\nYou're right, it is technically a breaking change, although it sounds like a classic [bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) case to me:\r\nCurrently a string literal or variable as the RHS _always results in `$false`_ with an open generic type, making the current behavior useless.\r\n\r\n",
+      "created_at": "2021-04-12T19:41:43Z",
+      "updated_at": "2021-04-14T18:25:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for when the error occurs:\r\n\r\nIt seems that I incorrectly inferred from the fact that a _script_-terminating error occurs that it happens at parse time, but the real problem is apparently just the former: it should be a _statement_-terminating error, right?\r\n\r\n```powershell\r\n' $list -is   [Collections.Generic.IEnumerable`1]; ''after'' ' > t1.ps1\r\n' 1/0; ''after'' ' > t2.ps1\r\n```\r\n\r\n```powershell\r\nPS> ./t1.ps1\r\nOperationStopped: Late bound operations cannot be performed on fields with types for which Type.ContainsGenericParameters is true.\r\n```\r\n\r\nvs.\r\n\r\n```powershell\r\nPS> ./t2.ps1\r\nRuntimeException: /Users/mklement/Desktop/pg/t2.ps1:1\r\nLine |\r\n   1 |   1/0; 'after'\r\n     |   ~~~\r\n     | Attempted to divide by zero.\r\n\r\nafter\r\n```\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-12T19:49:23Z",
+      "updated_at": "2021-04-12T19:52:10Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Indeed. Just to clarify the [terminology](https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/generics/generics-and-attributes), you can query for an interface by the name of its _open_ generic type, i.e. a generic type whose type parameters haven't been bound yet, as opposed to one whose have, making it a _closed_ (constructed) generic type.\r\n\r\nThe type name is the same whether it's an open or closed generic.\r\n\r\nI think the confusing part here is that in PowerShell, you need to include the airty specification to reference the open generic, but that's just a PowerShell thing.  The airty is pure compiler convention, both in the type definition and the omission of it when referencing the type, but it's always there in the metadata and surfaced in reflection.\r\n\r\n> > not saying it's impossible to determine, or that an API can't be written to query it.\r\n> \r\n> We already know that it's possible:\r\n\r\nI wasn't clear, but yeah that's what I was saying.\r\n\r\n> it should be a statement-terminating error, right?\r\n\r\nI'd follow whatever `'' -is [notarealtype]` does outside of classes.",
+      "created_at": "2021-04-12T22:20:38Z",
+      "updated_at": "2021-04-12T22:20:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> that's just a PowerShell thing. \r\n\r\nThe arity notation (e.g., ``IEnumerable`1``) is a language-agnostic _.NET API_ thing that PowerShell also (sensibly) happens to use - if it were PowerShell-specific, something like ``.GetInterface('IEnumerable`1')`` wouldn't work.\r\n\r\n> I'd follow whatever '' -is [notarealtype] does outside of classes.\r\n\r\nMakes sense, and your example indeed produces a _statement_-terminating error (unlike the current `` $foo -is [System.Collections.Generic.IEnumerable`1]`` behavior).\r\n\r\n(And, to recap: I wish that _statement_-terminating errors had never existed - see https://github.com/PowerShell/PowerShell/issues/14819#issuecomment-790637199)\r\n",
+      "created_at": "2021-04-12T22:37:06Z",
+      "updated_at": "2021-04-12T22:37:26Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> > that's just a PowerShell thing.\r\n> \r\n> The arity notation (e.g., `` IEnumerable`1 ``) is a language-agnostic _.NET API_ thing that PowerShell also (sensibly) happens to use - if it were PowerShell-specific, something like `` .GetInterface('IEnumerable`1') `` wouldn't work.\r\n\r\nYeah I'm aware. I was referring to it being required to reference an open generic.  Point being, it's always part of the type name",
+      "created_at": "2021-04-13T01:51:51Z",
+      "updated_at": "2021-04-13T01:51:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm glad you're aware, @SeeminglyScience, but how you expressed that awareness (\"that's just a PowerShell thing\") was potentially misleading. My comment tried to clarify, so as to avoid any potential confusion.\r\n\r\n\r\n",
+      "created_at": "2021-04-13T02:03:52Z",
+      "updated_at": "2021-04-13T02:03:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let me try to close that tangent by clarifying the relationship between [the .NET API's language-agnostic type-name notation](https://docs.microsoft.com/en-us/dotnet/framework/reflection-and-codedom/specifying-fully-qualified-type-names) and the functionality that PowerShell _overlays_ on it:\r\n\r\n* PowerShell allows enclosing a verbatim type name in .NET notation in `[...]` to form a _type literal_ (representing a [`System.Reflection.TypeInfo`](https://docs.microsoft.com/en-US/dotnet/api/System.Reflection.TypeInfo) instance), such as ``[System.Collections.Generic.IEnumerable`1]``\r\n\r\n* When resolving types (both in type literals and in other contexts where type names are expected), PowerShell allows omitting the `System.` prefix from full type names and allows use of type-accelerator names, such as `regex` for `System.Text.RegularExpressions.Regex`; additionally, mere type names (without namespace qualification) may be specified for types in namespaces for which `using namespace` statements are in effect. Also, name resolution is (invariably) case-_insensitive_. The same applies to _nested_ type names referenced in the list of type arguments when referring to a closed generic type. \r\n\r\n* As an additional simplification, PowerShell allows omitting the explicit arity (e.g., `` `2 ``) when referring to a _constructed_ generic type (one with the type parameters instantiated with specific types), as PowerShell then _infers_ the arity from the number of type arguments.\r\n\r\n* To illustrate the above with an example: to get a reference to the closed [constructed] generic type that in C# you could refer to as `IDictionary<string, int>`:\r\n    * In .NET notation (for use as strings with `[Type]::GetType()`):\r\n        *  ``System.Collections.Generic.IDictionary`2[[System.String], [System.Int32]]`` or, with the optional `[...]` around the type arguments removed:\r\n        * ``System.Collections.Generic.IDictionary`2[System.String, System.Int32]``\r\n    * In simplified PowerShell type-literal notation:\r\n       * ``[Collections.Generic.IDictionary[string, int]]``  (`System.` omitted, explicit arity omitted, use of type accelerators as the type arguments)\r\n\r\n ",
+      "created_at": "2021-04-13T03:06:12Z",
+      "updated_at": "2021-04-14T18:19:14Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "(I just learned a lesson I should have learned before: don't trust the docs to tell the fully story. In short: the .NET API type-name notation _does_ support specifying _closed_ generic types (which, of course, I should have expected); seemingly, the only PowerShell overlay in this respect is that it makes specifying the arity _explicitly_ optional - I've updated the previous comment, and I've created a docs issue at https://github.com/dotnet/docs/issues/23794)",
+      "created_at": "2021-04-13T07:21:23Z",
+      "updated_at": "2021-04-14T18:34:32Z"
+    }
+  ],
+  "created_at": "2021-04-10T19:27:17Z",
+  "number": 15197,
+  "state": "open",
+  "title": "Using an open generic type with the -is operator causes a script-terminating error",
+  "updated_at": "2021-04-14T18:34:32Z"
+}

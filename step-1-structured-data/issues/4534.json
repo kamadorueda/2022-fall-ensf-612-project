@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4534",
+  "author": "mklement0",
+  "body": "Note: I don't know if the change - a breaking one - was intentional. If so, it's worth documenting.\r\n\r\nArguably, the new behavior is less surprising.\r\n\r\n_Update_: The change in behavior seems to come from the underlying [`[System.Net.HttpWebRequest]`](https://msdn.microsoft.com/en-us/library/system.net.httpwebrequest(v=vs.110).aspx) class, but it's still worth getting clarity on how _PowerShell_ should behave.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nTry to access a redirected URL without allowing redirections.\r\nIn Windows PowerShell, you get a non-terminating error that still returns a response object that can be acted on, so as to determine the redirection target URL:\r\n\r\n```powershell\r\n(Invoke-WebRequest -Method HEAD http://cnn.com -MaximumRedirection 0 -ErrorAction Ignore).Headers.Location\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nIf the behavior were consistent, PS Core and Windows PowerShell would output the redirection target URL:\r\n\r\n```none\r\nhttp://www.cnn.com/\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\nWindows PowerShell: as expected.\r\n\r\nPowerShell Core: a statement-terminating error is thrown, causing `-ErrorAction Ignore` to be ignored and no object to be returned.\r\n\r\n```none\r\nInvoke-WebRequest : Response status code does not indicate success: 301 (Moved Permanently).\r\n....\r\n```\r\n\r\nThe workaround is to trap the error / inspect `$Error[0]` and examine its `.Exception.Response` property: `$Error[0].Exception.Response.Headers.Location`).\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.5 on macOS 10.12.6\r\nPowerShell Core v6.0.0-beta.5 on Ubuntu 16.04.3 LTS\r\nPowerShell Core v6.0.0-beta.5 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.483 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "[`System.Net.Http.HttpResponseMessage.IsSuccessStatusCode` ](https://github.com/dotnet/corefx/blob/master/src/System.Net.Http/src/System/Net/Http/HttpResponseMessage.cs#L123) only considers `200`-`299` as success. [`Invoke-WebRequest`](https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/CoreCLR/WebRequestPSCmdlet.CoreClr.cs#L567) is evaluating that and then generating a terminating error if `IsSuccessStatusCode` is false. I think their definition of \"success code\" is literally the `200` responses. `100`-`299` are \"not errors\". Not all \"not errors\" are \"successes\" but all \"successes\" are \"not errors\".\r\n\r\nI guess in the case of your example, wouldn't a `301` with `-MaximumRedirection 0` technically be a terminating error? I mean, I understand that you are attempting to retrieve where the page is redirecting, but under normal circumstances if you told it not to redirect and it tried to redirect, wouldn't that be an error?",
+      "created_at": "2017-08-09T17:58:41Z",
+      "updated_at": "2017-08-09T17:58:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus: \r\n\r\nThanks for the background info. \r\n\r\nYes, as I've said the terminating error arguably makes more sense, but the issue is that the behavior has _changed_ - namely in the underlying  `System.Net.HttpWebRequest` class, from what I can tell:\r\n\r\n```powershell\r\n# OK in Windows PowerShell, error in PS Core.\r\n$req = [System.Net.HttpWebRequest]::Create('http://cnn.com'); $req.AllowAutoRedirect = $false; $req.GetResponse().ResponseUri.AbsoluteUri\r\n```\r\n\r\nDo you know anything about that? Was the old behavior considered a bug that is now fixed?\r\n\r\nEither way, action is needed, even if it only means _documenting the change_.\r\nI suppose another option would be for `Invoke-WebRequest` to mask the change.",
+      "created_at": "2017-08-09T18:08:14Z",
+      "updated_at": "2017-08-09T18:08:14Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "From what I can tell there is an entirely new philosophy at play in the new `System.Net.Http.HttpResponseMessage` which is in use in Core. It is meant to be strongly typed and rigid. I would not be surprised if this new behavior is entirely intentional. I don't know if they were addressing specific problems or not.\r\n\r\nIt probably does warrant a documentation note. But, then, there are a bunch of changes in behavior between 5.1 and 6.0 in the WebRequest cmdlets (like the headers dictionary values now being a `[System.String[]]` instead of just a `[System.String]` and strict request header and user-agent validation is now default). Not sure how or where to document all of those differences.",
+      "created_at": "2017-08-09T18:24:42Z",
+      "updated_at": "2017-08-10T09:59:28Z"
+    },
+    {
+      "author": "ericwj",
+      "author_association": "NONE",
+      "body": "Is this just going to be documented or will there be a change? Is it intended that running this with `-ErrorAction SilentlyContinue` will still produce the exact same error and not give me any value whatsoever? Imho that would not be good.\r\n",
+      "created_at": "2018-04-17T13:43:20Z",
+      "updated_at": "2018-04-17T13:43:20Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@ericwj Hmm looks like I missed documenting this as a breaking change. I will update the doc when I have a chance or you can submit a PR for it as well.\r\n\r\nUltimately, this is `by design` and while an unintended consequence of moving to HttpClient, it fixes broken/poorly-designed behavior in previous versions. What I do have planned for a future version (possibly 6.2.0) is to add the ability to specify what status codes to treat as success. There are many instances where you need check the content of a 404 from a REST API as it contains valuable information in JSON.\r\n\r\nThe 3XX status codes could be treated as success.\r\n\r\nI have some possible designs listed in #6157",
+      "created_at": "2018-04-17T14:04:05Z",
+      "updated_at": "2018-04-17T14:04:05Z"
+    },
+    {
+      "author": "ericwj",
+      "author_association": "NONE",
+      "body": "I understand the design, I don't understand it does not matter what the value of `-ErrorAction` is.",
+      "created_at": "2018-04-17T21:56:26Z",
+      "updated_at": "2018-04-17T21:56:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@ericwj: \r\n\r\nThis is a general issue: The `-ErrorAction` common parameter applies to _nonterminating_ errors only; it has no effect on _statement-terminating_ errors, which are what `Invoke-WebRequest` now reports in the situations discussed.\r\n\r\nNote that the `$ErrorActionPreference` _preference variable_ still applies, however - see [this doc issue](https://github.com/PowerShell/PowerShell-Docs/issues/1583).",
+      "created_at": "2018-04-17T22:01:56Z",
+      "updated_at": "2018-04-17T22:01:56Z"
+    },
+    {
+      "author": "ericwj",
+      "author_association": "NONE",
+      "body": "Confusing. I gave it my intent and it didn't care.",
+      "created_at": "2018-04-17T23:21:18Z",
+      "updated_at": "2018-04-17T23:21:18Z"
+    },
+    {
+      "author": "hakenmt",
+      "author_association": "NONE",
+      "body": "I think the default action of throwing a terminating error is bad. For example, I'm writing a module to use with HDFS which happens in a 2 part interaction. The first put request returns a 307, I need to look at that response to get the location header and make sure it was a 307, not something else like a 400 or 500. Then I send a new request with possibly different headers and body content, so I can't just follow the redirection. I need to be able to see the response code from the first request, make sure it was a 307 and then move on. In PS v5, I was able to do this with the -ErrorAction parameter. This should be the same behavior in PS Core.",
+      "created_at": "2018-06-07T14:52:50Z",
+      "updated_at": "2018-06-07T14:52:50Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "So, this is a terminating error because, well,, this is a terminating error. When the result is not successful the command terminates and doesn't process further. A non-terminating error only makes sense when the command continues. This is a common pattern (as far as I can tell) with `Invoke` cmdlets. When a response is successful there is more processing done on the response. That's why the command terminating early is properly a terminating error. \r\n\r\nAs for the testing of 300 level response codes (and others), this will be addressed in another manner by allowing users to either treat all status as successful or to supply what response codes should be considered successful. There are plenty of situations where even a 404 needs to be tested.\r\n\r\nFor general use, if a user supplies a `-MaximumRedirection` and the redirects go beyond that count, that is an error and in the case of these cmdlets, a terminating one. Instead of thinking about it from a testing or grabbing location headers perspective, think about it from a normal user's perspective. They are saying \"do not go more than this many hops\" if the last hop in that count is not successful, then they would be expecting an error, not a successful response without what they are looking for. Now the burden is on them to test the status code to see if it was really a successful call or not.",
+      "created_at": "2018-06-07T15:07:19Z",
+      "updated_at": "2018-06-07T15:07:19Z"
+    },
+    {
+      "author": "FranklinYu",
+      "author_association": "NONE",
+      "body": "I also need this feature to check about an HTTP 303 response. From this thread as well as https://github.com/PowerShell/PowerShell/issues/6157#issuecomment-365796222 there seem to be at least two solutions:\r\n\r\n 1. Provide an option to treat all status as success, like `-TreatsAllStatusAsSuccessful` or `-IgnoreStatusError`.\r\n 2. Provide an option to specify the successful statuses (besides the standard ones like `2xx`?). Note that we may need range here, like `300-399` or `3xx`.\r\n\r\nI would prefer the first one. It\u2019s easy to implement, and we don\u2019t need to discuss whether to allow default successful statuses. User can write their own logic to decide whether status is success.",
+      "created_at": "2018-12-17T04:50:18Z",
+      "updated_at": "2018-12-17T04:50:18Z"
+    },
+    {
+      "author": "Aprazeth",
+      "author_association": "NONE",
+      "body": "I can concur/pile on here; especially in the situations where, for example, (AD FS or other types of) logins are in place - the initial response would give a redirect (to a login page) Since 30x is treated as an error, you can't login in that case because in order to login - you need to follow that redirect. So, please do provide a way to be able to set a range of HTTP codes as correct.",
+      "created_at": "2018-12-17T08:45:23Z",
+      "updated_at": "2018-12-17T08:45:23Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "For those looking for a workaround:\r\n\r\n```powershell\r\ntry {\r\n    Invoke-WebRequest -Method HEAD http://cnn.com -MaximumRedirection 0 -ErrorAction Stop\r\n} catch {\r\n    $Location = $_Exception.Response.Headers.Location\r\n}\r\n```",
+      "created_at": "2019-01-23T12:47:06Z",
+      "updated_at": "2019-01-23T12:47:06Z"
+    },
+    {
+      "author": "goldenHairDafo",
+      "author_association": "NONE",
+      "body": "Thanks @markekraus \r\n\r\nHint: In my PowerShell Core Version 6.2.3 it did not work at first. I had to add a \r\ndot between $_ and Exception.\r\n> For those looking for a workaround:\r\n> \r\n> ```powershell\r\n> try {\r\n>     Invoke-WebRequest -Method HEAD http://cnn.com -MaximumRedirection 0 -ErrorAction Stop\r\n> } catch {\r\n>     $Location = $_Exception.Response.Headers.Location\r\n$Location = $_.Exception.Response.Headers.Location }\r\n> ```\r\n\r\n",
+      "created_at": "2020-01-24T16:01:07Z",
+      "updated_at": "2020-01-24T16:01:07Z"
+    },
+    {
+      "author": "CarloToso",
+      "author_association": "CONTRIBUTOR",
+      "body": "It works correctly adding the -SkipHttpErrorCheck flag to Invoke-WebRequest",
+      "created_at": "2022-11-11T14:47:27Z",
+      "updated_at": "2022-11-11T14:47:27Z"
+    }
+  ],
+  "created_at": "2017-08-09T16:51:28Z",
+  "number": 4534,
+  "state": "open",
+  "title": "Invoke-WebRequest in PS Core throws a terminating error in situations where a non-terminating error is issued in Windows PowerShell",
+  "updated_at": "2022-11-11T14:47:27Z"
+}

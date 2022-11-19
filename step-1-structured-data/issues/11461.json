@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11461",
+  "author": "bgshacklett",
+  "body": "When running commands via `pwsh -c '<command>'`, PowerShell will return an exit code of `1` in the event that `<command>` returns an exit code greater than `0`. This is particularly problematic for tools like https://github.com/dense-analysis/ale/, which rely on an accurate exit code from the command which they spawn (a linter or fixer in this case).\r\n<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\npwsh -c \"bash -c 'exit 2'\"; echo $LASTEXITCODE\r\n```\r\n\r\n# Expected behavior\r\nThe exit code of the native application should be returned.\r\n```none\r\n2\r\n```\r\n\r\n# Actual behavior\r\nPowerShell returns a generic \"failure\" exit code of `1`.\r\n```none\r\n1\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.1\r\nOS                             Darwin 18.7.0 Darwin Kernel Version 18.7.0: Tue Aug 20 16:57:14 PDT 201\u2026\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0, 5.0, 5.1.10032.0, 6.0.0, 6.1.0, 6.2.0, 7.0.0-rc.1}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-08-22T00:00:18Z",
+  "comments": [
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "In case you don't know this workaround, using the `-File` parameter will return the actual exit code:\r\n```\r\n$ cat exit2.sh\r\n#!/bin/sh\r\n\r\nexit 2\r\n\r\n$ pwsh -nop -noni -f exit2.sh || echo $?\r\n2\r\n```",
+      "created_at": "2019-12-31T21:02:18Z",
+      "updated_at": "2019-12-31T21:02:18Z"
+    },
+    {
+      "author": "bgshacklett",
+      "author_association": "NONE",
+      "body": "Thank you for that; that's definitely a useful workaround, which I'll add to my repertoire. I must say, though, that having to generate and execute a temporary script just to get the expected exit code from the shell is... less than ideal. Honestly, if I tried to put that in a PR for ALE I expect it would be rejected immediately.\r\n\r\nOne code smell that I see very regularly is the amount of calls to `cmd /c` out there in build scripts and \"cross-platform\" tools which have special cases for running on Windows. When I see an issue like this, however, I'm stuck having to agree that `cmd` is actually the better option, which is sad given that it hasn't been touched for what... 20 years now?\r\n\r\nIt also makes it harder to break out of cases like https://github.com/dense-analysis/ale/blob/5e69aaf4c2b4ffbfd4fbe0af820e23bf559b8e14/autoload/ale.vim#L223 where functionality is based on the OS rather than the shell, which is becoming more important now that PowerShell runs on Linux and macOS (my current OS at work).\n\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/53278269?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dense-analysis/ale\">dense-analysis/ale</a></strong></div><div>Check syntax in Vim asynchronously and fix files, with Language Server Protocol (LSP) support - dense-analysis/ale</div></blockquote>",
+      "created_at": "2020-01-13T14:01:15Z",
+      "updated_at": "2020-01-13T14:01:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I agree that the behavior is problematic.\r\n\r\nA more direct workaround is to append `; exit $LASTEXITCODE` to the `-Command` argument:\r\n\r\n```powershell\r\npwsh -c \"bash -c 'exit 2'; exit `$LASTEXITCODE\"; echo $LASTEXITCODE\r\n```\r\n\r\nNote that executing _PowerShell_ scripts (`*.ps1`) with  `-File` behaves differently from POSIX-like shell scripts:\r\n\r\nIn the _absence_ of an explicit `exit` statement, POSIX-like shells report the \r\n _last statement_'s exit code as the script's, whereas `*.ps1` scripts _default to `0`_.\r\n  * Calling a `*.ps1` script from _inside_ PowerShell behaves differently again: `$LASTEXITCODE` after a script invocation reflects whatever _external program_ was last called in the absence of `exit <n>`, not implicitly `0`  - see #11712 \r\n\r\n---\r\n\r\nSummarizing the behavior of _PowerShell code_ with the CLI:\r\n\r\n`-Command` / `-c`  behaves _almost_ like a POSIX-like shell in that it automatically uses the _last_ statement's success status, but discards the specific exit code in favor of mapping the abstract Boolean `$?` to `0` or `1` (the behavior that prompted creation of this issue).\r\n\r\n`-File` with a `*.ps1` files behaves differently from `-Command` / `-c` and POSIX-like shells in that only _explicit_ `exit` calls matter, whereas calling `*.ps1` files PowerShell-internally behaves differently yet again.\r\n",
+      "created_at": "2020-01-29T03:02:30Z",
+      "updated_at": "2020-01-29T03:03:32Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "This is expected and changing it would break existing scripts\r\n\r\nThis should get the expected behavior\r\n\r\npowershell\r\n```\r\npwsh -c \"bash -c 'exit 2'; exit `$LASTEXITCODE\"; echo $LASTEXITCODE\r\n```",
+      "created_at": "2020-08-20T19:19:15Z",
+      "updated_at": "2020-08-20T19:19:15Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-08-22T00:00:16Z",
+      "updated_at": "2020-08-22T00:00:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13 \r\n\r\nI find reiterating an already-mentioned _workaround_ for the problematic behavior as the solution and dismissing a request to _fix it_ with a curt \"this is expected\" and \"would break existing scripts\"  disappointing, and I suspect I'm not the only one.\r\n\r\nI invite you to provide a more nuanced response at #13501\r\n\r\n",
+      "created_at": "2020-08-22T02:31:20Z",
+      "updated_at": "2020-08-22T02:31:47Z"
+    }
+  ],
+  "created_at": "2019-12-31T17:58:38Z",
+  "number": 11461,
+  "state": "closed",
+  "title": "PowerShell exits with exit code 1 rather than returning $LASTEXITCODE when last process exit code is >0",
+  "updated_at": "2020-08-22T02:31:47Z"
+}

@@ -1,0 +1,34 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4001",
+  "author": "daxian-dbw",
+  "body": "Root cause\r\n------------\r\nHere is the background information:\r\n1. When running the same unchanged script file multiple times, the script file will not be re-parsed. Instead, the AST will be used.\r\n1. When re-using the AST, we will reuse the same .NET type generated for a powershell class.\r\n1. At compilation time, [`ScriptBlockMemberMethodWrapper.InitAtRuntime`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/runtime/Operations/ClassOps.cs#L115) will be called to bound the static method of a powershell class to the [Runspace, SessionState] where the compilation is happening.\r\n\r\nThis causes a problem -- a static method of powershell class will always execute in the [Runspace, SessionState] where the script file that defines it lastly run.\r\n\r\nSteps to reproduce\r\n------------------\r\n> class.ps1 -- defines a powershell class `Foo`\r\n\r\n```powershell\r\n\r\nclass Foo\r\n{\r\n    static [string] GetName()\r\n    {\r\n        return (Get-Name)\r\n    }\r\n}\r\n```\r\n> test.ps1\r\nDot source `class.ps1`, create function `Get-Name` and run `[Foo]::GetName()`.\r\nThen create a new runspace, define another `Get-Name` and dot source `class.ps1` in that runspace.\r\nThen run `[Foo]::GetName()` again.\r\n\r\n```powershell\r\n\r\n. $PSScriptRoot\\class.ps1\r\n\r\nfunction Get-Name\r\n{\r\n    \"Console Runspace\"\r\n}\r\n\r\n[Foo]::GetName()\r\n\r\n$ps = [powershell]::Create()\r\n$ps.AddScript(\"function Get-Name { 'powershell instance Runspace' }\").Invoke()\r\n$ps.Commands.Clear()\r\n$ps.AddScript(\". $PSScriptRoot\\class.ps1\").Invoke()\r\n\r\n[Foo]::GetName()\r\n```\r\n> Then just run `test.ps1` in powershell\r\n\r\n```powershell\r\n.\\test.ps1\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n> Since I'm running both `[Foo]::GetName()` in the default console runspace, I expect the same result.\r\n\r\n```none\r\nConsole Runspace\r\nConsole Runspace\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nConsole Runspace\r\npowershell instance Runspace\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-beta\r\nPSEdition                      Core\r\nCLRVersion\r\nGitCommitId                    v6.0.0-beta.2-22-g7a51b446e5cc428efd634e8a8a38271156cc182b\r\nOS                             Microsoft Windows 10.0.15063\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2017-07-15T01:05:48Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I had a conversation with @BrucePay about this issue. \r\n\r\nCurrently both instance methods and static methods of a PowerShell class are bound to a [Runspace, SessionState] by default, and the execution of the methods will happen in that environment.\r\n\r\nThis makes PowerShell class not friendly to concurrent execution in PowerShell (via RunspacePool or multiple Runspaces), because if when calls to the methods are not in the bound [Runspace, SessionState], they will be sent there to run instead of running in the current Runspace.\r\n\r\nMaybe a better semantics is:\r\nWhen calling instance/static methods, if the current thread that makes the call has a default Runspace associated with it, then the methods runs in that Runspace; if the current thread doesn't have a default Runspace associated with it, then the bound [Runspace, SessionState] will be used to run the methods.",
+      "created_at": "2017-06-13T20:05:13Z",
+      "updated_at": "2017-06-13T20:05:13Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I think it's worth revisiting how we bind script blocks to session state.\r\n\r\nIn my mind, the current implementation is meant to simulate early binding primarily for script blocks in module scope. I'm not sure the current implementation is useful elsewhere.\r\n\r\nI'd also like to avoid semantics that apply to class methods because the problem is broader than that. For example, invoking a script block in a background runspace doesn't always work like people expect.",
+      "created_at": "2017-06-13T23:38:10Z",
+      "updated_at": "2017-06-13T23:38:10Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "While experimenting with this I found a related bug where the engine event mechanism used to marshal a script block back to the original runspace/session state doesn't work.  The result is running the script block on a different runspace/thread and corrupted state errors (\"index out of range\", \"global scope cannot be removed\", etc.).\r\nhttps://github.com/PowerShell/PowerShell/issues/4003\r\n",
+      "created_at": "2017-06-14T20:08:56Z",
+      "updated_at": "2017-06-14T20:08:56Z"
+    }
+  ],
+  "created_at": "2017-06-13T18:54:28Z",
+  "number": 4001,
+  "state": "closed",
+  "title": "PowerShell class static method has inconsistent behavior when the .ps1 file is dot sourced into multiple Runspace's",
+  "updated_at": "2017-08-03T06:27:38Z"
+}

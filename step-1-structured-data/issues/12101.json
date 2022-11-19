@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12101",
+  "author": "sba923",
+  "body": "# Steps to reproduce\r\n\r\n(foo.vhd is a 36+GB file)\r\n\r\n```\r\nGet-FileHash foo.vhd\r\n{hit Ctrl+C while running}\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe cmdlet should terminate \"promptly\" (probably with some exception)\r\n\r\n# Actual behavior\r\n\r\nThe cmdlet continues execution for \"a long time\"\r\n\r\n# Environment data\r\n```\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We use .Net Core API which does not allow cancellation. You could use *-Job cmdlets as workaround.",
+      "created_at": "2020-03-11T12:38:22Z",
+      "updated_at": "2020-03-11T12:38:22Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Is your comment generic or only about Get-FileHash?\r\n",
+      "created_at": "2020-03-11T13:48:47Z",
+      "updated_at": "2020-03-11T13:48:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@sba923, I think what @iSazonov is saying is that Ctrl-C is ignored while a _.NET method_ is executing (as opposed to PowerShell code); since most methods execute quickly, this is usually not noticeable, but in your case it is.\r\n\r\nYou can verify the behavior as follows:\r\n\r\n```powershell\r\n# Define a .NET class with a long-running method (effectively sleeps for 10 seconds).\r\nAdd-Type 'public class Foo { public void Bar() { for (var i = 0; i < 100; ++i) { System.Console.Write(\".\"); System.Threading.Thread.Sleep(100); } } }'\r\n\r\n# Ctrl-C has no effect while the .Bar() method is being executed.\r\n[Foo]::new().Bar()\r\n```\r\n",
+      "created_at": "2020-03-11T14:37:13Z",
+      "updated_at": "2020-03-11T14:40:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Is your comment generic or only about Get-FileHash?\r\n\r\nMy comment is about Get-FileHash.",
+      "created_at": "2020-03-11T14:41:12Z",
+      "updated_at": "2020-03-11T14:41:12Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "I get the picture. But @iSazonov wrote \"API _which does not_ allow cancellation.\" Is this a generic statement about _all_ .NET Core APIs, or (my understanding of the phrasing) about _that particular API_?\r\n\r\nShouldn't PowerShell wrap the calls to \"potentially long-running .NET Core APIs\" so that they can be aborted, whenever supported?",
+      "created_at": "2020-03-11T14:42:48Z",
+      "updated_at": "2020-03-11T14:42:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good question, @sba923 - certainly, PowerShell supporting Ctrl-C consistently would make for a better user experience, but I can't speak to the technical feasibility.\r\n\r\n@iSazonov, do we already have cases of using .NET APIs that _do_ support cancellation that we _do_ surface via Ctrl-C?\r\n\r\n",
+      "created_at": "2020-03-11T14:47:18Z",
+      "updated_at": "2020-03-11T14:47:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could manually evaluate a hash by chunks and check cancellation on every iteration.\r\nOr better run the work in another thread by Task.Run().\r\n",
+      "created_at": "2020-03-11T14:52:31Z",
+      "updated_at": "2020-03-11T14:52:31Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov evaluating in chunks is a great idea \u2764\ufe0f \r\n\r\nI'm less of a fan of just throwing it in another thread, since that gives the impression that the operation was cancelled.  Also with `Task.Run` in particular, the potential for thread starvation in environments with low thread pool capacity is not ideal.",
+      "created_at": "2020-03-11T15:57:14Z",
+      "updated_at": "2020-03-11T15:57:14Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 \r\n\r\n> @iSazonov, do we already have cases of using .NET APIs that _do_ support cancellation that we _do_ surface via Ctrl-C?\r\n\r\nYeah, that's essentially what `PSCmdlet.StopProcessing` is for.  When a pipeline stop is requested, that method is called in a different thread.  If the cmdlet implements that method, it can then use whatever API specific logic is required to cancel (sometimes a `CancellationToken`, sometimes a method has a specific `Stop` operation like `Ping.SendAsyncCancel()`).",
+      "created_at": "2020-03-11T16:07:30Z",
+      "updated_at": "2020-03-11T16:07:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience don't remind me \ud83d\ude05 \r\n\r\nI'm still not sure that method _actually_ does a proper cancellation, it seems to take the same amount of time whether you cancel it or not. \ud83d\ude01 \r\n\r\nBut yeah, janky Ping APIs aside, a lot of .NET async APIs have some kind of usable cancellation mechanism.",
+      "created_at": "2020-03-11T19:47:18Z",
+      "updated_at": "2020-03-11T19:47:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We will get ComputeHashAsync(Stream inputStream, CancellationToken cancellationToken = default)) in .Net Core 5.0.",
+      "created_at": "2020-03-12T03:44:02Z",
+      "updated_at": "2020-03-12T03:45:02Z"
+    }
+  ],
+  "created_at": "2020-03-11T09:23:57Z",
+  "number": 12101,
+  "state": "open",
+  "title": "Ctrl+C can't abort long running cmdlet",
+  "updated_at": "2020-03-12T03:45:02Z"
+}

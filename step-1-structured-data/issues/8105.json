@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8105",
+  "author": "Jaykul",
+  "body": "Looking at any array, even an empty one:\r\n\r\n```posh\r\n@().address\r\n\r\nOverloadDefinitions\r\n-------------------\r\nSystem.Object&, System.Private.CoreLib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=7cec85d7bea7798e Address(int )\r\n```\r\n\r\nThis method can't really be used, right?\r\n\r\n```posh\r\n@(1,2).address(0)\r\nNo coercion operator is defined between types 'System.Object&' and 'System.Object'.\r\nAt line:1 char:1\r\n+ @(1,2).address(0)\r\n+ ~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : OperationStopped: (:) [], InvalidOperationException\r\n+ FullyQualifiedErrorId : System.InvalidOperationException@(1,2).address(0)\r\n```\r\n\r\nBut it's getting in the way of stuff like ...\r\n\r\n```posh\r\n([xml]'<root>\r\n<user><address>huddledmasses.org</address><anything/></user>\r\n<user><address>github.com</address><else/></user>\r\n</root>').root.user.address\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jcotton42",
+      "author_association": "CONTRIBUTOR",
+      "body": "Doing some sleuthing shows that it's only on `T[]` and not `Array` itself\r\n```\r\n> [array].GetMember('Address')\r\n~\r\n> [int[]].GetMember('Address')\r\n\r\n\r\nName                       : Address\r\nDeclaringType              : System.Int32[]\r\nReflectedType              : System.Int32[]\r\nMemberType                 : Method\r\nMetadataToken              : 100663296\r\nModule                     : CommonLanguageRuntimeLibrary\r\nIsSecurityCritical         : False\r\nIsSecuritySafeCritical     : False\r\nIsSecurityTransparent      : True\r\nMethodHandle               : System.RuntimeMethodHandle\r\nAttributes                 : PrivateScope, Public\r\nCallingConvention          : Standard, HasThis\r\nReturnType                 : System.Int32&\r\nReturnTypeCustomAttributes : Int32&\r\nReturnParameter            : Int32&\r\nIsGenericMethod            : False\r\nIsGenericMethodDefinition  : False\r\nContainsGenericParameters  : False\r\nMethodImplementationFlags  : IL\r\nIsPublic                   : True\r\nIsPrivate                  : False\r\nIsFamily                   : False\r\nIsAssembly                 : False\r\nIsFamilyAndAssembly        : False\r\nIsFamilyOrAssembly         : False\r\nIsStatic                   : False\r\nIsFinal                    : False\r\nIsVirtual                  : False\r\nIsHideBySig                : False\r\nIsAbstract                 : False\r\nIsSpecialName              : False\r\nIsConstructor              : False\r\nCustomAttributes           : {}\r\n```",
+      "created_at": "2018-10-23T03:30:49Z",
+      "updated_at": "2018-10-23T03:30:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Do we create it? Where?",
+      "created_at": "2018-10-25T05:41:00Z",
+      "updated_at": "2018-10-25T05:41:00Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sort-of. I think the actual method is an underlying framework thing (although I can't find documentation of it).\r\n\r\nPowerShell lets you use _property_ syntax to see the overloads of methods, so we turn a method (that is completely **uncallable** in PowerShell, because it returns a pointer, _not an object_), into a method **and** a property -- and then we let that (totally useless) property get in the way of property unrolling syntax such as what is used in XML ...\r\n\r\nI'm sure we would have to create a special case ito hide either this particular method/property, or **any** methods properties that return AddressOf pointers ...",
+      "created_at": "2018-10-25T17:30:45Z",
+      "updated_at": "2018-10-25T17:40:24Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I think this particular method is safe to hide.  It's an implementation detail (well, in C# at least) for how you get an index from multidimensional array by reference ([sharplab example](https://sharplab.io/#v2:C4LglgNgNAJiDUAfAAgBgATIIwG4CwAUMgMyYBM6AwugN6HoOanIAs6AsgBRgB2wA2lAC66AIYBKWvUYyATgFMAZul7B0AI3QBedAuWj+qKOixD8BGQF9CloA===))\r\n\r\nRoslyn hides it as well, along with `Get` and `Set`.\r\n\r\nThere's some documentation on it in the [CLI Partition 2](https://download.microsoft.com/download/D/C/1/DC1B219F-3B11-4A05-9DA3-2D0F98B20917/Partition%20II%20Metadata.doc) spec on page 63.",
+      "created_at": "2018-10-25T18:15:44Z",
+      "updated_at": "2018-10-25T20:33:35Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@Jaykul We currently have no mechanism for hiding members and adding a special case to the .NET adapter for one particular method on one particular type is unappealing.   The root problem is that using '.'  this way is inherently fragile. What do you do if your XML has a `Count` property? We certainly can't hide that.  Now in this specific example, you can work around the `Address` property issue by using the `foreach` method as in:\r\n```powershell\r\n([xml]'<root>\r\n<user><address>huddledmasses.org</address><anything/></user>\r\n<user><address>github.com</address><else/></user>\r\n</root>').root.user.foreach('address')\r\n```\r\nBut that is still a bit clunky. An optimal solution would be to have another operator that only looks at the content, never at the container. This was proposed in #7445.\r\n",
+      "created_at": "2018-11-26T18:28:06Z",
+      "updated_at": "2018-11-26T18:28:06Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting point, @BrucePay, about the `.Count` property. Hashtables have a similar problem, where if you define a `Keys` or `Count` or similar _key_ in a hashtable, the properties of the container become inaccessible.\r\n\r\nI think that if we introduce a new operator to access the content specifically, hashtables should be reworked as well to avoid the frankly irritating workarounds (e.g., code like [this](https://github.com/vexx32/PSWordCloud/blob/7dc82bf7bd36477c5782c156f5fcd570d69f76de/PSWordCloud/Public/New-WordCloud.ps1#L414)). (Especially since hashtables already _have_ a perfectly serviceable method of accessing keys.\r\n\r\nWhich begs the question, I suppose; could we co-opt the hashtable/array syntax for this purpose here as well?",
+      "created_at": "2018-11-26T18:37:16Z",
+      "updated_at": "2018-11-26T18:37:16Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 I didn't understand your last question. Did you mean the array indexing syntax `$foo[13]` ?",
+      "created_at": "2018-11-26T22:33:44Z",
+      "updated_at": "2018-11-26T22:33:44Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay I can see your point about hiding the member, the problem is that it's actually really hard to figure out where the thing came from. It's an **ugly** surprise.\r\n\r\nAn explicit unrolling operator would be a workaround, but it has the same problem as .foreach: it's not discoverable at all -- and I have no way of knowing that I need it! \r\n\r\nWhen I type:  `$doc` I see a \"root\" property, so I type `$doc.root` and I see a \"user\" so I type `$doc.root.user` and I see the address _property_ ...  There's no way for me to know there's a landmine. It doesn't even show up when you pipe the `$doc.root.user | get-member -force` ... \r\n\r\nAnd then, to add insult to injury, the `Address` _method_ isn't callable in PowerShell, at all.\r\n\r\nOf course, the `Address` method is on `[System.Object[]]` which I shouldn't really be dealing with in XML land anyway. Logically speaking this **ought** to be a `System.Xml.XmlElementList` or a `System.Xml.XPathNodeList` or one of those other .NET 1.0 era XML custom collection objects...\r\n",
+      "created_at": "2018-11-27T00:05:48Z",
+      "updated_at": "2018-11-27T15:22:05Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Removing @PowerShell/powershell-committee review until there is a firm proposal",
+      "created_at": "2018-12-12T18:01:10Z",
+      "updated_at": "2018-12-12T18:01:10Z"
+    }
+  ],
+  "created_at": "2018-10-23T03:26:53Z",
+  "number": 8105,
+  "state": "open",
+  "title": "Can we get rid of the \"address\" method?",
+  "updated_at": "2018-12-12T18:01:10Z"
+}

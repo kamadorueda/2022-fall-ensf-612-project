@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12081",
+  "author": "wightsci",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\nThe following steps work on Windows PowerShell 5.1. This issue is present on both x86 and x64 versions and can be reproduced on multiple machines.\r\n\r\nI can export the certificate successfully using X509 .Net classes in PowerShell 7.\r\n\r\n```powershell\r\n$TestCertificate = New-SelfSignedCertificate -Subject 'TestCertificate' -KeyExportPolicy 'Exportable'\r\nExport-PfxCertificate -Cert $TestCertificate -FilePath .\\TestCertificate.pfx -Password (ConvertTo-SecureString 'TestPassword' -AsPlainText -Force)\r\n```\r\n\r\n# Expected behavior\r\nCreation of PFX file.\r\n\r\n# Actual behavior\r\n\r\n```PowerShell\r\nExport-PfxCertificate: Cannot export non-exportable private key.\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-03-14T17:35:04Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @anmenaga for information",
+      "created_at": "2020-03-09T10:19:52Z",
+      "updated_at": "2020-03-09T10:19:52Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looks like this is run on a system with an[ older version of `PKI` module](https://github.com/PowerShell/PowerShell/issues/11903#issuecomment-593607117).\r\nThis older version will engage `WinCompat` feature and each certificate cmdlet in repro steps will be doing PS Remoting Serialization twice.\r\nLooks like `X509Certificate2` is losing its PrivateKey when going over Serialization boundary.\r\nHere is a repro in Windows PowerShell 5.1 with WinRM Remoting session:\r\n```powershell\r\nPS C:\\> $PSVersionTable.PSVersion.ToString()\r\n5.1.14393.3471\r\nPS C:\\> $s = New-PSSession localhost\r\nPS C:\\> # original X509Certificate2 in remote session has PrivateKey\r\nPS C:\\> icm $s {(New-SelfSignedCertificate -Subject 'TestCertFromWinPS' -KeyExportPolicy 'Exportable').HasPrivateKey}\r\nTrue\r\nPS C:\\> # deserialized local copy does Not have PrivateKey\r\nPS C:\\> $TestCertificate = icm $s {New-SelfSignedCertificate -Subject 'TestCertFromWinPS' -KeyExportPolicy 'Exportable'}\r\nPS C:\\> $TestCertificate.HasPrivateKey\r\nFalse\r\nPS C:\\> # attempt to export deserialized local copy of X509Certificate2 will fail\r\nPS C:\\> Export-PfxCertificate -Cert $TestCertificate -FilePath .\\TestCertificate.pfx -Password (ConvertTo-SecureString 'Test\r\nPassword' -AsPlainText -Force)\r\nExport-PfxCertificate : Cannot export non-exportable private key.\r\nAt line:1 char:1\r\n+ Export-PfxCertificate -Cert $TestCertificate -FilePath .\\TestCertific ...\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Export-PfxCertificate], Win32Exception\r\n    + FullyQualifiedErrorId : System.ComponentModel.Win32Exception,Microsoft.CertificateServices.Commands.ExportPfxCertifi\r\n   cate\r\n```\r\n\r\nAs a workaround in PS 7 the entire operation can be done in WinCompat session:\r\n```powershell\r\nPS C:\\A> $PSVersionTable.PSVersion.ToString()\r\n7.0.0\r\nPS C:\\A> Import-Module PKI -UseWindowsPowerShell # this will create WinPSCompatSesion PS Remoting session\r\nWARNING: Module PKI is loaded in Windows PowerShell using WinPSCompatSession remoting session; please note that all input and output of commands from this module will be deserialized objects. If you want to load this module into PowerShell Core please use 'Import-Module -SkipEditionCheck' syntax.\r\nPS C:\\A> $s = Get-PSSession -Name WinPSCompatSession\r\nPS C:\\A> icm $s {$TestCertificate = New-SelfSignedCertificate -Subject 'TestCertificate' -KeyExportPolicy 'Exportable'}\r\nPS C:\\A> $pass = ConvertTo-SecureString 'TestPassword' -AsPlainText -Force\r\nPS C:\\A> icm $s {Export-PfxCertificate -Cert $TestCertificate -FilePath .\\TestCertificate.pfx -Password $using:pass | Out-Null}\r\n```\r\n\r\n@PaulHigin can you please confirm that this is expected behavior of private keys for de/serialized certificate objects? Thank you.",
+      "created_at": "2020-03-09T21:02:59Z",
+      "updated_at": "2020-03-09T21:02:59Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, looking at the code, PowerShell remoting rehydrates the dotNet certificate object but without the private key.",
+      "created_at": "2020-03-09T22:56:45Z",
+      "updated_at": "2020-03-09T22:56:45Z"
+    },
+    {
+      "author": "JeremyTBradshaw",
+      "author_association": "NONE",
+      "body": "@anmenaga I am wondering if you know of an alternative approach to the workaround using the WinCompat session you provided.  That workaround works great, but it is a little painful.  I'm hoping we can just get the private key to be kept intact without having to Invoke-Command to another PSSession.  Any idea?",
+      "created_at": "2021-04-21T12:47:08Z",
+      "updated_at": "2021-04-21T12:47:08Z"
+    },
+    {
+      "author": "sergshu",
+      "author_association": "NONE",
+      "body": "If you run task from Azure DevOps change script type to PowerShell (Not PowerShell Core)",
+      "created_at": "2022-02-04T07:47:51Z",
+      "updated_at": "2022-02-04T07:47:51Z"
+    }
+  ],
+  "created_at": "2020-03-08T14:46:24Z",
+  "number": 12081,
+  "state": "closed",
+  "title": "Cannot Export PFX certificate with key marked as exportable.",
+  "updated_at": "2022-02-04T07:47:52Z"
+}

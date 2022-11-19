@@ -1,0 +1,181 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11441",
+  "author": "RainbowMiner",
+  "body": "# Steps to reproduce\r\n\r\n```\r\nfunction Initialize-Something {\r\n    $Global:TestArray = @()\r\n    $Global:TestArray += [PSCustomObject]@{abc=1;def=2}\r\n    $Global:TestArray += [PSCustomObject]@{abc=2;def=3}\r\n    $Global:TestArray += [PSCustomObject]@{abc=3;def=4}\r\n}\r\n\r\nfunction Invoke-Something {\r\n    for($i=0; $i -lt 1000; $i++) {\r\n        $Global:TestArray | Select-Object > $null\r\n    }\r\n}\r\n\r\nInitialize-Something\r\nInvoke-Something\r\n```\r\n\r\n# Expected behavior\r\n\r\n```\r\nGarbage collection should clear heap afterwards\r\n```\r\n\r\n# Actual behavior\r\n\r\nEvery call to `Invoke-Something`  collects more objects of the following type in managed memory:\r\n```\r\n{System.Collections.Concurrent.ConcurrentDictionary<string, System.Management.Automation.PSMemberInfoInternalCollection<System.Management.Automation.PSMemberInfo>>.Node}\r\n```\r\n![image](https://user-images.githubusercontent.com/39437538/71520793-2e113b80-28be-11ea-80e5-c92b90560ae5.png)\r\n\r\n![image](https://user-images.githubusercontent.com/39437538/71520652-7bd97400-28bd-11ea-8aaa-8109db031d4c.png)\r\n\r\nMost notably, the \"_key\" contains the following.\r\n> \"Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@Selected.System.Management.Automation.PSCustomObject@@@System.Management.Automation.PSCustomObject@@@System.Object\"\r\n\r\nAfter each run of `Invoke-Something`, every newly created object of the above type seems to inherit this list, but increased by one more `Selected.System.Management.Automation.PSCustomObject`. This creates an exponential growth, over time.\r\n\r\n\r\n# Environment data\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n.. but the same happens with pwsh core 6.2.3, as well. Same thing happens, when running pwsh on a linux platform.",
+  "closed_at": "2020-01-25T09:10:40Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can you repo with latest PowerShell 7 build?",
+      "created_at": "2019-12-27T18:52:10Z",
+      "updated_at": "2019-12-27T18:52:10Z"
+    },
+    {
+      "author": "RainbowMiner",
+      "author_association": "NONE",
+      "body": "Good question, I don't have a pwsh 7 install, yet. I will try this first thing, tomorrow morning.",
+      "created_at": "2019-12-27T22:28:16Z",
+      "updated_at": "2019-12-27T22:28:16Z"
+    },
+    {
+      "author": "RainbowMiner",
+      "author_association": "NONE",
+      "body": "One additional remark: the leak also happens, when using `-first`, `-last`, `-index` etc. on Select-Object, but does not happen, when using `-Property` or `-ExpandProperty`. This might be, because the latter two create new objects.",
+      "created_at": "2019-12-27T22:32:17Z",
+      "updated_at": "2019-12-27T22:32:17Z"
+    },
+    {
+      "author": "RainbowMiner",
+      "author_association": "NONE",
+      "body": "> Can you repo with latest PowerShell 7 build?\r\n\r\nYes, same thing happens with PowerShell 7, too.",
+      "created_at": "2019-12-28T14:54:06Z",
+      "updated_at": "2019-12-28T14:54:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps it is related #7768",
+      "created_at": "2019-12-28T17:13:28Z",
+      "updated_at": "2019-12-28T17:13:28Z"
+    },
+    {
+      "author": "RainbowMiner",
+      "author_association": "NONE",
+      "body": "It's a pretty severe bug which did cost me many hours of searching. I had never suspected such a basic function like select-object to cause this much trouble. If you have a long running script, that does select-object on a global PSCustomObject array e.g. every 60 seconds, it will fill up all your machine's ram within 24 hours.\r\n\r\nRegarding issue #7768, I stumbled upon this issue during my search for the memory leak. Actually, that one addresses the use of `-ExpandProperty` and `-Property` - if using select-object with one or both of those parameters, the memory leak does not happen. Most probably, because a new object will be forwarded through the pipeline.\r\n\r\nIt's happening only, when using blank select-object or positional select-object, which should simply forward a selection of the original objects",
+      "created_at": "2019-12-30T13:28:47Z",
+      "updated_at": "2019-12-30T13:33:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I can not repo on PS 7.0. GC works great.\r\nI tried: \r\n```powershell\r\n1.. 1000 | % { Invoke-Something }\r\n# and\r\n1.. 1000 | % { Initialize-Something; Invoke-Something }",
+      "created_at": "2019-12-31T04:58:29Z",
+      "updated_at": "2019-12-31T04:58:29Z"
+    },
+    {
+      "author": "RainbowMiner",
+      "author_association": "NONE",
+      "body": "For me, it doesn't work out.\r\n\r\n$PSVersionTable\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.1\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nBefore:\r\n\r\n```\r\nMemUsage  MemDiff MemText\r\n--------  ------- -------\r\n22071784 22071784 Memory usage: 21,0 MB (22.071.784 Bytes +22071784)\r\n```\r\n\r\nNow I run this code:\r\n\r\n```\r\n1..20 | %{Invoke-Something}\r\n```\r\n\r\nAfter:\r\n\r\n```\r\nMemUsage  MemDiff MemText\r\n--------  ------- -------\r\n37715576 \u202d15643792\u202c Memory usage: 36,0 MB (37.715.576 Bytes +\u202d15643792\u202c)\r\n```\r\n\r\nNow I run this code again:\r\n\r\n```\r\n1..20 | %{Invoke-Something}\r\n```\r\n\r\n```\r\nMemUsage  MemDiff MemText\r\n--------  ------- -------\r\n54916776 \u202d17201200\u202c Memory usage: 52,4 MB (54.916.776 Bytes +\u202d17201200\u202c)\r\n```\r\n\r\nI am using the following function to get the memory usage. There is no change to the above values, if I would call [System.GC]::Collect() one or multiple times.\r\n\r\n```\r\nfunction Get-MemoryUsage\r\n{\r\n    $memusagebyte = [System.GC]::GetTotalMemory($true)\r\n    $memdiff = $memusagebyte - [int64]$Global:last_memory_usage_byte\r\n    [PSCustomObject]@{\r\n        MemUsage   = $memusagebyte\r\n        MemDiff    = $memdiff\r\n        MemText    = \"Memory usage: {0:n1} MB ({1:n0} Bytes {2})\" -f  ($memusagebyte/1MB), $memusagebyte, \"$(if ($memdiff -gt 0){\"+\"})$($memdiff)\"\r\n    }\r\n    $Global:last_memory_usage_byte = $memusagebyte\r\n}\r\n```\r\n",
+      "created_at": "2019-12-31T10:32:17Z",
+      "updated_at": "2019-12-31T13:55:43Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What is `$Global:last_memory_usage_byte` in your script? I don't see that the variable is assigned.",
+      "created_at": "2019-12-31T12:37:38Z",
+      "updated_at": "2019-12-31T12:37:38Z"
+    },
+    {
+      "author": "RainbowMiner",
+      "author_association": "NONE",
+      "body": "Ah, that's being set to 0 at the start and set within the above function. I had stripped some code from the Get-MemoryUsage function, before posting it here. I unintentionally did cut out the reset line (I just re-added it)\r\n\r\nI did another 100 runs:\r\n```\r\n1..100 | %{Invoke-Something}\r\n```\r\n\r\nNow the memory is here:\r\n\r\n```\r\n MemUsage   MemDiff MemText\r\n --------   ------- -------\r\n145399880  90483104 Memory usage: 138,7 MB (145.399.880 Bytes +90483104)\r\n```",
+      "created_at": "2019-12-31T13:49:31Z",
+      "updated_at": "2019-12-31T13:56:36Z"
+    },
+    {
+      "author": "RainbowMiner",
+      "author_association": "NONE",
+      "body": "The memory dump on Pwsh 7 is a bit different, than that I aquired from the Pwsh 6 dumps:\r\n\r\n![image](https://user-images.githubusercontent.com/39437538/71627563-7c427980-2bf3-11ea-95ce-959655a9f2ee.png)\r\n\r\n![image](https://user-images.githubusercontent.com/39437538/71627586-98deb180-2bf3-11ea-9fe6-aae618824987.png)\r\n\r\n![image](https://user-images.githubusercontent.com/39437538/71627629-db07f300-2bf3-11ea-9bf4-9051d1ecc804.png)\r\n\r\nTons of strings of type `System.Collections.Generic.List<string>`\r\n\r\n![image](https://user-images.githubusercontent.com/39437538/71627603-ab58eb00-2bf3-11ea-95e9-d2bb176bd6bd.png)\r\n\r\n![image](https://user-images.githubusercontent.com/39437538/71627644-f96dee80-2bf3-11ea-8a93-ed25177e4581.png)\r\n\r\nTons of strings of type  `System.Management.Automation.Runspaces.ConsolidatedString`\r\n\r\nSo, basically a similar result, compared to PS6, but in a different order and objects. But it all comes down to a giant collection of strings with the value `\"Selected.System.Management.Automation.PSCustomObject\"`",
+      "created_at": "2019-12-31T16:39:10Z",
+      "updated_at": "2019-12-31T16:39:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell is a script engine and it does many allocations by design.\r\nYour script creates global varable and not clear/remove it - as result memory is not freed. I can not confirm a memory leak.\r\n\r\nIf you see a memory leak, please make a simple repo on PowerShell 7.0 latest build so that we can reproduce and measure.",
+      "created_at": "2019-12-31T17:08:09Z",
+      "updated_at": "2019-12-31T17:08:09Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "@RainbowMiner - have you tried \r\n```powershell\r\nInitialize-Something\r\nInvoke-Something\r\nRemove-Item -Path Variable:testarray*\r\n```\r\nthen take a look at memory usage.",
+      "created_at": "2020-01-01T15:31:00Z",
+      "updated_at": "2020-01-01T15:31:00Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I can reproduce the problem and it feels like a bit of a corner case but maybe has an easy fix.\r\n\r\nThis function:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/59db1f619edb1bd85a784c0f019a8bf75574bd84/src/Microsoft.PowerShell.Commands.Utility/commands/utility/Select-Object.cs#L657\r\n\r\nprobably needs to be changed.\r\n\r\nIt doesn't seem useful to add the `Selected.` type to pass-thru objects like this (so you could add a test that `psoObj` is not `InputObject`, but that might be insufficient, e.g. I also don't think it makes sense to add `Selected.` if the type is already `Selected.`. Maybe the type prefix should not be added when `InputObject.BaseObject` is a `PSCustomObject`.",
+      "created_at": "2020-01-01T18:31:07Z",
+      "updated_at": "2020-01-01T18:31:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Thanks for your investigating!\r\n\r\n> Maybe the type prefix should not be added when InputObject.BaseObject is a PSCustomObject.\r\n\r\nWhy do we add the prefix at all exclusively to PSCustomObject-s?",
+      "created_at": "2020-01-02T07:14:31Z",
+      "updated_at": "2020-01-02T07:14:31Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@iSazonov - if the cmdlet is passing objects through unmodified - it doesn't make sense to add the prefix, so I think the condition was written with that intent as it creates custom objects from the selected properties.",
+      "created_at": "2020-01-02T15:47:46Z",
+      "updated_at": "2020-01-02T15:47:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr It is not clear why we add the prefix at all. Using Select-Object implies that this cmdlet always creates custom objects (except in edge bypass case). Also adding the type prefix is not [documented](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/select-object?view=powershell-6). So I think we could remove the feature.\r\n",
+      "created_at": "2020-01-03T06:56:03Z",
+      "updated_at": "2020-01-03T06:56:03Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I don't know the history but removing the prefix would be a breaking change and it might be hard to search for (125000 hits on the word Selected in GitHub - most probably **not** related but some might be.)",
+      "created_at": "2020-01-04T18:06:07Z",
+      "updated_at": "2020-01-04T18:06:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, formally it is a breaking change. I found some scripts using the feature https://github.com/search?q=Select-Object+Selected+pstypenames&type=Code - there are only a few.\r\n\r\nI think PowerShell Committee can already make a conclusion. /cc @SteveL-MSFT \r\n\r\nMy arguments for removing the feature:\r\n- it is not documented\r\n- it is a breaking change in grace area\r\n- it is bad design because this cmdlet always creates custom objects\r\n- users can use a workaround manually adding a custom type or a custom property to mark objects",
+      "created_at": "2020-01-04T18:47:28Z",
+      "updated_at": "2020-01-04T18:47:28Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n>  it's not documented\r\n\r\nNot specifically but as a general rule, when PSCustomObjects are produced, information is added to TypeNames so you can identify the origin of the object. So this is an entirely reasonable behaviour.\r\n\r\n> it is a breaking change in a grace area\r\n\r\nNo it's not. You showed that it would absolutely break people.\r\n\r\n> it is bad design because this cmdlet always creates custom objects\r\n\r\nIt creates custom objects because these are projections - there is no nominal type to return. It might be possible to do what LINQ does: synthesize  anonymous types and unify on property names but that would be a breaking change and I'm not sure generating transient types is the best solution for this scenario. It must be possible to optimize this (used interned strings or something.)\r\n\r\n> users can use a workaround manually adding a custom type or a custom property to mark objects\r\n\r\nSince you're ultimately doing the same thing, how is that going to fix the problem?",
+      "created_at": "2020-01-08T22:57:43Z",
+      "updated_at": "2020-01-08T22:57:43Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, we agree that simply removing the `Selected.` type IS a breaking change so any fix would need to be made without breaking existing users.",
+      "created_at": "2020-01-08T23:10:15Z",
+      "updated_at": "2020-01-08T23:10:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Since you're ultimately doing the same thing, how is that going to fix the problem?\r\n\r\nTh problem is that users in 99.999% cases do not need/not use (how GitHub search shows) and do not know the feature, and if they works with long time live custom object they can catch the issue with leak. In other words, it should be __opt-out__ or just delegated to users.\r\n\r\nThis is all the more amazing because we do nothing of the kind in Where-Object, Foreach-Object, \r\n and specially in Add-Member.\r\n",
+      "created_at": "2020-01-09T03:51:43Z",
+      "updated_at": "2020-01-09T03:51:43Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "To be clear, `Select-Object` should _only_ be adding the `Selected` prefix to `PSCustomObjects` *it* projects (creates). Everything else is a bug. Adding it 10000 times is a bug. Adding it to objects that it did not project is a bug. Does this make sense? ",
+      "created_at": "2020-01-09T19:39:49Z",
+      "updated_at": "2020-01-09T19:39:49Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11548, which has now been successfully released as `v7.1.0-preview.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.1)\n",
+      "created_at": "2020-03-26T17:46:54Z",
+      "updated_at": "2020-03-26T17:46:54Z"
+    }
+  ],
+  "created_at": "2019-12-27T14:44:59Z",
+  "number": 11441,
+  "state": "closed",
+  "title": "[Bug in PS 5,6 and 7] Memory leak when Select-Object on $Global scope array of PSCustomObject",
+  "updated_at": "2020-03-26T17:46:54Z"
+}

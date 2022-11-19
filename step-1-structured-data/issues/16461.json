@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16461",
+  "author": "daxian-dbw",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nThis is reported by internal MSFT folks. Quote the emails content below:\r\n\r\n**`Write-Host` sometimes undefined with `ForEach-Object -Parallel`.**\r\n\r\nDue to networking issues, I can\u2019t grab my actual code, but I wrote code along the lines of:\r\n```powershell\r\nfunction f1\r\n{\r\n    param([string]$i)\r\n    if (Test-Path $i) { return $i }\r\n    # do something\r\n    if ($i-eq \"bad\")\r\n    {\r\n        Write-Host \"something is wrong!\"\r\n        return $null\r\n    }\r\n\r\n    return $i\r\n}\r\n\r\nfunction get-inputs\r\n{\r\n    return @(\"foo\", \"bar\", \"bad\", \"good\")\r\n}\r\n\r\nfunction invoke-processInputs\r\n{\r\n    $inputs = get-inputs\r\n    $f1Func = Get-Command -Name \"f1\"\r\n    $job = $inputs | ForEach-Object -AsJob -ThrottleLimit 2 -Parallel {\r\n        $output = & $using:f1Func $_\r\n        if ($output -eq $null)\r\n        {\r\n            # do something\r\n        }\r\n    }\r\n\r\n    #do some status reporting on the job...\r\n    while ($job.State -eq \"Running\") { write-host \"running...\" ; start-sleep 1 }\r\n    Wait-Job -Id $job.Id\r\n    Remove-Job -Id $job.Id\r\n}\r\n```\r\n\r\nMy actual input set has 100+ entries and some of them essentially trigger the bad case (through a bunch of network stuff). What\u2019s super confusing is that I both see the actual output (the \u201csomething is wrong\u201d in this example) as well as \u201cThe term \u2018Write-Host\u2019 is not recognized as the name of a cmdlet\u2026\u201d error too. I\u2019ve also seen the Test-Path give the same error. Those both seem\u2026 wrong\r\n\r\nI expect there\u2019s something about the parallel foreach that I\u2019m messing up, but I\u2019m not sure what here.\n\n### Expected behavior\n\n```console\nWrite-Host should work fine\n```\n\n\n### Actual behavior\n\n```console\nRun into error:\r\nThe term 'Write-Host' is not recognized as the name of a cmdlet\u2026\n```\n\n\n### Error details\n\n```console\nNot available\n```\n\n\n### Environment data\n\n```powershell\nThis is all on pwsh 7.2 (GA, nothing internal)\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0\r\nOS                             Microsoft Windows 10.0.19043\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\n```\n\n\n### Visuals\n\nN/A",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": ">   $output = & $using:f1Func $_\r\n\r\nThe `FunctionInfo` object is passed to different Runspace\u2019s for execution, so it\u2019s highly likely that you were experiencing state corruption because of that.\r\n\r\nThere is a concept of \u201cRunspace affinity\u201d \u2013 a script block is associated with the Runspace where it was created, so when it\u2019s running in a different Runspace, the script block will be marshalled back to the Runspace where it was created to execute. This design is built on the assumption that a script block created in a Runspace is likely to depend on resources only available in that Runsapce at the run time. However, in practice, this causes a lot problems when you share a script block among multiple Runsapces. Here are some issues tracking this on GitHub: #4003, #7626.\r\n\r\nSimply put, this may cause the session state of the original Runspace, where the script block was created, to be corrupted, and thus you will see errors like \u201cWrite-Host is not recognized as the name of a cmdlet\u201d because the command lookup through scopes failed (the script block could be running with a dangling scope that was remove from the chain prematurely).\r\n\r\nSo, the solution is to not share script block among Runspace\u2019s. Instead, share the AST among those Runsapce\u2019s. In your case, it would be something like this:\r\n\r\n```\r\n$f1Func = Get-Command -Name \"f1\"\r\n$f1BodyAst = $f1Func.ScriptBlock.Ast.Body\r\n\r\n$job = $inputs | ForEach-Object -AsJob -ThrottleLimit 2 -Parallel {\r\n    if (-not $global:f1Func)\r\n    {\r\n        $ast = $using:f1BodyAst\r\n        # this creates a new script block in the Runspace where it\u2019s supposed to be running. \r\n        $global:f1Func = $ast.GetScriptBlock()\r\n    }\r\n\r\n    $output = & $global:f1Func $_\r\n    if ($output -eq $null)\r\n    {\r\n        # do something\r\n    }\r\n}\r\n```\r\n\r\n@PaulHigin did some work to disallow passing script block with `$using` when using `ForEach-Object -Parallel` (code is [here](https://github.com/PowerShell/PowerShell/blob/7dc4587014bfa22919c933607bf564f0ba53db2e/src/System.Management.Automation/engine/InternalCommands.cs#L432-L443)), but I guess it should **disallow FunctionInfo, FilterInfo, and ExternalScriptBlockInfo** too.\r\n\r\n![image](https://user-images.githubusercontent.com/127450/141601255-cf08257b-8d00-4579-8d50-7b22aaeb2be7.png)\r\n\r\nAlso, it would be nice to document the workaround using AST for scenarios like this one, and make the error message thrown from PowerShell points to the that doc, so the user can learn about this workaround.",
+      "created_at": "2021-11-13T01:50:27Z",
+      "updated_at": "2021-11-15T01:13:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Instead, share the AST among those Runsapce\u2019s. In your case, it would be something like this:\r\n\r\nIf it is an unambiguous match we could do it automatically. Simply banning these constructs is bad UX. It would be much easier for users to use intuitive explicit constructs and the Engine would convert this into the correct implementation.",
+      "created_at": "2021-11-13T06:05:59Z",
+      "updated_at": "2021-11-13T06:05:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> If it is an unambiguous match we could do it automatically. Simply banning these constructs is bad UX. It would be much easier for users to use intuitive explicit constructs and the Engine would convert this into the correct implementation.\r\n\r\nI fear that if that's done automatically it will lead to a lot of confusion about why the function can't access the state it previously could. While the error isn't great UX, it happens at design time and is instantly clear what is wrong. Plus the work around makes it a lot easier to understand that it won't work exactly the same.",
+      "created_at": "2021-11-13T14:40:22Z",
+      "updated_at": "2021-11-13T14:40:22Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I fear that if that's done automatically it will lead to a lot of confusion about why the function can't access the state it previously could.\r\n\r\nWhy? `$Using` assumes coping an entity to _another_ context. \r\nOne more option we discussed already is to clone whole context. It is slow to start but this could be useful in some scenarios.\r\n\r\nI don't like workarounds in languages. Languages are designed _to make things easier_. If a consumer has to make workarounds, it means the language creator did not think the language or its implementation through.",
+      "created_at": "2021-11-13T17:30:57Z",
+      "updated_at": "2021-11-13T17:30:57Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "This is a workaround to a bug, and that bug will be fixed at some point, even though it's low priority today.",
+      "created_at": "2021-11-13T17:50:37Z",
+      "updated_at": "2021-11-15T01:13:57Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Why? `$Using` assumes coping an entity to _another_ context. \r\n\r\nIt did with serialization, with thread jobs it doesn't imply a copy/clone.\r\n\r\n> I don't like workarounds in languages. Languages are designed _to make things easier_. If a consumer has to make workarounds, it means the language creator did not think the language or its implementation through.\r\n\r\nI don't disagree, but they're still preferred until the right solution is determined.\r\n\r\n",
+      "created_at": "2021-11-13T18:15:12Z",
+      "updated_at": "2021-11-13T18:15:12Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This has nothing to do with the remoting system, so changing working group to core cmdlets.\r\n\r\nIt looks like there are two issues here with the `$using:` keyword.\r\n\r\nOne is using unsafe objects (objects with runspace affinity and/or with thread safety issues).  This can be mitigated by detecting the use of these new objects and providing a useful error message.\r\n\r\nThe other is the (reasonable) expectation that parallel running runspaces share the same state as the runspace hosting the `foreach-object -parallel` call, and is captured in this issue (#12240).  Unfortunately, this has been considered lower priority and I have not been able to work on it yet.\r\n\r\nIt should be noted that these issues are not unique to `foreach-object -parallel`, and are simply inherent weaknesses of PowerShell threading and script execution model.  ",
+      "created_at": "2021-11-15T18:19:35Z",
+      "updated_at": "2021-11-15T18:19:35Z"
+    }
+  ],
+  "created_at": "2021-11-13T01:44:54Z",
+  "number": 16461,
+  "state": "open",
+  "title": "Share FunctionInfo and execute it with $using when using `ForEach-Object -Parallel` causes session state corruption",
+  "updated_at": "2021-11-15T18:19:35Z"
+}

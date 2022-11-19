@@ -1,0 +1,160 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4970",
+  "author": "markekraus",
+  "body": "closes #4899\r\n\r\nThis adds a `-CertificateValidationScript` parameter to `Invoke-RestMethod` and `Invoke-WebRequest` which allows the user to supply a custom validation script as a PowerShell `ScriptBlock` to validate Server Certificates for HTTPS connections.\r\n\r\nThe ScriptBlock also has 4 automatic variables created which allows the user to use either `$args`, `Param()`, or the automatic variables to inspect the `HttpRequestMessage` being sent to the server, `X509Certificate2` certificate returned by the server, the `X509Chain` certificate chain of the server certificate, and the `SslPolicyErrors`.  The ScriptBlock is converted to a Closure and is wrapped in a `Func` delegate which is used as the `HttpClientHandler.ServerCertificateCustomValidationCallback`. The ScriptBlock has access to the calling scope and any ScriptBlock exceptions are treated as a certificate failure.\r\n\r\n# Documentation Needed\r\nThis new parameter will need to be documented and an example added. The documentation will need to note that the `$using:` scope is not supported and will result in a certificate failure. it will also need to note that if the site redirects, the same validation script will apply for all hops. Finally, it will also need to state that `-SkipCertificateCheck` will override anything supplied in `-CertificateValidationScript`.",
+  "closed_at": "2017-12-06T10:10:08Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr @SteveL-MSFT Is there something more I need to do for this PR?",
+      "created_at": "2017-10-06T10:29:58Z",
+      "updated_at": "2017-10-06T10:29:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "LGTM but we need review from MSFT experts.",
+      "created_at": "2017-10-06T15:44:25Z",
+      "updated_at": "2017-10-06T15:44:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed the topic of params or automatic variables passed to the script block delegate.  There was concerns about new automatic variables scoped only to this usage but would needed to be documented in the about_automaticvariables topic which may create some confusion.  In addition, params seems to be a general pattern already in use across PowerShell, so the request is to use params for the script block (and update the doc draft accordingly).\r\n\r\nThere were other concerns we didn't have time to discuss such as which runspace the delegate ran in.  For now, continue that discussion in this PR.",
+      "created_at": "2017-10-12T00:48:55Z",
+      "updated_at": "2017-10-12T00:48:55Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well that's baffling. It's not a surprise that the certificate validation doesn't work on macOS. I ran into similar issues enabling `-Certificate` because macOS (and some linux distors) use a different implementation than openssl that CoreFX doesn't support but, how did these tests manage to pass on macOS in previous commits? \r\n\r\n* working: https://travis-ci.org/PowerShell/PowerShell/jobs/282050275\r\n* not working: https://travis-ci.org/PowerShell/PowerShell/jobs/287024709\r\n\r\nIt should have failed before.",
+      "created_at": "2017-10-12T14:58:58Z",
+      "updated_at": "2017-10-12T14:59:36Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "> There was concerns about new automatic variables scoped only to this usage but would needed to be documented in the about_automaticvariables topic which may create some confusion. \r\n\r\n@SteveL-MSFT Was the prospect of providing the callback parameters to the scriptblock by way of properties on `$_` contemplated?  That feels like the most PowerShell-ey style to me.  There is precedent for non-pipeline use of `$_` instead of `param()` in [ValidateScript()](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_functions_advanced_parameters?view=powershell-5.1#validatescript-validation-attribute).  \r\n\r\nI've been favoring `$_` over `param()` for scriptblock predicates like `ServerCertificateCustomValidationCallback` mainly because the `param()` block ends up being repeated, often overshadows the predicate in character count, and usually doesn't provide much useful information to a reader.\r\n\r\nHere's a mock-up of `param()` vs `$_` for illustration:\r\n\r\n```PowerShell\r\n{\r\n    param($Message,$Cert,$Chain,$PolicyErrors)\r\n    Assert-CertificateCompliance -Policy Strict -Message $Message -Cert $Cert -Chain $Chain -PolicyErrors $PolicyErrors\r\n}\r\n\r\n{$_ | Assert-CertificateCompliance -Policy Strict}\r\n```\r\n\r\nFor me the point of this PR is to be able to impose per-URL certificate requirements.  So I'll end up with policy data structures looking something like this:\r\n\r\n```PowerShell\r\n@{\r\n    Uri = 'https://github.com'\r\n    CertificateValidator = {\r\n        $_ | Assert-CertificateCompliance -Policy Strict\r\n        $_ | Assert-Certificate Server -Thumbprint d79f076110b39293e349ac89845b0380c19e2f8b\r\n    }\r\n}\r\n\r\n@{\r\n    Uri = 'https://www.powershellgallery.com'\r\n    CertificateValidator = {\r\n        $_ | Assert-CertificateCompliance -Policy Strict\r\n        $_ | Assert-Certificate Intermediate -Thumbprint \u200e98af62baa639b0827f887c75a77f4afd4eff2685\r\n    }\r\n}\r\n```\r\n\r\nThe validation scriptblock gets repeated for each uri so noise from `param()` adds up.",
+      "created_at": "2017-10-20T17:18:35Z",
+      "updated_at": "2017-10-20T17:18:35Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@alx9r no, using members of `$_` wasn't something that was considered and is an interesting approach.  Would like some others to chime in on this proposal.  cc @lzybkr @JamesWTruher @HemantMahawar ",
+      "created_at": "2017-10-21T00:58:54Z",
+      "updated_at": "2017-10-21T00:58:54Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT I had an early draft that did it that way. I had dropped it in favor of the automatic variables before submitting the PR.",
+      "created_at": "2017-10-21T01:03:57Z",
+      "updated_at": "2017-10-21T01:03:57Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus sorry, must have missed it.  Getting myself involved in too many discussions on here to keep track of them (something I'm learning not to do!)",
+      "created_at": "2017-10-21T01:05:04Z",
+      "updated_at": "2017-10-21T01:05:04Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT I don't think the draft ever made it's way to my public repo so I don't think you missed anything, actually. My point was more that I'm on board with the idea of a `$_` with members if that lends any weight in the decision making.",
+      "created_at": "2017-10-21T01:09:00Z",
+      "updated_at": "2017-10-21T01:09:00Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "After much trial and error I determined that the only safe way to do this where any kind of event triggers were in place was run the `ScriptBlock` in a completely new session state and runspace. Variables could easily be imported, but I did tests where the event triggers updated a variable at that same time as callback and that resulted in a hang. Importing functions and modules leaves them in a disconnected state from the user's context (module scoped variables are lost).\r\n\r\nI have incorporated the `$_`. I'm open for suggestions on renaming the members. Right now they are `Request`, `Certificate`, `CertificateChain`, and `SslErrors`. This current implementation does not support `param()`. I'm assuming we want to go with one or the other and not both.\r\n\r\nI have tested the current code with the event triggers @lzybkr provided and it works. no hangs.\r\n\r\nThe down side is that the `ScriptBlock` is now devoid of the calling scope. I was originally under the impression it would need to be done this way and I think that so long as it is documented it should be acceptable. Any of the other means of making the scope available results in either unpredictable behavior or hangs. I think no scope is better than some broken scope.",
+      "created_at": "2017-10-28T13:42:01Z",
+      "updated_at": "2017-10-28T13:42:01Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "> ...I did tests where the event triggers updated a variable at that same time as callback and that resulted in a hang.\r\n\r\nI'm curious what these tests looked like.  It doesn't seem like `Register-ObjectEvent` naturally accepts `PSVariable`s in its parameters.  It also doesn't seem like the `Register-ObjectEvent -Action` scriptblock has access the call site's variables.  In the tests that hung how did the event handler get a reference to the same variable as the callback?\r\n\r\n> I have incorporated the $_. I'm open for suggestions on renaming the members. Right now they are Request, Certificate, CertificateChain, and SslErrors.\r\n\r\nI see that [the current documentation for `HttpClientHandler.ServerCertificateCustomValidationCallback`](https://docs.microsoft.com/en-us/dotnet/api/system.net.http.httpclienthandler.servercertificatecustomvalidationcallback?view=netcore-2.0#System_Net_Http_HttpClientHandler_ServerCertificateCustomValidationCallback) doesn't name its parameters.  For that matter, there is very little documentation about the semantics of that callback altogether.  dotnet/corefx#24774 might improve that documentation and that might lead to parameter names.  If `ServerCertificateCustomValidationCallback` does end up with documented parameter names, it seems like the properties on `$_` should have identical names.  The closest documented callback interface seems to be [full .net's `System.Net.Security.RemoteCertificateValidationCallback`](https://docs.microsoft.com/en-us/dotnet/api/system.net.security.remotecertificatevalidationcallback?view=netframework-4.7.1).  I propose adopting the corresponding names from that callback interface in the meantime.\r\n\r\n> The down side is that the ScriptBlock is now devoid of the calling scope. I was originally under the impression it would need to be done this way and I think that so long as it is documented it should be acceptable. Any of the other means of making the scope available results in either unpredictable behavior or hangs. I think no scope is better than some broken scope.\r\n\r\nIs there a reason that the scope rules wouldn't be the same as for other scriptblocks using [remote variables](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_remote_variables?view=powershell-5.1)?  [`Invoke-Command`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/invoke-command?view=powershell-5.1)` -Session -ScriptBlock`, for example, provides access to local variables in the remote session by way of the `$using:` expression.\r\n\r\nFWIW, I think this would be a pretty awkward interface without having some way of making user objects available in the callback scriptblock.  A natural use would be as follows:\r\n\r\n```PowerShell\r\n@{\r\n    u='https://github.com/some/important/file'\r\n    thumbprint = 'd79f076110b39293e349ac89845b0380c19e2f8b'\r\n},\r\n@{\r\n    u='https://powershellgallery.com/some/other/important/file'\r\n    thumbprint = '98af62baa639b0827f887c75a77f4afd4eff2685'\r\n} |\r\n    % { \r\n        $thumbprint = $_.thumbprint\r\n        # ... do some prep things\r\n        Invoke-WebRequest $_.u -CertificateValidationScript {\r\n            # ... a bunch of tests that are identical for every certificate\r\n            $_.Certificate.Thumbprint -eq $using:thumbprint\r\n        }\r\n        # ... do some cleanup things\r\n    }\r\n```\r\n\r\nWithout `$using:`, arguments, or some other means of passing data, it will be tough to separate the concern of which thumbprints are acceptable for which url from the concern of checking for certificate revokation, for example.",
+      "created_at": "2017-10-28T20:37:25Z",
+      "updated_at": "2017-10-28T20:39:02Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I'm curious what these tests looked like. \r\n\r\nI just used the same variable in @lzybkr's example and used it\r\n\r\n```powershell\r\n$t = [System.Timers.Timer]::new(10)\r\n$t.AutoReset = $true\r\nRegister-ObjectEvent -InputObject $t -EventName Elapsed -Action { Write-Host 'event' }\r\n$t.Enabled = $true\r\n$script = {$t.Enabled = $false; $true}\r\nirm -uri https://expired.badssl.com\r\n#hangs\r\n```\r\n\r\n`$t` was being populated as a PSVarabile in the iss.\r\n\r\n>  I propose adopting the corresponding names from that callback interface in the meantime.\r\n\r\nI disagree. Unless it is documented on this API, we should use something generic that is easier for PowerShell users to use. `Sender` is a terrible choice when it's an `HttpRequestMessage`. If Sender were the documented name for this API, then I would concede that's probably better. \r\n\r\n> Is there a reason that the scope rules wouldn't be the same as for other scriptblocks using\r\n\r\n`$using` in every instance I've seen is a unique implementation. If there were a generic API for adding this capability to a `ScriptBlock`, then `$using:` would be awesome to have here. but I see no point in adding yet-another-using-implimentation for validation callbacks on cmdlets that don't normally do any work with `ScriptBlock`s.\r\n\r\n> Without $using:, arguments, or some other means of passing data,..\r\n\r\nErm, not really? I mean yea, not on the ease of use level that using variables from the calling scope or `$using:`, but, most validation logic is fairly static, in my experience. Create module, Import it in the ScriptBlock, magic. or use CSV, Clixml, JSON files for confgis if you don't wants it hard coded in the the PS Script.\r\n\r\nI'm not saying this is ideal. What I am saying is that I can't see a safe way to get the calling scope available in the remote scope with out severely over-complicating the implementation.\r\n\r\nAlso, these validations scripts are \"per call\". For 6.1 I want to look at adding session persistent options. One of them will be add your own .NET delegates for cert validation, So if you want to have some variable magic then you can. The goal in this PR is to provide the basic implementation that will work for most people on a \"per call\" basis. I think most will just need to ensure a static thumbprint or 2 against URLs. Complex validation scenarios are not the goal of the implementation in this PR, but are on my radar for the futre.",
+      "created_at": "2017-10-28T21:21:49Z",
+      "updated_at": "2017-10-28T21:22:02Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "> Complex validation scenarios are not the goal of the implementation in this PR, but are on my radar for the futre.\r\n\r\nOK.  Got it.  Thanks @markekraus ",
+      "created_at": "2017-10-28T22:41:27Z",
+      "updated_at": "2017-10-28T22:41:27Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "rebased to fix merge conflict.",
+      "created_at": "2017-11-13T20:46:48Z",
+      "updated_at": "2017-11-13T20:46:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@markekraus Another merge conflict.",
+      "created_at": "2017-11-14T04:24:37Z",
+      "updated_at": "2017-11-14T10:16:05Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "rebased.",
+      "created_at": "2017-11-14T10:06:37Z",
+      "updated_at": "2017-11-14T10:06:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and recommends using the param() format.  Specifically, $_ provides no context on what it represents.  Typically $_ means the current object and reusing it in the scriptblock changes that expectation.  Using param() makes the code more readable and therefore maintainable.",
+      "created_at": "2017-11-15T23:14:27Z",
+      "updated_at": "2017-11-15T23:14:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@markekraus Please rebase with next new commit to get latest updates and pass CIs.",
+      "created_at": "2017-11-18T09:22:27Z",
+      "updated_at": "2017-11-18T09:22:27Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov I still need to incorporate the changes per the committee's decision. I will hopefully have free time this week. I will rebase before I commit the changes.",
+      "created_at": "2017-11-18T11:31:42Z",
+      "updated_at": "2017-11-18T11:31:42Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "FYI, I'm waiting on #5518 as this will need to rebased again and more drastically.",
+      "created_at": "2017-11-30T00:15:34Z",
+      "updated_at": "2017-11-30T00:15:34Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Due to the issues of rebasing this and that the code still needs to be updated to fit the review comitee's decision, I'm going to close this PR. I will attempt to address this feature before 6.1.0.",
+      "created_at": "2017-12-06T10:10:08Z",
+      "updated_at": "2017-12-06T10:10:08Z"
+    }
+  ],
+  "created_at": "2017-10-01T21:16:22Z",
+  "number": 4970,
+  "state": "closed",
+  "title": "Add CertificateValidationScript Parameter to Web Cmdlets",
+  "updated_at": "2018-10-15T21:53:55Z"
+}

@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3197",
+  "author": "mklement0",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```powershell\r\nGet-ChildItem -LiteralPath c:\\windows\\system32\\cmd.exe... | Format-List Name, Extension\r\nGet-Item -LiteralPath c:\\windows\\system32\\cmd.exe... | Format-List Name, Extension\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nBoth commands should fail, because no such file exists (due to the extraneous trailing `.` chars.)\r\n\r\nActual behavior\r\n---------------\r\n\r\nBoth commands output:\r\n\r\n```\r\nName      : cmd.exe...\r\nExtension : .exe\r\n```\r\n\r\nNote how (a) `cmd.exe` was still matched, despite the extraneous trailing `.` chars., and (b) the `.Name` property reflects those` `. chars., whereas `.Extension` and `.FullName` do not.\r\n\r\n(As a consequence of the above, `.BaseName` reports an incorrect value.)\r\n\r\nOn a related note, _directory_ paths with `Get-Item` behave slightly differently: (a) directly appended periods are also ignored, but the `.Name` property is reported correctly; (b) you get the same behavior with an intervening `\\` followed by _3_ (`\\...`) or more trailing periods (with `\\.` and `\\..` exhibiting the expected behavior).\r\n\r\nAs an aside: The `.Extension` property only reflect's a directory name's extension if the path doesn't end in `\\`: `$null = mkdir foo.bar; (Get-Item foo.bar).Extension; (Get-Item foo.bar\\).Extension`\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-alpha (v6.0.0-alpha.16) on Microsoft Windows 10 Pro (64-bit; v10.0.14393)\r\nWindows PowerShell v5.1.14393.693 on Microsoft Windows 10 Pro (64-bit; v10.0.14393)\r\n```\r\n",
+  "closed_at": "2017-02-27T05:33:48Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "PowerShell seems to infer the existence of the specified path _as is_  from whether the [GetFileAttributes()](https://msdn.microsoft.com/en-us/library/windows/desktop/aa364944%28v=vs.85%29.aspx) native Windows API function finds the file (by successfully returning its attributes). \r\n\r\nIt is `GetFileAttributes()` that inexplicably accepts the trailing `...` appended to an existing file's path and still returns the file's attributes, _except_ when support for long paths is turned on by prepending `\\\\?\\`, as the following C# snippet demonstrates:\r\n\r\n```c#\r\npublic static class GetFileAttributesTest\r\n{\r\n\r\n\t[DllImport(\"kernel32.dll\", CharSet = CharSet.Auto, SetLastError = true)]\r\n\tstatic extern uint GetFileAttributes(string lpFileName);\r\n\r\n\tconst uint INVALID_FILE_ATTRIBUTES = 0xffffffff;\r\n\r\n\tpublic static void Main()\r\n\t{\r\n\t\tstring path = @\"c:\\windows\\system32\\cmd.exe...\";\r\n                // !! SUCCEEDS, despite trailing '...'\r\n\t\tvar attrShortPath = GetFileAttributes(path);\r\n                // FAILS, as expected.\r\n\t\tvar attrLongPath = GetFileAttributes($@\"\\\\?\\{path}\");\r\n\t\tvar foundShortPath = attrShortPath != INVALID_FILE_ATTRIBUTES;\r\n\t\tvar foundLongPath= attrLongPath != INVALID_FILE_ATTRIBUTES;\r\n\t}\r\n\r\n}\r\n```\r\n\r\n",
+      "created_at": "2017-02-24T14:19:38Z",
+      "updated_at": "2017-02-24T14:19:38Z"
+    },
+    {
+      "author": "HumanEquivalentUnit",
+      "author_association": "CONTRIBUTOR",
+      "body": "This originally surfaced from looking at `Get-ChildItem -Filter`, and how the Filter wildcards are handled by the filesystem provider. There, it is expected that a dot `.` wildcard will match at the end of a filename, e.g.\r\n   - in a command prompt `dir c:\\windows\\system32\\cmd.exe.......`  will find the file, but it will have the correct name.\r\n   - This replicates in PowerShell using the -Filter parameter, e.g.\r\n   - `gci -LiteralPath c:\\windows\\system32\\ -Filter 'cmd.exe.'` will find it, with the correct name (no dot)\r\n\r\nSo the buggy bit (to me) is that the PowerShell wildcarding, without using Filter, does match the file but pulls it back with the wrong name.\r\n\r\n - This behavior happens back to PS 2.0 on Server 2003 SP2 (so I imagine it's known about / documented somewhere previously).\r\n- (edit: removed BaseName comments, it's ca calculated property, they weren't relevant)\r\n- As well as `Get-Item`, this affects `Get-ChildItem`:\r\n   - `Get-ChildItem -LiteralPath c:\\windows\\system32\\cmd.exe.` returns a file with an incorrect name.",
+      "created_at": "2017-02-24T19:46:02Z",
+      "updated_at": "2017-02-24T22:10:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@HumanEquivalentUnit: Thanks for the additional information.\r\n\r\n* Given that the problem surfaces with `-LiteralPath` (too), it is not about _wildcarding_; I think that passing the path as a _literal_ to `GetFileAttributes`, and inferring from its ability to successfully return  attributes for it that the path is valid _as-is_ is the problem.\r\n\r\n* `.BaseName` being incorrect is just a follow-on effect of `.Name` being incorrect: `.BaseName` is a script property that chops off the extension from the `.Name` property by string length, and since `.Extension` has the correct value (`.exe`, in this case), whereas `.Name` has the extraneous trailing `.` chars.,  a part of the extension unexpectedly surfaces in `.BaseName`.",
+      "created_at": "2017-02-24T20:51:35Z",
+      "updated_at": "2017-02-24T20:51:35Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I believe this is how Win32 (not PowerShell, not .Net, but Win32) path processing works - removing trailing dots is, well, expected.\r\n\r\nHere is a rather definitive reference, based on reverse engineering:\r\n\r\nhttps://googleprojectzero.blogspot.cz/2016/02/the-definitive-guide-on-win32-to-nt.html",
+      "created_at": "2017-02-27T05:33:48Z",
+      "updated_at": "2017-02-27T05:33:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr: Thanks for that link - interesting (and frightening) read. The relevant passage (emphasis added) tells us that trailing _spaces_ are ignored as well:\r\n\r\n> \t**Remove any trailing spaces or dots for the last path element**, assuming that it isn\u2019t a single or double dot name.\r\n> \t\u2028\r\n> That last rule seems odd, but as we\u2019ll see it really does do this for normal paths.\r\n\r\n",
+      "created_at": "2017-02-27T17:45:53Z",
+      "updated_at": "2017-02-27T17:45:53Z"
+    }
+  ],
+  "created_at": "2017-02-24T04:41:58Z",
+  "number": 3197,
+  "state": "closed",
+  "title": "Get-Item and Get-ChildItem ignore extraneous trailing periods in a literal file path and report the trailing periods in the .Name property (Windows)",
+  "updated_at": "2017-02-27T17:45:53Z"
+}

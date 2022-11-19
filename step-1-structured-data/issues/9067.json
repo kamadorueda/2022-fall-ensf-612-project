@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9067",
+  "author": "msftrncs",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\nnew-item -type symboliclink -name \"hello\" -target \"Z:\\\"\r\n```\r\n\r\nBecause I have to execute this as an administrator, my Z: drive is not attached, and so PowerShell responds with an error.\r\n\r\n```\r\nnew-item : Cannot find drive. A drive with the name 'Z' does not exist.\r\nAt line:1 char:1\r\n+ new-item -type symboliclink -name \"hello\" -target \"Z:\\\"\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (Z:String) [New-Item], DriveNotFoundException\r\n+ FullyQualifiedErrorId : DriveNotFound,Microsoft.PowerShell.Commands.NewItemCommand\r\n```\r\n\r\nIt appears this was thought to be fixed in #801, but evidently it didn't include non-existent drives.\r\n\r\nInstead I have to resort to CMD MKLINK.\r\n\r\n```PowerShell\r\ncmd\r\n> mklink /D \"hello\" \"Z:\\\"\r\n> exit\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    6.2.0-rc.1\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nEdit 1: fixed spellings, changed parameter to '-target'.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think this issue might have to do with symbolic links need to know if it is a directory or a file based symlink.  MKLINK requires specifying the purpose of the symbolic link.  PowerShell is probably trying to find the target so that it can determine the type of link from the target.  That doesn't work when the target cannot be accessed at that time.\r\n\r\nI also tested creating a symbolic link to a non-existent server via a UNC path and got the same results, except that it could not find 'the network path', so I don't think it has to do with drives as I originally though.\r\n\r\nThis might require new enumerations for -itemtype (type) to bypass the target lookup.  I imagine this is not required for unix, and so this is probably a Windows only issue.",
+      "created_at": "2019-03-06T05:09:34Z",
+      "updated_at": "2019-03-06T05:11:53Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "#2915 seems to have a good read on this \u2026  but I am not sure what happened along the way.",
+      "created_at": "2019-03-06T05:28:05Z",
+      "updated_at": "2019-03-06T05:28:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "[This](https://github.com/PowerShell/PowerShell/issues/2915#issuecomment-293109907) is what happened (quoting @joeyaiello):\r\n\r\n> Well, it looks like your PR (#3509) is doing the right thing for now, If people desperately need directory symlinks to non-existent targets, we'll figure it out then.\r\n\r\nThe status quo:\r\n\r\n* You _can_ create symlinks to nonexistent targets, except if the target path starts with a nonexistent drive / UNC share, which prompted creation of _this_ issue, and which is a _bug_ that should be fixed.\r\n\r\n* When creation of a symlink with a nonexistent target succeeds, currently a _file_ symlink is invariably created - in the absence of being able to _infer_ whether the target is a file or a directory.\r\n\r\nAs you state, a proper fix requires _some_ way to explicitly indicate the type of a nonexistent target (and, indeed, it wouldn't be required on Unix-like platforms).\r\n\r\nBuilding on your idea to introduce new `-ItemType` enumeration values, we could do the following:\r\n\r\n* Introduce `FileSymlink` and `DirectorySymlink`  values in addition to `Symlink`.\r\n\r\n  * If `FileSymlink` or `DirectorySymlink` are used and the target exists but doesn't match the requested type, report an error.\r\n\r\n* Additionally, given that _directory_ symlinks are far more common than file symlinks, we could change the default (if only `Symlink` is used) to a directory symlink on Windows - though that is technically a breaking change.\r\n",
+      "created_at": "2019-03-06T15:05:04Z",
+      "updated_at": "2019-03-06T15:06:29Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Some thoughts:\r\n\r\n- Maybe instead of adding ItemType enumerations, it could allow an array of them, so that one could specify `-itemtype directory, symboliclink` to enforce the directory symbolic link.  This would require new new enumerations, but would require changing the definition of the parameter, and also handling the otherwise limited use of an array parameter.\r\n- If the type of link has been suggested, but PowerShell still insists on checking to see if it is the right choice (MKLINK does not care) there will be a delay with non-existent or unreachable UNC paths, and possibly with others if the media is offline at the moment.\r\n-Ppreviously I had found it more common to make symlinks for directories, but recently I have been relying on them to symlink files for the purpose of replacing VS Code's default grammar/syntax files with my own custom ones, as I am not ready to figure out how to replace them with an extension that could break other desired functionality.  I just have to replace the symlinks every time VS Code updates.",
+      "created_at": "2019-03-06T18:28:35Z",
+      "updated_at": "2019-03-06T18:28:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good points, @msftrncs. \r\n\r\n* Not performing any existence or type-consistency check is an option, though I wish there were an opt-in/opt-out mechanism:\r\n   * Arguably, an existence/consistency check should be performed _by default_, with a switch allowing opt-out, but that ship has sailed.\r\n   * We could offer an opt-in, such as with a `-Verify` switch.\r\n\r\n* As for making `-ItemType` array-valued: that's also an option, though I worry that it is both less discoverable and more cumbersome; it also requires more work behind the scenes to rule out nonsensical combinations.\r\n\r\n* Point taken, re file symlinks - no compelling reason to change the default.\r\n",
+      "created_at": "2019-03-06T20:46:39Z",
+      "updated_at": "2019-03-06T20:46:39Z"
+    },
+    {
+      "author": "jmg69",
+      "author_association": "NONE",
+      "body": "Hi. \r\nWhen we create a symlink, is it possible that the lastwrite is the same as the original file? If yes how to do?\r\n\r\nThank you for your answer.\r\n\r\nBest regards\r\n\r\nJean-Marc",
+      "created_at": "2020-05-12T14:02:49Z",
+      "updated_at": "2020-05-12T14:02:49Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "> When we create a symlink, is it possible that the lastwrite is the same as the original file? If yes how to do?\r\n\r\nWhen you create a symbolic link to a unicorn, you cannot make a note of when said unicorn recently pooped.\r\n",
+      "created_at": "2020-06-19T18:12:29Z",
+      "updated_at": "2020-06-19T18:12:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jmg69, that's not how the filesystem works; symlinks have their own last-write timestamps (which never change, unless you recreate the symlink). \r\n\r\nTherefore, you must manually determine the target file (assuming it exists) and then query its properties:\r\n\r\n```powershell\r\n$symlinkPath = './foo'\r\nGet-Item (Get-Item $symlinkPath).Target # use (...).LastWriteTime to get just the last-write time\r\n```\r\n\r\nIf a given path may or may not be a symlink:\r\n\r\n```powershell\r\n$potentialSymlinkPath = './foo'\r\n($item = Get-Item $potentialSymlinkPath).Target ? (Get-Item $item) : $item\r\n```\r\n\r\nBut please note that this issue is about symlinks with _non-existent_ targets.\r\nIf you have further questions, I suggest you use the following community resources: \r\n* The [Slack](https://join.slack.com/t/powershell/shared_invite/enQtMzA3MDcxNTM5MTkxLTBmMWIyNzhkYzVjNGRiOTgxZmFlN2E0ZmVmOWU5NDczNTY2NDFhZjFlZTM1MTZiMWIzZDcwMGYzNjQ3YTRkNWM) and [Discord](https://discordapp.com/invite/AtzXnJM) community chat forums (they seamless talk to each other).\r\n* Q & A site [StackOverflow.com](https://stackoverflow.com/questions/tagged/powershell) and the [PowerShell.org](https://powershell.org/forums/) forum.\r\n",
+      "created_at": "2020-06-19T19:10:26Z",
+      "updated_at": "2020-07-01T12:39:20Z"
+    }
+  ],
+  "created_at": "2019-03-05T23:12:50Z",
+  "number": 9067,
+  "state": "open",
+  "title": "New-Item symlinks cannot be created if destination (target) is non-existent or not accessible",
+  "updated_at": "2021-12-03T12:55:36Z"
+}

@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9977",
+  "author": "Francisco-Gamino",
+  "body": "This issue was originally opened in the https://github.com/Azure/azure-functions-powershell-worker repo by @markekraus. \r\n\r\nOne thing we do not handle well in the web cmdlets in PS Core is the singleton nature of HttpClient. HttpClient is intended to be instantiated once and then reused. In PS Core we instantiate a new HttpClient on every call to IWR/IRM. This is somewhat OK for a shell and scripting language, but could be problematic for Functions. A common pattern is to create a azure Function to combine data from multiple endpoints as a single data set. In a high volume environment, the repeated calls to web cmdlets could result in socket exhaustion. [More Info](https://docs.microsoft.com/en-us/aspnet/web-api/overview/advanced/calling-a-web-api-from-a-net-client#create-and-initialize-httpclient)\r\n\r\nFor conversation details please see https://github.com/Azure/azure-functions-powershell-worker/issues/174",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "From what I've read on the subject, the fix could more or less be as simple as maintaining a static `HttpClient` instance that is reused for all web cmdlet calls to the API. If thread safety is a concern, locks or possibly [ThreadStatic] members may be needed as well.\r\n\r\nMark may have other ideas as well. \ud83d\ude42 ",
+      "created_at": "2019-06-21T23:35:28Z",
+      "updated_at": "2019-06-21T23:35:28Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Unfortunately, it's not that simple. lets say the following 2 commands run in different runspaces:\r\n\r\n```powershell\r\nInvoke-WebRequest -SkipCertificateCheck -Uri https://myinternaldevsite.com\r\nInvoke-WebRequest -Uri https://sensitiveexternalsite.com\r\n```\r\n\r\nBecause both of those make a modification to the `HttpClientHandler.ServerCertificateCustomValidationCallback` (which would need to be static between threads to reduce the risk of port exhaustion) it is possible that the `HttpClientHandler.DangerousAcceptAnyServerCertificateValidator` could be applied when the call to `https://sensitiveexternalsite.com` is made.\r\n\r\nBasically, there are a few options. 1 is to create an `HttpClient` and `HttpClientHandler` pair per thread. Another is to implement our own `HttpMessageHandler` that includes the logic for handling our use cases (this is a pretty massive undertaking). Another is to create some kind of smart logic to create a new `HttpClient` only when needed (not as easy as it sounds).",
+      "created_at": "2019-06-21T23:51:31Z",
+      "updated_at": "2019-06-21T23:51:31Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": ".NET Core uses an implementation of a StringBuilderCache that is similar to what it sounds like you're suggesting; we could possibly take some pointers from their implementation of that and go from there....",
+      "created_at": "2019-06-22T00:13:57Z",
+      "updated_at": "2019-06-22T00:13:57Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "Since there is a fairly limited amount of HttpClientHandler configurations, and it's unlikely a user is going to  instantiate multiple different clienthandler configurations per session (maybe 2-3 to accomodate different host requirements), as discussed on another thread it's probably best to instantiate one httpclient per httpclienthandler configuration, which will drastically reduce the number of httpclients instantiated and bring the socket count down, especially for multiple concurrent requests to the same host using the same httpclienthandler configuration.",
+      "created_at": "2019-06-22T06:23:37Z",
+      "updated_at": "2019-06-22T06:23:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see that @daxian-dbw suggest per runspace caching https://github.com/Azure/azure-functions-powershell-worker/issues/174#issuecomment-476791645\r\nIt is easy to check that it improves performance without feature regression.",
+      "created_at": "2019-06-26T11:56:26Z",
+      "updated_at": "2019-06-26T11:56:26Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "The problem is that there still needs to allow multiple httpclienthandlers for different iwr parameter configurations, and it's a 1:1 relationship for httpclienthandler to httpclient.\r\n\r\nNot sure what he means by the race conditions either, httpclient is thread safe\r\n\r\nEdit: for these reasons I think a process wide singleton per httpclienthandler would be sufficient. Alternatively, allow users to \"opt in\" to this behavior with a parameter pair similar to -sessionvariable and - websession, but that is less intuitive. ",
+      "created_at": "2019-06-26T14:02:42Z",
+      "updated_at": "2019-06-26T17:44:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> for these reasons I think a process wide singleton per httpclienthandler would be sufficient.\r\n\r\nSo we need cache like config -> httpclienthandler or config -> httpclienthandler -> httpclient",
+      "created_at": "2019-06-27T04:06:01Z",
+      "updated_at": "2019-06-27T04:06:01Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'll defer to @markekraus on the particular implementation, I'm not a c# wizard but I'd envision taking a hash of the config and using it as the key in a key value cache, the value being the httpclient that was constructed with the particular httpclienthandler, and instantiate a new one if there is a cache miss and save it there. \r\n\r\nThe cache would dispose with the process, since there's a fairly limited group of configurations especially in a single use case so a memory leak isn't a major concern. ",
+      "created_at": "2019-06-27T05:46:10Z",
+      "updated_at": "2019-06-27T05:46:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could use a (global static) cache like Tokenizer.GetStringBuilder().",
+      "created_at": "2021-01-15T10:54:21Z",
+      "updated_at": "2021-01-15T10:54:21Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Not a bad idea. It's probably OK to just have the one handler to start off, and if the user requests a different configuration, the method goes off to create the necessary handler, store it in the lookup, and then return it.",
+      "created_at": "2021-01-15T12:09:42Z",
+      "updated_at": "2021-01-15T12:09:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "For reference https://github.com/dotnet/runtime/issues/44818 - what we could cache.",
+      "created_at": "2021-01-20T06:42:02Z",
+      "updated_at": "2021-01-20T06:42:02Z"
+    }
+  ],
+  "created_at": "2019-06-21T22:57:03Z",
+  "number": 9977,
+  "state": "open",
+  "title": "Web Cmdlet Socket Exhaustion Concern",
+  "updated_at": "2021-01-20T06:42:02Z"
+}

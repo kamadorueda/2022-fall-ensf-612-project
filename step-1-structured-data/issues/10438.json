@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10438",
+  "author": "mklement0",
+  "body": "Note: The `[datetime]::ParseExact()` method used below is the only one I've seen the problem with - I have no idea what underlies this symptom and how general the problem is.\r\n\r\nIf you run the code below in the following environments:\r\n\r\n* (a) as PowerShell code\r\n\r\n* (b) as C# code compiled on demand with `Add-Type`\r\n\r\n* (c) as C# code compiled to a .NET Core 2.1 / 3.0-preview8 console application\r\n\r\nonly (c) works as expected.\r\n\r\n# Steps to reproduce\r\n\r\nThe following code should yield `1921`:\r\n\r\n```powershell\r\n# Set the 2-digit-year threshold to 2020, so that '21' is interpreted as *19*21\r\n($c = [CultureInfo]::InvariantCulture.Clone()).Calendar.TwoDigitYearMax = 2020; [datetime]::ParseExact('21', 'yy', $c).Year\r\n\r\n# Run the equivalent C# code via Add-Type\r\nAdd-Type @'\r\n    using System;\r\n    using System.Globalization;\r\n\r\n    public static class Program\r\n    {\r\n        public static void Main(string[] args)\r\n        {\r\n            var cc = (CultureInfo)CultureInfo.InvariantCulture.Clone();\r\n            cc.Calendar.TwoDigitYearMax = 2020;\r\n            Console.WriteLine(DateTime.ParseExact(\"21\", \"yy\", cc).Year);\r\n        }\r\n    }\r\n'@\r\n\r\n[Program]::Main(@())\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\n1921\r\n1921\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\n2021\r\n2021\r\n```\r\n\r\nThat is, the modified `.TwoDigitYearMax` property value was ignored.\r\n\r\nNote:\r\n\r\n* If you run the exact same code as passed to `Add-Type` above as a .NET Core application, the result is as expected.\r\n\r\n* The problem may be related to calling `.Clone()` on the static `[CultureInfo]::InvariantCulture` property, because it goes away if you obtain the invariant culture with `[CultureInfo] ''` or `[CultureInfo]::GetCultureInfo('')` instead (while the resulting  object _looks_ the same, there's no reference equality)\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.2\r\nWindows PowerShell 5.1.17763.592\r\n```\r\n",
+  "closed_at": "2019-09-09T20:15:31Z",
+  "comments": [
+    {
+      "author": "lpatalas",
+      "author_association": "NONE",
+      "body": "The reason for this behavior is that in reality `ParseExact` does not use `CultureInfo.Calendar` but `CultureInfo.DateTimeFormat.Calendar` property. In original object both calendars are the same reference but after cloning they still have the same values but become separate instances. You can quickly test this using following code:\r\n\r\n```\r\n$original = [cultureinfo]::InvariantCulture\r\n$clone = [cultureinfo]$original.Clone()\r\n\r\n[Object]::ReferenceEquals($original.Calendar, $original.DateTimeFormat.Calendar)\r\n[Object]::ReferenceEquals($clone.Calendar, $clone.DateTimeFormat.Calendar)\r\n```\r\n\r\nIf you set `.DateTimeFormat.Calendar.TwoDigitYearMax = 2020` in your example then it will work as expected. I'm not sure if it's a bug or not but anyway it seems to have nothing to do with PowerShell itself. :)",
+      "created_at": "2019-09-09T10:35:18Z",
+      "updated_at": "2019-09-09T10:35:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Excellent analysis, @lpatalas, that narrows it down a lot:\r\n\r\nIndeed, setting `.DateTimeFormat.Calendar.TwoDigitYearMax` directly makes the problem go away, in all scenarios.\r\n\r\n> but after cloning they still have the same values but become separate instances\r\n\r\nThat is true in _PowerShell_  - irrespective of whether you use PowerShell code or C# code via `Add-Type` - but not in _independently compiled C# code_.\r\n\r\nThat is, if you stick the content of the string passed to `Add-Type` _as-is_ into a `netcoreapp3.0` console application compiled with SDK version `3.0.0-preview8-28405-07`, cloning behaves correctly; that is, in the clone the reference equality between `.Calendar` and `.DateTimeFormat.Calendar` is _preserved_.\r\n\r\nPowerShell's behavior amounts to what would be a _bug_ in the `.Clone()` method.\r\n\r\nHere's code that shows the reference-inequality problem explicitly.\r\nAgain: running this _in PowerShell_ malfunctions, running the C# code passed to `Add-Type` as the source code of a _.NET Core console applications_ works correctly. \r\n\r\n```powershell\r\n'--- PS code'\r\n\r\n$ic = [cultureinfo]::InvariantCulture\r\n$icc = $ic.Clone()\r\n\"Clone's .Calendar is same reference as its .DateTimeFormat.Calendar?: $([object]::ReferenceEquals($icc.Calendar, $icc.DateTimeFormat.Calendar))\"\r\n$icc.Calendar.TwoDigitYearMax = 2020\r\n\"21 parsed as: $([datetime]::ParseExact('21', 'yy', $icc).Year)\"\r\n\r\n'--- C# via Add-Type'\r\n\r\n# Run the equivalent C# code via Add-Type\r\nAdd-Type @'\r\n    using System;\r\n    using System.Globalization;\r\n\r\n    public static class Program\r\n    {\r\n        public static void Main(string[] args)\r\n        {\r\n            var ic = CultureInfo.InvariantCulture;\r\n            var icc = (CultureInfo)ic.Clone();\r\n            Console.WriteLine($\"Clone's .Calendar is same reference as its .DateTimeFormat.Calendar?: {object.ReferenceEquals(icc.Calendar, icc.DateTimeFormat.Calendar)}\");\r\n            icc.Calendar.TwoDigitYearMax = 2020;\r\n            Console.WriteLine($\"21 parsed as: {DateTime.ParseExact(\"21\", \"yy\", icc).Year}\");\r\n        }\r\n    }\r\n'@\r\n\r\n[Program]::Main(@())\r\n```\r\n\r\n@lzybkr, any ideas?",
+      "created_at": "2019-09-09T13:53:17Z",
+      "updated_at": "2019-09-09T13:55:09Z"
+    },
+    {
+      "author": "lpatalas",
+      "author_association": "NONE",
+      "body": "I am also able to reproduce it in netcoreapp2.2 console app. The trick is that you have to access `CultureInfo.Calendar` property before cloning:\r\n\r\n```\r\nvar orig = CultureInfo.InvariantCulture;\r\nConsole.WriteLine(ReferenceEquals(orig.Calendar, orig.DateTimeFormat.Calendar));\r\n\r\nvar clone = (CultureInfo)orig.Clone();\r\nConsole.WriteLine(ReferenceEquals(clone.Calendar, clone.DateTimeFormat.Calendar));\r\n\r\n// Prints:\r\n//   True\r\n//   False\r\n```\r\n\r\nBecause `InvariantCulture` is singleton it's enough to call it once to trigger that behaviour for the rest of the clones so that's probably a reason why we see it in PowerShell.\r\n\r\nIf I would have to guess it's caused by this line: https://github.com/dotnet/coreclr/blob/master/src/System.Private.CoreLib/shared/System/Globalization/CultureInfo.cs#L1015. The `_calendar` field is null so it's not cloned until it's accessed for the first time. After that it's set and each subsequent `Clone()` call will create new `Calendar` instance.\r\n\r\n\r\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/9141961?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dotnet/coreclr\">dotnet/coreclr</a></strong></div><div>CoreCLR is the runtime for .NET Core. It includes the garbage collector, JIT compiler, primitive data types and low-level classes. - dotnet/coreclr</div></blockquote>",
+      "created_at": "2019-09-09T19:23:40Z",
+      "updated_at": "2019-09-09T19:26:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @lpatalas - great stuff (it is accessing `.DateTimeFormat.Calendar`, not `.Calendar`, before cloning that triggers the bug).\r\n\r\nI've created a CoreFx bug report at  https://github.com/dotnet/corefx/issues/40953\r\n\r\nSo it sounds like PowerShell surfaces the bug accidentally, by virtue of the reflection it performs _behind the scenes_, correct?\r\n\r\nI'm closing this, as it appears to be purely a CoreFx issue, even though PowerShell happens to surface it consistently.",
+      "created_at": "2019-09-09T20:15:30Z",
+      "updated_at": "2019-09-09T21:03:59Z"
+    },
+    {
+      "author": "lpatalas",
+      "author_association": "NONE",
+      "body": "You're right regarding the property - actually just accessing `.DateTimeFormat` is enough. So probably my guess regarding offending line is incorrect. :)",
+      "created_at": "2019-09-09T20:38:15Z",
+      "updated_at": "2019-09-09T20:38:15Z"
+    }
+  ],
+  "created_at": "2019-08-23T19:59:50Z",
+  "number": 10438,
+  "state": "closed",
+  "title": "Method call behaves differently in PowerShell than in a compiled C# application",
+  "updated_at": "2019-09-16T10:40:56Z"
+}

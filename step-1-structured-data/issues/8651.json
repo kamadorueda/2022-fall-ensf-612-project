@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8651",
+  "author": "OlsonDev",
+  "body": "# Summary of the new feature/enhancement\r\nAs a PowerShell user, I want `[ValidateSet]` to support a dynamically generated sets _from script blocks_ so that I can make terse, reusable sets of data, and my coworkers are provided useful IntelliSense from my work. In issue #3744, it was proposed to support a dynamically generated set for `[ValidateSet]`. An example was given with a script block, which would resolve the set. However, the actual merged PR laid the groundwork and implemented a variant, using classes and interfaces. I'd like this issue to specifically track the ability to use `[ValidateSet]` with a _script block_ and receive IntelliSense feedback. \r\n\r\n# Proposed technical implementation details\r\nFor example:\r\n```powershell\r\n[CmdletBinding()]\r\nparam (\r\n    [ValidateSet({ (Get-MyGitRepos -Code -Config).master })]\r\n    $Repo = \"foo\"\r\n)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It's important to remember that while the `[ArgumentCompleter()]` script block param can refer to other already-entered parameters via a `$fakeBoundParameters` param in the script block's `param()` block, the `IValidateSetValuesGenerator` interface does not provide the same capability as `IArgumentCompleter`'s interface method does.\r\n\r\nIt may be possible to copy parts of the code from the `[ArgumentCompleter()]` constructor that utilises a script block, and the code from `IArgumentCompleter` in order to permit this much more dynamic and self-referential mode of using ValidateSet, which should make it a far more versatile attribute to work with.",
+      "created_at": "2019-01-15T15:45:48Z",
+      "updated_at": "2019-01-15T15:45:48Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@OlsonDev \r\n> and my coworkers are provided useful IntelliSense from my (arbitrary scriptblocks).\r\n\r\nAre you talking about intellisense in an editor? Running arbitrary code when you are simply _editing_ is problematic from a security standpoint. Consider all the problems that Word macros caused. Or an `evil.ps1` script file:\r\n```powershell\r\n[CmdletBinding()]\r\nparam (\r\n    [ValidateSet({Remove-Item -Force -Recurse ~})]\r\n    $Repo = \"foo\"\r\n)\r\n```\r\n",
+      "created_at": "2019-01-15T21:05:10Z",
+      "updated_at": "2019-01-15T21:05:10Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@BrucePay -\r\n\r\n>  Running arbitrary code when you are simply editing is problematic from a security standpoint.\r\n\r\nThat ship sailed a long time ago - parameter name completion has invoked the `dynamicparam` block since it was introduced.",
+      "created_at": "2019-01-15T21:46:10Z",
+      "updated_at": "2019-01-15T21:46:10Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr We don't instantiate functions until runtime. Without running the script, how is the dynamic parameter block getting turned into executable code? ",
+      "created_at": "2019-01-16T00:37:38Z",
+      "updated_at": "2019-01-16T00:37:38Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It falls out naturally when asking for the parameter metadata - `PSScriptCmdlet` implements `IDynamicParameters`.\r\n\r\nIf you ask for the parameter metadata, e.g. to invoke the command or for parameter name completion, you must also query the cmdlet for it's dynamic parameters via `IDynamicParameters`.\r\n\r\nThe actual compilation is always on demand, so in this case, it's the implementation of `PSScriptCmdlet.GetDynamicParameters` that kicks off the compilation.",
+      "created_at": "2019-01-16T01:09:21Z",
+      "updated_at": "2019-01-16T01:09:21Z"
+    },
+    {
+      "author": "OlsonDev",
+      "author_association": "NONE",
+      "body": "@BrucePay\r\n\r\n> Are you talking about intellisense in an editor? Running arbitrary code when you are simply _editing_ is problematic from a security standpoint. Consider all the problems that Word macros caused. Or an `evil.ps1` script file:\r\n> \r\n> ```powershell\r\n> [CmdletBinding()]\r\n> param (\r\n>     [ValidateSet({Remove-Item -Force -Recurse ~})]\r\n>     $Repo = \"foo\"\r\n> )\r\n> ```\r\n\r\nI more so meant command completion in the PowerShell console window -- in which case, (my coworkers at least) have the source to every command and every command we maintain is code reviewed when changed/added. I don't really view this kind of completion as any more risky than running a command without digging into its source; it could do anything after all.",
+      "created_at": "2019-01-19T00:19:34Z",
+      "updated_at": "2019-01-19T00:20:57Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "@OlsonDev I agree, not any more risky than running a command really, just occurs maybe a little sooner. I suppose the validation code could be put in a constrained runspace but seems like a lot of overhead for little benefit.\r\n\r\nFYI as a workaround that is both Core and WinPS compatible, you can use Register-ArgumentCompleter for the autocomplete part and pass it a scriptblock, and (if you're really paranoid) then have one of the first lines of your code run the same scriptblock, compare the result, and throw an error. The error can have basically the same text as ValidateSet, so you get effectively the same result.\r\n\r\n```powershell\r\nfunction Get-TestArgumentValues {\r\n    (get-module).name\r\n}\r\n\r\nRegister-ArgumentCompleter -CommandName Test-ArgumentCompleter -ScriptBlock {Get-TestArgumentValues}\r\n\r\nfunction Test-ArgumentCompleter ($argument) {\r\n    #This part is optional but recommended\r\n    $TestArgumentValues = Get-TestArgumentValues\r\n    if ($argument -notin $TestArgumentValues) {throw \"Parameter invalid, you must specify one of the following options: $($TestArgumentValues -join ', ')\"}\r\n    #End Optional Part\r\n\r\n    echo $argument\r\n}\r\n\r\n#Now try Test-ArgumentCompleter -Argument [tab]\r\n```\r\n\r\n\r\nYou can also dynamically generate an enum on module import and set your parameter type to that, but then you have to get the enum into the \"user\" scope because of how dumb classes are. The above is \"cleaner\" in my opinion.",
+      "created_at": "2019-03-18T16:39:10Z",
+      "updated_at": "2019-03-18T16:45:12Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I have some other alternatives for this purpose listed in my blog post here: \r\n\r\nhttps://vexx32.github.io/2018/11/29/Dynamic-ValidateSet/\r\n\r\nBut yes, given that the implementation via class is already a thing, I don't really see how that's all that different to just accepting and using a script block just like ArgumentCompleter already does.",
+      "created_at": "2019-03-18T17:17:42Z",
+      "updated_at": "2019-03-18T17:17:42Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 I agree, the class already has the functionality in PSCore so the decision has already been made that this is \"OK\", so going forward the syntax should be able to be simplified to just a scriptblock to make it more intuitive for less advanced powershell users :)",
+      "created_at": "2019-03-18T19:30:16Z",
+      "updated_at": "2019-03-18T19:30:16Z"
+    },
+    {
+      "author": "exproject",
+      "author_association": "NONE",
+      "body": "I do wish this was implemented as for my current workflow, it would work a wonder. Trying to use IValidateSetValuesGenerator now, but it's just not very intuitive.",
+      "created_at": "2019-08-24T06:59:53Z",
+      "updated_at": "2019-08-24T06:59:53Z"
+    }
+  ],
+  "created_at": "2019-01-15T15:36:10Z",
+  "number": 8651,
+  "state": "open",
+  "title": "ValidateSet should support a dynamically generated set from a script block",
+  "updated_at": "2019-08-24T06:59:54Z"
+}

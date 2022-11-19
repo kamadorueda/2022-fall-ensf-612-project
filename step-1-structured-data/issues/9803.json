@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9803",
+  "author": "pronichkin",
+  "body": "There are multiple scenarios where a machine has a Code Integrity (CI) policy applied. Code Integrity is a Windows 10 and Server 2016/2019 feature which was formerly known as UMCI policy (as part of Device Guard family) and now called [Windows Defender Application Control (WDAC)](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/windows-defender-application-control)\r\n\r\nWhen Code Integrity is applied, the PowerShell scripts are evaluated against the policy. (I am not sure whether it applies to scenarios where PowerShell code is run by applications which implement their own hosts.) Only signed or explicitly whitelisted scripts are allowed to run in full language mode. Otherwise, scripts are executed in [constrained language mode](https://devblogs.microsoft.com/powershell/powershell-constrained-language-mode/).\r\n\r\nWhen you execute scripts interactively, and they fail because of Code Integrity policy (constrained language mode), you're presented with an error message which is fairly easy to understand, even if you did not expect this failure and have no idea of Code Integrity concepts.\r\n\r\nHowever, diagnosing why something fails becomes very difficult if the script is (attempted to) run by an application which hides implementation details (e.g. OpsMgr agent.)\r\n\r\nOf course, the application might (and probably should) receive the same error, intercept it, and handle accordingly. (E.g. by providing another meaningful error message to the end user.) However, not all applications are known to do that. In particular, OpsMgr agent currently provides no indication that scripts fail. You can only suspect that something goes wrong because monitoring data is not flowing as expected.\r\n\r\nAnother currently available diagnostic option is to enable system-wide transcripting, and then manually examine all transcripts for known error messages related to language mode. However, there are obvious downsides of this approach. (It has to be configured in advance, it would fill up disks, it is time consuming and prone to human error, etc.)\r\n\r\nI propose there should be a system-wide notification (e.g. a new event type in PowerShell operational log) when a script fails due to known implications of Code Integrity or other similar scenarios. That would greatly improve diagnosability for applications that rely on PowerShell engine but have not implemented natively specific error handling for such scenarios.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "pronichkin",
+      "author_association": "NONE",
+      "body": "Note that there are some blog posts that briefly mention that there is already such an event.\r\n\r\n> One of the other questions I had is if I turn this on how do I know when this is breaking things in my environment? Fortunately this is actually handled fairly well in that whenever a script does not run due to Constrained Language mode we do actually throw a nice event in the PowerShell Operational Event log that specifically says a script was blocked due to Contrained Language mode.\r\n\r\n([source](https://blogs.technet.microsoft.com/kfalde/2017/01/20/pslockdownpolicy-and-powershell-constrained-language-mode/))\r\n\r\nHowever, during my testing I could not locate this event no matter how hard I was looking for it\u2014even though there were plenty of other events in the PowerShell operations log. Hence, because _(a)_ this blog post is not authoritative by someone from PowerShell team and _(2)_ it does not provide any specific examples of said events, I assume either that was never the case, or it is not very robust and breaks under certain circumstances.",
+      "created_at": "2019-06-02T20:07:08Z",
+      "updated_at": "2019-06-02T20:07:48Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @TravisEz13 @PaulHigin ",
+      "created_at": "2019-06-06T11:06:50Z",
+      "updated_at": "2019-06-06T11:06:50Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Working Security Group:\r\nWe can certainly add more logging to help diagnostics, as long as we do not disclose sensitive information.  But it is not clear what more information would be helpful.  A specific scenario would help.\r\n\r\nExisting ErrorRecords contain exceptions and inner exceptions, and that may be enough for most failure scenarios.",
+      "created_at": "2021-03-15T21:18:59Z",
+      "updated_at": "2021-03-15T21:18:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I guess @pronichkin says that it is not obvious where we could to see result of WDAC check. In AppLocker log? If yes we could close the issue. If no I agree that we need more convenient way to detect that script was blocked in scenarios like  OpsMgr.\r\n\r\nIf we look the code https://github.com/PowerShell/PowerShell/blob/4c40ab11401ff2ca19ee1206b7654ed299f373e6/src/System.Management.Automation/security/SecurityManager.cs#L630-L644 we see we can log the fact of WDAC check but not a _result_ of the check.\r\n\r\nThe same for exception https://github.com/PowerShell/PowerShell/blob/4c40ab11401ff2ca19ee1206b7654ed299f373e6/src/System.Management.Automation/security/SecurityManager.cs#L174-L184\r\n- we create `UnauthorizedAccessException` with only specific message without specific _flag_ (is this WDAC lock?).\r\nAnd it is not clear what is a log where we log the exception (if log).",
+      "created_at": "2021-03-16T04:21:32Z",
+      "updated_at": "2021-03-16T04:21:32Z"
+    },
+    {
+      "author": "pronichkin",
+      "author_association": "NONE",
+      "body": "> We can certainly add more logging to help diagnostics, as long as we do not disclose sensitive information. But it is not clear what more information would be helpful. A specific scenario would help.\r\n\r\nPlease see my original post with the specific scenario (OpsMgr agent.) However, because the issue is so old, I don't have a repro readily available anymore, and building one purposefully would be quite laborious.\r\n\r\nIn general, I do not think we should focus on a specific scenario here. Rather, we need to solve the class of problems as a whole. If _something_ gets blocked due to WDAC and/or Constrained language mode, and it happens behind the scenes (i.e. there's no interactive PowerShell window to look at), how do I know about that and know where the issue is?\r\n\r\nIn short, I believe we need the following information be logged _somewhere._\r\n\r\n1. The fact that something tried to execute.\r\n2. What it was. (Script/interactive command/etc.)\r\n3. Who tried to run it (e.g. parent process, user name, etc.)\r\n3. Did it succeed or failed to execute.\r\n4. The reason it failed (e.g. WDAC, or Constrained language mode, etc.)\r\n5. Which piece of code was subject to the restriction. (E.g. the specific line which violates Constrained language mode rules.)\r\n\r\nThe last bit is nice to have, and everything else should not contain any sensitive information whatsoever.\r\n\r\nToday, there's either no way to figure out any of the above, or it's utterly painful. (You have to dig through system-wide transcripts.) This makes it a bummer for users who try to implement good security. Some customers gave up WDAC because of this restriction.\r\n\r\n\r\n> it is not obvious where we could to see result of WDAC check. In AppLocker log?\r\n\r\nIt _may be_ AppLocker log, however there's a couple issues with it.\r\n\r\n1. As a user, I have no idea what this all have to do with AppLocker, and it's not documented anywhere. We know that WDAC uses AppLocker mechanisms under the hood, and that's why it sometimes emits info into AppLocker logs. However, assuming I'm not using AppLocker, I'm only using WDAC, and something mysteriously fails in PowerShell (or a separate app which just happens to execute PowerShell scripts behind the scenes), AppLocker log will be the last place on Earth where I would look for clues.\r\n2. AppLocker feature is not available on Server Core, and hence there's no AppLocker log whatsoever. Even though WDAC is present, and hence the whole scenario is entirely possible. (In fact, the customer I was dealing with when filing the original issue was facing this particular issue on Server Core\u2014and there was no way to troubleshoot that.)",
+      "created_at": "2021-03-16T18:16:26Z",
+      "updated_at": "2021-03-16T18:16:26Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I am not saying we should design for specific scenarios, but having some scenarios can greatly help clarify the problem.  Scripts can fail in subtle ways when running in ConstrainedLanguage mode.  At minimum we can add logging when PowerShell CL mode blocks something outright (and emits an error that may be lost in script layers).  But it is not clear to me how helpful this would be and if it is even possible to correlate the log entries with script and module failures.  We also need to be careful of information disclosure.",
+      "created_at": "2021-03-16T18:56:32Z",
+      "updated_at": "2021-03-16T18:56:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> We also need to be careful of information disclosure.\r\n\r\nHmm... There already is ETW tracing.\r\n\r\nIf an user reports me that he see \"The application is disabled by Administrator\" message in interactive session this explicitly says for me that the application was blocked by AppLocker. No information disclosure.",
+      "created_at": "2021-03-17T04:16:18Z",
+      "updated_at": "2021-03-17T04:16:18Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "> Hmm... There already is ETW tracing.\r\n\r\n> If an user reports me that he see \"The application is disabled by Administrator\" message in interactive session this explicitly says for me that the application was blocked by AppLocker. No information disclosure.\r\n\r\nI'd be concerned about logging transcripts because output may contain sensitive information.  I think this is the information disclosure that Paul was referring to.",
+      "created_at": "2021-03-17T18:41:53Z",
+      "updated_at": "2021-03-17T18:41:53Z"
+    },
+    {
+      "author": "pronichkin",
+      "author_association": "NONE",
+      "body": "To be clear, I'm not asking for additional logging of _output._ (We already have this in system-wide transcripts BTW, however that's not the point.) Practically speaking, if there's _any_ output, this typically means that code succeeded to execute, and it's not what I'm interested in.\r\n\r\nMy proposal above is about including some part of _code_ that failed execution. Code is hardly an information disclosure, unless it's some noteworthy bad code (e.g. it contains secrets.)\r\n\r\nBut even we don't log any code whatsoever, but do everything else from my proposal (i.e. merely the fact that _something_ was blocked and _why),_ it would already improve diagnosability a lot comparing to where we are right now.",
+      "created_at": "2021-03-17T19:15:08Z",
+      "updated_at": "2021-03-17T19:15:08Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Security working group:  We can look at what can be done, such as logging the stack when something fails because of WDAC, but we will have to see how meaningful this is.",
+      "created_at": "2021-04-05T20:55:57Z",
+      "updated_at": "2021-04-05T20:55:57Z"
+    },
+    {
+      "author": "romero126",
+      "author_association": "CONTRIBUTOR",
+      "body": "The PowerShell does give out an exit codes and feedback when there is exceptions called when you call powershell from execution. This should give you some insight as to what specifically is being ran however you have to run it directly from PowerShell and not through a cmd.exe. (There is an extension to execute PowerShell directly so this should not be a problem using SCOM).\r\n\r\nNext if that isn't a good enough answer. There are a ton of forensic tooling via Eventlog that might help. With exception CLM (Not supported without transcription).\r\n\r\nFor Applocker/WDAC info\r\nhttps://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/event-id-explanations\r\nEvents 8029, 8038 etc\r\n\r\nNow because WDAC sends telemetry to Azure, as long as you tie  your WDAC environment to a Log Analytics Workspace, you can also query the data from WDAC for details as to what failed. It gives details like CLI/Executable calls (this should contain command line data)\r\nhttps://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/querying-application-control-events-centrally-using-advanced-hunting\r\n\r\n\r\nPlease let me know if that helps.\r\n\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/event-id-explanations\">Understanding Application Control event IDs (Windows 10) - Windows security</a></strong></div><div>Learn what different Windows Defender Application Control event IDs signify.</div></blockquote>\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/querying-application-control-events-centrally-using-advanced-hunting\">Query Application Control events with Advanced Hunting (Windows 10) - Windows security</a></strong></div><div>Learn how to query Windows Defender Application Control events across your entire organization by using Advanced Hunting.</div></blockquote>",
+      "created_at": "2021-04-29T03:59:28Z",
+      "updated_at": "2021-04-29T03:59:30Z"
+    },
+    {
+      "author": "pronichkin",
+      "author_association": "NONE",
+      "body": "Thanks for taking your time to respond. Unfortuantely it all does not help much.\r\n\r\n> The PowerShell does give out an exit codes and feedback when there is exceptions called when you call powershell from execution. This should give you some insight as to what specifically is being ran however you have to run it directly from PowerShell and not through a cmd.exe. (There is an extension to execute PowerShell directly so this should not be a problem using SCOM).\r\n\r\nThis will only help if the calling application (OpsMgr in this case) is aware of such issues and can handle the specific exit codes. In reality, many apps do not. They are simply unaware of WDAC and/or Constrained language mode, and they assume that if script launched (and they have permissions, etc.) it will complete. Moreover, OpsMgr runs scripts in its own host, so the exit code might not even generate. Effectively, the discovery (or other monitoring operations) fail silently, and for the end user it simply looks like the service or component to be monitored is not there. No success, no failure, no discovered objects. End of the story.\r\n\r\nThere are other apps (e.g. Windows Admin Center) who fall more or less into the same trap. Yes, each app can (and probably should) be redesigned to become aware of WDAC and CLM. Who knows how many 3rd party apps are affected as well. Given that such redesign for each and every app is not happening in foreseeable future, I'm just suggesting that maybe we should try to address this _class of issues_ (even if partly) from PowerShell side.\r\n\r\n> There are a ton of forensic tooling via Eventlog that might help. With exception CLM (Not supported without transcription).\r\n\r\nYes, transcription is what I have to use today when troubleshooting such issues. My point is that it's painful, and I can only do this _because I know where to look_ and what to look for. For an average system admin this is a non-starter.\r\n\r\n> For Applocker/WDAC info\r\n<...>\r\nEvents 8029, 8038 etc\r\n\r\nYes, this is great. No kidding\u2014this is fantastic. It's **exactly** what I'm looking for.\r\n\r\nExcept that AppLocker log is not present on Server Core. (Which is by desgin since AppLocker feature is not there.) That's why I'm asking for similar (or better) events to be logged on PowerShell side, to PowerShell logs. _This is the whole point of this very issue._\r\n\r\n> Now because WDAC sends telemetry to Azure, as long as you tie your WDAC environment to a Log Analytics Workspace, you can also query the data from WDAC for details as to what failed. It gives details like CLI/Executable calls (this should contain command line data)\r\n\r\nThere are a lot of people who do not or cannot connect to Azure, e.g. because they're running in air-gapped networks. I do not believe that \u201cuse Azure\u201d is an adequate resolution, even if it might indeed help some customers.",
+      "created_at": "2021-04-29T06:42:20Z",
+      "updated_at": "2021-04-29T06:46:09Z"
+    }
+  ],
+  "created_at": "2019-06-02T18:24:03Z",
+  "number": 9803,
+  "state": "open",
+  "title": "System-wide logging in case script or command fails due to Code Integrity (WDAC) and/or Constrained Language Mode imposed by it",
+  "updated_at": "2021-04-29T06:46:09Z"
+}

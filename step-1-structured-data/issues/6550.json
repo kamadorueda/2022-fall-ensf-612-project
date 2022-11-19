@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6550",
+  "author": "Calimerou",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\n- Windows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://github.com/PowerShell/PowerShell/blob/master/docs/KNOWNISSUES.md).\r\n- Fill out the following repro template:\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\nUsing Windows 1252 encoding, create a file \"test.txt\" that contents this sentence : \r\ncette fonction doit \u00eatre appel\u00e9e avant l'initialisation de l'API \r\n\r\nTry to convert the file \"test.txt\" from Windows 1252 to UTF8 using this script.\r\n\r\nParam (\r\n    [Parameter(Mandatory=$True)][String]$SourcePath\r\n)\r\n\r\nGet-ChildItem $SourcePath\\*  -recurse -Include *.txt | ForEach-Object {\r\n$content = $_ | Get-Content\r\n\r\nSet-Content -PassThru $_.Fullname $content -Encoding UTF8 -Force}\r\n\r\n\r\nExpected behavior\r\n-----------------\r\nIn UTF8 :\r\n\r\ncette fonction doit \u00eatre appel\u00e9e avant l'initialisation de l'API \r\n\r\nActual behavior\r\n---------------\r\nIn UTF8:\r\n\r\ncette fonction doit \ufffdtre appel\ufffde avant l'initialisation de l'API \r\n\r\nEnvironment data\r\n----------------\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.1.0-preview.1\r\nOS                             Microsoft Windows 6.1.7601 S\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nNote\r\n-------\r\nPowershell 4.0 does not have this issue\r\n",
+  "closed_at": "2018-04-04T15:38:48Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The default encoding in PowerShell Core is now UTF-8 (without a BOM when creating files).\r\n\r\nThat means that a Windows 1252-encoded file - in the absence of a BOM defining it as such (there is none for Windows 1252) - is now interpreted as _UTF-8_.\r\n\r\nThe upshot is that **you must now tell `Get-Content` what encoding to assume - unless it is UTF-8 or there is a BOM.**\r\n\r\n**Regrettably, `Get-Content` doesn't currently allow you to specify Windows 1252**, because `Default` now represents UTF-8 and no longer the active \"ANSI\" code page (such as Windows 1252), as on Windows PowerShell, and you cannot pass a `[System.Text.Encoding]` instance directly.\r\n\r\n**This is an oversight that must be corrected.**\r\n\r\nMy suggestion: add an `ANSI` encoding enumeration value on Windows that represents the system's legacy \"ANSI\" code page (e.g., Windows 1252 on US-English systems).\r\n\r\n---\r\n\r\nThe - cumbersome - **workaround** to use in the meantime requires use of the .NET framework directly:\r\n\r\n    $content = [IO.File]::ReadAllText($_.FullName, [text.encoding]::GetEncoding(1252))\r\n\r\nOr, more generically:\r\n\r\n    $content = [IO.File]::ReadAllText($_.FullName, [text.encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage))\r\n",
+      "created_at": "2018-04-03T14:26:11Z",
+      "updated_at": "2018-04-03T14:26:11Z"
+    },
+    {
+      "author": "stknohg",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 \r\n\r\nPowerShell Core 6.0 accepts `System.Text.Encoding` class in `-Encoding` parameter. (#5080)\r\n\r\nWe can write as follow.\r\n\r\n```powershell\r\n$content = $_ | Get-Content -Encoding ([System.Text.Encoding]::GetEncoding(1252))\r\n\r\n# or\r\n\r\n$content = $_ | Get-Content -Encoding ([System.Text.Encoding]::GetEncoding([cultureinfo]::CurrentCulture.TextInfo.ANSICodePage))\r\n```\r\n\r\nAdditionally, `WindowsLegacyg` is proposed in [RFC](https://github.com/PowerShell/PowerShell-RFC/blob/master/2-Draft-Accepted/RFC0020-DefaultFileEncoding.md).\r\n(but `WindowsLegacyg` is not implemented yet...)\r\n\r\nIt is better to discuss this RFC if compatibility is necessary.\r\n\r\n----\r\n\r\nMaybe #5204 related.\r\n\r\n",
+      "created_at": "2018-04-04T03:26:57Z",
+      "updated_at": "2018-04-04T03:26:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@stknohg: \r\n\r\nAh, thanks. Somehow I had wrongly convinced myself that you couldn't directly pass a `System.Text.Encoding` instance - thanks for clarifying that. \r\n\r\nI think the discussion around the linked RFC eventually led to the current Core behavior of globally defaulting to BOM-less UTF-8 - see https://github.com/PowerShell/PowerShell-RFC/issues/71\r\n\r\nThe `WindowsLegacy` meta-setting was intended for a never-implemented `$PSDefaultEncoding` preference variable, and was meant to _globally_ revert to the old, inconsistent encoding behavior for the sake of backward compatibility - an approach that I personally think is not worth pursuing.\r\n\r\nAgain, given that `OEM` - the OEM code page implied by the legacy system locale - already exists as a predefined encoding enumeration value, it should be complemented with an `ANSI` identifier for the \"ANSI\" code page implied by the system locale (on Windows only; the equivalent of what `Default` represents for _Windows_ PowerShell).\r\n\r\n",
+      "created_at": "2018-04-04T03:40:07Z",
+      "updated_at": "2018-04-04T03:42:20Z"
+    },
+    {
+      "author": "stknohg",
+      "author_association": "CONTRIBUTOR",
+      "body": "Certainly, to introduce `ANSI` is simpler and not *globally* as you say.\r\nI think it's good.",
+      "created_at": "2018-04-04T03:59:26Z",
+      "updated_at": "2018-04-04T03:59:26Z"
+    },
+    {
+      "author": "Calimerou",
+      "author_association": "NONE",
+      "body": "The workaround proposed by mklement0 works for me.\r\nI propose to close this issue since the rest of the discussion is mainly focused on BM-less UTF8 which is indeed treated in PowerShell/PowerShell-RFC#71.\r\nThanks.",
+      "created_at": "2018-04-04T13:25:09Z",
+      "updated_at": "2018-04-04T13:25:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Calimerou: Alternatively, we could retitle your issue and modify the initial post to propose the missing `ANSI` encoding-enumeration value, as discussed. If you prefer my creating a new issue instead, let me know.\r\n",
+      "created_at": "2018-04-04T13:42:17Z",
+      "updated_at": "2018-04-04T13:42:17Z"
+    },
+    {
+      "author": "Calimerou",
+      "author_association": "NONE",
+      "body": "I would prefer yours. \r\nThanks in advance.",
+      "created_at": "2018-04-04T15:38:46Z",
+      "updated_at": "2018-04-04T15:38:46Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "For now, I work around this issue in my scripts as follows:\r\n\r\n````\r\n    $iswinps = ($null, 'Desktop') -contains $PSVersionTable.PSEdition\r\n    if (!$iswinps)\r\n    {\r\n        $encoding = [System.Text.Encoding]::GetEncoding(1252)\r\n    }\r\n    else\r\n    {\r\n        $encoding = [Microsoft.PowerShell.Commands.FileSystemCmdletProviderEncoding]::Default\r\n    }\r\n    \r\n    Get-Content -Encoding $encoding ...\r\n\r\n````\r\n\r\nHTH\r\n",
+      "created_at": "2019-07-18T14:54:39Z",
+      "updated_at": "2019-07-20T08:36:20Z"
+    }
+  ],
+  "created_at": "2018-04-03T12:53:28Z",
+  "number": 6550,
+  "state": "closed",
+  "title": "Converting from windows 1252 to UTF8",
+  "updated_at": "2019-07-20T08:36:20Z"
+}

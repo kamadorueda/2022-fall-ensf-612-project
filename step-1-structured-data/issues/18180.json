@@ -1,0 +1,160 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/18180",
+  "author": "garretwilson",
+  "body": "### Summary of the new feature / enhancement\r\n\r\nPlease provide an option or configuration to prevent PowerShell from prefixing every relative file path (even program arguments!) with a `.\\` without my asking it to\r\n\r\nI understand why PowerShell requires that I prefix a command `foo.exe` with `.\\foo.exe` when I run it. So if I am typing a command `fo` and hit `Tab`, autocomplete changes what I typed to `.\\foo.exe`. I can live with that, even though I find it annoying and patronizing.\r\n\r\nThe problem is when `foo.exe` takes command-line arguments, and one of them is the `bar.dat` file. If I'm typing `.\\foo.exe ba` and hit `Tab`, I want to get `.\\foo.exe bar.dat`. I do _not_ want to get `.\\foo.exe .\\bar.dat`. Not only is this irritating as heck (not to mention ugly), it actually breaks some of my commands, which don't allow any directory (even the current directory) to be specified in the argument.\r\n\r\nHow do I turn off this PowerShell quirk of adding a `.\\` to every single autocomplete for a relative path? As far as I'm concerned, I'd like it to be turned off everywhere\u2014I can remember to type `.\\foo.exe` instead of `foo.exe` for the initial command. As I mentioned earlier, I can partially understand that PowerShell wants to add the `.\\` to the initial command, because it's required to run a program in the current directory. But I'm dumbfounded as to why PowerShell is so unintelligent that it blindly adds the `.\\` prefix to all relative paths, even where it's not required, not needed, and certainly not desired.\r\n\r\nI opened [prevent PowerShell autocomplete from adding dot prefix](https://superuser.com/questions/1741125/prevent-powershell-autocomplete-from-adding-dot-prefix) on Super User, but no one had any solutions.\r\n\r\n### Proposed technical implementation details (optional)\r\n\r\n_No response_",
+  "closed_at": "2022-10-06T22:01:22Z",
+  "comments": [
+    {
+      "author": "MartinGC94",
+      "author_association": "CONTRIBUTOR",
+      "body": "I like the automatic addition of `.\\` but if you want to work around this you can use the following modified tabexpansion2 function:\r\n\r\n```\r\nfunction TabExpansion2\r\n{\r\n    <# Options include:\r\n         RelativeFilePaths - [bool]\r\n             Always resolve file paths using Resolve-Path -Relative.\r\n             The default is to use some heuristics to guess if relative or absolute is better.\r\n\r\n       To customize your own custom options, pass a hashtable to CompleteInput, e.g.\r\n             return [System.Management.Automation.CommandCompletion]::CompleteInput($inputScript, $cursorColumn,\r\n                 @{ RelativeFilePaths=$false }\r\n    #>\r\n\r\n    [CmdletBinding(DefaultParameterSetName = 'ScriptInputSet')]\r\n    [OutputType([System.Management.Automation.CommandCompletion])]\r\n    Param\r\n    (\r\n        [Parameter(ParameterSetName = 'ScriptInputSet', Mandatory = $true, Position = 0)]\r\n        [string] $inputScript,\r\n\r\n        [Parameter(ParameterSetName = 'ScriptInputSet', Position = 1)]\r\n        [int] $cursorColumn = $inputScript.Length,\r\n\r\n        [Parameter(ParameterSetName = 'AstInputSet', Mandatory = $true, Position = 0)]\r\n        [System.Management.Automation.Language.Ast] $ast,\r\n\r\n        [Parameter(ParameterSetName = 'AstInputSet', Mandatory = $true, Position = 1)]\r\n        [System.Management.Automation.Language.Token[]] $tokens,\r\n\r\n        [Parameter(ParameterSetName = 'AstInputSet', Mandatory = $true, Position = 2)]\r\n        [System.Management.Automation.Language.IScriptPosition] $positionOfCursor,\r\n\r\n        [Parameter(ParameterSetName = 'ScriptInputSet', Position = 2)]\r\n        [Parameter(ParameterSetName = 'AstInputSet', Position = 3)]\r\n        [Hashtable] $options = $null\r\n    )\r\n\r\n    End\r\n    {\r\n        $CompletionOutput = if ($psCmdlet.ParameterSetName -eq 'ScriptInputSet')\r\n        {\r\n            [System.Management.Automation.CommandCompletion]::CompleteInput(\r\n                <#inputScript#>  $inputScript,\r\n                <#cursorColumn#> $cursorColumn,\r\n                <#options#>      $options)\r\n        }\r\n        else\r\n        {\r\n            [System.Management.Automation.CommandCompletion]::CompleteInput(\r\n                <#ast#>              $ast,\r\n                <#tokens#>           $tokens,\r\n                <#positionOfCursor#> $positionOfCursor,\r\n                <#options#>          $options)\r\n        }\r\n\r\n        if ($inputScript -and\r\n            !$inputScript.Contains('.\\') -and\r\n            $CompletionOutput.CompletionMatches.Count -gt 0 -and\r\n            $CompletionOutput.CompletionMatches[0].ResultType -eq [System.Management.Automation.CompletionResultType]::ProviderContainer -or\r\n            $CompletionOutput.CompletionMatches[0].ResultType -eq [System.Management.Automation.CompletionResultType]::ProviderItem\r\n        )\r\n        {\r\n            [System.Object[]]$NewCompletionList = foreach ($Item in $CompletionOutput.CompletionMatches)\r\n            {\r\n                if ($Item.CompletionText.Contains('.\\'))\r\n                {\r\n                    [System.Management.Automation.CompletionResult]::new($Item.CompletionText.Replace('.\\',''), $Item.ListItemText, $Item.ResultType, $Item.ToolTip)\r\n                }\r\n                else\r\n                {\r\n                    $Item\r\n                }\r\n            }\r\n            $CompletionOutput.CompletionMatches = $NewCompletionList\r\n        }\r\n\r\n        return $CompletionOutput\r\n    }\r\n}\r\n```",
+      "created_at": "2022-09-28T16:13:02Z",
+      "updated_at": "2022-09-28T16:13:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Nicely done, @MartinGC94.\r\nI suggest tweaking the code a bit (I've done it below) so as to match `.\\` only at the _start_ of a completion result, and so as to treat `./` the same.\r\n\r\n<Details>\r\n\r\n```powershell\r\nfunction TabExpansion2 {\r\n  <# Options include:\r\n         RelativeFilePaths - [bool]\r\n             Always resolve file paths using Resolve-Path -Relative.\r\n             The default is to use some heuristics to guess if relative or absolute is better.\r\n\r\n       To customize your own custom options, pass a hashtable to CompleteInput, e.g.\r\n             return [System.Management.Automation.CommandCompletion]::CompleteInput($inputScript, $cursorColumn,\r\n                 @{ RelativeFilePaths=$false }\r\n    #>\r\n\r\n  [CmdletBinding(DefaultParameterSetName = 'ScriptInputSet')]\r\n  [OutputType([System.Management.Automation.CommandCompletion])]\r\n  Param\r\n  (\r\n    [Parameter(ParameterSetName = 'ScriptInputSet', Mandatory = $true, Position = 0)]\r\n    [string] $inputScript,\r\n\r\n    [Parameter(ParameterSetName = 'ScriptInputSet', Position = 1)]\r\n    [int] $cursorColumn = $inputScript.Length,\r\n\r\n    [Parameter(ParameterSetName = 'AstInputSet', Mandatory = $true, Position = 0)]\r\n    [System.Management.Automation.Language.Ast] $ast,\r\n\r\n    [Parameter(ParameterSetName = 'AstInputSet', Mandatory = $true, Position = 1)]\r\n    [System.Management.Automation.Language.Token[]] $tokens,\r\n\r\n    [Parameter(ParameterSetName = 'AstInputSet', Mandatory = $true, Position = 2)]\r\n    [System.Management.Automation.Language.IScriptPosition] $positionOfCursor,\r\n\r\n    [Parameter(ParameterSetName = 'ScriptInputSet', Position = 2)]\r\n    [Parameter(ParameterSetName = 'AstInputSet', Position = 3)]\r\n    [Hashtable] $options = $null\r\n  )\r\n\r\n  # Original code.\r\n  $CompletionOutput =\r\n    if ($psCmdlet.ParameterSetName -eq 'ScriptInputSet') {\r\n      [System.Management.Automation.CommandCompletion]::CompleteInput(\r\n        <#inputScript#>  $inputScript,\r\n        <#cursorColumn#> $cursorColumn,\r\n        <#options#>      $options)\r\n    }\r\n    else {\r\n      [System.Management.Automation.CommandCompletion]::CompleteInput(\r\n        <#ast#>              $ast,\r\n        <#tokens#>           $tokens,\r\n        <#positionOfCursor#> $positionOfCursor,\r\n        <#options#>          $options)\r\n    }\r\n\r\n  # Custom post-processing to remove a .\\ or ./ prefix, if present.\r\n  if ($inputScript -and\r\n    $inputScript -notmatch '^.[/\\\\]' -and\r\n    $CompletionOutput.CompletionMatches.Count -gt 0 -and\r\n    $CompletionOutput.CompletionMatches[0].ResultType -in [System.Management.Automation.CompletionResultType]::ProviderContainer, [System.Management.Automation.CompletionResultType]::ProviderItem\r\n  ) {\r\n    $CompletionOutput.CompletionMatches = \r\n      foreach ($Item in $CompletionOutput.CompletionMatches) {\r\n        if ($Item.CompletionText -match '^.[/\\\\]') {\r\n          [System.Management.Automation.CompletionResult]::new(($Item.CompletionText -replace '^.[/\\\\]'), $Item.ListItemText, $Item.ResultType, $Item.ToolTip)\r\n        }\r\n        else {\r\n          $Item\r\n        }\r\n      }\r\n\r\n  }\r\n\r\n  return $CompletionOutput\r\n}\r\n```\r\n</Details>\r\n",
+      "created_at": "2022-09-28T16:54:06Z",
+      "updated_at": "2022-09-28T16:54:06Z"
+    },
+    {
+      "author": "garretwilson",
+      "author_association": "NONE",
+      "body": "> \u2026 use the following modified tabexpansion2 function \u2026\r\n\r\nHow do I use this ~~monstrous~~ marvelous workaround? Do I install it? Do I copy it some where? Do I make sure it runs every time I go into PowerShell?",
+      "created_at": "2022-09-28T19:55:33Z",
+      "updated_at": "2022-09-28T19:55:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To answer your <del>flippant</del> question, which exhibits commendable consistency with your overall <del>abrasive</del> style of communicating: check [the updated answer to your superuser.com](https://superuser.com/a/1742406/139307) question; in short: copy & paste the function definition at the prompt to define it for the _current_ session and/or paste it into your `$PROFILE` file to make it take effect for all future sessions.\r\n",
+      "created_at": "2022-09-28T20:06:54Z",
+      "updated_at": "2022-09-28T20:06:54Z"
+    },
+    {
+      "author": "dkaszews",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 Is `TabCompletion2` one of those magic functions you can overwrite to change behavior of PowerShell REPL? Like `prompt`? What happened to `TabCompletion`? ",
+      "created_at": "2022-09-28T21:54:49Z",
+      "updated_at": "2022-09-28T21:54:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@dkaszews, I don't know the history, but, yes, `TabExpansion2` (not `TabCompletion2`)  is defined by default in an interactive session and called by PowerShell in order to obtain completion results, and there is no `TabExpansion` (anymore).\r\n\r\n[Source-code link](https://github.com/PowerShell/PowerShell/blob/fd67038ed88a844c51bcadbd720e6c2335fa4900/src/System.Management.Automation/engine/InitialSessionState.cs#L3988) to the function definition, current as of this writing.",
+      "created_at": "2022-09-28T22:06:59Z",
+      "updated_at": "2022-09-28T22:06:59Z"
+    },
+    {
+      "author": "kilasuit",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 you mentioned in the SU post this has been like this since v7.2.6 - though I can also repro in v5.1\r\n\r\n@dkaszews - TabExpansion2 has been around IIRC since v3 and is an internal function to PowerShell, it's prior version tabExpansion is used with hosts still running PowerShell v2 [as per this comment](https://github.com/PowerShell/PowerShell/blob/7c624902e1dbb165b1fa0700df498a22c567b9f8/src/System.Management.Automation/engine/remoting/server/serverremotesession.cs#L818-L819)\r\n\r\n",
+      "created_at": "2022-09-28T22:10:56Z",
+      "updated_at": "2022-09-28T22:10:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@kilasuit, the SU answer states that behavior applies _as of_ 7.2.6, implying all versions _up to (and including)_ it.\r\n\r\nGood to know about the history of `TabExpansion` vs. `TabExpansion2`.",
+      "created_at": "2022-09-28T22:27:19Z",
+      "updated_at": "2022-09-28T22:30:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> But I'm dumbfounded as to why PowerShell is so unintelligent that it blindly adds the `.\\` prefix to all relative paths, even where it's not required, not needed, and certainly not desired.\r\n\r\nIt is a compromise. Tab completion works smart only if there is a meta data - type inference. If no type inference is possible the tab completion uses last resort - path completion because this is the most common case. Of course, it is not ideal, but until there is no meta information it is almost impossible to do something smarter, only to add workarounds for special cases. It is not always worth the cost.",
+      "created_at": "2022-09-29T03:25:14Z",
+      "updated_at": "2022-09-29T03:25:14Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> it actually breaks some of my commands, which don't allow any directory (even the current directory) to be specified in the argument.\r\n\r\nSounds like the real problem lies with the design of those. \r\n\r\nTBH PowerShell completes more things than I was used to before I used it, I don't normally like things sticking extras in (like the .\\) but I hardly noticed and now it seems odd to drop into CMD and not have tab expansion for anything other than file names, and for those to be \"naked\".  Changing the default behaviour is likely to annoy a lot more people than it pleases, but as has been shown already tab support comes from a customizable function. \r\n\r\n",
+      "created_at": "2022-09-29T12:29:59Z",
+      "updated_at": "2022-09-29T12:29:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, the complaint isn't about situations where  filename completion isn't appropriate (that's a separate issue, e.g. #14147, #7215), it is about the unnecessary prefixing of completed names with `.\\` or `./` (depending on platform).\r\n\r\nHowever, to me that applies to _arguments_ only, not _command names_, as something like `.\\foo` is _required_ in order to execute a command / open a document named `foo` that is located in the _current directory_ (as opposed to being executable via `$env:PATH`; that _documents_ can be opened via `$env:PATH` is a problem in its own right: #12632):\r\n \r\n  * Curiously, Bash's tab-completion gets this wrong in that it completes executables in the current directory _without_ a prefix (as it generally does), meaning that the invocation would fail unless `./` is manually prepended.\r\n \r\n * Another option would be for PowerShell to complete command names via `$env:PATH` only, _unless_ the user has explicitly typed `.\\` or `./` at the start of their command name.\r\n\r\nMy personal preference is for the prefix  to be _omitted_ for arguments, primarily to cut down on the visual noise (as @jhoneill's comment implies, most commands treat the prefixed form as equivalent, so the problem is primarily an aesthetic one).\r\n\r\nAs for changing the existing behavior: We have no _strict_ backward-compatibility concern here, given that no existing code would be affected, but, as @jhoneill points out, such a change might annoy / confuse users.\r\n\r\nThus, this comes down to:\r\n\r\n* Is it worth implementing a preference variable or, perhaps better, a PSReadLine option to allow prefix-less completion on an _opt-in_ basis?\r\n\r\n* Or is the workaround shown in this post - a custom `TabExpansion2` function - good enough?\r\n\r\nThe latter would be less obscure if it were discussed in <del>a - hypothetical, future - `about_Command_Completion` help topic, which I feel is called for either way.</del>.\r\n\r\nUpdate: Oops! Turns out that such a conceptual help topic already exists: [about_Tab_Expansion](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_Tab_Expansion), so the additional information could be added / linked to there.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n ",
+      "created_at": "2022-09-29T14:01:39Z",
+      "updated_at": "2022-09-29T14:18:52Z"
+    },
+    {
+      "author": "garretwilson",
+      "author_association": "NONE",
+      "body": "Before jumping back in here, I want to stress that I appreciate those who have gone to the trouble to provide a creative workaround. (I haven't got a chance to try it yet; I'll report back when I do. Conceptually I can already imagine a couple of corner cases where it does the wrong thing, but it's likely good enough in the interim.) I'm adding comments not to be argumentative but to add to the discussion so that you can make the best decision on what to do.\r\n\r\n> Bash's tab-completion gets this wrong in that it completes executables in the current directory without a prefix ...\r\n\r\nI understand what you're saying, but another way to look at it would be that in the case of the executable, it's the user who got it wrong: Bash correctly _completed_ what they started, it's just that the user started typing something that wouldn't work to begin with. (Personally I would be fine with that behavior. I'm suspicious of software in general trying to correct my mistakes, as many times the software gets it wrong.)\r\n\r\nIn fact it's arguable that PowerShell doesn't get it 100% right even with commands. Do the following (based on something I found out just last night in the latest _Powershell Cookbook_):\r\n\r\n```powershell\r\n$env:Path += ';.'\r\n```\r\n\r\nYou've just told PowerShell that it's OK to invoke commands in the current directory without the `.\\` prefix. That is, you can type `foo.ps1 bar.dat` and it will run `foo.ps1` just fine. But guess what? If you type `fo` and then to tab completion, _PowerShell still changes it to `.\\foo.ps1`_!\r\n\r\nSo I would argue that there is virtually no intelligence (in the literal software meaning) to what PowerShell is doing. It's just blinding prefixing relative paths with `.\\`, regardless of whether the path is a command or an argument, and regardless of whether the command even needs it. And that irks me, especially since it clutters up a simple thing I'm trying to type.\r\n\r\nIt wouldn't be so bad if the workaround were two or three lines, or if there were a `tab.expansion.prefix.relative.paths` setting as I might expect to add to `.gitconfig` if this were a Git problem. But it doesn't seem correct that I would essentially have to reprogram tab expansion, using a very hackish approach (in no way belittling the people who wrote it --- that's probably the only way to do it) which itself will likely have bugs without further handling of corner cases (e.g. if the user actually typed the path starting with `.\\` to begin with, or if the path has been quoted, etc.). In my mind this all comes down to: PowerShell is doing something I didn't ask it to do (and doing it in a very unintelligent way at that) and it shouldn't be so hard to get it to stop.",
+      "created_at": "2022-09-29T15:57:13Z",
+      "updated_at": "2022-09-29T15:57:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for being willing to engage constructively.\r\n\r\n* Indeed PowerShell currently _blindly_ prepends `.\\` or `./`\r\n* I argue that in the case of completing a _command_ name that is useful (more on that below).\r\n* Yes, the workaround is obscure and so complex that whenever you need to apply it, you'll have to go back to the source and copy the code, which is unfortunate.\r\n* I would personally welcome a simple, configuration-based opt-in way of no longer prefixing _argument_ completions, but I have no say in whether that will happen. (And I would personally also be OK with simply changing the default behavior, but I understand that not everyone would be.)\r\n\r\n---\r\n\r\n> Bash correctly _completed_ what they started,\r\n\r\nThis behavior is useless, as the reasonable expectation of a tab-completed value is that it works _as is_.\r\n\r\nWhat if the user _wants_ completion based on the current directory, and only typed `foo` _as a convenience_, (`.\\` and `./` are awkward to type) relying on the tab-completion logic to turn it into `./foo`? After all, tab-completion is about _interactive convenience_.\r\n\r\nIn fact, I routinely rely on this technique: Say I want to open file `readme.txt` in the current directory: I start typing `read`, and rely on PowerShell to turn this into `./readme.txt`.\r\n\r\nNote that in general what the user typed is (fortunately) not necessarily honored _verbatim_; e.g. typing `*.txt` and tab-completing that would (eventually) get me to `./readme.txt` too.\r\n\r\n  * This doesn't work in Bash if typed as the _command_, btw, so Bash _does_ treat command-name completions differently, so it's unfortunate that it doesn't prepend `./` automatically when needed; curiously, `*.txt` doesn't expand at all, while typing `*` does expand, but only _directories_, but starting a command line in Bash with anything other than an _executable_ doesn't make sense.\r\n\r\n---\r\n\r\n> `$env:Path += ';.'`\r\n\r\n* This is generally ill-advised, as it makes the execution environment less predictable and opens the door for maliciously placed executables to preempt execution of the intended ones, so I see no reason for tab-completion to accommodate such a configuration.\r\n\r\n\r\n",
+      "created_at": "2022-09-29T17:35:53Z",
+      "updated_at": "2022-09-29T17:35:53Z"
+    },
+    {
+      "author": "garretwilson",
+      "author_association": "NONE",
+      "body": "> This [Bash] behavior is useless, as the reasonable expectation of a tab-completed value is that it works as is.\r\n\r\nThat's a reasonable conclusion, and I'm not saying that PowerShell should remove its more helpful behavior in relation to the initial command. I was just saying it's not necessarily \"wrong\" to do it the other way. Both Bash and PowerShell take a \"I'll blindly do path completion the same way for all relative paths.\" I guess my point is that if it has to be all or nothing, I much prefer the Bash approach, which results in fewer things I didn't ask for.\r\n\r\nBut we shouldn't be stuck with two blind approaches. I'm sure PowerShell can be made smart enough to figure out if the path relates to the initial command or an argument. (And I think it's worth noting that **the logic to avoid this behavior surely would be many times shorter than the workaround**.)\r\n\r\n> This [adding the current directory to the command search path] is generally ill-advised ...\r\n\r\nI don't disagree. The point I was making is that the purported purpose of adding `.\\` to the command is because it is necessary for functionality, and I was noting that PowerShell is adding it even when it's not necessary for functionality. If someone still wants PowerShell to add the prefix because it looks prettier to them, that's a valid opinion, but that's a different argument than functional utility.\r\n\r\nI also want to say that your four points at the start of your comment above are an excellent summary, and I agree with them all.",
+      "created_at": "2022-09-29T17:57:59Z",
+      "updated_at": "2022-09-29T17:57:59Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> that irks me, especially since it clutters up a simple thing I'm trying to type.\r\n> \r\n> It wouldn't be so bad if the workaround were two or three lines, or if there were a `tab.expansion.prefix.relative.paths` setting as I might expect to add to `.gitconfig` if this were a Git problem. But it doesn't seem correct that I would essentially have to reprogram tab expansion, using a very hackish approach\r\n\r\nIt's very clear you're irked, \r\n\r\nTabExpansion is implemented as a pair of PowerShell functions (and not as compiled code) precisely to allow for people who do not like the way things have been done to get something different, and lots of things in PowerShell have a similar philosophy. Personally I would like the code for tab expanding files and folders to be as easy to change, I have my own (e.g. it fixes ~ not expanding, expands  .... to ..\\..\\.. yada yada yada) and it has has to be bound to the command/parameter where I want it, it can't be a drop in replacement. At least _this_ wish can be achieved by fixing the returned responses, mine generates extra/different responses \r\n\r\nNow, if there many people feeling as you do, the functions would have been modified to support an option to conditionally run code like that which appears above, or to run as things have worked since ~2006. So far yours is a lone voice, but maybe this thread will reveal some more.  In that situation resources won't get allocated to making the change, there is a work round (take the script you've been given, load it from your profile).  You can have what you want today, if you managed to persuade the team to change the product you wouldn't see the change this year. \r\n\r\n",
+      "created_at": "2022-09-29T18:14:36Z",
+      "updated_at": "2022-09-29T18:14:36Z"
+    },
+    {
+      "author": "dkaszews",
+      "author_association": "CONTRIBUTOR",
+      "body": "~~@jhoneill Can you recommend some resources or tutorial how to modify the completion function (other than to just look at the default and examples in this thread)? I would like to try and replicate behavior of bash, which stops on first distinct character of ambiguous completion.~~\r\n\r\nNvm, found it's already part of PSReadline: https://stackoverflow.com/questions/8264655/how-to-make-powershell-tab-completion-work-like-bash",
+      "created_at": "2022-09-29T18:53:51Z",
+      "updated_at": "2022-09-29T18:56:43Z"
+    },
+    {
+      "author": "garretwilson",
+      "author_association": "NONE",
+      "body": "I've upgraded to PowerShell 7.x and set up a profile and done initial testing of the workaround. Another day I'll have feedback and provide my own improvements. It's been an incredibly long day and I'm trying to find a stopping point.\r\n\r\nMy next step was to be to installing [posh-git](https://github.com/dahlbyk/posh-git), as Git autocomplete was one of the primary reasons for using PowerShell (which I can actually get in Git Bash, but that brings other difficulties). So I wondered, how does posh-git do its magic? And is it compatible with this workaround? I quickly stumbled upon a few things:\r\n\r\n* posh-git seems to use `TabExpansion` in [`GitTabExpansion.ps1`](https://github.com/dahlbyk/posh-git/blob/master/src/GitTabExpansion.ps1), which above someone mentioned was outdated. But that actually seems to be a fallback (caveat: I'm tired and I haven't explored the code thoroughly): it first tries to use something called `Register-TabExpansion`.\r\n* #2130 was moved to MicrosoftDocs/PowerShell-Docs/issues/747, which along with MicrosoftDocs/PowerShell-Docs/issues/2325 seem to indicate that even `TabExpansion2` is obsolete. (Only after I had already mentioned that ticket did I realize it was written by @mklement0.)\r\n  > mention the older mechanism it obsoletes (I presume), namely the TabExpansion[2] functions.\r\n* MicrosoftDocs/PowerShell-Docs/issues/2325's reference link is broken, but it a quick search brings up [`Register-ArgumentCompleter`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/register-argumentcompleter).\r\n\r\nI'm too tired to read those documents tonight, but I'll note them in case some experts here already have the answers: Are we even using the correct approach for the workaround, or should we be instead be using `Register-TabExpansion` or `Register-ArgumentCompleter`? And is this workaround compatible (i.e. won't break or vice-versa) posh-git?\r\n\r\nI'll investigate more after a good night's sleep. Apologies in advance if all this is irrelevant or misinterpreted.",
+      "created_at": "2022-09-30T04:34:01Z",
+      "updated_at": "2022-09-30T04:40:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @MartinGC94 ",
+      "created_at": "2022-09-30T04:50:53Z",
+      "updated_at": "2022-09-30T04:50:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "My presumption about `Register-ArgumentCompleter` (fully) obsoleting `TabExpansion2` wasn't correct: `Register-ArgumentCompleter` defines custom completions for the _arguments_ of _specific commands_ - it is what you typically use. However, to modify completion behavior _globally_, including for _command names_, you still need `TabExpansion2`.\r\n\r\n",
+      "created_at": "2022-09-30T07:31:26Z",
+      "updated_at": "2022-09-30T07:31:50Z"
+    },
+    {
+      "author": "theJasonHelmick",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the issue and the lively conversation, especially the workaround.\u00a0 To be clear regarding this issue: \"Please provide an option or configuration to prevent PowerShell from prefixing every relative file path \". This was discussed by the Working Group.\u00a0 We don\u2019t see an overwhelming increased value in making a change here.\u00a0 Thank you for the input and issue.\r\n\r\n",
+      "created_at": "2022-10-05T20:20:44Z",
+      "updated_at": "2022-10-05T20:20:44Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as declined and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-10-06T22:01:21Z",
+      "updated_at": "2022-10-06T22:01:21Z"
+    }
+  ],
+  "created_at": "2022-09-28T13:59:55Z",
+  "number": 18180,
+  "state": "closed",
+  "title": "prevent PowerShell autocomplete from adding dot prefix",
+  "updated_at": "2022-10-06T22:01:22Z"
+}

@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13658",
+  "author": "mklement0",
+  "body": "Follow-up from #13636:\r\n\r\n_Note_: \r\n\r\n* Substantially revised after the [discussion below](https://github.com/PowerShell/PowerShell/issues/13658#issuecomment-696117740).\r\n\r\n* While the _verbose_ stream is being discussed, the same applies analogously to the warning, debug, and information streams.\r\n\r\n## Summary of the new feature/enhancement\r\n\r\n**As a script/function author, I want to be able to create advanced functions / scripts that are cmdlet-like and deliberately limit verbose output to explicit `Write-Verbose` calls only (by default)**.\r\n\r\nBecause of PowerShell's dynamic scoping, the stream-controlling `$*Preference` variables are visible to all child scopes of a given script/function and also apply to cmdlet calls inside them.\r\nThis also applies to the stream-controlling common parameters (e.g., `-Verbose`), which PowerShell automatically translates into function/script-local `$*Preference` variables.\r\n\r\nWhile this can be helpful in troubleshooting a function or script, it can also lead to a flood of unwanted verbose output that drowns out the verbose output of interest.\r\n(A related problem are the verbose messages that can surface due to _auto-loading_ of the module containing the command being invoked - see #13657.)\r\n\r\nFor instance, in the following (simulated) advanced function, I may want to show the user the explicit `Write-Verbose` call's output _only_, not also the verbose messages produced by the `Import-Module` call, and the (simulated) call to another script or function.\r\n\r\n```powershell\r\n# The script block represents an *advanced function*.\r\n& {\r\n  [CmdletBinding()]\r\n  param()\r\n\r\n  # This also produces verbose output.\r\n  Import-Module PSReadLine\r\n\r\n  # Simulate a call to other PowerShell functions / scripts:\r\n  # This also produces verbose output.\r\n  & {\r\n    Write-Verbose 'in child scope'\r\n  }\r\n\r\n  # The only explicit Write-Verbose call\r\n  Write-Verbose Done.\r\n\r\n} -Verbose\r\n```\r\n\r\nFor carefully crafted, cmdlet-like advanced scripts/functions, it would be helpful to have an _opt-in_ mechanism that makes PowerShell limit verbose output to explicit `Write-Verbose` calls only (by default), so that the verbose output isn't \"polluted\" by verbose output from internal calls that should be considered implementation details.\r\n\r\nWhile there are workarounds, they are cumbersome; here's one, which demonstrates the desired behavior:\r\n\r\n```powershell\r\n& {\r\n  [CmdletBinding()]\r\n  param()\r\n\r\n  # If verbose output is turned on, hide the setting from the descendant scopes,\r\n  # but make all Write-Verbose calls *in this scope only* emit verbose output.\r\n  if ($VerbosePreference -eq 'Continue') {\r\n    $VerbosePreference = 'SilentlyContinue' # Hide from cmdlet calls and descendant scopes.\r\n    # Apply only to Write-Verbose calls in the current scope.\r\n    $private:PSDefaultParameterValues = $PSDefaultParameterValues ? $PSDefaultParameterValues.Clone() : [System.Management.Automation.DefaultParameterDictionary]::new()\r\n    $private:PSDefaultParameterValues['Write-Verbose:Verbose'] = $true\r\n  }\r\n\r\n  # This is now quiet.\r\n  Import-Module PSReadLine\r\n\r\n  # Simulate a call to other PowerShell functions / scripts:\r\n  # This is now quiet too.\r\n  & {\r\n    Write-Verbose 'in child scope'\r\n  }\r\n\r\n  # Only this will print.\r\n  Write-Verbose Done.\r\n\r\n} -Verbose\r\n```\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nImplement a new `StreamPreferencePropagation` property on the `CmdletBinding` attribute, which defaults to `$true` and can be set to `$false` (analogous to the `PositionalBinding` property):\r\n\r\n```powershell\r\n& {\r\n  # Note the new property.\r\n  [CmdletBinding(StreamPreferencePropagation = $false)]\r\n  param()\r\n\r\n  # This is now quiet.\r\n  Import-Module PSReadLine\r\n\r\n  # Simulate a call to other PowerShell functions / scripts:\r\n  # This is now quiet too.\r\n  & {\r\n    Write-Verbose 'in child scope'\r\n  }\r\n\r\n  # Only this will print.\r\n  Write-Verbose Done.\r\n\r\n} -Verbose\r\n```\r\n\r\n\r\n\r\n",
+  "closed_at": "2020-09-26T20:54:28Z",
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "I think this will annoy roughly as many people as it pleases. \r\nThere are functions which have no write-verbose statements which are wrappers for another command which we want the detail from (IIRC I did this a lot to find what went into invoke-restmethod in other functions). \r\nI've also written functions where I expressly called other things with `-verbose:$false`  because I *did* write to verbose in the function, and tens or hundreds of function calls with verbose made it hard to see the wood for the trees.  \r\n\r\nI'm not sure which is the more common case, but my gut says its not 10 or 20 of one to one of the other. \r\n\r\n",
+      "created_at": "2020-09-21T13:33:40Z",
+      "updated_at": "2020-09-21T13:33:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah I don't think this will be a clear cut case either way. I can see times I'd want this and times it would make things really difficult for me as an author.",
+      "created_at": "2020-09-21T20:23:01Z",
+      "updated_at": "2020-09-21T20:23:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I get that this a tricky proposition, but I wanted to get the conversation started.\r\n\r\n> I've also written functions where I expressly called other things with -verbose:$false because I did write to verbose in the function, and tens or hundreds of function calls with verbose made it hard to see the wood for the trees.\r\n\r\nThis scenario is precisely what this proposal is trying to address.\r\nWhile adding `-verbose:$false` to all internal calls is an _effective_ workaround, it is obviously both very cumbersome and prone to errors by omission.\r\n\r\nHowever, as noted in the \"Conceptual challenge\" paragraph in the OP, the line between scripts that are carefully crafted like cmdlets (which benefit from the proposed change) and \"glue\" scripts that simply tie together other commands for a custom task (to which the change should _not_ apply) isn't easy to draw _automatically_.\r\n\r\nIncidentally, the same distinction would make sense for the warning, debug, and information streams.\r\n\r\nSo perhaps the answer is to allow advanced scripts / functions to request the non-propagation behavior _explicitly_, perhaps as part of the `[CmdletBinding()]` attribute; e.g.:\r\n\r\n```powershell\r\n[CmdletBinding(PreferencePropagation=$false, ...)]\r\n```\r\n\r\n",
+      "created_at": "2020-09-21T20:28:53Z",
+      "updated_at": "2020-09-23T18:30:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Based on the feedback I've completely rewritten the OP:\r\n\r\nI'm now asking for an _opt-in_ mechanism, via the `[CmdletBinding()]` attribute - this preserves the existing behavior while giving authors the _option_ to carefully craft cmdlet-like functions/scripts that produce deliberate verbose output only.\r\n",
+      "created_at": "2020-09-23T18:33:25Z",
+      "updated_at": "2020-09-23T18:33:25Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "When I first read through this, my reaction was similar to jhoneill and vexx32, along the lines of \"this will annoy roughly as many people as it pleases\" (or more). Because in a non-trivial module, I typically have functionality broken up into lots of functions--it's an entire library, with everything working together. So what happens is, yeah, sometimes I might want Verbose output only from \"just my code\", but that's never just one function; it calls several helpers, which each call several helpers, etc.\r\n\r\nWith the \"opt-in\" mechanism... maybe that could be reasonable, but I'm still not convinced it's necessary or would even do what most people want.\r\n\r\n1. **Not necessary:** My strategy for dealing with this is to simply hardcode `-Verbose:$false` on external calls that I don't want to see Verbose output for. For example, calls to `Import-Module` (which of course requires me to also explicitly pre-load dependencies to avoid #13657, ugh).\r\n\r\n2. **Not what people want:** as mentioned in my opening paragraph, I believe what is actually wanted is \"Verbose output for 'Just My Code'\", not \"Verbose output for 'Just This Function'\".\r\n\r\nPerhaps the idea could be re-worked again, from a per-function opt-in thing, to something like a still-dynamically-scoped-but-stops-at-module-boundaries concept. But given that I don't think it's necessary in the first place, that seems like a lot of complication for no good reason.\r\n\r\nDoes my strategy for (1) not cover some scenario?",
+      "created_at": "2020-09-26T18:44:21Z",
+      "updated_at": "2020-09-26T18:44:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jazzdelightsme \r\n\r\n>  something like a still-dynamically-scoped-but-stops-at-module-boundaries concept\r\n\r\nIt actually _does_ stop a module boundaries, but that is in itself highly problematic: #4568\r\n\r\n> Does my strategy for (1) not cover some scenario?\r\n\r\nYes, it's an effective approach (which @jhoneill also mentioned), but my concern was that it is cumbersome and easy to forget.\r\n\r\nBut the point about intra-module helper code is a valid one.\r\n\r\nI'm closing this, and let's hope that fixing #13657 alone will go a long way toward mitigating the problem.\r\n\r\n\r\n",
+      "created_at": "2020-09-26T20:54:27Z",
+      "updated_at": "2020-09-26T20:54:27Z"
+    }
+  ],
+  "created_at": "2020-09-18T20:21:47Z",
+  "number": 13658,
+  "state": "closed",
+  "title": "Give advanced PowerShell functions and scripts an opt-in to limit verbose output to explicit Write-Verbose calls",
+  "updated_at": "2020-09-26T20:54:28Z"
+}

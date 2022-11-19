@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7679",
+  "author": "dantraMSFT",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\n- Windows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n- Fill out the following repro template:\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n* Install OpenSSH on Windows Server 2016\r\n* Configure PowerShell as a subsystem\r\n    NOTE: Due to path issues, create a symlink or copy PowerShell Core to a directory without spaces\r\n    Subsystem       powershell c:\\powershell\\pwsh.exe -sshs -NoLogo -NoProfile\r\n\r\n* Connect from a linux or windows system\r\n\r\n```powershell\r\n$session = New-PSSession -HostName hostname -UserName username\r\nEnter-PSSession $session\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nThe session is entered.\r\n\r\nActual behavior\r\n---------------\r\nThe command fails\r\n```powershell\r\nPS /home/psrptest> enter-pssession $session\r\nenter-pssession : The 'Measure-Object' command was found in the module 'Microsoft.PowerShell.Utility', but the module could not be loaded. For more information, run 'Import-Module Microsoft.PowerShell.Utility'.\r\nAt line:1 char:1\r\n+ enter-pssession $session\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (Measure-Object:String) [Enter-PSSession], CommandNotFoundException\r\n+ FullyQualifiedErrorId : CouldNotAutoloadMatchingModule\r\n```\r\n\r\nUsing Invoke-Command to invoke Test-Path on the session also produces an error due to failing to load 'Microsoft.PowerShell.Management'\r\n\r\n```powershell\r\nPS /home/psrptest> Invoke-Command -Session $session -ScriptBlock {Test-Path -Path C:\\Windows}\r\nThe 'Test-Path' command was found in the module 'Microsoft.PowerShell.Management', but the module could not be loaded. For more information, run 'Import-Module Microsoft.PowerShell.Management'.\r\n+ CategoryInfo          : ObjectNotFound: (Test-Path:String) [], CommandNotFoundException\r\n+ FullyQualifiedErrorId : CouldNotAutoloadMatchingModule\r\n+ PSComputerName        : psrpwinsrv.fsm0dauomfbubcgw4wlghhwv3d.yx.internal.cloudapp.net\r\n\r\n```\r\n\r\nUsing Invoke-Command to examine $env:PSModulePath, it appears suspicious in that $PSHOME is the last entry in the apath.\r\n\r\n```powershell\r\nPS /home/psrptest> Invoke-Command -Session $session -ScriptBlock {$PSHOME}\r\nC:\\powershell\r\nPS /home/psrptest> Invoke-Command -Session $session -ScriptBlock {$env:PSModulePath}\r\nC:\\Users\\psrptest\\Documents\\PowerShell\\Modules;C:\\Program Files\\PowerShell\\Modules;C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules;c:\\powershell\\Modules\r\n```\r\nEnvironment data\r\n----------------\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSRemotingProtocolVersion      2.3\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nGitCommitId                    6.1.0-rc.1\r\nPSEdition                      Core\r\nOS                             Microsoft Windows 10.0.14393\r\nPlatform                       Win32NT\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\nPSVersion                      6.1.0-rc.1\r\n```\r\n",
+  "closed_at": "2018-09-10T17:58:38Z",
+  "comments": [
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "The problem occurs when the PSModulePath from the native environment contains a reference to a SxS installation. \r\n\r\nModuleIntrinsics.GetModulePath calls RemoveSxSPsHomeModulePath to remove it; which succeeds but the subsequent logic is has a few problems.  In the repro case, systemModulePathToUse is populated with the PSHOME\\Modules because hklmMachineModulePath is null and it is placed at the end of the PSModulePath.  Using the pshome\\modules path as the fallback is problem since later logic assumes they are different.\r\n\r\nFor the repro case, I was using 6-preview as the default shell for OpenSSH and using RC-1 as the subsystem.  OpenSSH adds the path of the default shell  to the PSModulePath environment variable which is picked up by the subsystem process.\r\n",
+      "created_at": "2018-09-06T01:28:37Z",
+      "updated_at": "2018-09-06T17:12:08Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "The problem occurs when the environment's path already contains the Windows PowerShell module path (%windir%\\system32\\WindowsPowerShell\\v1.0\\Modules).  \r\n\r\nThe current logic conditionally appends it if it is not present but doesn't consider it when adding $PSHOME\\Modules.  The result is $PSHOME\\Modules is added after Windows PowerShell causing built in modules to be loaded from Windows PowerShell; many of which fail.\r\n\r\nThe problem only occurs when SxS versions of PowerShell containing the PSCompatibleEdition changes are installed and one launches the other or if the Windows PowerShell module path is present in the environment's PSModulePath.\r\n\r\nA possible fix is to detect the existence of WP's module path and insert $PSHOME\\Modules before it.",
+      "created_at": "2018-09-06T17:15:03Z",
+      "updated_at": "2018-09-06T17:31:07Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Talked to @dantraMSFT, this seems more of an advanced use case than a common case for most users.  If the fix comes in and is low risk, we can consider for 6.1 GA, but it's not a blocker for GA.",
+      "created_at": "2018-09-07T00:14:30Z",
+      "updated_at": "2018-09-07T00:14:30Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: The proposed fix and test are here: https://github.com/PowerShell/PowerShell/pull/7727",
+      "created_at": "2018-09-07T00:35:39Z",
+      "updated_at": "2018-09-07T00:35:39Z"
+    }
+  ],
+  "created_at": "2018-08-31T19:47:07Z",
+  "number": 7679,
+  "state": "closed",
+  "title": "Using PowerShell Core RC-1  as an OpenSSH subsystem on windows breaks core module loading",
+  "updated_at": "2018-09-11T04:31:47Z"
+}

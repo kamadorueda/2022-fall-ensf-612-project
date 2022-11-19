@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8150",
+  "author": "OmerYa",
+  "body": "AMSI plays a vital role in Powershell's security but it is found lacking when simple obfuscation techniques are employed. This is a \"bug\" in Powershell since it does not report the actual command being executed.\r\n\r\nAs an example, look at the following command:\r\n`[Ref].Assembly.GetType(('{0}{1}{2}'-f'System.Management .Aut','omation.A','msiUtils')).GetField(('{0}{1}{2}'-f'am','siIn','itFailed'),('{0}{1}{2}'-f'NonPu','blic,S','tatic')).SetValue($null,$true)`\r\nIt is minimally obfuscated version of [Matt Graeber's \"AMSI bypass in a single tweet\"](https://twitter.com/mattifestation/status/735261176745988096?lang=en). Using AMSI with Windows Defender blocks the Matt's original command but fails to detect the obfuscated version.\r\n\r\nIn my point of view, the responsibility for blocking such a bypass is on the endpoint security product, not on Powershell itself. Having said that, Powershell's responsibility is to accurately report through AMSI the exact command being executed and this is the \"bug\" I ask to address. On the example above, Powershell sends the obfuscated command to AMSI (which causes Windows Defender to miss the malicious content).\r\n\r\nThe reason for this behavior is the point in time where ScanContent is being called - right before compilation of a ScriptBlock. This location has a few disadvantages:\r\n1. Commands resulting in execution of native app (through NativeCommandProcessor) can be missed.\r\n2. Calls for C# Cmdlet can be missed (Cmdlets running through CommandProcessor).\r\n3. Calls to functions with obfuscated parameters can be missed (when parameters are bound by the compiler).\r\nThere might be a few other cases - I didn't have time to go through all code paths.\r\n\r\nSolving (1) and (2) is easy:\r\n(1) Add calls for ScanContent at NativeCommandProcessor.InitNativeProcess() before creating a Process object (two locations).\r\n(2) Add call for ScanContent at either CommandProcessor.ProcessRecord or at Cmdlet.DoProcessRecord (by that time the parameters are known.\r\n\r\nThe hard issue is (3) and requires some more thought on how to address the issue. My POC changed the behavior of Language.PSInvokeMemberBinder.InvokeMethod() to add Expression.Call() to a function that receives the MethodBase and parameters and calls ScanContent before calling Expression.Call that was supposed to be called. While this solution works well it is not complete as there are some other methods that invoke methods dynamically.\r\n\r\nA POC with implementation can be found at:\r\nhttps://github.com/OmerYa/Babel-Shellfish\r\nA talk on the subject from DerbyCon 2018:\r\nhttp://www.irongeek.com/i.php?page=videos/derbycon8/track-3-15-goodbye-obfuscation-hello-invisi-shell-hiding-your-powershell-script-in-plain-sight-omer-yair\r\n\r\nI'll try to send pull request for the mentioned changes on the following days.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @TravisEz13 @PaulHigin ",
+      "created_at": "2018-10-31T00:49:51Z",
+      "updated_at": "2018-10-31T00:49:51Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@OmerYa Please be sure to follow our security issue reporting process documented here: https://github.com/PowerShell/PowerShell/blob/master/docs/maintainers/issue-management.md#security-vulnerabilities",
+      "created_at": "2018-10-31T00:52:46Z",
+      "updated_at": "2018-10-31T00:52:46Z"
+    },
+    {
+      "author": "OmerYa",
+      "author_association": "NONE",
+      "body": "@TravisEz13 The issue was already reported to Microsoft Security Response Center and got approval for publishing.",
+      "created_at": "2018-10-31T07:23:48Z",
+      "updated_at": "2018-10-31T07:23:48Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks @OmerYa.\r\n\r\nThe AMSI bypass via dotNet reflection (as reported by Matt Graeber) is a known issue.\r\n\r\n`Powershell's responsibility is to accurately report through AMSI the exact command being executed and this is the \"bug\" I ask to address. On the example above, Powershell sends the obfuscated command to AMSI (which causes Windows Defender to miss the malicious content).`\r\n\r\nI don't agree with this.  AV engines have signatures based on commands typed at the command line and scripts as they are run, and I feel that shouldn't change.  In any case changing it will break existing AV signatures.  In addition, a high degree of obfuscation can, in itself, be an indicator of malicious code.\r\n\r\nI am not sure I understand your comments on the use of ScanContent.  Can you provide examples in your description where ScanContent is not covering executing script?\r\n\r\n",
+      "created_at": "2018-10-31T16:55:16Z",
+      "updated_at": "2018-10-31T16:55:16Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I think I mis-read the idea of providing non-obfuscated text to AMSI.  If we do it in a new stream then we are adding information and not changing existing reporting.  I think this would be a definite improvement since it means giving more information to AV engines.",
+      "created_at": "2018-10-31T22:52:54Z",
+      "updated_at": "2018-10-31T22:52:54Z"
+    },
+    {
+      "author": "OmerYa",
+      "author_association": "NONE",
+      "body": "That is where I was aiming - adding more information to AV engines.\r\n\r\nThe current implementation missed in three major cases as I outlined above. The first two issues arise from the position ScanContent is being called right now - before ScriptBlock compilation. This compilation happens only if command discovery decides to use a DlrCommandProcessor. If on the other hand the command discovery creates CommandProcessor or NativeCommandProcessor to handle the command, the script won't be sent to ScanContent at all.\r\n\r\nThe third issue I mention is about binding - consider the following code (variation on the above script):\r\n```\r\n$s = 'System.Management .Aut'\r\n$s += 'omation.A'\r\n$s += 'msiUtils'\r\n[Ref].Assembly.GetType($s)\r\n```\r\nIt won't be considered obfuscated as all it uses is string concatenation though it achieves the same result (and bypasses Defender's signature). The reason this script bypasses detection is because Defender receives `[Ref].Assembly.GetType($s)` where `$s` has no meaning for it though it contains a string that otherwise would have been blocked.\r\nSince `$s` is a bound parameter, it's value is known only during runtime and not before compilation (when ScanContent is called). I suggest tracking bound invocations on top of the current ScanContent calls. @LeeHolmes has some very good suggestions on how this can be implemented.\r\n\r\nThe runtime behavior is even more dangerous - consider the following code:\r\n```\r\n$s = 'System.String'\r\n[Ref].Assembly.GetType($s)\r\n$s = 'System.Management .Aut'\r\n$s += 'omation.A'\r\n$s += 'msiUtils'\r\n[Ref].Assembly.GetType($s)\r\n```\r\nSince the same line of code `[Ref].Assembly.GetType($s)` is called twice (correct me if I'm wrong) - the code will be cached. The first time it is called $s will contain legitimate string but on the second call it will fetch a dangerous object that should be blocked. The only way to track this behavior is if the call to ScanContent happens right before the bound invocation when the variable value is known.",
+      "created_at": "2018-11-01T09:54:46Z",
+      "updated_at": "2018-11-01T09:54:46Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "WG-Security:\r\nWe want to accommodate AMSI providers, and this sounds like a reasonable request.  Marking it as an enhancement for 7.2 consideration.\r\n\r\nThis is an impactful change that needs to be coordinated with AMSI providers, since we assume requires re-training and perhaps include tags to define the reporting format.",
+      "created_at": "2021-06-21T21:21:44Z",
+      "updated_at": "2021-06-21T21:21:44Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "WG-Security\r\nMoving to 7.3 consider.",
+      "created_at": "2021-08-23T21:19:52Z",
+      "updated_at": "2021-08-23T21:19:52Z"
+    }
+  ],
+  "created_at": "2018-10-30T18:34:20Z",
+  "number": 8150,
+  "state": "open",
+  "title": "Improve strings sent to AMSI",
+  "updated_at": "2021-08-23T21:19:52Z"
+}

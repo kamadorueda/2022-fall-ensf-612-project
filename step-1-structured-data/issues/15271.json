@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15271",
+  "author": "chillum",
+  "body": "## Summary of the new feature/enhancement\r\n\r\n<!-- \r\nA clear and concise description of what the problem is that the new feature would solve.\r\nTry formulating it in user story style (if applicable):\r\n'As a user I want X so that Y.' with X being the being the action and Y being the value of the action.\r\n-->\r\nAs a user I want to be able to display running app's name in window title.\r\n\r\nI launch `kubectl port-forward ...` in one terminal tab and sometimes I'm completely lost like: do I have it still running? in which terminal?\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\n<!-- \r\nA clear and concise description of what you want to happen.\r\nConsider providing an example PowerShell experience with expected result.\r\n-->\r\n\r\nIn zsh I can do:\r\n\r\n```sh\r\nfunction precmd {\r\n    print -Pn '\\e]0;%1~\\a'\r\n}\r\nfunction preexec {\r\n    printf '\\e]0;%s\\a' $1\r\n}\r\n```\r\n\r\nand this will set my title:\r\n1. to the running command if one is running\r\n2. to the path of the directory if shell is waiting\r\n\r\nin PowerShell I can set the title to the directory name in the `prompt` function, but didn't find any analogue to `preexec`.\r\n\r\nbasically the idea is to have a hook function that will execute just before the command is executed, and this function will know what command line will be executed next. and then it will be possible to implement the desired customization.",
+  "closed_at": "2021-06-10T23:00:06Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Something similar previously came up in  #14484, and my sense is that this would best be handled by introducing new event hooks exposed via `$ExecutionContext.InvokeCommand.*Action` properties, analogous to [`$ExecutionContext.InvokeCommand.PreCommandLookupAction`](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.commandinvocationintrinsics.precommandlookupaction) / [`$ExecutionContext.InvokeCommand.PostCommandLookupAction`](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.commandinvocationintrinsics.postcommandlookupaction):\r\n\r\nFor instance, `$ExecutionContext.InvokeCommand.PreExecutionAction` and `$ExecutionContext.InvokeCommand.PostExecutionAction`, which could receive the command line being executed as the event argument. This would have the added advantage that it would be a _host-independent_ mechanism; that is, it wouldn't be tied to consoles (terminals).\r\n\r\n---\r\n\r\nHere's a workaround using the current features; it relies on `PSReadLine`, which is the command-line editing module that is loaded by default.\r\n\r\n```powershell\r\n# Override the PSReadLine Enter key handler in order to inject\r\n# custom logic just before submitting a command.\r\nSet-PSReadLineKeyHandler Enter {\r\n\r\n  # Get the text of the comamnd being submitted. \r\n  $line = $null; [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref] $line, [ref] $null)\r\n\r\n  if ($line.Trim() -and $line.Trim() -inotmatch '\\[Console\\]::Title\\b|\\$host\\.ui\\.RawUI\\.WindowTitle\\b') { # (Reasonably robustly) bypass title updating when the window title is explicitly set / queried.\r\n\r\n    # Save the current window title in a global variable, to be used by the `prompt` function to restore it.\r\n    # Note: On Unix, $host.ui.RawUI.WindowTitle only reports a value if one was previously assigned \r\n    #       to that property,  so we must fall back to a default.\r\n    $global:__prevWinTitle = if ($host.ui.RawUI.WindowTitle) { $host.ui.RawUI.WindowTitle } else { 'pwsh' }\r\n  \r\n    # Update the window title to show the running command and when it was started.\r\n    $host.ui.RawUI.WindowTitle = \"{0} - started at: {1:T}\" -f $line, [datetime]::Now\r\n\r\n  }\r\n\r\n  # Submit the command.\r\n  [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()\r\n}\r\n\r\n# Update the `prompt` function to restore the previous window title on completion of a command.\r\n# Note that this prevents scripts from modifying the window title.\r\n$function:prompt = \"if (`$global:__prevWinTitle) { `$host.ui.RawUI.WindowTitle = `$global:__prevWinTitle; `$global:__prevWinTitle = '' }; $function:prompt\"\r\n```\r\n\r\n",
+      "created_at": "2021-04-19T20:56:47Z",
+      "updated_at": "2021-04-19T20:56:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "At a glance, it looks kinda like you could use the `PreCommandLookupAction` you mentioned for this purpose fairly easily:\r\n\r\n```powershell\r\n$ExecutionContext.InvokeCommand.PreCommandLookupAction = {\r\n    param($command)\r\n\r\n    if ($command -notmatch 'Set-StrictMode|PSConsoleHost') {\r\n        $host.UI.RawUI.WindowTitle = \"Running [$command]...\"\r\n    }\r\n    else {\r\n        $host.UI.RawUI.WindowTitle = \"pwsh\"\r\n    }\r\n}\r\n```\r\n\r\nI guess the question is -- is there something significantly different in a \"true\" pre-exec hook to what this offers? This hook runs slightly before a pre-exec hook would, but offers much the same thing, I think?",
+      "created_at": "2021-04-19T21:08:29Z",
+      "updated_at": "2021-04-19T21:08:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, these hooks are invoked _multiple_ times per command line (use `$ExecutionContext.InvokeCommand.PreCommandLookupAction = { write-verbose -vb pre }` to see the problem), which makes this workaround awkward, especially if you want to handle restoring the previous title correctly - see https://github.com/PowerShell/PowerShell/issues/14484#issuecomment-751221242.\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-19T21:14:02Z",
+      "updated_at": "2021-04-19T21:14:02Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Instead of a key handler, you can override the function `PSConsoleHostReadLine` similar to how you would `profile`.\r\n\r\nThat combined with overriding `profile` itself provides hooks into both pre and post invocation.",
+      "created_at": "2021-04-20T01:37:09Z",
+      "updated_at": "2021-04-20T01:37:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, redefining `PSConsoleHostReadLine` is also an option, as you've demonstrated at https://github.com/PowerShell/PowerShell/issues/14484#issuecomment-751741668, but using `Set-PSReadLineKeyHandler Enter` strikes me as the cleaner option, because it uses an official extensibility mechanism.\r\n\r\n(And you probably meant `prompt`, not `$profile`).",
+      "created_at": "2021-04-20T01:40:28Z",
+      "updated_at": "2021-04-20T01:40:28Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "This feature request looks to be a duplicate of #14484 (Feature Request - \"pre\"prompt functionality).",
+      "created_at": "2021-06-09T21:13:34Z",
+      "updated_at": "2021-06-09T21:13:34Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as duplicate and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-06-10T23:00:05Z",
+      "updated_at": "2021-06-10T23:00:05Z"
+    }
+  ],
+  "created_at": "2021-04-19T14:44:35Z",
+  "number": 15271,
+  "state": "closed",
+  "title": "Feature Request: pre-exec hook",
+  "updated_at": "2021-06-10T23:00:06Z"
+}

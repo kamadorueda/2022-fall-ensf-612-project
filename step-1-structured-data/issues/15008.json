@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15008",
+  "author": "rjmholt",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nA classic pitfall of the `PowerShell` class is doing something like this:\r\n\r\n```csharp\r\nusing (var pwsh = PowerShell.Create())\r\n{\r\n    DateTime? firstDate = pwsh.AddCommand(\"Get-Date\").Invoke<DateTime?>().FirstOrDefault();\r\n    DateTime? secondDate = pwsh.AddCommand(\"Get-Date\").Invoke<DateTime?>().FirstOrDefault();\r\n\r\n    Console.WriteLine($\"1: {firstDate}\");\r\n    // secondDate is null??\r\n    Console.WriteLine($\"2: {secondDate}\");\r\n}\r\n```\r\n\r\nIn this scenario, the PowerShell object's state is affected by the first `AddCommand()` call and we need to clear the commands. This is easily seen here but when `pwsh` is a field being shared between calls it can be subtle.\r\n\r\nIn a lot of my code I end up writing this:\r\n\r\n```csharp\r\nstatic class PowerShellExtensions\r\n{\r\n    public static Collection<PSObject> InvokeAndClear(this PowerShell pwsh) => pwsh.InvokeAndClear<PSObject>();\r\n\r\n    public static Collection<T> InvokeAndClear<T>(this PowerShell pwsh)\r\n    {\r\n        try\r\n        {\r\n            return pwsh.Invoke<T>();\r\n        }\r\n        finally\r\n        {\r\n            pwsh.Commands.Clear();\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nWe should consider adding that to the PowerShell SDK, since I suspect this is a very common use case.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Also the error, verbose, etc streams",
+      "created_at": "2021-03-12T23:18:14Z",
+      "updated_at": "2021-03-12T23:18:14Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just to spell it out, because the fact that your sample code actually _does_ work confused me:\r\n\r\nThe commands _accumulate_ in the `pwsh.Commands` collection, and subsequent `.Invoke()` calls try to execute them _all_, in addition to accumulating stream output in `pwsh.Streams` across calls, as @SeeminglyScience  points out.\r\n\r\nYour second `.Invoke()` call is therefore roughly equivalent to:\r\n\r\n```powershell\r\n[powershell]::Create().AddCommand(\"Get-Date\").AddCommand(\"Get-Date\").AddArgument('1970-01-01').Invoke()\r\n```\r\n\r\nwhich in turn is equivalent to:\r\n\r\n```powershell\r\nGet-Date | Get-Date\r\n```\r\n\r\nand the latter just _happens_ to work, because `Get-Date` also accepts a `[datetime]` instance via the pipeline, so this pipeline is in effect the same as just calling `Get-Date` alone.\r\nAdding a `-Date` argument to the 2nd `GetDate` call would surface the problem, however, because something like `Get-Date | Get-Date 1970-01-01` indeed fails.\r\n\r\n---\r\n\r\nAs for the API surface and your extension method:\r\n\r\nIf the intent is to also clear the _streams_, you cannot include `.Streams.ClearStreams()` in the `.InvokeAndClear()` method, as you would instantly wipe out the `.Invoke()` call's non-success stream output.\r\n\r\nSo I wonder if something along the following lines is called for instead:\r\n\r\nA fluent `.Reset()` method that calls `.Commands.Clear()` and `.Streams.ClearStreams()` and returns the PowerShell instance itself, as the existing methods do.\r\n\r\nThis means that resetting can then either be performed stand-alone:\r\n\r\n```csharp\r\npwsh.Reset();  // same as: .Commands.Clear(); .Streams.ClearStreams(); return this;\r\n```\r\n\r\nOr, fluently, as part of recurring invocations on a reusable `PowerShell` instance:\r\n\r\n```csharp\r\npwsh.Reset().AddCommand(\"Get-Date\").Invoke<DateTime?>().FirstOrDefault();\r\n```\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-13T14:29:52Z",
+      "updated_at": "2021-03-13T14:29:52Z"
+    },
+    {
+      "author": "Fs00",
+      "author_association": "CONTRIBUTOR",
+      "body": "I would definitely love to see a `PowerShell.Reset()` method as proposed by @mklement0!\r\nI've found myself doing `pwsh.Commands.Clear(); pwsh.Streams.ClearStreams();` too (and once discovered the hard way that I had to).",
+      "created_at": "2021-03-15T17:55:08Z",
+      "updated_at": "2021-03-15T17:55:08Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Quick thought since I have the issue open:\r\n\r\n```csharp\r\n[Flags]\r\npublic enum PowerShellClearOptions\r\n{\r\n    None = 0x0,\r\n    Commands = 0x1,\r\n    Streams = 0x2,\r\n}\r\n\r\n...\r\n\r\npublic PowerShell Reset() => Reset(PowerShellClearOptions.Commands | PowerShellClearOptions.Streams);\r\n\r\npublic PowerShell Reset(PowerShellClearOptions clearOptions)\r\n{\r\n    if (clearOptions.HasFlag(PowerShellClearOptions.Commands))\r\n    {\r\n        Commands.Clear();\r\n    }\r\n\r\n    if (clearOptions.HasFlag(PowerShellClearOptions.Streams))\r\n    {\r\n        Streams.Clear();\r\n    }\r\n    \r\n    return this;\r\n}\r\n```\r\n\r\nI suggest that because in various scenarios, I don't want to clear the streams.",
+      "created_at": "2021-03-26T00:04:48Z",
+      "updated_at": "2021-03-26T00:05:20Z"
+    }
+  ],
+  "created_at": "2021-03-12T20:41:40Z",
+  "number": 15008,
+  "state": "open",
+  "title": "PowerShell class should have an InvokeAndClear() method",
+  "updated_at": "2021-03-26T00:05:20Z"
+}

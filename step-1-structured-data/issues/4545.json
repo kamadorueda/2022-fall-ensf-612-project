@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4545",
+  "author": "mklement0",
+  "body": "Note: Unlike _string interpolation_, _default output_ is meant to be _culture-sensitive_, as the following example demonstrates:\r\n\r\n```powershell\r\n> [cultureinfo]::CurrentCulture = 'de-DE'; \"$(1.2)\"; 1.2\r\n1.2  # culture-invariant string interpolation\r\n1,2 # culture-sensitive default output formatting\r\n```\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n# Switch to a culture with \",\" as the decimal mark, then output a [double] in 3 scenarios:\r\n# a literal, a literal inside a script block, a *literal* passed to a script block as an *untyped* \r\n# parameter (plus a literal inside for comparison).\r\n# In all 3 scenarios, the output should be culture-sensitive: 1.2 -> \"1,2\"\r\n[cultureinfo]::CurrentCulture = 'de-DE'; 1.2; & { 1.2 }; & { 1.2; $Args[0] } 1.2\r\n'---'\r\n# Same as above, only wrapped in a script block invoked with &.\r\n# This *nesting* of script blocks causes the problem here, but, more generally,\r\n# wrapping the commands in a function also triggers the problem.\r\n[cultureinfo]::CurrentCulture = 'de-DE'; & { 1.2; & { 1.2 }; & { 1.2; $Args[0] } 1.2 }\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\n1,2\r\n1,2\r\n1,2\r\n1,2\r\n---\r\n1,2\r\n1,2\r\n1,2\r\n1,2\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n1,2\r\n1,2\r\n1,2\r\n---\r\n1,2\r\n1,2\r\n1,2\r\n1.2   # !! Default output of parameter-passed [double] literal not localized\r\n```\r\n\r\nNote that if you _explicitly_ type the parameter, the problem goes away:\r\n\r\n```powershell\r\n# OK, but if you were to remove [double], the problem would surface.\r\n> [cultureinfo]::CurrentCulture = 'de-DE'; & { & { param([double]$a) 1.2; $a } 1.2 }\r\n1,2\r\n1,2\r\n```\r\n\r\nConversely, even an untyped (unconstrained) parameter works fine if the parameter value comes from a _variable_:\r\n\r\n```powershell\r\n# OK, because the [double] instance is passed via a *variable*:\r\n> [cultureinfo]::CurrentCulture = 'de-DE'; & { $val = 1.2; & { param($a) 1.2; $a } $val }\r\n1,2\r\n1,2\r\n```\r\n\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.5 on macOS 10.12.6\r\nPowerShell Core v6.0.0-beta.5 on Ubuntu 16.04.3 LTS\r\nPowerShell Core v6.0.0-beta.5 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.483 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2017-08-11T20:17:38Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "`1.2` is a string - no convertion to number - and we get it back \"as is\".",
+      "created_at": "2017-08-10T14:57:51Z",
+      "updated_at": "2017-08-10T14:57:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\n```powershell\r\n> (1.2).GetType().FullName; & { $Args[0].GetType().FullName } 1.2\r\nSystem.Double\r\nSystem.Double\r\n```\r\n\r\nThe current culture doesn't come into play, because source-code literals are always parsed with the invariant culture:\r\n\r\n```powershell\r\n> [cultureinfo]::CurrentCulture = 'de-DE'; (1.2).GetType().FullName\r\nSystem.Double\r\n```\r\n\r\n",
+      "created_at": "2017-08-10T15:02:20Z",
+      "updated_at": "2017-08-10T15:02:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 It seems we see \"side effect\". Please use trace for analyzing:\r\n```powershell\r\nSet-TraceSource -Name TypeConversion -Option All -PSHost\r\n```",
+      "created_at": "2017-08-10T15:15:56Z",
+      "updated_at": "2017-08-10T15:15:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: I can't make sense of what `Set-TraceSource` is trying to tell me, but the following`Trace-Command` command again suggests that `1.2` is parsed as a `[double]`.\r\n\r\n```powershell\r\n> Trace-Command -pshost -Name * { Write-Output 1.2 }\r\n...\r\nTrying to convert argument value from System.Double to System.Management.Automation.PSObject\r\n...\r\n```\r\n\r\nMore generally, https://github.com/PowerShell/PowerShell/issues/2751#issuecomment-307175363 aims to describe how number literals are parsed in argument mode.\r\n\r\n\r\nAside from that, I see no good reason for the discrepancy in behavior between the two commands in the original post.\r\n",
+      "created_at": "2017-08-10T17:49:15Z",
+      "updated_at": "2017-08-10T17:49:15Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "This is by design. When PowerShell parses a literal as a command argument, it does not know the intended use of the literal.\r\n\r\nWhen the use is a string, it is important that we have the **exact** string used as the argument and that we do not go through the literal's `ToString` implementation.\r\n\r\nExamples:\r\n```\r\nPS> echo 0.00001 001 0x1\r\n0.00001\r\n001\r\n0x1\r\n```\r\n\r\nIf PowerShell did not do this, you would see:\r\n```\r\nPS> echo 0.00001 001 0x1\r\n1E-05\r\n1\r\n1\r\n```",
+      "created_at": "2017-08-10T17:57:02Z",
+      "updated_at": "2017-08-10T17:57:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I get that, but that wasn't the point of this issue.\r\nPlease explain the following discrepancy (a more narrowly focused reformulation of the original commands):\r\n\r\n```powershell\r\n> [cultureinfo]::CurrentCulture = 'de-DE'; & { $Args[0].GetType().Name; $Args[0] } 1.2\r\nDouble\r\n1,2    # Culture-SENSITIVE representation\r\n```\r\n\r\nvs. \r\n\r\n```powershell\r\n> [cultureinfo]::CurrentCulture = 'de-DE'; & { & { $Args[0].GetType().Name; $Args[0] } 1.2 }\r\nDouble \r\n1.2    # !! Culture-INVARIANT representation.\r\n```\r\n\r\nNote that the only difference is an _extra enclosing script block_.",
+      "created_at": "2017-08-10T18:08:21Z",
+      "updated_at": "2017-08-10T18:08:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.: Even `echo` (`Write-Output`)  doesn't _always_ behave the way you describe:\r\n\r\n```powershell\r\n> [cultureinfo]::CurrentCulture = 'de-DE'; Write-Output 0.0001 1.2 1e2\r\n0,0001   # !! Culture-SENSITIVE output\r\n1,2  # !! ditto\r\n1e2  # passed through as-is\r\n```\r\n\r\nThe exact rules aren't clear to me. For instance, if you added just one extra - `00.0001` or `0.0001` - you would again get a culture-invariant representation.\r\n\r\n\r\n",
+      "created_at": "2017-08-10T18:23:04Z",
+      "updated_at": "2017-08-10T20:03:37Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It looks like there is a small bug [here](https://github.com/PowerShell/PowerShell/blob/1a8563336a1a7f297c05fe06d732994f8efa8691/src/System.Management.Automation/engine/parser/Compiler.cs#L3456)\r\n\r\nThe bug is assuming the culture won't change between compilation and execution. This is a mostly reasonable assumption, fixing this might hurt performance and not fix any real customer issue.\r\n\r\nAs for the difference between adding a script block invocation - I forget exact details, but the current culture is reset for reasons I never understood. I thought it was done in the host after each command line, but it looks like it's done more often than that.",
+      "created_at": "2017-08-10T19:54:38Z",
+      "updated_at": "2017-08-10T19:54:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr:\r\n\r\nThanks. I realize I didn't really fully understand the issue until now (hopefully), so let me try to confirm my understanding:\r\n\r\nWhen a literal is bound to an unconstrained parameter:\r\n\r\n* On the one hand, it _is_ converted to a numeric type if it can be interpreted as such (`1.2` becomes a `[double]`).\r\n* On the other hand, the intent is for its default output representation to be the literal _exactly as originally specified_.  \r\nIt is this aspect that does _not_ apply when a number literal is used in an _expression_.\r\n\r\nTherefore, `[cultureinfo]::CurrentCulture = 'de-DE'; & { $Args[0] } 1.2` currently yielding `1,2` - a culture-_sensitive_  representation - is actually a manifestation of the bug you mention.\r\n\r\n---\r\n\r\n> The bug is assuming the culture won't change between compilation and execution. This is a mostly reasonable assumption, fixing this might hurt performance and not fix any real customer issue.\r\n\r\nUnderstood. If it isn't fixed, I suggest documenting the behavior.\r\n\r\n>  I forget exact details, but the current culture is reset for reasons I never understood\r\n\r\nThis sounds more worrisome and perhaps warrants further investigation. \r\n\r\nWhile the example commands are contrived, I actually ran into this in a real-world scenario:\r\nI'm using a function called `Use-Culture` (inspired by [this oldie-but-goodie blog post](https://rkeithhill.wordpress.com/2009/10/21/windows-powershell-2-0-string-localization/) by @rkeithhill) that accepts a script block to be executed in the context of a specified culture that is temporarily switched to.\r\n\r\n```powershell\r\n> Use-Culture de-DE { & { $Args[0]; 1.2; [cultureinfo]::currentculture.Name } 1.2 } \r\n1.2   # !! Due to \"culture reset\" in nested script block, the original bug is *masked*\r\n1,2   # literal: still culture-sensitive\r\nde-DE # German culture still in effect\r\n```\r\n\r\nThe above shows that culture isn't _categorically_ reset: the default output of a literal is still localized, and `[cultureinfo]::currentculture` still reports the specified culture.\r\n\r\nSo the questions is: In what way is the culture reset and what are the implications?\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-08-11T09:43:03Z",
+      "updated_at": "2017-08-11T09:43:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "For clarity I've opened two new, focused issues: #4557 and #4558 ",
+      "created_at": "2017-08-11T20:36:15Z",
+      "updated_at": "2017-08-11T20:36:15Z"
+    }
+  ],
+  "created_at": "2017-08-10T14:21:10Z",
+  "number": 4545,
+  "state": "closed",
+  "title": "Literals passed as unconstrained parameters to script blocks can result in culture-invariant default output",
+  "updated_at": "2017-08-11T20:36:15Z"
+}

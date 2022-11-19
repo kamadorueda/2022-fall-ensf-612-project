@@ -1,0 +1,538 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13673",
+  "author": "iSazonov",
+  "body": "<!-- Anything that looks like this is a comment and can't be seen after the Pull Request is created. -->\r\n\r\n# PR Summary\r\n\r\nSimple demo:\r\n```powershell\r\n$sb = { $a = 3; if ($a -eq 3) { Write-Host \">$a\" } else { Sleep 5 } Sleep 2 }\r\nMeasure-Script -ScriptBlock $sb\r\n```\r\n\r\n```powershell\r\nMeasure-Script { function f { param($p = @{ a=$(Sleep 2;1)}) $p }; f }\r\n```\r\n\r\n## PR Context\r\n\r\nBased on Jason's approach https://github.com/lzybkr/PowerShell/commit/d620bb4494b94a85a479ebd62ce935ba8e797ff5\r\n\r\n- Perf event (with minimal data) issues for every sequence point while measure runs\r\n    - the event is marked as start and recursive event\r\n- Perf events are implemented in ProfilerEventSource class\r\n- Perf event contains\r\n    - Timestamp\r\n    - script block Id\r\n    - parent script block Id (allow to keep track of the call stack)\r\n    - runspace Id (allow to support jobs, ForEach -Parallel and many runspaces)\r\n- Now perf events are issued for default parameter evaluations (and more). \r\n- Limitations:\r\n    - no Stop events\r\n    - we do not explicitly see parameter binding operations, pipeline/cmdlet phases (Begin, Process, End)\r\n\r\n- Rundown event (with full meta data) issues for every sequence point after measure stops\r\n- Rundown event issues for every script block (not used in Measure-Script now)\r\n- Rundown event issues are implemented in ProfilerRundownEventSource class\r\n\r\n- Scriptblock cache was simplifed and now it caches `CompiledScriptBlock`-s\r\n    - previously ScriptBlock object was cached but never used directly - before use we always cloned them and a comment says it is because we should avoid a reference to SessionStateInternal and memory leak.\r\n    - the ScriptBlock cloning was really `new ScriptBlock(CompiledScriptBlock)`\r\n    - so it makes sense to cache ScriptBlock objects, now we cache CompiledScriptBlock-s and create script blocks with `new ScriptBlock(CompiledScriptBlock)` without extra cloning.\r\n    - removed a lock if script block is already compiled\r\n\r\n- To collect meta data we use `ConcurrentDictionary` `CompiledScriptBlock.s_cachedScripts` cache\r\n- To initialize the cache at measure start we use CompiledScriptBlock cache and then register every script block at creation time.\r\n- This allow us to have meta data for every script block.\r\n- Exception (an edge case) - long running script blocks already removed from CompiledScriptBlock cache.\r\n\r\n- Measure-Script cmdlet is implemented for demo use\r\n- ProfileEventRecord is used for typed output\r\n- Duration is broken in common\r\n    - now duration is calculated as substruction two Start event timestamps\r\n    - we haven't Stop events\r\n    - so it is not work for last event\r\n\r\n#### For discussion\r\n\r\nSince we have only start timestamps we haven't stop timestamp for last sequence point. Perhaps we need a script block stop event and maybe start event.\r\n\r\nHere a question is should we think about measuring pipelines, parameter bindings.\r\n\r\nAlso can we be compatible with PerfView tool?\r\n\r\n## PR Checklist\r\n\r\n- [ ] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [ ] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [ ] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [ ] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.\r\n- **[Breaking changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)**\r\n    - [ ] None\r\n    - **OR**\r\n    - [ ] [Experimental feature(s) needed](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/6/Microsoft.PowerShell.Core/About/about_Experimental_Features.md)\r\n        - [ ] Experimental feature name(s): <!-- Experimental feature name(s) here -->\r\n- **User-facing changes**\r\n    - [ ] Not Applicable\r\n    - **OR**\r\n    - [ ] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed: <!-- Number/link of that issue here -->\r\n- **Testing - New and feature**\r\n    - [ ] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [ ] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n- **Tooling**\r\n    - [ ] I have considered the user experience from a tooling perspective and don't believe tooling will be impacted.\r\n    - **OR**\r\n    - [ ] I have considered the user experience from a tooling perspective and enumerated concerns in the summary. This may include:\r\n        - Impact on [PowerShell Editor Services](https://github.com/PowerShell/PowerShellEditorServices) which is used in the [PowerShell extension](https://github.com/PowerShell/vscode-powershell) for VSCode (which runs in a different PS Host).\r\n        - Impact on Completions (both in the console and in editors) - one of PowerShell's most powerful features.\r\n        - Impact on [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) (which provides linting & formatting in the editor extensions).\r\n        - Impact on [EditorSyntax](https://github.com/PowerShell/EditorSyntax) (which provides syntax highlighting with in VSCode, GitHub, and many other editors).\r\n",
+  "closed_at": "2022-07-18T23:58:21Z",
+  "comments": [
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Looks good. I am not able to build it on Windows. Cleaned up and ran bootstrap script, but I still see \r\n\"C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\Subsystem\\SubsystemInfo.cs(304,29): error CS0103: The name 'SubsystemStrings' does not exist in the current context [C:\\Projects\\powershell\\src\\System.Management.Automation\\System.Management.Automation.csproj]\" any advice?\r\n\r\n",
+      "created_at": "2020-09-23T12:12:41Z",
+      "updated_at": "2020-09-23T12:12:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr I added a scriptblock rundown event per https://github.com/PowerShell/PowerShell/pull/13589#issuecomment-696840641 \r\nFor the example `$sb = { Get-Process pwsh* | % -Begin { Sleep 2} -Process { $_.Name } }` we get 3 such events:\r\n- for the full scriptblock\r\n- for `{ Sleep 2}`\r\n- for `{ $_.Name }`\r\nWe get events for nested scriptblocks. Do we need its?\r\n\r\nAlso I found how use ConditionalWeakTable. With it I get strange scriptblocks without sequence points.\r\n\r\n@nohwnd It is very strange. It seems your local fork is broken. At least you could do `ipmo ./Build.psm1 -Force` and `Start-PSBuild -Clean`. Then I could remove local directory tree and load from GitHub again.",
+      "created_at": "2020-09-23T13:49:20Z",
+      "updated_at": "2020-09-23T13:50:20Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@iSazonov - I'm not sure what it would take to get support in perfview. I believe it support languages like JavaScript so I'd imagine PowerShell could do something similar. Maybe @brianrob (current maintainer of perfview) can offer some suggestions.",
+      "created_at": "2020-09-23T22:56:14Z",
+      "updated_at": "2020-09-23T22:56:14Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@IISResetMe (who adapted my SDK sample into the module [PSProfiler](https://www.powershellgallery.com/packages/PSProfiler/1.0.2.0)) might also want to take a look.",
+      "created_at": "2020-09-23T22:59:23Z",
+      "updated_at": "2020-09-23T22:59:23Z"
+    },
+    {
+      "author": "brianrob",
+      "author_association": "NONE",
+      "body": "What kind of support in PerfView are you looking for?",
+      "created_at": "2020-09-23T23:00:09Z",
+      "updated_at": "2020-09-23T23:00:09Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "The output format is slightly awkward, but beyond that I could definitely work with this:\r\n\r\n```\r\n$sb = { Get-Process pwsh* | % -Begin { Sleep 2} -Process { $_.Name } }\r\nMeasure-Script -ScriptBlock $sb |\r\n  Where ExtentText -NotLike '[{}]' |\r\n  Group {$_.Extent.StartOffset},{$_.Extent.EndOffset} |\r\n  Select Count,\r\n         @{N='TotalTime';E={$t = [timespan]::Zero;$_.Group.ForEach({$t=$t+$_.Duration});$t}},\r\n         @{N='Code';E={\"{0,$($_.Group[0].Extent.StartColumnNumber - $sb.Ast.Extent.StartColumnNumber)}{1}\"-f$null,$_.Group[0].ExtentText}}\r\n```\r\n\r\n```\r\nCount TotalTime        Code\r\n----- ---------        ----\r\n    1 00:00:00.0025372   Get-Process pwsh* | % -Begin { Sleep 2} -Process { $_.Name }\r\n    1 00:00:02.0061880                                  Sleep 2\r\n    3 00:00:00.0001681                                                      $_.Name\r\n```\r\n\r\nWill take a closer look at the code tomorrow",
+      "created_at": "2020-09-24T00:00:17Z",
+      "updated_at": "2020-09-24T00:00:17Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@brianrob - I think PowerShell maintainers and some module authors would appreciate hybrid PowerShell/C# call stacks from CPU sampling.\r\n\r\nThis PR is generating minimal events (analogous to an IP but no stack) while profiling via an EventSource (using instrumentation in the generated code which is interpreted and lazily jit compiled). After turning off profiling, a rundown event provider is generating metadata to recover the source line and function details from the minimal events.\r\n\r\n@iSazonov may have other ideas how PowerShell users might use perfview or wpa.",
+      "created_at": "2020-09-24T03:34:12Z",
+      "updated_at": "2020-09-24T03:34:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> What kind of support in PerfView are you looking for?\r\n\r\nMy thoughts is very simple. Since users will can able to collect PowerShell performance events out-of-process they need tools to analyze the data. \r\n- Developer scenarios. Visual Studio and VS Code PowerShell extension/PES could expose a profiler somewhat. \r\n- Hosting scenarios. Azure, server scripts, PowerShell hosting applications - users will collect PowerShell performance events and they need a __standalone tool__ to analyze them.\r\n_I would like to avoid creating a separate new tool as it is a lot of work._ It would be great to use a well known and reliable PerfView (and maybe WPA).\r\nAs end user I'd expect PerfView will show me a callstack tree like for .Net.\r\nI guess we need to issue events like .Net does. I guess we should emulate such start/stop events. I hope it is possible and simplify PerfView adoption. \r\n\r\n@lzybkr Could you please point me where we could issue a stop event for scriptblock/sequence point?\r\n\r\n@brianrob What do you think? Is it possible? Could you tell me how we should create events correctly for PerfView?\r\n\r\n\r\n",
+      "created_at": "2020-09-24T04:43:22Z",
+      "updated_at": "2020-09-24T04:43:22Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Tried running this over a Pester test and it failed. Here is a mini repro: _scriptBlock is null when you hit the `@()` token in `Measure-Script { function f { param($p = @())  $p }; f }`\r\n\r\n```\r\nPS C:\\Projects\\powershell> $error[0] | fl -Force *\r\n\r\nPSMessageDetails      :\r\nException             : System.NullReferenceException: Object reference not set to an instance of an object.\r\n                           at System.Management.Automation.Language.FunctionContext.UpdatePositionNoBreak(Int32 pos) in C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\parser\\Compiler.cs:line 815\r\n                           at System.Management.Automation.Language.FunctionContext.UpdatePosition(Int32 pos) in C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\parser\\Compiler.cs:line 826\r\n                           at lambda_method39(Closure , FunctionContext )\r\n                           at System.Management.Automation.Language.Compiler.GetExpressionValue(ExpressionAst expressionAst, Boolean isTrustedInput, ExecutionContext context, SessionStateInternal sessionStateInternal,\r\n                        IDictionary usingValues, Func`2& lambda, IScriptExtent[]& sequencePoints, Type& localsTupleType) in C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\parser\\Compiler.cs:line 2179\r\n                           at System.Management.Automation.Language.Compiler.DefaultValueExpressionWrapper.GetValue(ExecutionContext context, SessionStateInternal sessionStateInternal, IDictionary usingValues) in\r\n                        C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\parser\\Compiler.cs:line 1958\r\n                           at System.Management.Automation.ScriptParameterBinder.GetDefaultScriptParameterValue(RuntimeDefinedParameter parameter, IDictionary implicitUsingParameters) in\r\n                        C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\scriptparameterbinder.cs:line 149\r\n                           at System.Management.Automation.ParameterBinderController.BindUnboundScriptParameterWithDefaultValue(MergedCompiledCommandParameter parameter) in\r\n                        C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\ParameterBinderController.cs:line 1279\r\n                           at System.Management.Automation.ParameterBinderController.BindUnboundScriptParameters() in C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\ParameterBinderController.cs:line 1242\r\n                           at System.Management.Automation.ScriptParameterBinderController.BindCommandLineParameters(Collection`1 arguments) in\r\n                        C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\scriptparameterbindercontroller.cs:line 99\r\n                           at System.Management.Automation.DlrScriptCommandProcessor.EnterScope() in C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\ScriptCommandProcessor.cs:line 609\r\n                           at System.Management.Automation.DlrScriptCommandProcessor.RunClause(Action`1 clause, Object dollarUnderbar, Object inputToProcess) in\r\n                        C:\\Projects\\powershell\\src\\System.Management.Automation\\engine\\ScriptCommandProcessor.cs:line 501\r\nTargetObject          :\r\nCategoryInfo          : NotSpecified: (:) [f], NullReferenceException\r\nFullyQualifiedErrorId : System.NullReferenceException,f\r\nErrorDetails          :\r\nInvocationInfo        : System.Management.Automation.InvocationInfo\r\nScriptStackTrace      : at <ScriptBlock>, <No file>: line 1\r\n                        at <ScriptBlock>, <No file>: line 1\r\nPipelineIterationInfo : {}\r\n```",
+      "created_at": "2020-09-24T13:08:13Z",
+      "updated_at": "2020-09-24T13:08:13Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@nohwnd for reference your original error was because the resource strings needed to be rebuilt. `Start-PSBuild -Clean` usually fixes that",
+      "created_at": "2020-09-24T17:57:01Z",
+      "updated_at": "2020-09-24T17:57:01Z"
+    },
+    {
+      "author": "brianrob",
+      "author_association": "NONE",
+      "body": "I just skimmed the PR to try and understand how things work.  I would like to make sure I understand how things work, and then have a few questions.\r\n\r\nMy understanding is that there is a desire to enable profiling in two ways:\r\n1. Via `Measure-ScriptBlock`, which would result in the use of `EventSource` and `EventListener` to generate results inside of the `pwsh` process, and display them to the console.\r\n2. Via `ETW` or other platform loggers by enabling the events via an out-of-process mechanism.  This profiling would be fully controlled via the platform logger and would occur regardless of whether or not `Measure-ScriptBlock` is invoked.\r\n\r\nThere are a couple of pieces of functionality that I can see being implemented in PerfView.  Of course, I'm open to feedback and other ideas as well:\r\n1. The ability to determine how long a particular scriptblock/cmdlet takes to execute.  This can be done via the `Events` view as long as there are start/stop events that get emitted on either side of the execution.  I'm not sure if these exist today, but I don't see them in this PR.\r\n2. Views where we attribute computing resources (CPU, memory allocations, etc.) to their script/cmdlet-based stack.\r\n\r\nFor the computing resource based views, we'd need to understand a couple of things:\r\n1. How to construct the stack.\r\n2. How to resolve symbols (if necessary).\r\n\r\nRight now, PerfView has functionality that does this for jitted code that is compiled on-the-fly by the .NET runtime.  This is done by using rundown events to provide function memory ranges and symbols.  There's mention of both interpreted and jitted code here.  For interpreted code, we'd need events that would allow us to build the appropriate stack.  You could imagine doing this with start/stop events that wrap the \"scope\" of each frame.  This would work as long as collection started before the invocation.  If it is started in the middle of an invocation, we'd see broken stacks, but these may still be valuable depending on how much movement up and down the stack there is.  For jitted code, are we talking about using the .NET runtime's JIT, or something else?",
+      "created_at": "2020-09-24T18:46:46Z",
+      "updated_at": "2020-09-24T18:46:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@brianrob \r\n> My understanding is that there is a desire to enable profiling in two ways:\r\n\r\nYes.\r\n\r\n> There are a couple of pieces of functionality that I can see being implemented in PerfView. Of course, I'm open to feedback and other ideas as well:\r\n\r\n>1. The ability to determine how long a particular scriptblock/cmdlet takes to execute. This can be done via the Events view as long as there are start/stop events that get emitted on either side of the execution. I'm not sure if these exist today, but I don't see them in this PR.\r\n>2. Views where we attribute computing resources (CPU, memory allocations, etc.) to their script/cmdlet-based stack.\r\n\r\nYes for 1. Currently we issue an event with number 1 as start event but without the \"start\" label. \r\nFrom your comment I see that we need (1) both start and stop events, (2) a way to track a script stack. \r\nI hope @lzybkr give the cue where we could issue stop events and how we could track script stack.\r\n\r\nFor 2. I am not sure we can utilize resource tracking because scripts are executed in runspaces (you can think that it is special thread) and there could be some parallel runspaces so we cannot directly know which runspace is consuming resources- we should track a long correlation sequence scriptblock-runspace-.Net thread. It looks too complex for me. Although it is possible... It is my answer on \"For jitted code, are we talking about using the .NET runtime's JIT, or something else?\" too - it would interesting to have the correlated views (script - JIT) but looks too complex for the first step PR.\r\n\r\n",
+      "created_at": "2020-09-24T19:29:52Z",
+      "updated_at": "2020-09-24T19:29:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Tried running this over a Pester test and it failed. Here is a mini repro: _scriptBlock is null when you hit the @() token in Measure-Script { function f { param($p = @()) $p }; f }\r\n\r\nNRE is in \"ProfilerEventSource.LogInstance.SequencePoint(_scriptBlock.Id, pos);\" (in UpdatePositionNoBreak()) because \"_scriptBlock\" is null. I wonder why... It seems a \"bug\" mentioned above.",
+      "created_at": "2020-09-24T19:35:25Z",
+      "updated_at": "2020-09-25T15:44:27Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@brianrob PowerShell does use the .NET jit via LINQ expression trees. PowerShell forked the DLR to use the interpreter which will jit compile code if it executes enough times.",
+      "created_at": "2020-09-25T14:55:45Z",
+      "updated_at": "2020-09-25T14:55:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Measure-Script { function f { param($p = @()) $p }; f }\r\n\r\nWe catch NRE on \"@()\". It is parameter binding. This is evaluated out of current scripblock. There is created pseudo functioncontext with sequence points but without a reference to current scriptblock. \r\n- If we skip issuing the perf event in the case we never see parameter bindings in the profiler. If we issue the perf event there will be no link to a scriptblock and we will not know the context when analyzing.\r\n- In the example we call GetDefaultScriptParameterValue(). So it is called everywhere where parameter binding exists (funcrions/scriptblocks).\r\n- another code path -  GetExpressionValue(). This is used in many places and we may not see it in the profiler too.\r\n\r\nSince these code paths is complex, with static methods without scriptblock parameter it is a huge work to fix all them.\r\nOne workaround I can think is to track functioncontext in interpreter. Is it possible/make sense?\r\n\r\n",
+      "created_at": "2020-09-26T18:26:56Z",
+      "updated_at": "2020-09-26T18:26:56Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "I just tried it out with some real scripts and my module that summarizes the results and it works nicely. I am preparing a presentation about this for PWSH24. Is it reasonable to expect that this will be available in a month or two? (even if behind an experimental flag)",
+      "created_at": "2020-10-06T19:35:35Z",
+      "updated_at": "2020-10-06T19:35:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nohwnd Thanks!\r\n\r\nDo you ask about 7.1 or 7.2? I am sure we will get this in 7.2 Preview1 as experimental.\r\nAs for 7.1 we need to ask MSFT team. I think it is low risk because we don't change functional code. But the code will be changed without a doubt because we need to add _stop_ events. Currently Measure-Script cmdlet is demo only. I could make it more useful, move to Utility module and mark as experimental feature.",
+      "created_at": "2020-10-07T09:55:48Z",
+      "updated_at": "2020-10-07T09:55:48Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "7.2 is okay. I just wanted to know when roughly this will be ready to try, because I have only a version that works with PowerShell 5, by doing some \"reflection\" magic, but nothing for the PowerShell core versions.",
+      "created_at": "2020-10-07T10:03:37Z",
+      "updated_at": "2020-10-07T10:03:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nohwnd .Net 5.0 will be released in November. PowerShell 7.1 will be released in the time too. Then the holidays come. I'd expect 7.2 Preview1 in January unless MSFT team forked earlier.",
+      "created_at": "2020-10-07T10:15:29Z",
+      "updated_at": "2020-10-07T10:15:29Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as stale because it has been marked as requiring author feedback but has not had any activity for **15 days**. It will be closed if no further activity occurs **within 10 days of this comment**.",
+      "created_at": "2020-10-31T20:00:05Z",
+      "updated_at": "2020-10-31T20:00:05Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as stale because it has been marked as requiring author feedback but has not had any activity for **15 days**. It will be closed if no further activity occurs **within 10 days of this comment**.",
+      "created_at": "2020-11-29T20:00:06Z",
+      "updated_at": "2020-11-29T20:00:06Z"
+    },
+    {
+      "author": "kborowinski",
+      "author_association": "NONE",
+      "body": "@nohwnd @iSazonov Sorry for pinging but any progress on this? Is it going to be in *PowerShell v7.2.0-preview.2*?",
+      "created_at": "2020-12-04T13:43:39Z",
+      "updated_at": "2020-12-04T13:43:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@kborowinski MSFT team is near to start reviewing. I hope we get the profiler in Preview2 or Preview3.",
+      "created_at": "2020-12-04T17:59:43Z",
+      "updated_at": "2020-12-04T17:59:43Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as stale because it has been marked as requiring author feedback but has not had any activity for **15 days**. It will be closed if no further activity occurs **within 10 days of this comment**.",
+      "created_at": "2020-12-30T23:00:12Z",
+      "updated_at": "2020-12-30T23:00:12Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Please don't close this :)",
+      "created_at": "2021-01-04T14:55:18Z",
+      "updated_at": "2021-01-04T14:55:18Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as stale because it has been marked as requiring author feedback but has not had any activity for **15 days**. It will be closed if no further activity occurs **within 10 days of this comment**.",
+      "created_at": "2021-01-19T17:00:05Z",
+      "updated_at": "2021-01-19T17:00:05Z"
+    },
+    {
+      "author": "fflaten",
+      "author_association": "CONTRIBUTOR",
+      "body": "This shouldn't be closed, or is this work moved somewhere else @iSazonov ? ",
+      "created_at": "2021-01-29T18:24:31Z",
+      "updated_at": "2021-01-29T18:24:31Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2021-02-10T02:00:06Z",
+      "updated_at": "2021-02-10T02:00:06Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "@iSazonov could you push some changes please so I can get a fresh build and see why it is failing? I will go ahead and try to change the Pester CC implementation to leverage this to see if I can get the same results as with breakpoints.\r\n\r\n@rjmholt if we get a passing build here, and the PR comments are addressed, is there anything else that is preventing this PR from being merged? Do we need a committee approval or something like that?",
+      "created_at": "2021-03-24T14:20:49Z",
+      "updated_at": "2021-03-24T14:20:49Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "@iSazonov Thanks! I wired it [together with Pester Code Coverage](https://github.com/pester/Pester/pull/1884/files) (which was suprisingly simple) and don't see any item for the first statement in the file:\r\n\r\n```powershell\r\n# file.ps1\r\n1\r\n2\r\n```\r\n```powershell\r\n\r\nMeasure-Script { & ./file.ps1 }  | % source\r\n\r\n# output: \r\n{\r\n& ./file.ps1\r\n2\r\n}\r\n```\r\n\r\nSame for file.ps1 that is `1;2`. But when running `Measure-Script { 1;2 }` it works fine.\r\n\r\n\r\nCould you verify? I added null annotation to File field to be able to build, which does not seem like it would cause the issue. \r\n\r\n\r\n",
+      "created_at": "2021-03-24T21:29:03Z",
+      "updated_at": "2021-03-24T21:31:14Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Using names instead of numbers to make it clearer. It looks like when the script is invoked then the first sequence point is 1 not 0:\r\n```\r\n\"one\"\r\n\"two\"\r\n``` \r\nIf you check this place:\r\n```\r\n  internal void UpdatePositionNoBreak(int pos)\r\n        {\r\n            _currentSequencePointIndex = pos;\r\n\r\n            if (ProfilerEventSource.LogInstance.IsEnabled())\r\n            {\r\n                ProfilerEventSource.LogInstance.SequencePoint(\r\n                    _scriptBlock is not null ? _scriptBlock.Id : Guid.Empty,\r\n                    _executionContext.CurrentRunspace.InstanceId,\r\n                    _executionContext.Debugger.GetParentScriptBlockId(pos),\r\n                    pos);\r\n            }\r\n        }\r\n```\r\nWhen invoked from a file, pos is 1 for \"one\", when a script is called, the compiled scriptblock reports it as 0. So there are 4 events and we have one for pos 1 which prints as \"two\", but is actually event for \"one\", and the actual event for pos 2 \"two\" is missing. ",
+      "created_at": "2021-03-24T22:58:55Z",
+      "updated_at": "2021-03-24T22:58:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, see https://github.com/PowerShell/PowerShell/blob/177921ed63191d71665d303e76ccdbae64d80822/src/System.Management.Automation/engine/parser/Compiler.cs#L1132-L1144\r\n\r\nThe comment says we skip the first sequence point every time we enter a scriptblock including the scenario with executing a script file with `& file.ps1`. \r\nUpdatePosition() method has not a CommandInfo and we can not check if it is ExternalScriptInfo.\r\n\r\nI don\u2019t know how important this optimization is but for experiment in last commit I always add UpdatePositionExpr(). \r\n\r\nPerhaps @lzybkr could advise how to fix this in better way.",
+      "created_at": "2021-03-25T13:33:09Z",
+      "updated_at": "2021-03-25T13:35:46Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It's been many years since I wrote that, but I would think it's not an optimization.\r\n\r\nIf I'm remembering correctly, the idea was to avoid needing to step twice to get to the next statement after reaching a breakpoint on a function name.\r\n\r\nAs for fixes, one could special case the first sequence point in a function for the purposes of debugging, e.g. never finding it when setting a breakpoint and always stepping through it.\r\n\r\nAlternatively, the profiling logic could be called from `EnterScriptFunction`. In that case, you might prefer creating a new function for the shared logic of checking for breakpoints and handling the profiler logic.",
+      "created_at": "2021-03-25T16:24:36Z",
+      "updated_at": "2021-03-25T16:24:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Thanks! Adding the profiling logic in EnterScriptFunction() is an easiest way.\r\n\r\n@nohwnd You can continue your experiments. Also please think about that is a best output for Pester code coverage scenario. Thus we could output raw data or make specific for Pester a preprocessing . ",
+      "created_at": "2021-03-26T05:24:40Z",
+      "updated_at": "2021-03-26T05:24:40Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "@iSazonov I can see \"one\" now, but I also see the \"{\" doubled for every scriptblock, or function entry. \r\n\r\n`Measure-Script { function f { \"a\" } ; & { f; & .\\file.ps1 } }`\r\n\r\n![image](https://user-images.githubusercontent.com/5735905/112757718-44d79e00-8feb-11eb-9943-df7db46caf8a.png)\r\n\r\n\r\nAs for Pester specific output: At the moment I am getting a ton of entries for Pester internals because there is a lot of stuff going on. It would be nice to specify files I am not interested in. But I should also be able to avoid a lot of this by using debugger hidden attribute I think. I need to experiment with it a bit more. ",
+      "created_at": "2021-03-28T15:30:59Z",
+      "updated_at": "2021-03-28T19:38:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nohwnd I added new commit to address last feedback.",
+      "created_at": "2021-03-29T18:49:09Z",
+      "updated_at": "2021-03-30T14:58:19Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Looks good, now the only issue I see **is Pester** issue where I am getting column numbers from the AST parser that are where breakpoint would be bound, but from Measure-Script I get where the actual statement start is. \r\n\r\nBut after translating those I am able to pass Pester CC tests. \ud83d\udc4d\r\n",
+      "created_at": "2021-03-30T14:44:11Z",
+      "updated_at": "2021-03-30T14:44:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Looks good, now the only issue I see **is Pester** issue where I am getting column numbers from the AST parser that are where breakpoint would be bound, but from Measure-Script I get where the actual statement start is.\r\n> \r\n\r\n@nohwnd Could you please explain more and maybe reference Pester code - why have you re-calculate the positions? It could have a value for PS EditorService too and in the case we could do the work in here.\r\n",
+      "created_at": "2021-03-31T08:37:25Z",
+      "updated_at": "2021-03-31T08:37:25Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Sure. Code is here https://github.com/pester/Pester/blob/v5.0/src/functions/Coverage.ps1\r\n\r\nIn Pester, up until now we've been using breakpoints to do code coverage. In order to avoid rewriting a lot of the code, I am just adapting the results I get from Measure-Script to have the same form as the breakpoints we would set. This way I can just skip setting the breakpoints, and  use Measure-Script instead, and all the code coverage processing code, can remain the same. This makes it easier to get a working prototype, but costs me some details that the Profiler reports, and causes this misalignment.\r\n\r\nThe misalignment is as follows: \r\n\r\nTo set breakpoints up we use AST to find commands (in `Get-CommandsInFile`) and unless they are excluded (in `IsExludedCommand`), we place a breakpoint on them. Those breakpoints are using line + column: \r\n\r\n`$abc = \ud83d\udd34Get-Command`\r\n\r\nBut the Profiler reports the whole assignment. So if this was a breakpoint it would look like this: \r\n\r\n`\ud83d\udd34$abc = Get-Command`\r\n\r\nThose two have matching line number but not matching column number. So I need to calculate it. \r\n\r\nhttps://github.com/pester/Pester/pull/1884/commits/f4dd58497ad328bf8fa32b9758acff5d51eef4c4#diff-d1d42e6af6c2da4901e781a4ac3dbe51a60b0e8a808f60a8d114e97d8db59af6R678-R688\r\n\r\nIt's not a serious problem and if our code coverage setup would take the specifics of the profiler into account it would not be needed.\n\n<blockquote><img src=\"https://avatars.githubusercontent.com/u/2376848?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/pester/Pester\">pester/Pester</a></strong></div><div>Pester is the ubiquitous test and mock framework for PowerShell. - pester/Pester</div></blockquote>",
+      "created_at": "2021-03-31T09:22:34Z",
+      "updated_at": "2021-03-31T09:22:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nohwnd Thanks for clarify! It seems the Pester behavior is a specific and depends on how it set breakpoints. But if PSES does the same we could send AST (very increase the Profile trace size!) or re-calculated Extend.\r\n/cc @rjmholt Could you please clarify how PSES works and what we could do more useful here for PSES?",
+      "created_at": "2021-03-31T12:41:24Z",
+      "updated_at": "2021-03-31T12:41:24Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2021-04-07T14:00:08Z",
+      "updated_at": "2021-04-07T14:00:08Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Few proposals after implementing https://github.com/nohwnd/Profiler, while taking this PR into consideration: \r\n- I think Trace-Script would be nicer name for the cmdlet. The data itself are not of much use by themselves. We need some function to post process it and calling it `Measure-Script` (as it is right now in PSProfiler) would be nice.\r\n- Would you consider publishing the structs used for the result? I tested running this against Pester run, which gives me some 3 millions events, and processing them in powershell is still (suprisingly) fast. But having the possibility to write the code directly in C# without requiring IVTs or using reflection would be nice. Or is there a better way to do this without making those types public? \r\n- Having the possibility to exclude files from tracing (as suggested above) would be nice for profiling code that runs user code. E.g. Pester tests.\r\n\r\n<blockquote><img src=\"https://opengraph.githubassets.com/c253cf61ca6c49568611e30f0a2f2f0010811adebbfffdb7d5d5cb278b9a651b/nohwnd/Profiler\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/nohwnd/Profiler\">nohwnd/Profiler</a></strong></div><div>Script, ScriptBlock and module performance profiler for PowerShell 5, and PowerShell 7.  - nohwnd/Profiler</div></blockquote>",
+      "created_at": "2021-04-28T10:44:35Z",
+      "updated_at": "2021-04-28T10:46:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The most important thing for us is to get the stability of event formats from ProfilerEventSource and ProfilerRundownEventSource. Measure applications can use the sources directly and make pre-processing and processing themselves.\r\nI consider the Measure-Script cmdlet as a thing for testing and demo. Although of course we can turn it into a more convenient and powerful tool (including `-Raw` switch to pass raw events, filters (ex. by paths), user-friendly output). And after we make sure that this type of stable we could make it public.\r\n",
+      "created_at": "2021-04-28T12:39:01Z",
+      "updated_at": "2021-04-28T12:39:01Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "One more request. Please add the count of items on callstack.\r\n\r\nI have been grabbing it via reflection here: \r\n\r\nhttps://github.com/nohwnd/Profiler/blob/main/csharp/Profiler/Tracer.cs#L47-L60\r\n\r\nThis allows me to figure out if the current event is a call, processing, or return. This is necessary to figure out how long a given call took. Or listing all events that happened between entering a function and leaving it.\r\n\r\nHere is how I use it to see if a line is call, process, or return:\r\nhttps://github.com/nohwnd/Profiler/blob/main/Profiler/Trace-Script.ps1#L227-L287\r\n\r\nHere I figure out duration: https://github.com/nohwnd/Profiler/blob/main/Profiler/Trace-Script.ps1#L338-L362 \r\n\r\n\n\n<blockquote><img src=\"https://opengraph.githubassets.com/65f58a5970124a59e09e26787f5173f31564769a8616faa363d0900e901d9f99/nohwnd/Profiler\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/nohwnd/Profiler\">nohwnd/Profiler</a></strong></div><div>Script, ScriptBlock and module performance profiler for PowerShell 5, and PowerShell 7.  - nohwnd/Profiler</div></blockquote>\n<blockquote><img src=\"https://opengraph.githubassets.com/65f58a5970124a59e09e26787f5173f31564769a8616faa363d0900e901d9f99/nohwnd/Profiler\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/nohwnd/Profiler\">nohwnd/Profiler</a></strong></div><div>Script, ScriptBlock and module performance profiler for PowerShell 5, and PowerShell 7.  - nohwnd/Profiler</div></blockquote>\n<blockquote><img src=\"https://opengraph.githubassets.com/65f58a5970124a59e09e26787f5173f31564769a8616faa363d0900e901d9f99/nohwnd/Profiler\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/nohwnd/Profiler\">nohwnd/Profiler</a></strong></div><div>Script, ScriptBlock and module performance profiler for PowerShell 5, and PowerShell 7.  - nohwnd/Profiler</div></blockquote>",
+      "created_at": "2021-05-01T19:34:16Z",
+      "updated_at": "2021-05-01T19:34:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nohwnd I don't understand your request. We issue events strictly sequentially and the stack level change is reflected by the change of the script block Id in the event so that you can track the call stack - \"{\" event is \"push on stack\", \"}\" event \"pop from stack\".",
+      "created_at": "2021-05-02T06:51:38Z",
+      "updated_at": "2021-05-02T06:51:38Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "> \"{\" event is \"push on stack\", \"}\" event \"pop from stack\".\r\n\r\nI did not realize that. But it does not seem to cover all cases, like jumping up the stack when throwing. Maybe I could somehow reconstruct the flow, but it is not as easy as actually having the number of items on stack. Here is a function that throws inside of a nested function call and swallows the exception few levels up: \r\n```powershell\r\n\r\nfunction a () {\r\n    throw \"aaa\"\r\n}\r\n\r\nfunction b () {\r\n    a\r\n}\r\n\r\nfunction c () { \r\n    b\r\n}\r\n\r\ntry { \r\n    c\r\n}\r\ncatch {\r\n    \"failed\"\r\n}\r\n```\r\n\r\nOutput from this  PR: \r\n![image](https://user-images.githubusercontent.com/5735905/116805626-040e0000-ab28-11eb-8ee9-b2240e125cb1.png)\r\n\r\nOutput from my profiler where I track the number of items on stack (relative to how many there was when I enabled profiling), plus some info based on it, like the Flow (is the next move up or down), ReturnIndex (where in the log the call returns), CallerIndex (who called us): \r\n\r\n![image](https://user-images.githubusercontent.com/5735905/116805679-46cfd800-ab28-11eb-81da-41379882ac86.png)\r\n\r\nNotice that on the line where there is throw we jump from level 5 to level 2.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-05-02T07:30:34Z",
+      "updated_at": "2021-05-02T07:30:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@nohwnd \"{\" and \"}\" are a hint :-) ProfileEventRecord contains ParentScriptBlockId and ScriptBlockId - you can explicitly track current level and changing level. I think your implementation should be based on Stack class.",
+      "created_at": "2021-05-02T07:56:36Z",
+      "updated_at": "2021-05-02T07:56:36Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Right right, I will just reconstruct that info from the ids then. I can just look at if the current id became parent id in the next step, or if not is the same, or if not pop stack of ids as long as I find the return. It's only slightly more complicated :)",
+      "created_at": "2021-05-03T10:08:14Z",
+      "updated_at": "2021-05-03T10:08:14Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2021-05-10T14:00:05Z",
+      "updated_at": "2021-05-10T14:00:05Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2021-09-23T02:00:44Z",
+      "updated_at": "2021-09-23T02:00:44Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2021-11-10T02:00:55Z",
+      "updated_at": "2021-11-10T02:00:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT @daxian-dbw From PowerShell Committee conclusion in #14953 I understand the profiler is preferred - can we finish the work? Decline or merge? ",
+      "created_at": "2021-11-10T05:42:09Z",
+      "updated_at": "2021-11-10T05:42:09Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2021-11-19T02:01:08Z",
+      "updated_at": "2021-11-19T02:01:08Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT @daxian-dbw any chance this topic could get some attention in the not so distant future? :) ",
+      "created_at": "2022-03-14T20:07:21Z",
+      "updated_at": "2022-03-14T20:07:21Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Goal is to get this into 7.3",
+      "created_at": "2022-05-16T23:23:44Z",
+      "updated_at": "2022-05-16T23:23:44Z"
+    },
+    {
+      "author": "pull-request-quantifier[bot]",
+      "author_association": "NONE",
+      "body": "### ![](https://img.shields.io/static/v1?label=Quantified&message=Large&color=red)\r\n\r\nThis PR has `357` quantified lines of changes. In general, a change size of upto `200` lines is ideal for the best PR experience!\r\n\r\n------\r\n\r\n<details >\r\n    <summary display=\"inline\"> <strong>Quantification details</strong></summary>\r\n    <p />\r\n\r\n```\r\nLabel      : Large\r\nSize       : +311 -46\r\nPercentile : 75.7%\r\n\r\nTotal files changed: 9\r\n\r\nChange summary by file extension:\r\n.cs : +308 -45\r\n.ps1 : +3 -1\r\n```\r\n> Change counts above are quantified counts, based on the [PullRequestQuantifier customizations](https://github.com/microsoft/PullRequestQuantifier/blob/main/docs/prquantifier-yaml.md).\r\n    \r\n</details>\r\n\r\n\r\n<details>\r\n    <summary display=\"inline\"> <strong>Why proper sizing of changes matters</strong> </summary>\r\n    <p/>\r\n    <p/>\r\n\r\nOptimal pull request sizes drive a better predictable PR flow as they strike a\r\nbalance between between PR complexity and PR review overhead. PRs within the\r\noptimal size (typical small, or medium sized PRs) mean:\r\n\r\n- Fast and predictable releases to production:\r\n  - Optimal size changes are more likely to be reviewed faster with fewer\r\niterations.\r\n  - Similarity in low PR complexity drives similar review times.\r\n- Review quality is likely higher as complexity is lower:\r\n  - Bugs are more likely to be detected.\r\n  - Code inconsistencies are more likely to be detetcted.\r\n- Knowledge sharing is improved within the participants:\r\n  - Small portions can be assimilated better.\r\n- Better engineering practices are exercised:\r\n  - Solving big problems by dividing them in well contained, smaller problems.\r\n  - Exercising separation of concerns within the code changes.\r\n\r\n#### What can I do to optimize my changes\r\n\r\n- Use the PullRequestQuantifier to quantify your PR accurately\r\n  - Create a context profile for your repo using the [context generator](https://github.com/microsoft/PullRequestQuantifier/releases)\r\n  - Exclude files that are not necessary to be reviewed or do not increase the review complexity. Example: Autogenerated code, docs, project IDE setting files, binaries, etc. Check out the `Excluded` section from your `prquantifier.yaml` context profile. \r\n  - Understand your typical change complexity, drive towards the desired complexity by adjusting the label mapping in your `prquantifier.yaml` context profile.\r\n  - Only use the labels that matter to you, [see context specification](./docs/prquantifier-yaml.md) to customize your `prquantifier.yaml` context profile.\r\n- Change your engineering behaviors\r\n  - For PRs that fall outside of the desired spectrum, review the details and check if:\r\n    - Your PR could be split in smaller, self-contained PRs instead\r\n    - Your PR only solves one particular issue. (For example, don't refactor and code new features in the same PR).\r\n\r\n#### How to interpret the change counts in git diff output\r\n\r\n- One line was added: `+1 -0`\r\n- One line was deleted: `+0 -1`\r\n- One line was modified: `+1 -1` (git diff doesn't know about modified, it will\r\ninterpret that line like one addition plus one deletion)\r\n- Change percentiles: Change characteristics (addition, deletion, modification)\r\nof this PR in relation to all other PRs within the repository.\r\n\r\n</details>\r\n\r\n<p />\r\n\r\n------\r\n\r\nWas this comment helpful? <a href=\"https://pullrequestquantifierfeedback.azurewebsites.net/feedback?payload=eyJBdXRob3JOYW1lIjoiaVNhem9ub3YiLCJSZXBvc2l0b3J5TGluayI6Imh0dHBzOi8vZ2l0aHViLmNvbS9Qb3dlclNoZWxsL1Bvd2VyU2hlbGwiLCJQdWxsUmVxdWVzdExpbmsiOiJodHRwczovL2dpdGh1Yi5jb20vUG93ZXJTaGVsbC9Qb3dlclNoZWxsL3B1bGwvMTM2NzMiLCJFdmVudFR5cGUiOiJUaHVtYnNVcCJ9&amp;anonymous=True\" target=\"_blank\" title=\"Thumbs up\"><strong>:thumbsup:</strong></a> <a href=\"https://pullrequestquantifierfeedback.azurewebsites.net/feedback?payload=eyJBdXRob3JOYW1lIjoiaVNhem9ub3YiLCJSZXBvc2l0b3J5TGluayI6Imh0dHBzOi8vZ2l0aHViLmNvbS9Qb3dlclNoZWxsL1Bvd2VyU2hlbGwiLCJQdWxsUmVxdWVzdExpbmsiOiJodHRwczovL2dpdGh1Yi5jb20vUG93ZXJTaGVsbC9Qb3dlclNoZWxsL3B1bGwvMTM2NzMiLCJFdmVudFR5cGUiOiJOZXV0cmFsIn0=&amp;anonymous=True\" target=\"_blank\" title=\"Neutral\"><strong>&nbsp;:ok_hand:</strong></a> <a href=\"https://pullrequestquantifierfeedback.azurewebsites.net/feedback?payload=eyJBdXRob3JOYW1lIjoiaVNhem9ub3YiLCJSZXBvc2l0b3J5TGluayI6Imh0dHBzOi8vZ2l0aHViLmNvbS9Qb3dlclNoZWxsL1Bvd2VyU2hlbGwiLCJQdWxsUmVxdWVzdExpbmsiOiJodHRwczovL2dpdGh1Yi5jb20vUG93ZXJTaGVsbC9Qb3dlclNoZWxsL3B1bGwvMTM2NzMiLCJFdmVudFR5cGUiOiJUaHVtYnNEb3duIn0=&amp;anonymous=True\" target=\"_blank\" title=\"Thumbs down\"><strong>&nbsp;:thumbsdown:</strong></a> (<a href=\"MAILTO:prquantifier@microsoft.com\" title=\"Mail to prquantifier@microsoft.com\">Email</a>)\r\n[Customize PullRequestQuantifier](https://github.com/PowerShell/PowerShell/blob/master/.github/prquantifier.yaml) for this repository.\r\n\r\n",
+      "created_at": "2022-05-23T17:09:15Z",
+      "updated_at": "2022-05-23T17:09:15Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The goal here should be to determine if the PR is good enough to be an experimental feature so we can get user feedback.  @iSazonov can you turn this into an ExperimentalFeature?",
+      "created_at": "2022-05-23T18:04:39Z",
+      "updated_at": "2022-05-23T18:05:53Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I agree with @nohwnd that the cmdlet should be `Trace-Script` and a separate cmdlet (in a separate PR) would use the trace objects to give a view to the user on hot spots in their script.",
+      "created_at": "2022-05-23T18:33:34Z",
+      "updated_at": "2022-05-23T18:33:34Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Was playing with this branch and made a function to consolidate and sort the results https://gist.github.com/SteveL-MSFT/f602dd7e3faac36cc8c781b3c07d036e.\n\n<blockquote><img src=\"https://github.githubassets.com/images/modules/gists/gist-og-image.png\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> Gist</div><div><strong><a href=\"https://gist.github.com/SteveL-MSFT/f602dd7e3faac36cc8c781b3c07d036e\">show-profiler.ps1</a></strong></div><div>GitHub Gist: instantly share code, notes, and snippets.</div></blockquote>",
+      "created_at": "2022-05-23T22:49:35Z",
+      "updated_at": "2022-05-23T22:49:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The goal here should be to determine if the PR is good enough to be an experimental feature so we can get user feedback. @iSazonov can you turn this into an ExperimentalFeature?\r\n\r\nFirst of all, we need answers to the basic questions that have been formulated. I saw this PR as more of a problem study than a final product.",
+      "created_at": "2022-05-24T15:28:29Z",
+      "updated_at": "2022-05-24T15:28:29Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2022-06-01T02:00:41Z",
+      "updated_at": "2022-06-01T02:00:41Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "> > The goal here should be to determine if the PR is good enough to be an experimental feature so we can get user feedback. @iSazonov can you turn this into an ExperimentalFeature?\r\n> \r\n> First of all, we need answers to the basic questions that have been formulated. I saw this PR as more of a problem study than a final product.\r\n\r\nAn experimental feature isn't a final product.  It's getting it into the hands of users to get real usage feedback.  Because it's experimental, it means changes can happen without them being breaking changes.  Can you summarize what questions you want answered?",
+      "created_at": "2022-06-13T16:30:16Z",
+      "updated_at": "2022-06-13T16:37:35Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2022-06-21T02:01:17Z",
+      "updated_at": "2022-06-21T02:01:17Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "Commented above, if the current implementation adds function name (or someone tells me where to get its\ud83d\ude07 ), I should be good to integrate this with Profiler.\r\n\r\n---\r\n\r\nSince we last talked a year ago my Profiler module evolved a bit and now collects also module and function name (from session state and current function context). Which makes me think that exposing this as a list of events with predefined data might be limiting in the future. \r\n\r\nCould there be also an additional extension point similar to `$ExecutionContext.InvokeCommand.CommandNotFoundAction`, where a callback could be registered? \r\n\r\nThere are few general objects that might potentially have more interesting info, and it would be cool to have a built-in extension point that I could use in the future, to look at the current script extent, scriptblock, session state, function context, and callstack.\r\n",
+      "created_at": "2022-06-28T08:03:44Z",
+      "updated_at": "2022-06-28T08:03:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw This project has always been a hobby of mine, but waiting more than a year and a half is no longer a hobby, but a frustrating disappointment. I hope you understand that I don't have any motivation to remember this old story, especially since I found several other projects that I'm happy to spend my time on. I have already closed most of my unanswered PRs. Since no one was upset, it means no one needs them. The ones I left may be useful to someone or you can close them. I always saw in PowerShell a huge potential to change the ecosystem. Unfortunately this is in a deep sleep and I don't expect it to change in the foreseeable future unfortunately.\r\n",
+      "created_at": "2022-06-28T17:45:16Z",
+      "updated_at": "2022-06-28T17:45:16Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I totally understand your frustration and I'm truly sorry seeing this happening.",
+      "created_at": "2022-06-28T18:25:29Z",
+      "updated_at": "2022-06-28T18:25:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw The sole purpose of this PR was to implement the idea of Json Shirk so that we could explore it.\r\nThe cmdlet from the PR is only for exploring and testing. I think it should be moved into our HelpersCommon module. I know MSFT team prefer to have new cmdlets as community modules so new profiler cmdlets/tools can be released in this way.\r\nOnly @nohwnd showed interest so it's worth realizing what he wants.\r\nApart from this I see another important scenario for developers, administrators and support teams - the possibility of remote collection of events and study them in tools like PerfView and speedscope. I assume they need a couple of Start/Stop events while we now only release the Start event.",
+      "created_at": "2022-06-29T03:46:46Z",
+      "updated_at": "2022-06-29T03:46:46Z"
+    },
+    {
+      "author": "nohwnd",
+      "author_association": "NONE",
+      "body": "My current solution works okay, except that it can't profile additional runspaces (not sure if that is a limitation I will be able to lift easily). Unless @JustinGrote wants to push this forward, I am okay with this PR being closed.",
+      "created_at": "2022-06-29T08:06:13Z",
+      "updated_at": "2022-06-29T08:06:13Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the explanation @iSazonov, I would agree to drop it in favor of a module-based implementation unless there's something engine-intrinsic that needs to occur in order to assist with a profiling scenario (e.g. runspaces as @nohwnd mentioned)",
+      "created_at": "2022-06-29T14:16:40Z",
+      "updated_at": "2022-06-29T14:16:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Thanks for the explanation @iSazonov, I would agree to drop it in favor of a module-based implementation unless there's something engine-intrinsic that needs to occur in order to assist with a profiling scenario (e.g. runspaces as @nohwnd mentioned)\r\n\r\nEvents should be generated in Engine. Rest of processing can be external.",
+      "created_at": "2022-06-29T16:57:18Z",
+      "updated_at": "2022-06-29T16:57:18Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I appreciate all the work you've done and we've been trying to have Mondays focused on community contributions since the start of this month so that at least we have a more regular cadence when folks can expect an ack or response.\r\n\r\nFor this PR, I think the maintainers should take it over to get the events into 7.3 and the processing of the events will be an external module.",
+      "created_at": "2022-06-29T19:42:57Z",
+      "updated_at": "2022-06-29T19:42:57Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "> @iSazonov I appreciate all the work you've done and we've been trying to have Mondays focused on community contributions since the start of this month so that at least we have a more regular cadence when folks can expect an ack or response.\r\n> \r\n> For this PR, I think the maintainers should take it over to get the events into 7.3 and the processing of the events will be an external module.\r\n\r\nI agree, add the API to be able to get the profiling events and leave the implementation up to the community.",
+      "created_at": "2022-06-29T21:16:45Z",
+      "updated_at": "2022-06-29T21:16:45Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This pull request has been automatically marked as Review Needed because it has been there has not been any activity for **7 days**.\nMaintainer, please provide feedback and/or mark it as `Waiting on Author`",
+      "created_at": "2022-07-07T02:01:16Z",
+      "updated_at": "2022-07-07T02:01:16Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The Engine Working Group discussed this PR in the last meeting (7/7), and we agreed to close it with the following reasons:\r\n1. According to [this comment](https://github.com/PowerShell/PowerShell/pull/13673#issuecomment-1169502646) from @iSazonov, only @nohwnd showed interests, but @nohwnd already has a working solution and [is OK to close this PR](https://github.com/PowerShell/PowerShell/pull/13673#issuecomment-1169664529). It indicates that this is not a high demand feature.\r\n\r\n2. Based on the PR description and @iSazonov's comments, the change in this PR is not feature-complete. The biggest concern is that the STOP event is missing because PowerShell currently doesn't emit sequence point on finishing script execution. It may be non-trivial work to add it, so the cost of resource to take over this PR is likely high.\r\n\r\n3. We think our efforts should be put in more recent PRs instead, so hopefully new contributors won't face the same frustration again and again.\r\n\r\nThank you @iSazonov for putting up this PR and led the discussion around the idea of emitting events during script execution. We can always reference this PR when a similar need comes up in future.\r\n",
+      "created_at": "2022-07-18T23:58:20Z",
+      "updated_at": "2022-07-18T23:58:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw @SeeminglyScience In the PR was made some helper changes in Engine. Could you please review them? Perhaps this is of some value for other scenarios. If not, I will delete this branch altogether.",
+      "created_at": "2022-07-19T05:39:55Z",
+      "updated_at": "2022-07-19T05:39:55Z"
+    }
+  ],
+  "created_at": "2020-09-22T17:13:20Z",
+  "number": 13673,
+  "state": "closed",
+  "title": "PowerShell profiler",
+  "updated_at": "2022-07-19T05:39:55Z"
+}

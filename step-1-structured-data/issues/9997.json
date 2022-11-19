@@ -1,0 +1,321 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9997",
+  "author": "vexx32",
+  "body": "See the comments in #9794 for the full extent of the existing discussion, starting with https://github.com/PowerShell/PowerShell/pull/9794#issuecomment-504796781\r\n\r\nAutomationNull.Value is sometimes detectable and distinguishable from $null in certain cases, for example:\r\n\r\n```powershell\r\nusing namespace System.Management.Automation.Internal\r\n\r\n$null -is [psobject] # false\r\n[AutomationNull]::Value -is [psobject] # true\r\n\r\n@($null).Count # 1\r\n@([AutomationNull]::Value).Count # 0\r\n```\r\n\r\n@SeeminglyScience mentioned a possible way we could have it be handled more closely like `[dbnull]` and `[nullstring]` are being handled as of #9794, without losing its current function in the pipeline internals, in https://github.com/PowerShell/PowerShell/pull/9794#issuecomment-505107426:\r\n\r\n> Ideally if this were to be fixed it would just be removed from assignment, e.g. `$obj = [AutomationNull]::Value` would populate `$obj` with true `null`. The `-is` operator is one of the few things that never \"lie\" on occasion and I think it would be a detriment to change that.\r\n> \r\n> You can also make `[AutomationNull]::Value -is [AutomationNull]` work by:\r\n> \r\n> 1. Removing the `static` keyword from the class decl\r\n> 2. Make it inherit `PSObject`\r\n> 3. Change the singleton instance to `new AutomationNull()`\r\n> \r\n> That would allow `$autoNull -is [psobject]` to still work while enabling `$autoNull -is [AutomationNull]`. Though I think there are a few places in the compiler where it uses a pattern like `if (expr.ExpressionType == typeof(PSObject) && expr.Value == AutomationNull.Value)` so that might need to change.\r\n\r\n/cc @daxian-dbw @mklement0 \r\n\r\nI'm personally in favor of Patrick's solution, as it enables the very clear and concise `$item -is [AutomationNull]` with few downsides (the biggest downside being potential implementation complications, but in my opinion these are probably worth tackling). Interested to hear any further discussion on this! \ud83d\udc96 \r\n",
+  "closed_at": "2020-03-14T17:32:01Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "```powershell\r\nusing namespace System.Management.Automation.Internal\r\n[AutomationNull]::Value -is [AutomationNull]\r\n``` \r\nreturning `$true` makes perfect sense both intrinsically and for symmetry with `[DbNull]::Value -is [DbNull]` and `[NullString]::Value -is [NullString]` returning `$true`.\r\n\r\nThe current workaround for detecting `[System.Management.Automation.Internal.AutomationNull]::Value` actually requires _two_ tests (to also distinguish `[AutomationNull]::Value` from an empty collection object).\r\n\r\n```powershell\r\n$null -eq $someValue -and @($someValue).Count -eq 0\r\n```\r\n\r\nAs for why there is an occasional need to distinguish between a true `$null` and `[System.Management.Automation.Internal.AutomationNull]::Value`:\r\n\r\nA command that produces _no output_ technically outputs `[System.Management.Automation.Internal.AutomationNull]::Value`, which is distinct from a command _explicitly returning `$null`_.\r\n\r\nWhile `$null` and `[System.Management.Automation.Internal.AutomationNull]::Value` are treated the same in an expression context, their behavior differs fundamentally in the pipeline:\r\n\r\n```powershell\r\n# A true $null is sent through the pipeline. \r\nPS> & { $null }  | % { 'here' }\r\nhere\r\n\r\n# A command with no output technically outputs [System.Management.Automation.Internal.AutomationNull]::Value, which is NOT sent through the pipeline - it is an empty enumeration.\r\nPS> & { }  | % { 'here' }\r\n# NO output\r\n```\r\n\r\nAlso, because the `switch` statement treats its operand as an _enumeration_, a `[System.Management.Automation.Internal.AutomationNull]::Value` value causes the statement to be skipped altogether; that is, it is effectively _ignored_:\r\n\r\n``` powershell\r\n$val = & {}\r\n# Because $val contains [System.Management.Automation.Internal.AutomationNull]::Value,\r\n# the switch statement is effectively ignored;\r\nswitch ($val) {\r\n  default { 'hi' }\r\n}\r\n```\r\n\r\nRelated issues: \r\n\r\n* You cannot pass `[System.Management.Automation.Internal.AutomationNull]::Value` as an _argument_ - it is invariably converted to `$null`, which @lzybkr surmised may have been an oversight - see https://github.com/PowerShell/PowerShell/issues/9150#issuecomment-474650803\r\n\r\n* The `foreach` _statement_ does _not_ distinguish between `$null` and `[System.Management.Automation.Internal.AutomationNull]::Value` - _neither_ is enumerated.\r\n\r\n* The mystifying `[AutomationNull]::Value -is [AutomationNull]` being `$false` has echoes of `[pscustomobject] @{ foo = 1 } -as [System.Management.Automation.PSCustomObject]` being `$null` and `-as [pscustomobject]` _always_ returning the LHS, with a true `$null` LHS being the only exception - see #4343 and below.\r\n\r\n---\r\n\r\nJust like `[AutomationNull]::Value -is [AutomationNull]` currently being `$false` is a head-scratcher, so is `[AutomationNull]::Value -is [psobject]` being `$true` and - given the unfortunate identity of `[psobject]` and `[pscustomobject]` - `[AutomationNull]::Value -is [pscustomobject]` being equally `$true`.\r\n\r\n`[AutomationNull]::Value -is [psobject]` being `$true` makes no sense from an end-user perspective, and looks like another case of `[psobject]` peeking from behind the curtain - see #5579.\r\n",
+      "created_at": "2019-06-25T06:01:34Z",
+      "updated_at": "2020-01-31T14:36:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The AutomationNull is defined in System.Management.Automation.Internal namespace that implies only internal _non-public_ use. We free to change the internal AutomationNull but it make sense only if it is really needed for addressing important scenarios.",
+      "created_at": "2019-06-25T11:25:45Z",
+      "updated_at": "2019-06-25T11:25:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If it is purely for internal use it should never be leaking in the ways described above.\r\n\r\nHowever, due to the way it's intended to behave, I'm not sure it can be purely internal and still provide the same utility.",
+      "created_at": "2019-06-25T12:10:52Z",
+      "updated_at": "2019-06-25T12:10:52Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov is correct. AutomationNull is for internal use by the runtime. It exists to distinguish an empty stream from a stream containing null.\r\n\r\n@vexx32 \r\n> AutomationNull.Value is sometimes detectable and distinguishable ... for example...\r\n\r\nAll of your examples explicitly reference the type. I would hardly call that a \"leak\".\r\n\r\n> However, due to the way it's intended to behave, I'm not sure it can be purely internal and still provide the same utility\r\n\r\nWhat do you think it should do that it currently doesn't do and why do you think that behaviour is useful? For example, this\r\n```powershell\r\nusing System.Management.Automation.Internal\r\n[AutomationNull]::Value -is [AutomationNull]\r\n```\r\ndoes *not* qualify as useful *because it's an internal class*. ",
+      "created_at": "2019-06-25T18:37:21Z",
+      "updated_at": "2019-06-25T18:37:21Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sure, for simplicity of definition I opted to use the explicit class name. @mklement0  offered several other ways to obtain the value. Also, it's **not** internal. I can reference the type name from PS directly. It might be in the internal namespace, but it's public.\r\n\r\nHere's another way to get an auto-null:\r\n\r\n```powershell\r\n$a = if ($false) { Do-Thing }\r\n```\r\n\r\nContrived? Yes. Easily found in a real application? Absolutely. Even more so in a pipeline which may not return any value.",
+      "created_at": "2019-06-25T18:43:31Z",
+      "updated_at": "2019-06-25T18:43:31Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 \r\n\r\nIt's in the internal namespace:\r\n\r\nSystem.Management.Automation._Internal_\r\n\r\nThis namespace contains classes and interfaces that must be public for some reason but are not considered part of the public PowerShell API.\r\n\r\n```powershell\r\n{master}PSCore (1:1) >  $a = if ($false) { Do-Thing }\r\n{master}PSCore (1:2) >  $a -eq $null\r\nTrue\r\n{master}PSCore (1:3) >  $a.GetType().FullName\r\nYou cannot call a method on a null-valued expression.\r\nAt line:1 char:1\r\n+ $a.GetType().FullName\r\n+ ~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (:) [], RuntimeException\r\n+ FullyQualifiedErrorId : InvokeMethodOnNull\r\n\r\n{master}PSCore (1:4) >\r\n```\r\nSo where does AutomationNull show up in this?",
+      "created_at": "2019-06-25T19:14:09Z",
+      "updated_at": "2019-06-25T19:14:09Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "As Dongbo mentioned in the linked PR, AutomationNull doesn't respect GetType(); it's special-cased in that instance to appear as `$null`. However, compare `$a` in that example with true `$null` as follows:\r\n\r\n```powershell\r\n$a -is [psobject] # true\r\n$null -is [psobject] # false\r\n\r\n@($a).Count # 0\r\n@($null).Count # 1\r\n```\r\n\r\nIf it's not meant to be part of the public API, then y'all need to figure out how to hide it better. \ud83d\ude09 ",
+      "created_at": "2019-06-25T20:15:05Z",
+      "updated_at": "2019-06-25T20:20:33Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay I've had to account for it before with methods that have a parameter typed as `object[]`.  For example:\r\n\r\n```powershell\r\n$a = if ($false) { Do-Thing }\r\n[type]::GetTypeArray(@(0, $a, 1))\r\n```\r\n\r\nAnd to be fair, the [documentation](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.internal.automationnull?view=pscore-6.2.0) does not do a great job at explaining that it shouldn't be used (and by that I mean it says that it's *imperative* that you *do* use it).  You also have to remember the audience, most PowerShell folks won't think twice about the namespace because they aren't familiar with that pattern.  Granted, most folks who end up needing `AutomationNull` will probably be pretty technical, but still.\r\n\r\nWhether or not it was intended to be used, I'd still advise that care be taken when it comes to breaking changes.",
+      "created_at": "2019-06-25T20:53:12Z",
+      "updated_at": "2019-06-25T21:03:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good points, @vexx32  and @SeeminglyScience.\r\n\r\nI don't think `[AutomationNull]` _can_ be hidden, because users need to _understand_ how it differs from `$null` and need to be able to _inspect_ a given value to infer its pipeline behavior - and also more obscure differences such as @SeeminglyScience's method-argument example.\r\n\r\nIn other words: it is insufficient for PowerShell to pretend that a type('s singleton)  is `$null` when it actually _behaves differently_, situationally.\r\n\r\nThat difference must be _discoverable_, and having to resort to obscure and cumbersome workarounds to detect `[AutomationNull]::Value` - which you'll never discover unless you know about this \"internal\" type - is obviously unsatisfactory.\r\n\r\nSo, yes,\r\n\r\n```\r\n$var = & {}\r\n$var -is [AutomationNull]\r\n```\r\n\r\n_is_ useful - and that it currently returns `$false` is self-contradictory.\r\n\r\nFurthermore, the type  must be _documented_ in the end-user docs.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-06-28T03:02:50Z",
+      "updated_at": "2019-06-28T03:02:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience, stumbling upon this again I've noticed bizarre behavior around your example:\r\n\r\n```powershell\r\n# This FAILS, as in your example.\r\n$anull = & {}; [Type]::GetTypeArray(@(0, $anull)).Name | Should -Be 'Int32', 'PSObject'\r\n\r\n# This SUCCEEDS - single-element array, with just AutomationNull.\r\n$anull = & {}; [Type]::GetTypeArray(@(, $anull)).Name | Should -Be 'PSObject'\r\n\r\n# RETRYING the ORIGINAL command NOW SUDDENLY SUCCEEDS.\r\n$anull = & {}; [Type]::GetTypeArray(@(0, $anull)).Name | Should -Be 'Int32', 'PSObject'\r\n```",
+      "created_at": "2019-11-19T16:32:53Z",
+      "updated_at": "2019-11-19T16:32:53Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, looks like a binder bug.  There must be a difference in how it approaches converting single item arrays vs more populated arrays.  That would explain why the third works, the binder would still be cached.",
+      "created_at": "2019-11-19T16:57:56Z",
+      "updated_at": "2019-11-19T16:57:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience; I've created #11118.",
+      "created_at": "2019-11-19T17:19:41Z",
+      "updated_at": "2019-11-19T17:19:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It's only tangentially related, but another context where `[System.Management.Automation.Internal.AutomationNull]::Value` behaves differently from `$null` is the `switch` statement, because `switch` treats its operand as an _enumeration_, which in the case of true `[System.Management.Automation.Internal.AutomationNull]::Value` causes the statement to be skipped altogether; that is, it is effectively _ignored_:\r\n\r\n``` powershell\r\n$val = & {}\r\n# Because $val contains [System.Management.Automation.Internal.AutomationNull]::Value,\r\n# the switch statement is effectively ignored;\r\nswitch ($val) {\r\n  default { 'hi' }\r\n}\r\n```",
+      "created_at": "2019-12-19T03:31:21Z",
+      "updated_at": "2020-01-31T14:37:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Are we still tracking anything in the issue or we can close?",
+      "created_at": "2020-01-31T12:23:20Z",
+      "updated_at": "2020-01-31T12:23:20Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Not sure, but I do want to clarify that my previous idea of:\r\n\r\n> Ideally if this were to be fixed it would just be removed from assignment, e.g. `$obj = [AutomationNull]::Value` would populate `$obj` with true `null`.\r\n\r\nisn't feasible because then these two examples would react differently:\r\n\r\n```powershell\r\n$anull = $null | % {}\r\n$anull | % { 'something' }\r\n\r\n# vs\r\n$null | % {} | % { 'something' }\r\n```\r\n",
+      "created_at": "2020-01-31T13:21:03Z",
+      "updated_at": "2020-01-31T13:21:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience, do you still think the other part of the proposal - making `-is [AutomationNull]` work -  is feasible without breaking things?\r\n\r\nIf so, we'd also have to introduce `[AutomationNull]` as a type accelerator to make this practical.",
+      "created_at": "2020-01-31T13:40:54Z",
+      "updated_at": "2020-01-31T13:40:54Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "If the goal is to make `-is [AutomationNull]` work, that's the way to do it imo. I don't know that it necessarily needs to work since well over 99% of the time you don't need to worry about auto null and the current methods work fine.\r\n\r\n`AutomationNull` is also still in sort of a gray area where it isn't \"technically\" supported.  It may be worth while to either move `AutomationNull` or make it internal (preferably the former) similar to what [ASP.NET did with their pubternal API's](https://github.com/aspnet/Announcements/issues/377).\r\n\r\nMight even be able to get away without any breaking changes by doing this:\r\n\r\n```csharp\r\nnamespace System.Management.Automation\r\n{\r\n    public sealed class AutomationNull : PSObject\r\n    {\r\n        private AutomationNull()\r\n        {\r\n        }\r\n\r\n        public static AutomationNull Value { get; } = new AutomationNull();\r\n    }\r\n}\r\n\r\nnamespace System.Management.Automation.Internal\r\n{\r\n    [Obsolete(\"Use System.Management.Automation.AutomationNull\")]\r\n    public static class AutomationNull\r\n    {\r\n        public static PSObject Value => System.Management.Automation.AutomationNull.Value;\r\n    }\r\n}\r\n```\r\n\r\nAuto null should probably be officially supported before any additional enhancements are made.",
+      "created_at": "2020-01-31T13:58:15Z",
+      "updated_at": "2020-01-31T13:58:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience - my vote is definitely to do it, even if it's only needed 1% of the time, so users can solve the mysteries [discussed above](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-505296556).",
+      "created_at": "2020-01-31T14:15:32Z",
+      "updated_at": "2020-01-31T14:15:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Do you ready to ask PowerShell committee?",
+      "created_at": "2020-01-31T14:34:00Z",
+      "updated_at": "2020-01-31T14:34:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I am, @iSazonov - thanks.",
+      "created_at": "2020-01-31T14:37:42Z",
+      "updated_at": "2020-01-31T14:37:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @SteveL-MSFT for PowerShell Committee conclusion.",
+      "created_at": "2020-01-31T15:08:55Z",
+      "updated_at": "2020-01-31T15:08:55Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience \r\n>If the goal is to make `-is [AutomationNull]` work.\r\n\r\nWhy? If you want to check for `AutomationNull` you should do `$x == [AutomationNull]::Value.` because it's a singleton.\r\n\r\n`AutomationNull` is primarily designed for use in the pipeline to distinguish between the _value_  `$null` and no value (the empty stream.) When a pipeline returns `AutomationNull`  it is converted into a `$null` on variable assignment.\r\n\r\n`AutomationNull` needed to be publicly visible for various reasons. For example, a compiled cmdlet might want to explicitly return it. (Though generally, if the cmdlet doesn't call write, the pipeline processor will automatically return `AutiomationNull`.)\r\n\r\nOverall, when we introduced `AutomationNull` in V1, sorting out when something was `$null` versus `AutomationNull` was *extremely*  painfull. There were tons of related bugs that took a long time to fix properly. So any significant changes to `AutomationNull` are likely to result in a whole bunch of new, obscure bugs so I would classify it as high risk change. Conversely, as far as I can see, the proposed changes don't actually add significant value. Why should we take a high-risk low-value change?\r\n",
+      "created_at": "2020-02-20T18:17:47Z",
+      "updated_at": "2020-02-20T18:17:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Why? \r\n\r\nFor the reasons outlined [above](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-506582327).\r\n\r\n> If you want to check for AutomationNull you should do `$x == [AutomationNull]::Value`.\r\n\r\nThat doesn't help with _checking_, the awkwardness and obscurity of which has been outlined [above](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-505296556), due to the non-distinction between `$null` and `$AutomationNull` in expressions; to recap:\r\n\r\n```powershell\r\n# Awkward and obscure test whether $x contains [AutomationNull]::Value\r\n$null -eq $x -and @($x).Count -eq 0\r\n```\r\n\r\n> When a pipeline returns AutomationNull it is converted into a $null on variable assignment.\r\n\r\nThat was true up to v2; v3+ preserves the value, and that mustn't change.\r\n\r\n```powershell\r\nPS> $x = & {}; $null -eq $x -and @($x).Count -eq 0\r\nTrue\r\n```\r\n\r\n> So any significant changes to AutomationNull are likely to result in a whole bunch of new, obscure bugs\r\n\r\n<del>I agree that making `[AutomationNull]::Value` no longer a true singleton, as [proposed above](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-580743572), is problematic.</del>\r\n\r\nHowever, what I think would be a low-risk change - if feasible (can't speak to that) - is to have _the `-is` operator_ tell a _new white (useful) <del>lie</del>_ (actually: _truth_), the way it already does for `PSCustomObject`, without the implementation of `[AutomationNull]::Value` needing to change:\r\n\r\n```powershell\r\n# Technically a PSObject, but presents as PSCustomObject\r\nPS> [pscustomobject] @{} -is [System.Management.Automation.PSCustomObject]\r\nTrue\r\n```\r\n\r\nTherefore, along with implementing `[AutomationNull]` as a type accelerator, the following should then work:\r\n\r\n```powershell\r\nPS> $x = & {}; $x -is [AutomationNull] \r\nTrue  # wishful thinking\r\n```\r\n\r\n\r\n\r\nI think that would be sufficient and makes for a nice complement to the pending implementation of `-is $null` (#10704)\r\n\r\n\r\n\r\n",
+      "created_at": "2020-02-20T20:14:36Z",
+      "updated_at": "2020-02-21T21:15:41Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience\r\n> \r\n> > If the goal is to make `-is [AutomationNull]` work.\r\n> \r\n> Why?\r\n\r\nI agree for the most part.  I don't think it comes up anywhere near often enough to really touch it aside from *maybe* making a actual public version that just essentially points to the pubternal one.\r\n\r\nThe wording there was carefully chosen to convey that but it probably wasn't direct enough.  My change proposal is more \"if it's decided that it should be done for reason x, then this is how it should be done\".\r\n\r\n> When a pipeline returns `AutomationNull` it is converted into a `$null` on variable assignment.\r\n\r\nIt was at one point, but it's assigned to the variable now.  Here's an example of what I assume is the reason why, copied from one of my comments above:\r\n\r\n```powershell\r\n# If autonull wasn't saved, these two examples would act differently.\r\n$anull = $null | % {}\r\n$anull | % { 'something' }\r\n\r\n# vs\r\n$null | % {} | % { 'something' }\r\n```\r\n\r\n> `AutomationNull` needed to be publicly visible for various reasons. For example, a compiled cmdlet might want to explicitly return it. (Though generally, if the cmdlet doesn't call write, the pipeline processor will automatically return `AutiomationNull`.)\r\n\r\nWhy pubternal then?  Why not just a normal public API?\r\n\r\n> So any significant changes to `AutomationNull` are likely to result in a whole bunch of new, obscure bugs so I would classify it as high risk change. Conversely, as far as I can see, the proposed changes don't actually add significant value. Why should we take a high-risk low-value change?\r\n\r\nI'm not sure I necessarily agree with the risk assessment, but I'm not arguing the low value side of that. ~@mklement0  you're welcome to make a case for it.~ Hah you did as a pressed submit \ud83d\ude42 ",
+      "created_at": "2020-02-20T20:14:42Z",
+      "updated_at": "2020-02-21T02:05:46Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Point of clarity that seems to have been ever so slightly glossed over... you can't check `$value -eq [automationnull]::Value` in PowerShell and expect the right result; `$null -eq [automationnull]::Value` will always return `$true`",
+      "created_at": "2020-02-20T21:29:09Z",
+      "updated_at": "2020-02-20T21:29:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @vexx32, and, in a similar vein, to amend my previous comment:\r\n\r\nWhile `[pscustomobject] @{} -is [System.Management.Automation.PSCustomObject]` returning `$true` is a - beneficial - _lie_, `$x = & {}; $x -is [AutomationNull]`  returning `$true` would actually be _telling the truth_  - that the current conflation of `[AutomationNull]::Value` with `$null` gets in the way of.",
+      "created_at": "2020-02-21T04:51:48Z",
+      "updated_at": "2020-02-21T04:51:48Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 That's actually not a lie.  When you create a `PSObject` without a base object, `PSCustomObject` is used:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/da94afaf5b176fc85887fd314d0643fcd80bccda/src/System.Management.Automation/engine/MshObject.cs#L544-L550",
+      "created_at": "2020-02-21T13:30:09Z",
+      "updated_at": "2020-02-21T13:30:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience, but it is still _wrapped in_ a `PSObject`, isn't it?\r\n\r\n```powershell\r\nPS> [type]::GetTypeArray(([pscustomobject] @{})).Name\r\nPSObject\r\n```\r\n\r\nAnd speaking of conflation and lies: the conflation of `[psobject]` and `[pscustomobject]`, _both_ of which are `PSObject`, makes the following virtually useless:\r\n\r\n```powershell\r\nPS> [pscustomobject] @{} -is [pscustomobject]\r\nTrue  # OK, but ....\r\n\r\nPS> (Get-Item /) -is [pscustomobject]\r\nTrue  # !! ALSO true, because  [pscustomobject]  is the SAME AS [psobject]\r\n```\r\n\r\n`-is [pscustomobject]` working the same as `-is [System.Management.Automation.PSCustomObject]` would be a _more_ beneficial lie, by far - the current behavior is both useless and confusing.\r\n\r\nAnd let's not forget that with `-as` even the verbose `[pscustomobject] @{} -as [System.Management.Automation.PSCustomObject]` doesn't work, let alone `-as [pscustomobject]`: #4343\r\n\r\nNote that there is already precedent for situationally treating `[psboject]` and `[pscustomobject]` differently:\r\n\r\n```powershell\r\n# `[pscustomobject] @{}`  is *syntactic sugar* for constructing a PSCustomObject \r\nPS> ([pscustomobject] @{}).GetType().Name\r\nPSCustomObject\r\n\r\n# `[psobject] @{}`, by contrast, confusingly creates a [hashtable] that is\r\n# virtually invisibly and uselessly in a PSObject instance.\r\n# This despite the fact that both `New-Object PSObject` \r\n# and `[psobject]::new()` *do* create PSCustomObject instances.\r\nPS> ([psobject] @{}).GetType().Name\r\nHashTable\r\n```\r\n\r\n",
+      "created_at": "2020-02-21T14:25:45Z",
+      "updated_at": "2020-02-21T14:25:45Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience, but it is still _wrapped in_ a `PSObject`, isn't it?\r\n\r\nWell yeah sure but most things are, most of the time.  `PSObject` is the magic wrapper that makes the language functional (I know you know this, bear with me), so really it's lying in the same way that `[psobject]'string' -is [string]` is lying.\r\n\r\nThe other stuff is probably better suited for a new issue.\r\n\r\nMy point is that it's not worth making `-is` lie (aside from the single \"lie\" of evaluating a psobject's base object) to make `$anull -is [automationnull]` work for the dozen of us that will use it once it year.  If something was going to change, I really don't think my proposal is dangerous.  I understand that when significantly more substantial changes were made in the past that there were understandably difficult to resolve bugs. My proposal is very small though, it's unlikely that any code outside of the class itself would need to be changed.",
+      "created_at": "2020-02-21T15:04:02Z",
+      "updated_at": "2020-02-21T15:24:43Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I missed this initially:\r\n\r\n> I agree that making `[AutomationNull]::Value` no longer a true singleton, as [proposed above](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-580743572), is problematic.\r\n\r\nIn my proposal it's still a true singleton.  The same exact object will be returned from both `Internal.AutomationNull.Value` and `AutomationNull.Value`, every single call.  It will also still be a `PSObject` since `AutomationNull` would subclass `PSObject`.\r\n\r\nThe *only* possible break I can think of is if there is an obscure branch of code where `obj == AutomationNull.Value` is *gated* by an explicit type check like `obj.GetType() == typeof(PSObject)`.   For example:\r\n\r\n```csharp\r\n// Would NOT catch auto null\r\nif (obj.GetType() == typeof(PSObject))\r\n{\r\n    return obj == AutomationNull.Value;\r\n}\r\n\r\n// This would still work\r\nif (obj is PSObject)\r\n{\r\n    return obj == AutomationNull.Value\r\n}\r\n```\r\n\r\nIf there are any instances of that (ideally there wouldn't be as `PSObject` is not sealed), they should be pretty easy to find by following references of `AutomationNull.Value`.",
+      "created_at": "2020-02-21T15:36:52Z",
+      "updated_at": "2020-02-21T15:38:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the clarification, @SeeminglyScience, I had missed the nuances of your proposal; so it sounds like we needn't worry about the proposed change being _risky_ .\r\n\r\nThis leaves us with the question: _Why do it_?\r\n\r\n> make `$anull -is [automationnull]` work for the dozen of us that will use it once it year.\r\n\r\nTo me, it's not about how often the need arises, but about the need to **provide a way to discover and make sense of a real-world behavioral difference** that would otherwise be inexplicable without insider information (currently, the only high-profile source of this information that I'm aware of is [this Stack Overflow question](https://stackoverflow.com/q/30016949/45375), where @PetSerAl has provided an in-depth answer).\r\n\r\n**As it stands, the conflation of `$null` and `AutomationNull` in terms of _conditionals_ and _reflection_ amounts to a _leaky abstraction_**: \r\nThey are _not_ the same and in the contexts [described above](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-505296556) whether you're dealing with one or the other makes a fundamental difference - yet nothing in PowerShell currently tells you which one you're dealing with.\r\n\r\nMaking the following all work (meaningfully) would be a great enhancement in my estimation:\r\n\r\n* `-is [AutomationNull]` (this proposal)\r\n\r\n* `-is $null ` - being worked on in #10704\r\n\r\n* `-is [pscustomobject]`(not just `-is [System.Management.Automation.PSCustomObject]`) and `-as [pscustomobject]` - see #11921\r\n\r\n\r\n---\r\n\r\nParting thought re:\r\n\r\n>  PSObject is the magic wrapper that makes the language functional \r\n\r\nYes, but it's another leaky abstraction that occasionally peeks from behind the curtain to cause seemingly inexplicable behavioral differences: #5579\r\n\r\n",
+      "created_at": "2020-02-21T19:59:31Z",
+      "updated_at": "2020-02-22T04:07:48Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 \r\n> Point of clarity that seems to have been ever so slightly glossed over... you can't check $value -eq [automationnull]::Value in PowerShell and expect the right result; $null -eq [automationnull]::Value will always return $true\r\n\r\nCorrect and by design. The intent was to make `AutomationNull` as invisible to script users as possible.\r\n\r\nSo again - why? What significant scenarios depend on actively working with `AutomationNull` in script. Why would we take a significant risk to do this?\r\n. \r\n\r\n",
+      "created_at": "2020-02-21T22:24:52Z",
+      "updated_at": "2020-02-21T22:24:52Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "What risk? There isn't any significant risk whatsoever, unless you have some specific disagreements with @SeeminglyScience's assessments.\r\n\r\nI think @mklement0 and prior points in this thread have addressed the _why_ of it quite well enough. \ud83d\ude42 ",
+      "created_at": "2020-02-21T23:03:07Z",
+      "updated_at": "2020-02-21T23:03:07Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 \r\n> What risk?\r\n\r\nThe significant risk of breaking all kinds of things in obscure ways because we've done something to make AutomationNull *more* visible rather than *less* visible. As I mentioned before, getting a usable system with AutomationNull took *months* of bug hunting. \r\n\r\nAnd I have yet to hear a credible rational for changing the semanitcs of AutomationNull. In a value/expression content AutomationNull should work exactly like null. In a pipeline, it's purpose is to indicate that the pipeline returned no results which is *not* the same as null.",
+      "created_at": "2020-02-26T22:46:22Z",
+      "updated_at": "2020-02-26T22:46:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay Sure, but it _doesn't_ work \"exactly\" like null in all cases. Therefore having a reliable and accessible way to distinguish the two is desirable so that you can properly handle it when you need to.\r\n\r\nYour arguments are hypotheticals that we \"might\" break something, with very little information . The responses from @mklement0 and @SeeminglyScience as well as the occasional question that crops up on a fairly frequent basis in the community chat channels indicates that having a reliable way to distinguish $null from AutomationNull is worth implementing. \r\n\r\nUnless you can demonstrate something that the proposed changes will actually break, I'm not sure your concerns can be tested in any way. An untestable hypothesis isn't especially useful as a talking point.",
+      "created_at": "2020-02-26T22:51:52Z",
+      "updated_at": "2020-02-26T22:52:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To add to @vexx32' s helpful comment: No one in this thread has advocated changing the _semantics_ of AutomationNull - the proposed change in no way modifies the existing _behavior_, it merely enables _reflection on_ a preexisting behavioral difference that has hitherto been undiscoverable without insider knowledge.\r\n\r\nAnecdotal references to past struggles and insisting on not being _personally_ convinced are no substitutes for rational debate, especially if the points that have been made aren't being addressed.",
+      "created_at": "2020-02-26T23:30:32Z",
+      "updated_at": "2020-02-26T23:30:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We were sure that # 9794 is correct but it was reverted. This experience says that each application area can have its own 'null' and it is probably not worth crossing them as far as possible (even if it raises a lot of questions).\r\n",
+      "created_at": "2020-02-27T19:33:47Z",
+      "updated_at": "2020-02-27T19:33:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, #9794 was a different story altogether, and in a sense the _opposite_ (complement) of what is being proposed here: it tried to extend the set of types that are _conflated_ with `$null` when compared it via `-eq` (in keeping with `-eq`'s loose concept of equality); by contrast, here we're asking to _unambiguously identify_ a \"specific flavor of `$null`\". Again, we're only talking about a _reflection_ feature here that makes real-world behavioral differences _discoverable_ - no existing behavior relating to _using_ these values will change.",
+      "created_at": "2020-02-27T20:07:10Z",
+      "updated_at": "2020-02-27T20:49:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> we're only talking about a reflection feature here that makes real-world behavioral differences discoverable - no existing behavior relating to using these values will change.\r\n\r\n@vexx32 @mklement0 The issue description is based on #9794 and mentioned `dbnull` and `stringnull`. This is misleading. I think you need to close this discussion and create a new one where you clearly indicate the desired changes as 1, 2, 3.\r\n\r\nPlease strongly take into account a history which Bruce revealed.\r\nAlso please take into account that AutomationNull is \"public\" mainly for SDK ([see](https://github.com/search?q=AutomationNull&type=Code) C# vs PowerShell - ~3000 vs ~0 results)\r\n ",
+      "created_at": "2020-02-28T15:55:59Z",
+      "updated_at": "2020-02-28T15:55:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Please strongly take into account a history which Bruce revealed.\r\n\r\nThe history he revealed is that there were a lot of bugs when they made the change that allowed autonull to be saved to a variable.  Nothing is revealed there, that's a huge change that pretty obviously increases risk.\r\n\r\nIt's sort of like saying that there was a lot of obscure bugs when PowerShell's parser switched from purely token based to AST based so we shouldn't consider adding an overload to `Parser.ParseInput`.\r\n\r\nIf the argument was \"this comes up so infrequently that it's not even worth discussing\" I'd be with ya 100%.  If instead the argument is \"significantly more drastic and involved changes we made 10 years ago caused problems\" then I have a hard time seeing that as anything other than off topic.",
+      "created_at": "2020-02-28T16:23:52Z",
+      "updated_at": "2020-02-28T16:23:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I mean mainly the old history and experience:\r\n>AutomationNull is primarily designed for use in the pipeline to distinguish between the value $null and no value (the empty stream.) When a pipeline returns AutomationNull it is converted into a $null on variable assignment.\r\n\r\n>AutomationNull needed to be publicly visible for various reasons. For example, a compiled cmdlet might want to explicitly return it. (Though generally, if the cmdlet doesn't call write, the pipeline processor will automatically return AutiomationNull.)\r\n\r\nOur new history and experience is that in #9794 we got married [dbnull], [stringnull] and [null] and then stumbled upon AutiomationNull that was highlighted in the separate discussion. In the history no real scenario presents. So question is - what scenarios do we need to fix to help (1) script writers, (2) binary module developers? what can they not do? what can they not overcome? What annoys them and forces them to make bad workarounds?\r\nAlthough Bruce mentioned only one scenario where AutiomationNull might be used (binary cmdlet), perhaps there are others. I would rather expect that these scenarios were discussed with the aim of hiding or getting rid of AutiomationNull because it is the visibility of AutiomationNull (knowledge that it exists) that causes questions for users, although most likely they do not need it and they can bypass the emerging problem easily.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-02-28T17:39:02Z",
+      "updated_at": "2020-02-28T17:39:02Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this.  We feel that using `AutomationNull` directly comes up infrequently enough that it doesn't warrant the time spent on discussion already.  We would also be concerned about potential breaking change as noted by @SeeminglyScience and @bpayette.",
+      "created_at": "2020-03-04T23:22:33Z",
+      "updated_at": "2020-03-04T23:22:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> comes up infrequently enough \r\n\r\n_How often this comes up_  isn't the point, as [argued before](https://github.com/PowerShell/PowerShell/issues/9997#issuecomment-589812072).\r\n\r\n> using AutomationNull directly \r\n\r\nThat wasn't the point either; it's not about _using_, but about _discovering_ something that _you can't help but encounter in real life_, without the language giving you the ability to understand why not all apparent `$null` values are created equal.\r\n\r\nRecent case in point: https://stackoverflow.com/q/60515757/45375\r\n\r\n> concerned about potential breaking change\r\n\r\nWhat the proposal _turned into_ would _not_ result in any breaking change (as @SeeminglyScience has conclusively argued, aside from his not being personally convinced of the need for a change).\r\n\r\n----\r\n\r\n@iSazonov:\r\n\r\n>  I think you need to close this discussion and create a new one \r\n\r\nRe-reading the OP, I agree; unfortunately I didn't get around to it in time.\r\n\r\n> it is the visibility of AutomationNull (knowledge that it exists) that causes questions for users\r\n\r\nThe exact opposite is the case: most users are _unaware_ of `AutomationNull`, but they see its _effects_, which is why they need to be given a way to _discover_ this value.\r\n\r\n> with the aim of hiding or getting rid of AutomationNull\r\n\r\nIn light of the above: `AutomationNull` must neither be hidden nor can it be gotten rid of.\r\n\r\n\r\n\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/60515757/powershell-filter-ignored-in-pipeline\">Powershell filter ignored in pipeline</a></strong></div><div>I am writing a Chef library to make writing a custom resource for managing Microsoft MSMQ resources on Windows Server easier.  Chef interfaces with Windows using Powershell 5.1.\n\nI want to raise an...</div></blockquote>",
+      "created_at": "2020-03-04T23:47:26Z",
+      "updated_at": "2020-03-04T23:47:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, I finally got around to this suggestions of yours:\r\n\r\n> I think you need to close this discussion and create a new one\r\n\r\nPlease see #13465, which focuses just on `-is [AutomationNull]` and hopefully avoids the confusion that arose in this discussion around non-existent breaking changes.\r\n",
+      "created_at": "2020-08-17T20:21:08Z",
+      "updated_at": "2020-08-17T20:21:08Z"
+    }
+  ],
+  "created_at": "2019-06-24T18:00:30Z",
+  "number": 9997,
+  "state": "closed",
+  "title": "AutomationNull Behaviour",
+  "updated_at": "2020-08-17T20:21:08Z"
+}

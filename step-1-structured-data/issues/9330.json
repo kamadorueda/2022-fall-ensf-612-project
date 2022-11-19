@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9330",
+  "author": "mklement0",
+  "body": "in Windows PowerShell and v6.1.3 you can match files that don't have a filename extension with provider filter `-Filter *.`. \r\n\r\nThis doesn't work anymore.\r\n\r\nNote that `-Filter` ultimately uses the underlying Windows API for wildcard matching, which has legacy quirks, including the ability to match extension-less filenames with `*.`; it is _not_ the same wildcard language as _PowerShell's own_ (and `*.` wouldn't work that way with, say, `-Include`).\r\n\r\n# Steps to reproduce\r\n\r\nRun the following test on Windows:\r\n\r\n```powershell\r\nDescribe \"Extension-less file filtering\"  {\r\n  It \"-Filter *. finds extension-less files\" -Skip:(!$IsWindows) {\r\n      '' > TestDrive:/foo\r\n      (Get-ChildItem -File -LiteralPath TestDrive:/ -Filter *.).Name | Should -Be foo\r\n  }\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe test should pass.\r\n\r\n# Actual behavior\r\n\r\nThe test fails.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core v6.2.0 (6.2.0) on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.706)\r\n```\r\n",
+  "closed_at": "2019-05-07T00:20:09Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83e\udd14 if there's no extension, there's no period either, typically, no? So I can sort of see why it would be the way it currently is. I wasn't aware that Windows PowerShell could use such a pattern & why it might have been changed (if the change was at all intentional).\r\n\r\nBut I guess that depends on how you look at it? Weird...",
+      "created_at": "2019-04-10T12:11:15Z",
+      "updated_at": "2019-04-10T12:11:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32: \r\n\r\nYes, there's no period, and if you use _PowerShell's_ wildcard language - `Get-ChildItem * -Include *.` - _nothing_ matches.\r\n\r\nHowever, the `-Filter` argument is by design ultimately interpreted _by the Windows API_, and its wildcard language has legacy quirks - including the ability to find extension-less files with `*.` - try `cmd /c dir *.`, for instance. This quirk happens to be useful, and people may have come to rely on it.\r\n\r\nSee https://stackoverflow.com/a/17739503/45375 for background information.\r\n",
+      "created_at": "2019-04-10T12:30:49Z",
+      "updated_at": "2019-04-10T12:30:49Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I wouldn't classify it as a quirk, its actually intentional, and comes from the DOS days when all _files_ had an inherent period at the end of their names.   At that time, the period was a field separator, separating the name from the extension (and the period was not stored on disk), and of course only one period was allowed, the separator.   Today in Windows, the last period in any pattern is considered to be that same separator between name and extension, and so receives special treatment, but yet does not stop it from matching other patterns that might also include a `.` before the actual extension, because in some ways you might consider the extension of a file to have multiple periods.\r\n\r\nNote that `DIR *.` in CMD will match any file or directory either doesn't have a '.' or that the only '.' is at the beginning of the file name, as a period at the beginning of a file name is not considered to be defining an extension, since the name field would be empty, and that is not allowed.\r\n",
+      "created_at": "2019-04-12T17:53:02Z",
+      "updated_at": "2019-04-12T17:53:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good to know, @msftrncs. Undoubtedly, `*.` serves a useful purpose and is a handy way to find extension-less files (and directories).\r\n\r\nAs you state, the `.` isn't actually part of the filename, and by default you can't even create a file whose actual name ends in `.`; e.g., `ab.`; if you use the `\\\\?\\` prefix (invariably with an _absolute_ path), however, you can (`New-Item ('\\\\?\\' + $pwd.ProviderPath + '\\ab.')`), and `cmd /c dir *.` matches that too.\r\n\r\nOn a related note, if you don't use the `\\\\?\\` prefix, any _trailing spaces or periods_ your specify as part of a path are quietly ignored (`Get-Item -Path ab.....` will find file `ab`, for instance, with both `-Path` and `-LiteralPath`).\r\n\r\n",
+      "created_at": "2019-04-12T20:36:34Z",
+      "updated_at": "2019-04-12T20:36:34Z"
+    },
+    {
+      "author": "roller",
+      "author_association": "NONE",
+      "body": "Just to re-iterate what @mklement0 wrote, \"trailing spaces or periods your specify as part of a path are quietly ignored\".   This is much bigger effect than just matching.  You won't be able to open or interact with the file at all without using a `\\\\?\\` prefix. \r\n\r\nEasy ways to create such a file:\r\n  - Create a Scheduled Task in Task Scheduler with a naming ending in a period\r\n  - Linux subsystem for Windows (eg, `touch a.file.`)\r\n\r\nNote that powershell Core for linux running on WSL doesn't have the same restriction, so we can't really blame powershell.  Also, [Microsoft Docs](https://docs.microsoft.com/en-us/windows/desktop/FileIO/naming-a-file) recommend against creating such a file.\r\n\r\n> Do not end a file or directory name with a space or a period. Although the underlying file system may support such names, the Windows shell and user interface does not. ",
+      "created_at": "2019-04-16T13:17:33Z",
+      "updated_at": "2019-04-16T13:41:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @roller.\r\n \r\nYes, unfortunately the behavior is implemented at the level of the Windows API.\r\n\r\nEven though there's now an [opt-in to ignore the  legacy 259-char. max-path-length constraint](https://blogs.msdn.microsoft.com/jeremykuhne/2016/07/30/net-4-6-2-and-long-paths-on-windows-10/), there seems to be no analogous opt-in for supporting \"irregular\" file names (trailing spaces, periods). \r\n\r\nIt's implied by your quote from the docs, but just to spell it out: File Explorer, as part of the Windows (GUI) shell, _shows_ such file names, but cannot _act on them_.\r\n\r\nTherefore, unfortunately, even with the long-path opt-in in place, you still need _always_ need prefix `\\\\?`with an absolute path to access such files.",
+      "created_at": "2019-04-16T13:33:55Z",
+      "updated_at": "2019-04-16T13:33:55Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Similarly, `-Filter 2*.*` in PowerShell Core 6.2.0 will not find items with names like `20190504`, whereas it will in Windows PowerShell 5.1. Is there a place where all \"breaking\" changes in PowerShell Core (vs. Windows PowerShell) are documented? If there isn't, where would such a piece of document best be hosted?",
+      "created_at": "2019-05-03T22:50:37Z",
+      "updated_at": "2019-05-03T22:50:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Looks like this is the result of a change in corefx default behavior.",
+      "created_at": "2019-05-04T02:55:07Z",
+      "updated_at": "2019-05-04T02:55:07Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looks like ;-) you don't want to document _that_ particular change in behavior, but rather remove it!\r\n\r\nThis is clearly going in the direction of making 7.0 as backwards-compatible with Windows PowerShell 5.1 as possible, which is the right thing to do IMVHO.\r\n\r\nBut what about documenting (in a single place) all areas where differences _will_ remain?",
+      "created_at": "2019-05-04T06:32:32Z",
+      "updated_at": "2019-05-04T06:32:32Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@sba923 for changes in behavior we are aware of, we do document them in our changelog as `Breaking Change`, but I don't believe we have a single place capturing all the differences which makes sense to have perhaps as an about topic cc @sdwheeler \r\n",
+      "created_at": "2019-05-04T15:34:44Z",
+      "updated_at": "2019-05-04T15:34:44Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT @sba923 This page is not updated but contains a good start for all new PS6 users [Breaking Changes for PowerShell 6.0](https://docs.microsoft.com/en-us/powershell/scripting/whats-new/breaking-changes-ps6?view=powershell-6)",
+      "created_at": "2019-05-04T15:51:26Z",
+      "updated_at": "2019-05-04T15:51:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "We should have a consolidated page for PowerShell 7 cc @joeyaiello ",
+      "created_at": "2019-05-04T16:30:54Z",
+      "updated_at": "2019-05-04T16:30:54Z"
+    }
+  ],
+  "created_at": "2019-04-10T11:05:56Z",
+  "number": 9330,
+  "state": "closed",
+  "title": "Regression: Get-ChildItem -File -Filter *. no longer finds extension-less files on Windows",
+  "updated_at": "2019-05-07T16:39:49Z"
+}

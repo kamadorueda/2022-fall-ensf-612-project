@@ -1,0 +1,167 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10994",
+  "author": "zammitt",
+  "body": "Start/Stop-Transcript does not always capture everything written to the console.\r\n\r\nI created a github repo with code, repro steps and more context: https://github.com/zammitt/PowerShellTranscriptIssue\r\n\r\n# Steps to reproduce\r\n\r\nIn a script file (.ps1)\r\n1) Start-Transcript\r\n2) Run a Cmdlet that outputs data with WriteObject\r\n3) Stop-Transcript\r\n4) Observe that the output was not written to the transcript\r\n\r\nHere is a script to repro:\r\n\r\n```\r\nInstall-Module TranscriptIssue\r\nImport-Module TranscriptIssue\r\n\r\nStart-Transcript -Path transcript.txt -UseMinimalHeader\r\n\r\nWrite-Output \"Hello from Write-Output\"\r\nWrite-Host \"Hello from Write-Host\"\r\n\r\nTest-TranscriptIssue\r\n\r\nWrite-Output \"Goodbye from Write-Output\"\r\nWrite-Host \"Goodbye from Write-Host\"\r\n\r\nStop-Transcript\r\n\r\n# Write out the transcript to the console\r\ncat ./transcript.txt\r\n```\r\nThe code for Test-TranscriptIssue can be found here:  https://github.com/zammitt/PowerShellTranscriptIssue/blob/master/TestIssueOnPowerShellCore/Test-TranscriptIssue.cs\r\n\r\n# Expected behavior\r\n\r\nThe contents of the transcript match what was written to the console while the transcript was active.\r\n\r\n```\r\nTranscript started, output file is transcript.txt\r\nHello from Write-Output\r\nHello from Write-Host\r\n\r\nGoodbye from Write-Host\r\nTestProperty\r\n------------\r\nTestValue\r\nGoodbye from Write-Output\r\nTranscript stopped, output file is D:\\code\\PowerShellTranscriptIssue\\TestIssueOnPowerShellCore\\bin\\Debug\\netcoreapp3.0\\transcript.txt\r\n**********************\r\nPowerShell transcript start\r\nStart time: 20191105180138\r\n**********************\r\nHello from Write-Output\r\nHello from Write-Host\r\n\r\nGoodbye from Write-Host\r\nTestProperty\r\n------------\r\nTestValue\r\nGoodbye from Write-Output\r\n**********************\r\nPowerShell transcript end\r\nEnd time: 20191105180138\r\n**********************\r\n\r\n```\r\n\r\n# Actual behavior\r\n\r\nThe transcript is missing data that was written to the console while the transcript was active.\r\n\r\n```\r\nTranscript started, output file is transcript.txt\r\nHello from Write-Output\r\nHello from Write-Host\r\n\r\nGoodbye from Write-Host\r\nTestProperty\r\n------------\r\nTestValue\r\nGoodbye from Write-Output\r\nTranscript stopped, output file is D:\\code\\PowerShellTranscriptIssue\\TestIssueOnPowerShellCore\\bin\\Debug\\netcoreapp3.0\\transcript.txt\r\n**********************\r\nPowerShell transcript start\r\nStart time: 20191105180138\r\n**********************\r\nTranscript started, output file is transcript.txt\r\nHello from Write-Output\r\nHello from Write-Host\r\n\r\nGoodbye from Write-Host\r\n**********************\r\nPowerShell transcript end\r\nEnd time: 20191105180138\r\n**********************\r\n\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.3\r\nPSEdition                      Core\r\nGitCommitId                    6.2.3\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "TLDR:\r\n* Mixing and matching objects, strings, and write-host with transcription is _really_ tricky.\r\n \r\nI\u2019m not sure this is a bug, per se, but a subtle interaction between the script and how transcription works with our pipelines. I will agree that it is in no way intuitive.\r\n \r\nOne of the things that happen when you emit objects is that the formatting of those objects gets handled by out-default, but after the script has completed and since transcription has stopped, that output doesn\u2019t get transcribed. Strings are handled differently, they\u2019re sometimes short-circuited through formatting (but sometimes not). The combination of write-host (which makes an immediate write), write-object <string> (which may get short-circuited through formatting), and output of a <complexObject> makes this pretty hard to reason about what\u2019s going to happen. However, there may be a way that you may want to try (See \u201cA POSSIBLE WAY\u201d below).\r\n \r\nEven more details:\r\n \r\nHere are a couple of variations on the theme:\r\n \r\nVariation 1 \u2013 your scenario, with the output of a structured object at the end of all of the other operations.\r\n\r\n```powershell \r\nPS> cat s2.ps1\r\nremove-item s2 -ea ignore\r\nstart-transcript s2 -usemin\r\nwrite-host \"1\"\r\nwrite-output \"2\"\r\nget-location\r\nwrite-host \"4\"\r\nwrite-output \"5\"\r\nstop-transcript\r\n \r\nPS> ./s2.ps1\r\nTranscript started, output file is s2\r\n1\r\n2\r\n \r\n4\r\nPath\r\n----\r\n/Users/jimtru/src/projects/transcript\r\n5\r\nTranscript stopped, output file is /Users/jimtru/src/projects/transcript/s2\r\n ```\r\n \r\nThis one is really confusing, but explainable (but perhaps not satisfying). \u2018Write-Host 4\u2019 is visible before `get-location` because Write-Host is hot-rodded directly into the host and emitted (there\u2019s code in transcription which essentially tees the output to the transcript file and the console). Then we have the regular output of `get-location` and `write-output 5` sent as output of the script.\r\n\r\nSince transcription is turned off before the script exits, it\u2019s not rendered in the transcript, because the objects were sent to the next consumer in the pipeline (in this case, it\u2019s out-default which is what the engine does automatically). The tricky bit is that strings are also somewhat hot-rodded in our formatting, so the first `write-output 2` gets emitted and captured by the transcript, but the insertion of the `get-location` object causes it to be pushed into the stack of things that need actual formatting, which sets a bit of state for any remaining objects which may need formatting (which is why the second `write-output 5` doesn\u2019t get transcripted.\r\n \r\n ```powershell\r\n**********************\r\nPowerShell transcript start\r\nStart time: 20191106114858\r\n**********************\r\nTranscript started, output file is s2\r\n1\r\n2\r\n \r\n4\r\n**********************\r\nPowerShell transcript end\r\nEnd time: 20191106114858\r\n**********************\r\n ```\r\n\r\nVariation 2 \u2013 move the object emission to the beginning\r\n\r\n```powershell \r\nstart-transcript s3 -usemin\r\nget-location\r\nwrite-host \"1\"\r\nwrite-output \"2\"\r\nwrite-host \"4\"\r\nwrite-output \"5\"\r\nstop-transcript\r\n```\r\n\r\nWe can see that the `write-host` happen before anything, and then the objects start to come out. The string output essentially forces the object to be rendered to the screen, but you\u2019ll notice that the transcript contains only the output of Write-Host. That\u2019s because those were piped to the formatting after the script turned off transcription.\r\n \r\n```powershell \r\nPS> ./s3.ps1\r\nTranscript started, output file is s3\r\n \r\n1\r\n4\r\nPath\r\n----\r\n/Users/jimtru/src/projects/transcript\r\n2\r\n5\r\nTranscript stopped, output file is /Users/jimtru/src/projects/transcript/s3\r\n \r\n  \r\nPS> cat s3\r\n \r\n**********************\r\nPowerShell transcript start\r\nStart time: 20191106115142\r\n**********************\r\nTranscript started, output file is s3\r\n \r\n1\r\n4\r\n**********************\r\nPowerShell transcript end\r\nEnd time: 20191106115142\r\n**********************\r\n```\r\n\r\nVariation 3 \u2013 object emission at the end:\r\nWe can see that everything but the object is now in the transcript\r\n \r\n```powershell\r\nPS> cat s4.ps1\r\nstart-transcript s4 -usemin\r\nwrite-host \"1\"\r\nwrite-output \"2\"\r\nwrite-host \"4\"\r\nwrite-output \"5\"\r\nget-location\r\nstop-transcript\r\n```\r\n \r\nHere\u2019s the execution flow\r\n\r\n```powershell \r\nPS> ./s4.ps1\r\nTranscript started, output file is s4\r\n1\r\n2\r\n4\r\n5\r\n \r\nPath\r\n----\r\n/Users/jimtru/src/projects/transcript\r\nTranscript stopped, output file is /Users/jimtru/src/projects/transcript/s4\r\n```\r\n \r\nAnd the content of the transcript\r\n\r\n```powershell\r\n**********************\r\nPowerShell transcript start\r\nStart time: 20191106115255\r\n**********************\r\nTranscript started, output file is s4\r\n1\r\n2\r\n4\r\n5\r\n \r\n**********************\r\nPowerShell transcript end\r\nEnd time: 20191106115255\r\n**********************\r\n```\r\n \r\n## A Possible Way\r\n\r\nLastly, here\u2019s a slight variation on the original, but now everything will be in the transcript. I\u2019ve taken the code of interest and am calling the formatter forcefully via out-default. You\u2019ll notice that the last Write-Host call is still out of order, that\u2019s because of the short-circuiting of write-host which is a direct call into the host and does not go into the output stream.\r\n\r\n```powershell \r\nstart-transcript s5 -usemin\r\n.{\r\n    write-host \"1\"\r\n    write-output \"2\"\r\n    get-location\r\n    write-host \"4\"\r\n    write-output \"5\"\r\n} | out-default\r\nstop-transcript\r\n```\r\n \r\nHere\u2019s the execution, followed by the transcript\r\n \r\n```powershell\r\nPS> ./s5.ps1\r\nTranscript started, output file is s5\r\n1\r\n2\r\n \r\n4\r\nPath\r\n----\r\n/Users/jimtru/src/projects/transcript\r\n5\r\n \r\nTranscript stopped, output file is /Users/jimtru/src/projects/transcript/s5\r\n  \r\n \r\nPS> cat s5\r\n**********************\r\nPowerShell transcript start\r\nStart time: 20191106115701\r\n**********************\r\nTranscript started, output file is s5\r\n1\r\n2\r\n \r\n4\r\nPath\r\n----\r\n/Users/jimtru/src/projects/transcript\r\n5\r\n \r\n**********************\r\nPowerShell transcript end\r\nEnd time: 20191106115701\r\n**********************\r\n```",
+      "created_at": "2019-11-06T22:24:28Z",
+      "updated_at": "2019-11-06T22:24:28Z"
+    },
+    {
+      "author": "he852100",
+      "author_association": "NONE",
+      "body": "I suggest adding a new option. Allows it to output color documents",
+      "created_at": "2019-11-07T18:32:03Z",
+      "updated_at": "2019-11-07T18:32:03Z"
+    },
+    {
+      "author": "zammitt",
+      "author_association": "NONE",
+      "body": "@JamesWTruher Thank you for the detailed reply.  Out-Default works great!   I ended up using the -Transcript flag so that the objects are still passed forward on the pipeline.\r\n\r\n@he852100 I'll second this.  Color in transcripts would be awesome.\r\n\r\n",
+      "created_at": "2019-11-08T19:34:00Z",
+      "updated_at": "2019-11-08T19:34:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "My one question to that is always going to be -- how? PS works with text files, not formatted documents. The next step up would perhaps be Markdown, which would be messier to read in the console, and still doesn't natively support color formatting. That should probably be a whole other issue discussion, though. \ud83d\ude09 ",
+      "created_at": "2019-11-08T19:38:48Z",
+      "updated_at": "2019-11-08T19:38:48Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, we believe a complete solution for transcription (like the unix `script` command) would love to see the community build a new cmdlet (published to PSGallery) that uses ptty or on Windows grabbing the screen buffer, but the ask is out of scope for the current transcription framework.",
+      "created_at": "2020-01-08T23:20:58Z",
+      "updated_at": "2020-01-08T23:20:58Z"
+    },
+    {
+      "author": "Cloudmersive",
+      "author_association": "NONE",
+      "body": "Dear Microsoft - when are you going to fix this?  @SteveL-MSFT this is critical functionality - how is it \"out of scope\"?  It is critically important that bedrock Microsoft capabilities actually solve problems at scale and this is a huge gap",
+      "created_at": "2020-03-07T19:23:18Z",
+      "updated_at": "2020-03-07T19:23:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To complete the picture of the current problems and limitations:\r\n\r\n* Interactive prompts are never transcribed - unlike with the Unix `script` utility, you neither see the prompt string nor what the user typed.\r\n\r\n* #4645 describes duplicated output in transcripts and situationally _changed behavior_ when transcript ion is used.\r\n\r\n* As for the `Out-Default` workaround for the issue at hand:\r\n  * Given that we [shouldn't promote use of `Out-Default` in user code](https://github.com/MicrosoftDocs/PowerShell-Docs/issues/5131), `Out-Host` is the better choice, but it is still a flawed workaround:\r\n\r\n       *  You lose the ability to capture any output from the script.\r\n       * Due to #11134, stderr output from _external programs_ will be missing from the transcript.\r\n\r\nOn Unix-like platforms, use of the [`script` utility](http://man7.org/linux/man-pages/man1/script.1.html) already is an option to bypass all these issues (albeit not from _within_  a script), while additionally providing:\r\n\r\n* capturing of VT sequences (ANSI escapes) \r\n* capturing of interactive prompt strings and _what the user typed_\r\n\r\nHowever, the `PSReadLine` module doesn't play nice with the latter in `Read-Host` calls; e.g. (on Linux):\r\n\r\n```sh\r\n# Transcribe an interactive PowerShell user prompt.\r\n# Save the transcript in file .\\typescript\r\nscript -c 'pwsh -nop -c \"read-host prompt\"'\r\n```\r\n\r\nIf you type `abc` when prompted, the transcript won't contain just string `abc`, but the equivalent following, which makes the terminal go haywire when you `cat` the resulting file; note how each letter typed caused the inclusion of VT sequences and reprinting of all letters typed so far:\r\n\r\n```\r\n`e[?1h`e=prompt:\u00b7`e[6na`e[62;9Hab`e[62;9Habc\r\n```\r\n\r\n",
+      "created_at": "2020-03-07T19:58:19Z",
+      "updated_at": "2020-03-07T20:03:50Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just discovered that `Start-Transcript` typically captures little to no output from `ROBOCOPY`.\r\n\r\n![image](https://user-images.githubusercontent.com/12860484/101187692-f9247180-3654-11eb-903e-48347af5a4e3.png)\r\n\r\n![image](https://user-images.githubusercontent.com/12860484/101187961-5ae4db80-3655-11eb-83ba-188f19f79f53.png)\r\n\r\n![image](https://user-images.githubusercontent.com/12860484/101188010-6932f780-3655-11eb-9298-c495e33a088d.png)\r\n\r\n\r\n[PSTranscriptAndRobocopy.zip](https://github.com/PowerShell/PowerShell/files/5643944/PSTranscriptAndRobocopy.zip)\r\n\r\nWould there be a workaround?",
+      "created_at": "2020-12-04T16:23:36Z",
+      "updated_at": "2020-12-04T16:23:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I see the problem in 7.1.0 (as you do), and also still in in 7.2.0-preview.1.\r\n\r\nAppending `| Out-Host` is a workaround for PS Core (none needed for WinPS), though the formatting is a bit off.\r\n\r\n\r\n",
+      "created_at": "2020-12-04T17:38:26Z",
+      "updated_at": "2020-12-04T17:38:26Z"
+    },
+    {
+      "author": "aolszowka",
+      "author_association": "NONE",
+      "body": "This also does not work for `WhatIf` if ran in an Invoke-Command; See https://github.com/PowerShell/PowerShell/issues/9870#issuecomment-856969529",
+      "created_at": "2021-06-08T20:12:52Z",
+      "updated_at": "2021-06-08T20:12:52Z"
+    },
+    {
+      "author": "kilasuit",
+      "author_association": "COLLABORATOR",
+      "body": "I was playing with .Net Interactive notebooks & looking into this for why this issue with Notebooks occurs https://github.com/dotnet/interactive/issues/1430 as this is a crucial item that needs fixed before I can recommend to Jupyter Notebooks using .Net Interactive to users in production environments that will have org wide transcription enforced, & I would like to be able to recommend using them without needing to resort to a non-workable workaround cc @SteveL-MSFT ",
+      "created_at": "2021-06-17T23:03:00Z",
+      "updated_at": "2021-06-17T23:03:00Z"
+    },
+    {
+      "author": "Zeal0us",
+      "author_association": "NONE",
+      "body": "This is pretty disappointing, it's one of those things you expect to just work when you find it, and then you check your log file and it's got 20 lines out of tens of thousands.",
+      "created_at": "2021-11-09T10:03:47Z",
+      "updated_at": "2021-11-09T10:03:47Z"
+    },
+    {
+      "author": "TheOnlyWei",
+      "author_association": "NONE",
+      "body": "Similar problem when you try to run PowerShell 7 code with Start-Transcript from a PowerShell 5 session (not sure if that is the same exact issue as this). You see the output in PowerShell 5 console, but when you check the log file that Start-Transcript output to, it is missing a lot of the output. The same work-around, involving appending `| Out-Host` to parts of code where the output is not showing in the transcript, works. I didn't want to capture transcript from PowerShell 5 as it outputs weird symbols and interprets regular output as errors from different applications.",
+      "created_at": "2022-04-06T01:28:28Z",
+      "updated_at": "2022-04-06T01:48:09Z"
+    },
+    {
+      "author": "Cistalvo",
+      "author_association": "NONE",
+      "body": "Any dev update on this? I might have stumbled over this error, just wondering if it was fixed in the meantime. ",
+      "created_at": "2022-06-03T14:53:00Z",
+      "updated_at": "2022-06-03T14:53:00Z"
+    },
+    {
+      "author": "buscseik",
+      "author_association": "NONE",
+      "body": "This issue still exists and it is worse than ever. It was not good in PS5 but in PS7 even worse. \r\nStart-transcript can't literally be used \r\n\r\nThis is a crutial feature. Please fix it. This issue started before 2015.\r\nPowerShell is great, Windows Terminal is great, but due this I will have to switch some third party solution like Moba Xterm which actually can log everthing without any issue.\r\n",
+      "created_at": "2022-07-21T13:22:39Z",
+      "updated_at": "2022-07-21T13:22:39Z"
+    },
+    {
+      "author": "johnbailey-transactcampus",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT - This issue is still prevalent. I can reproduce the `Start-Transcript` issue if the `Invoke-RestMethod` commandlet is called with a `POST` method. \r\n\r\nIn my case, the workaround of utilising `| Out-Host` (mentioned above) on PS 7.2.5 still does not produce any viable command invocation output (for monitoring/auditing) - whether the command succeeds **_or_** fails:\r\n\r\n```\r\n**********************\r\nCommand start time: 20220722090610\r\n**********************\r\nPS>TerminatingError(Invoke-RestMethod): \"{ \"statusCode\": 401, \"message\": \"Unauthorized. Access token is missing or invalid.\" }\"\r\n```\r\n\r\nIf I append `-Verbose` and `-Debug` on the Invoke-RestMethod command, then I lose the Invocation Header data (e.g.: `Command start time:`) from the transcript for the command - which makes it even harder to determine the details of the command that was run (when a failure doesn't occur):\r\n\r\n```\r\nVERBOSE: DELETE with 0-byte payload\r\nVERBOSE: received 85-byte response of content type application/json\r\n>> TerminatingError(Invoke-RestMethod): \"{ \"statusCode\": 401, \"message\": \"Unauthorized. Access token is missing or invalid.\" }\"\r\n```\r\n\r\nAs it appears that there hasn't been any traction on this - for quite some time - is it possible to help the community derive a work-around for the[se] issue[s], until it[they] can be addressed in the code-base?",
+      "created_at": "2022-07-22T09:16:25Z",
+      "updated_at": "2022-07-22T09:16:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I hope people understand that if this was easy to fix, we would have done it.  The transcription code is more than 10 years old and its design has limitations not easily addressed.  The robocopy example above is an example where the NativeCommandProcessor has an optimization where if a native command is at the end of the pipeline, then it doesn't read the stdout pipe and instead just has the exe send the output directly to the console.  In this case, transcription is not aware (since PowerShell is not aware) of any output.  Piping to a cmdlet works around this optimization.\r\n\r\nIt would actually be easier to create a `script`-like executable (perhaps called `transcript.exe` that does what `script` does which is start a new instance of the shell that ran it and read stdout/stderr/stdin and write that to a file while also passing it through to the shell.  Doing it within the shell is problematic due to output being \"leaky\".\r\n\r\n",
+      "created_at": "2022-08-01T22:08:02Z",
+      "updated_at": "2022-08-01T22:08:02Z"
+    },
+    {
+      "author": "psawa",
+      "author_association": "NONE",
+      "body": "Then what's the point of this command if the transcription cannot be relied on? This is just an extreme flaw for a crucial and basic cmdlet",
+      "created_at": "2022-08-05T08:58:11Z",
+      "updated_at": "2022-08-05T08:58:11Z"
+    },
+    {
+      "author": "Xechorizo",
+      "author_association": "NONE",
+      "body": "> if this was easy to fix, we would have done it\r\n\r\nIf it weren't vital functionality, why would the community want it? Your team only fixes easy problems?\r\n\r\nIf it can't be done, remove it (or note it as an experimental, deprecated, or otherwise unreliable cmdlet)",
+      "created_at": "2022-10-05T16:13:01Z",
+      "updated_at": "2022-10-05T18:06:28Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "> If it can't be done, remove it.\r\n\r\nI'd rather have PowerShell with limited transcript functionality than with none at all.\r\n",
+      "created_at": "2022-10-05T17:11:26Z",
+      "updated_at": "2022-10-05T17:11:26Z"
+    },
+    {
+      "author": "nzbart",
+      "author_association": "NONE",
+      "body": "While I agree that `Start-Transcript` is fairly useless due to this problem and not capturing the output from executables, if anyone has a workaround for this problem, please post it here. A suitable workaround could include something like:\r\n\r\n1. A new function such as recommended here: https://github.com/PowerShell/PowerShell/issues/10994#issuecomment-572306095; or\r\n2. A new host process that can \"tee\" the output to file.\r\n\r\n@SteveL-MSFT currently, the documentation for `Start-Transcript` says:\r\n\r\n>The transcript includes all command that the user types and all output that appears on the console.\r\n\r\nWould it be possible to at least list the limitations of the current command, such as not capturing the output from executables in the documentation to save people a lot of time wondering why it's not working as documented?",
+      "created_at": "2022-11-01T17:01:13Z",
+      "updated_at": "2022-11-01T17:01:13Z"
+    },
+    {
+      "author": "Bibench-R7",
+      "author_association": "NONE",
+      "body": "It does capture executable output, but only 10 lines or so on hundreds. Since it looked like it worked for a few lines of test, I discovered after the fact that all my logs are worthless.",
+      "created_at": "2022-11-10T08:22:50Z",
+      "updated_at": "2022-11-10T13:52:28Z"
+    }
+  ],
+  "created_at": "2019-11-05T23:06:50Z",
+  "number": 10994,
+  "state": "open",
+  "title": "Start/Stop-Transcript does not capture everything written to the console",
+  "updated_at": "2022-11-10T13:52:28Z"
+}

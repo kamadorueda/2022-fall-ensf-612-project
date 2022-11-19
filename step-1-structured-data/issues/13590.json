@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13590",
+  "author": "mklement0",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nThe output formatting system's purpose is to present data to the _human_ reader.\r\n(As such - because the formatted output isn't meant for _programmatic_ processing - it isn't part of PowerShell's breaking-changes contract.)\r\n\r\nCurrently, large numbers are output without thousands separators, i.e. without grouping the digits for easier comprehension.\r\n\r\nI suggest applying this grouping to all numbers (that aren't explicitly formatted via formatting data):\r\n\r\n```powershell\r\n# WISHFUL THINKING - but you can get a preview with the prototype below.\r\n\r\n# Number by itself (out-of-band formatting)\r\nPS> 1000\r\n1,000\r\n\r\n# Implicit in-band formatting (table or list)\r\nPS> @{ num = 1000 }\r\n\r\nName                           Value\r\n----                           -----\r\nnum                            1,000\r\n\r\n# Should also automatically apply to types with explicit formatting data \r\n# (unless number formatting is part of a given list item / table column).\r\n# Note the \"Size\" column.\r\nPS> Get-Item $PROFILE\r\n\r\n    Directory: /Users/jdoe/.config/powershell\r\n\r\nUnixMode   User             Group                 LastWriteTime           Size  Name\r\n--------   ----             -----                 -------------           ----  ----\r\n-rw-r--r-- jdoe             staff              10/23/2019 22:31           1,934  Microsoft.PowerShell_profile.ps1\r\n\r\n```\r\n\r\nAs @ThomasNieto [proposes below](https://github.com/PowerShell/PowerShell/issues/13590#issuecomment-688354542), a new _preference variable_ and _new switch_  for the `Format-*` cmdlets could allow opting into the old behavior. E.g.: `$PSThousandsGrouping` with values `$true` and `$false` (default `$true`), and switch\r\n`-ThousandsGrouping`.\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nHere's a quick _prototype_ that uses the ETS. It is _not_ the suggested implementation, for reasons of both performance and also changing the behavior of explicit `.ToString()` calls.\r\n\r\nA proper implementation would require modifying the formatting system itself.\r\n\r\n```powershell\r\n# Prototype:\r\n[int16], [int], [long], [double], [decimal], [bigint], [uint16], [uint], [uint64] | % {\r\n\r\n  Update-TypeData -TypeName $_.FullName  -MemberType ScriptMethod -MemberName ToString -Value { \r\n    # Determine how many decimal places there are in the original representation.\r\n    # Note: PowerShell's string interpolation uses the *invariant* culture, so '.'\r\n    #       can reliably be assumed to be the decimal mark.\r\n    $numDecimalPlaces = (\"$this\" -replace '^[^.]+(?:.(.+))?', '$1').Length\r\n\r\n    # Format with thousands grouping and the same number of decimal places.\r\n    # Note: This will create a culture-sensitive representation\r\n    #       just like with the default output formatting.\r\n     # CAVEAT:\r\n     #  To avoid a crash (from infinite recursion?), both .psobject.BaseObject \r\n     #  and the -f operator must be used.\r\n     #  ($this.psobject.BaseObject.ToString(\"...\") also crashes).\r\n    \"{0:N$numDecimalPlaces}\" -f $this.psobject.BaseObject\r\n  } -Force\r\n\r\n}\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "> (As such - because the formatted output isn't meant for _programmatic_ processing - it isn't part of PowerShell's breaking-changes contract.)\r\n\r\nAlthough this might be true, I am afraid that the purpose will be more confusing than an advantage in human readability especially for a novice programmer.\r\n\r\nIf I do this: `@{ num = 1000 } | Out-File .\\Output.txt`\r\nWill it have thousands separators in the output file or not?\r\nI presume they shouldn't show up in the output, as I am not doing e.g. `@{ num = 1000 } | Format-Table | Out-File .\\Output.txt`\r\nwhich is wrong although a lot a lot of PowerShell users do this or have already done this (there are several examples of this on StackOverflow). For this group, their process (relying on a 'Format-Table' output) might break. _... Sorry, you should have read the small print in the contact_ \ud83d\ude12\r\nSo, if this assumption is correct, a novice programmer will likely get confused by the difference outputted on the screen and what is actually in the file.\r\n\r\n\r\n",
+      "created_at": "2020-09-07T07:03:37Z",
+      "updated_at": "2020-09-07T07:05:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "There is a UX problem - if copy-paste from console it is very annoying because it is culture sensitive.",
+      "created_at": "2020-09-07T07:21:43Z",
+      "updated_at": "2020-09-07T07:21:43Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "You might also consider to do this on a specific type...\r\nThe type that intended for large numbers and can hold all the other types (which is actually not in your prototype list): **`[BigInt]`**.\r\nIf you just do this just for `[BigInt]`, you would be able to quiet easily format a large number with thousands separators, like:\r\n\r\n```PowerShell\r\nPS C:\\> [BigInt]1000\r\n1,000\r\nPS C:\\> @{ num = [BigInt]1000 }\r\n\r\nName                           Value\r\n----                           -----\r\nnum                            1,000\r\n```",
+      "created_at": "2020-09-07T08:55:03Z",
+      "updated_at": "2020-09-07T11:36:05Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think that's more likely to just be needlessly confusing, having one numeric type that behaves differently to the rest.\r\n\r\n**If** this is going to change, all number types should behave similarly.",
+      "created_at": "2020-09-07T14:08:21Z",
+      "updated_at": "2020-09-07T14:08:21Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "To get the current behavior there should be a switch parameter on the format commands and a preference variable to enable/disable globally. ",
+      "created_at": "2020-09-07T14:16:53Z",
+      "updated_at": "2020-09-07T14:16:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, the culture-specific output not being reusable in source code already applies to numbers _with decimal places_ (and also to dates, for instance):\r\n\r\n```powershell\r\nPS> $o = [cultureinfo]::CurrentCulture; [cultureinfo]::CurrentCulture = 'fr-FR'; 1.23; [cultureinfo]::CurrentCulture = $o\r\n1,23  # Decimal mark is \",\"\r\n```\r\n\r\nTrue, with the thousands grouping it would occur more often, which is why @ThomasNieto's  suggestion (preference variable and switch) is a good one (I've added the suggestion, fleshed out, to the OP).\r\n\r\n@iRon7, nothing would change for `Out-File` / `>`: you'll get the same representation in the file as you would get on the screen; because `Out-File` also uses the formatting system, files created this way shouldn't be relied on for further programmatic processing. Also, something like `@{ num = 1000 } | Format-Table | Out-File out.txt` is legitimate, because it allows you to pick the \"shape\" of the output explicitly instead of relying on the default.\r\n",
+      "created_at": "2020-09-07T21:03:43Z",
+      "updated_at": "2020-09-07T21:18:30Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I'd definitely like to see an option for this.  I think making this default would lead to a lot of confusion on both ends of the experience spectrum though.\r\n\r\n* Veteran users have already been trained that if they see digit separators then they're dealing with a string.  If they want to treat it like a number, they need to prep the string for parsing\r\n* Newer users will have difficulty troubleshooting why their number only has digit separators *sometimes*. (e.g. `Write-Host 1000` would output `1000` but `1000` would output `1,000`)",
+      "created_at": "2020-09-08T12:40:00Z",
+      "updated_at": "2020-09-08T12:40:00Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "It needed to sinking in a little, but I guess I actually like the basic idea.\r\n_Provided there is an option to disable it_ because (if I understand it right) here lays in essence the pitfall:\r\n\r\n```PowerShell\r\n(1000 | Out-String) -eq ('1000' | Out-String)\r\n```\r\nThis is **`$True`** in **CMO** and will be **`$False`** in **FMO**.\r\n\r\nThe same discrepancy (between CMO and FMO) will happen when I do this:\r\n\r\n```PowerShell\r\n1000 | Out-File .\\Thousand.txt\r\n$Thousand = Get-Content .\\Thousand.txt\r\n$Thousand -eq 1000\r\n```\r\n\r\nOr is this due to the fact that it concerns a prototype?",
+      "created_at": "2020-09-08T14:30:01Z",
+      "updated_at": "2020-09-08T14:42:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience:\r\n \r\nAt the end of the day I'd personally be happy with either solution (grouping by default ON vs. OFF), though I think that in the long run having it on by default is more beneficial:\r\n\r\n* Readability is then enhanced _by default_. While that comes at the expense of copying and pasting output as number literals usable in source code, I think the readability aspect trumps that, given that presenting output readably to the human observer is the very purpose of the formatting system.\r\n\r\n* Conversely, if OFF were the default, it wouldn't be easy for beginners to discover how to opt in.\r\n\r\n* I don't think we need to worry about `Write-Host`, which already presents enough puzzles to the uninitiated - e.g.,\r\n`Write-Host @{ a =1; b = 2}` printing `System.Collections.DictionaryEntry System.Collections.DictionaryEntry`. However, unlike with the preference variable / new switch we're discussing here, information about  `Write-Host` is easy to discover and conceptualize - even though the help topic is currently lacking: see https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6599.\r\nThe short of it: `Write-Host` uses .NET  `.ToString()` stringification on its arguments, which is unrelated to PowerShell's formatting system.\r\n\r\n",
+      "created_at": "2020-09-08T15:21:51Z",
+      "updated_at": "2020-09-08T15:21:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7:\r\n\r\nYes, these behaviors would change, but I do not consider that problematic:\r\n\r\n> `(1000 | Out-String) -eq ('1000' | Out-String)`\r\n\r\n* `1000` is unequivocally a number literal, '1000' is unequivocally a string.\r\n* You need to know that `Out-String` applies default formatting to its inputs, and that the results will _only_ be the same if the input is a _strings_ (leaving aside that `Out-String` currently appends an extra newline).\r\n\r\nThe same applies to `Out-File`; if you _do_ want `.ToString()` stringification, use `Set-Content` instead.\r\n\r\n```powershell\r\n1000 | Set-Content .\\Thousand.txt\r\n$Thousand = Get-Content .\\Thousand.txt\r\n$Thousand -eq 1000\r\n```\r\n\r\nBut note that even that _already_ falls apart if you have a number _with decimal places_ with a culture that uses `,` as the decimal mark, because argument-less `.ToString()` calls use the current culture.",
+      "created_at": "2020-09-08T15:28:04Z",
+      "updated_at": "2020-09-08T15:31:27Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> * Readability is then enhanced _by default_. While that comes at the expense of copying and pasting output as number literals usable in source code, I think the readability aspect trumps that, given that presenting output readably to the human observer is the very purpose of the formatting system.\r\n> * Conversely, if OFF were the default, it wouldn't be easy for beginners to discover how to opt in.\r\n\r\nYeah I agree for sure.  I just expect a lot of confusion around it if it gets implemented.  Similar to how some format definitions include columns that aren't real properties, I see folks having issues with that at least once a week.  Also when you get an object that returns an actual formatted string that's going to be hard to pin down the difference.\r\n\r\n> * I don't think we need to worry about `Write-Host`, which already presents enough puzzles to the uninitiated - e.g., (...)\r\n\r\nTrue, but I think it's much harder to reason about with a primitive.  A complex object is expected to be formatted differently, where a primitive you usually expect the stringification of it. ",
+      "created_at": "2020-09-08T15:56:15Z",
+      "updated_at": "2020-09-08T15:56:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> much harder to reason about with a primitive\r\n\r\nI think that all users need to know is: (a) `Write-Host` works differently, and (b) given that it uses `.ToString()` on its input objects - whether primitive or not - you can easily test the behavior with, say, `$var = 1.23;  $var.ToString()` - although there is indeed an _existing_ pitfall there: `Write-Host 1.23` is _not_ culture-sensitive, because a _literal_ argument is used; by contrast, `$num = 1.23; Write-Host $num` _is_ culture-sensitive; I've updated the [docs issue](https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6599) with details.\r\n\r\nGenerally, I think users from cultures that use `,` as the decimal mark are already ware that _neither_ `Write-Host` nor `Out-*` cmdlets / implicit formatting necessarily preserve the original representation of a number.\r\n\r\n---\r\n\r\nI hear you on the potential for confusion, but I think this confusion will go away over time, and won't apply to new users.\r\nNot being able to readily distinguish between the output from `1000` and `'1,000'` is somewhat inconvenient, but I think the  inconvenience of having to call `.GetType()` / `Get-Member` to disambiguate is outweighed by the benefits of readability.\r\n\r\nI think we now understand the issues involved and just happen to disagree on what the default should be.\r\nLet's see what others have to say.\r\n",
+      "created_at": "2020-09-08T17:26:10Z",
+      "updated_at": "2020-09-08T17:26:47Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I think that all users need to know is: (a) `Write-Host` works differently, and (b) given that it uses `.ToString()` on its input objects\r\n\r\n`Write-Host` was an example, the `ToString` difference is what I'm talking about.  And yes, once they understand what it happening they will understand what it is happening, but it's still introducing a new newbie pitfall.\r\n\r\n> (...) and won't apply to new users.\r\n\r\nI disagree, I think it's most likely to confuse new or very casual users who are more likely to try to fit the stringification of a primitive into a report or something.\r\n\r\n> I think we now understand the issues involved and just happen to disagree on what the default should be.\r\n> Let's see what others have to say.\r\n\r\n\ud83d\udc4d ",
+      "created_at": "2020-09-08T18:17:56Z",
+      "updated_at": "2020-09-08T18:18:08Z"
+    }
+  ],
+  "created_at": "2020-09-06T19:43:54Z",
+  "number": 13590,
+  "state": "open",
+  "title": "Formatting system: format large numbers with thousands separators (digit grouping) by default",
+  "updated_at": "2020-09-08T18:18:08Z"
+}

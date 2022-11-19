@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8861",
+  "author": "vexx32",
+  "body": "OK, so... this is an issue that's been around for a long time, I'm sure. I've not really had reason to hit it before. And now I have.\r\n\r\n# Scenario\r\n\r\nI'm trying to package a module with a dependency that does p/invoking via native runtime libraries. The library is [SkiaSharp](/mono/SkiaSharp). This library cannot be used without native runtimes.\r\n\r\nI'd like to be able to handle native runtimes _correctly_ from a compiled PowerShell cmdlet / module.\r\n\r\n# Problem\r\n\r\nThe issue then becomes that these native runtimes are different on each platform. Each platform expects that the libraries will be in the same folder as the SkiaSharp.dll. This can't be done for every platform at once, as several of the platform-specific libraries have the same name. \r\n\r\nThe folder structure after running `dotnet publish` looks like this:\r\n\r\n![Tree Structure](https://user-images.githubusercontent.com/32407840/52540967-b138aa00-2d5d-11e9-9f8e-93fbf6476571.png)\r\n\r\nIgnoring the `tizen` runtimes (I think they're for Android or something? not sure), a few of the libraries have the same filenames, namely the Windows libraries for the two architectures. A _temporary_ workaround is to put as much as possible in the same folder and ignore that x86 Windows still exists.\r\n\r\n# Attempted Solutions\r\n\r\nWe have tried to work around the problem by selectively importing the native libraries, but this is entirely impossible with PowerShell as they throw `Bad IL format` errors. We have tried:\r\n\r\n1. `Import-Module .\\bin\\Debug\\netstandard2.0\\publish\\runtimes\\<platform>\\native\\<runtime_file>`\r\n2. `Add-Type -Path .\\bin\\Debug\\netstandard2.0\\publish\\runtimes\\<platform>\\native\\<runtime_file>`\r\n3. `[System.Reflection.Assembly]::LoadFile((Resolve-Path \".\\bin\\Debug\\netstandard2.0\\publish\\runtimes\\<platform>\\native\\<runtime_file>\"))`\r\n\r\n# Possible Solutions\r\n\r\n* Ability to specify dependencies such as these by relative path in a PSD1 on a per-platform basis, which is respected with `Import-Module` and loaded correctly.\r\n* Some kind of handling in PowerShellGet for native runtimes on a per-platform basis? Possibly handled via NuGet in terms of pulling down the exact runtime required on a specific platform.\r\n\r\nThere's probably a neater solution I'm missing, feel free to add any suggestions.\r\n\r\n# Files\r\n\r\nSource & module files for reference, if you should like to attempt anything with them:\r\nhttps://github.com/vexx32/PSWordCloud/tree/Cmdlet/PSWordCloud\r\n\r\n# Running PSWordCloud\r\nTo use:\r\n1. Publish the source files for this module with `dotnet publish`\r\n2. Import the PSM1 file in the linked folder with `Import-Module`\r\n3. Attempt to pipe some text into `New-WordCloud -Path .\\test.svg`\r\n\r\nThis **will** work on Windows thanks to the PSM1 manually modifying $env:Path to add all the native runtime folders. This solution is _terribly_ messy and absolutely makes a right royal mess of $env:Path for anyone importing the module. I would like to avoid this.\r\n\r\nIt _attempts_ to do similar on Mac OS and Linux, but in these cases it seems the path for native runtime libraries isn't searched correctly. The only currently available workaround is manually copying these libraries to the same folder as `SkiaSharp.dll` which is... less than great. \r\n\r\n/cc @TylerLeonhardt @daxian-dbw @SteveL-MSFT ",
+  "closed_at": "2020-05-26T15:40:20Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Here's the issue I opened for PSGet to support runtimes: https://github.com/PowerShell/PowerShellGet/issues/273\r\n\r\nFor now, you can have different managed wrappers using PInvoke for each RID and selectively load the right one based on the platform.  This means you'd ship all the native libraries you support and have multiple copies of the wrapper (one for each RID).",
+      "created_at": "2019-02-11T00:15:25Z",
+      "updated_at": "2019-02-11T00:15:25Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Awesome! Do you have a reference / example for how that would be done?",
+      "created_at": "2019-02-11T00:28:06Z",
+      "updated_at": "2019-02-11T00:28:06Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 [Here's an example](https://github.com/Jaykul/PortableNativeBinariesTest/blob/master/PortableModule.psm1) from @Jaykul.\r\n\r\nJust omit the extension in the `DllImport` attribute and they'll be loaded based on those environment variables.  Make sure those are set before any p/invoke method is invoked.",
+      "created_at": "2019-02-11T13:11:48Z",
+      "updated_at": "2019-02-11T13:11:48Z"
+    },
+    {
+      "author": "mattleibow",
+      "author_association": "NONE",
+      "body": "@vexx32 Did adding the paths to the variables not work?",
+      "created_at": "2019-02-11T13:52:27Z",
+      "updated_at": "2019-02-11T13:52:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mattleibow nope. Let me go back a little ways in my commit history for the file I was using here...\r\n\r\n[This](https://github.com/Jaykul/PortableNativeBinariesTest/blob/master/PortableModule.psm1) was the original from @jaykul (linked by @SeeminglyScience above). Ah! Patrick, I was using that script under the assumption that Skia's own DLLImport methods most likely would handle the native import, especially since placing the native runtime files in the same folder as the SkiaSharp.dll allowed it to load flawlessly.\r\n\r\nI noted that the error message on Mac systems (@TylerLeonhardt _may_ still have a copy of the exact error or can get it for us; he was helping me test it on Mac) seems to point to a different library path than Joel had noted in his script, and so I ended up with this script where I added the paths to _both_ variables:\r\n\r\nhttps://github.com/vexx32/PSWordCloud/blob/d01d38c7b837639c5070edee07a44b3d92e10571/Cmdlet/PSWordCloud.psm1\r\n\r\nSetting the library paths didn't work at all, although moving the .dylib file to the same folder as SkiaSharp.dll _did_. The library paths don't seem to be respected in all cases, despite being directly referenced in the error messages. I haven't yet attempted changing the recorded environment variables outside the PowerShell process to accomplish this, but it may be necessary to have that work, I'm not sure.\r\n\r\nCurrently I'm working around this as you can see [here](https://github.com/vexx32/PSWordCloud/blob/Cmdlet/Module/PSWordCloud.psm1) (module file) and [here](https://github.com/vexx32/PSWordCloud/blob/Cmdlet/build.ps1) build file. Basically I execute the build script to compile the DLLs and copy them from the output folder into a subtree that ends up looking like this:\r\n\r\n```\r\nPSWordCloud/\r\n  |- win-x64/\r\n    |- SkiaSharp.dll\r\n    |- libSkiaSharp.dll\r\n  |- win-x86/\r\n    |- SkiaSharp.dll\r\n    |- libSkiaSharp.dll\r\n  |- linux-x64/\r\n    |- SkiaSharp.dll\r\n    |- libSkiaSharp.so\r\n  |- osx/\r\n    |- SkiaSharp.dll\r\n    |- libSkiaSharp.dylib\r\n  |- PSWordCloudCmdlet.dll\r\n  |- PSWordCloud.psd1\r\n  |- PSWordCloud.psm1\r\n```\r\n\r\nAs you can see, there will be a good bit of duplicating the main SkiaSharp.dll, but this way I can selectively pick which folder to `Add-Type` the file from when importing the PowerShell module on a given platform.\r\n\r\nThe duplication is necessary, since I am unable to `Add-Type` the `libSkiaSharp.*` files directly; on Windows they give me `Bad IL format` errors, and I imagine a similar error on other OSes as well, though I haven't had a chance to try that and don't really consider it necessary.\r\n\r\nThus far I have tested Mac and Windows, and the library paths have only been respected on Windows (probably because they're literally just pulled from `%PATH%` and used as-is).",
+      "created_at": "2019-02-11T15:10:31Z",
+      "updated_at": "2019-02-11T15:17:05Z"
+    },
+    {
+      "author": "mattleibow",
+      "author_association": "NONE",
+      "body": "Duplicating the managed SkiaSharp.dll might not be to bad as that is a fairly small file. You won't be able to load the libSkiaSharp.* directly as that is machine code, not IL. But, you don't have to worry about it as the managed SkiaSharp.dll will load it automatically via P/Invoke.\r\n\r\nThe real issue here is that you are publishing a .NET Core app, and everything is in the right place. The native files are supposed to be under the runtimes folder. PowerShell is just not respecting those rules. If you were to compile and publish a .NET Core console or web app, the .NET Core runtime would know to look in those folders.\r\n\r\nThat is why I would rather fix this on the PowerShell side as they need to correctly look at the runtimes folder.\r\n\r\nIf you have a look at this file: https://github.com/PowerShell/PowerShell/blob/master/docs/building/internals.md#native-components you can see PowerShell itself uses this folder structure, it just appears to no understand it with modules.",
+      "created_at": "2019-02-15T17:24:30Z",
+      "updated_at": "2019-02-15T17:24:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, it would be much better to fix this in PowerShell or PowerShellGet, and have the floor open for more xplat native code extensibility.",
+      "created_at": "2019-02-15T17:58:48Z",
+      "updated_at": "2019-02-15T17:58:48Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "People *keep* asking for PowerShell to do this: #3091 #6642 #6724\r\n\r\nWe can't keep pushing this stuff off on module authors -- not only is it painful, it also produces a lot of copies of everything. We also can't put it purely on PowerShellGet, unless we _really_ think the right solution is to build NPM-like warrens of dependencies inside every module folder.\r\n\r\nHowever, if we do think that's the right solution, we should at least do it the way NPM does: the package manager needs to support _assemblies_ as dependencies -- not require us to re-package them in modules.\r\n\r\nPersonally, I think the NPM way is wrong, and the `dotnet` build way is a better model: a single copy of the assemblies which your session can go fetch from a central location when it's needed.\r\n\r\nThis means **PowerShell** needs to do the heavy lifting #7259\r\n\r\nWe would add nuget package references to `RequiredAssemblies`, and \r\n\r\n1. PowerShellGet would download those dependencies \r\n2. PowerShell would go find them and load the right one",
+      "created_at": "2019-02-15T18:04:13Z",
+      "updated_at": "2019-02-15T18:04:13Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 this should be resolved by https://github.com/PowerShell/PowerShell/pull/11032?",
+      "created_at": "2020-03-14T18:07:38Z",
+      "updated_at": "2020-03-14T18:07:38Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT yep, can confirm this appears to be working correctly! Expect to see more PSWordClouds soon. \ud83d\ude02 ",
+      "created_at": "2020-03-14T19:43:16Z",
+      "updated_at": "2022-09-12T17:35:02Z"
+    },
+    {
+      "author": "AndrewSav",
+      "author_association": "NONE",
+      "body": "So how do you Package Native Libraries for PowerShell Modules, now when this change is in?",
+      "created_at": "2020-03-14T21:31:55Z",
+      "updated_at": "2020-03-14T21:32:09Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@AndrewSav see here:\r\n\r\nhttps://docs.microsoft.com/en-us/powershell/scripting/learn/writing-portable-modules?view=powershell-7#dependency-on-native-libraries\r\n\r\nEssentially, pack all the native runtimes into your module as needed, and put them in folders named after the runtime identifier for the platform.\n\n<blockquote><div><strong><a href=\"https://docs.microsoft.com/en-us/powershell/scripting/learn/writing-portable-modules\">Writing Portable Modules - PowerShell</a></strong></div></blockquote>",
+      "created_at": "2020-03-14T21:42:32Z",
+      "updated_at": "2020-03-14T21:42:35Z"
+    }
+  ],
+  "created_at": "2019-02-10T23:15:58Z",
+  "number": 8861,
+  "state": "closed",
+  "title": "It's Really Hard To Package Native Libraries for PowerShell Modules",
+  "updated_at": "2022-09-12T17:35:02Z"
+}

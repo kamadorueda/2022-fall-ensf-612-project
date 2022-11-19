@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14745",
+  "author": "iRon7",
+  "body": "Best practice answers and documentation often refer to .Net methods for file streaming where it concerns performance, e.g. [Processing Large Files](https://docs.microsoft.com/en-us/powershell/scripting/dev-cross-plat/performance/script-authoring-considerations?view=powershell-7.2#processing-large-files). But the .Net implementation differs from native PowerShell behavior were it concerns casting expectations and the current directory:\r\n\r\n```PowerShell\r\n([io.fileinfo]'.\\Test.txt').DirectoryName\r\nC:\\WINDOWS\\system32\r\n(Get-Item '.\\Test.txt').DirectoryName\r\nC:\\Users\\User\\MyScripts\r\n```\r\n\r\nBtw. There is currently no accelerator or initiator for files:\r\n```PowerShell\r\n[fileinfo]'.\\Test.txt'\r\n```\r\n> InvalidOperation: Unable to find type [fileinfo].\r\n\r\n<sub>Note that `[io.fileinfo]'.\\Test.txt'` strips the `.\\` from every member of the object which means if it is used for a parameter type, you can't discover anymore that the path was relative (using a condition as e.g. `if ($FilePath.Name.StartsWith('.\\')) {...`), which means that you can only use a general `string` type for this instead.</sub>\r\n\r\nUsing .net (streaming) methods generally require more coding therefore it often ends up in a separate function.\r\nAs a (spoiled) _PowerShell_ engineer, I would expect to be able to do just this (wishful thinking):\r\n\r\n```PowerShell\r\nFunction Stream-File([FileInfo]$FilePath) {\r\n    $Stream = [System.IO.StreamReader]$FilePath\r\n    # ...\r\n    $Stream.Dispose()\r\n}\r\n\r\nStream-File .\\Test.txt\r\n```\r\nThis implies at least two things:\r\n1) The (PowerShell) `FileInfo` constructor needs to accept a relative path that is than joined to the current path (`Join-Path (Get-Location) '.\\Test.txt'`) to prevent it expects the file in the `C:\\WINDOWS\\system32` folder and to be  accelerated to resolve the following error:\r\n\r\n> InvalidOperation: Unable to find type [FileInfo].\r\n\r\n2) The `[FileInfo]` class should automatically cast to other file classes along with `System.IO.StreamReader` which current results in the following error:\r\n\r\n> Cannot convert the \"C:\\Users\\User\\MyScripts\\Test.txt\" value of type \"System.IO.FileInfo\" to type \"System.IO.StreamReader\".\r\nInvalidOperation:\r\n",
+  "closed_at": "2022-02-19T22:00:43Z",
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "This is really a known issue as the .NET methods use the process working directory whereas the PowerShell cmdlets rely on the Runspace location (see https://github.com/PowerShell/PowerShell/issues/3428 and linked issues in there). You can't really keep them in sync because there's only 1 process working dir but multiple Runspaces can exist inside a process. Maybe we just need to add some documentation (if there isn't already) on the best ways to write cmdlets to handle this properly. In my case I usually do the following to handle both `-Path` and `-LiteralPath` when calling .NET methods\r\n\r\n\r\n```powershell\r\nFunction Get-ItemLikeFunction {\r\n    [CmdletBinding(DefaultParameterSetName='Path')]\r\n    param (\r\n        [Parameter(\r\n            Mandatory = $true,\r\n            Position = 0,\r\n            ValueFromPipeline = $true,\r\n            ValueFromPipelineByPropertyName = $true,\r\n            ParameterSetName = 'Path'\r\n        )]\r\n        [SupportsWildcards()]\r\n        [ValidateNotNullOrEmpty()]\r\n        [String[]]\r\n        $Path,\r\n\r\n        [Parameter(\r\n            Mandatory = $true,\r\n            Position = 0,\r\n            ValueFromPipelineByPropertyName = $true,\r\n            ParameterSetName = 'LiteralPath'\r\n        )]\r\n        [Alias('PSPath')]\r\n        [ValidateNotNullOrEmpty()]\r\n        [String[]]\r\n        $LiteralPath\r\n    )\r\n    \r\n    begin {\r\n        # Some code here\r\n    }\r\n\r\n    process {\r\n        if ($PSCmdlet.ParameterSetName -eq 'Path') {\r\n            $allPaths = $Path | ForEach-Object -Process {\r\n                $provider = $null\r\n                $PSCmdlet.SessionState.Path.GetResolvedProviderPathFromPSPath($_, [ref]$provider)\r\n            }\r\n        }\r\n        elseif ($PSCmdlet.ParameterSetName -eq 'LiteralPath') {\r\n            $allPaths = $LiteralPath | ForEach-Object -Process {\r\n                $PSCmdlet.SessionState.Path.GetUnresolvedProviderPathFromPSPath($_)\r\n            }\r\n        }\r\n\r\n        foreach ($filePath in $allPaths) {\r\n            # Each $filePath contains the absolute path resolved from the current PowerShell location\r\n        }\r\n    }\r\n\r\n    end {\r\n        # Some code here\r\n    }\r\n}\r\n```\r\n\r\nI'm not sure I agree with having a type accelerator for `FileInfo` specifically, this class is not really something I think we should encourage general use off in PowerShell. Usually the same operations that `FileInfo` (and `DirInfo`) are behind the FIleSystem provider included cmdlets like `Get-Item`, `Set-Item`, etc. Anyone wishing for these more advanced methods are probably ok with writing the full type name just like any other .NET class without an accelerator.",
+      "created_at": "2021-02-09T19:28:01Z",
+      "updated_at": "2021-02-09T19:29:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good points, @jborean93: the discrepancy between the working directories makes a solution based on general-purpose (PowerShell-unaware) .NET types impossible.\r\n\r\nAn additional complication is the lack of support for paths based on _PowerShell_ drives; in the context of the provider cmdlets, this is _on output_ compensated for with _instance_ ETS members such as `.PSPath`, which you don't get when you directly work with these types.\r\n\r\n* For improving the function / script-authoring experience with file-system paths, @rkeithhill  has previously suggested introducing a `PathParameter` attribute that `string` parameters can be decorated with - see https://github.com/PowerShell/PowerShell/issues/8819#issuecomment-460102241.\r\n\r\n* When passing paths to .NET methods, you have to ensure that you always pass _full, native_ paths, to account for the differing working directories.\r\n\r\n  * For an _existing_ file-system item this is easily done with `Convert-Path`.\r\n  * Unfortunately, that currently doesn't work with not-yet-extant items, such as when passing an _output_ file path, which is a real pain point - see #2993.\r\n\r\nFor general usage, what I do think would make sense is to implement _PowerShell-aware analogs_ to `FileInfo` and `DirectoryInfo`:\r\n\r\nIn fact, a _single_ new class, `PSPathInfo` that derives from the existing [`System.Management.Automation.PathInfo`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.PathInfo) class  (it is currently sealed, but changing that shouldn't break anyone), may be sufficient:\r\n\r\n`PathInfo` is currently used in `Resolve-Path`, and has no public constructor - and it has no type accelerator, which `PSPathInfo` would need, however.\r\n\r\n`PSPathInfo` could build on `PathInfo` as a provider-agnostic path-information class, with a public constructor that accepts a path string.\r\n\r\nIt could add generally useful properties, such as `.BaseName`, `.Extension` and `.ParentPath` and `.ParentProviderPath`, as well as `.Exists` and `.ParentExists` (which would be helpful for output items yet to be created), and an `.ItemType` property that indicates the type of item the path refers to _if it exists_ - along the lines of `Unknown` (path doesn't exist), `File`, `Directory`, `Symlink`, ... (including subtypes of other providers, which most don't have, however).\r\n\r\n(With the proposed class' focus on _paths_, it wouldn't have to duplicate additional _item_-specific properties such as `.LastWriteTime`, ...)\r\n\r\nAs an alternative to `Convert-Path`, you could then do the following when calling .NET methods, which is more efficient:\r\n\r\n```powershell\r\n# WISHFUL THINKING\r\n# Equivalent to:\r\n#    [System.IO.File]::ReadAllLines((Convert-Path foo.txt))\r\n[System.IO.File]::ReadAllLines(([PSPathInfo] 'foo.txt').ProviderPath)\r\n```\r\n\r\nIf `PSPathInfo` is made to stringify to its `.ProviderPath` property (the full, _native_ path, which would be a departure from `PathInfo`, but to me a defensible one; use `.Path` for the PowerShell-drive-based path) we could simplify to:\r\n\r\n```powershell\r\n# WISHFUL THINKING\r\n[System.IO.File]::ReadAllLines([PSPathInfo] 'foo.txt')\r\n```\r\n\r\nAdditionally, `Split-Path` could be enhanced to return such instances with the previously proposed `-All` switch (or, perhaps better: `-AsPSPathInfo` / `-pi`) - see #6606.\r\n\r\nThis would make the following two sample commands equivalent:\r\n\r\n```powershell\r\n# WISHFUL THINKING\r\n([PSPathInfo] 'foo.txt').Extension\r\n(Split-Path -All foo.txt).Extension\r\n```\r\n\r\nAlso allowing `Resolve-Path` to take advantage of the enhanced class would require a _new switch_ (e.g., `-AsPSPathInfo` / `-pi`), so as not to break backward compatibility - or, perhaps outputting a class _derived_ from the original, as is the case here, is an acceptable change.\r\n",
+      "created_at": "2021-02-09T22:19:25Z",
+      "updated_at": "2022-02-18T03:19:33Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@jborean93, @mklement0, thanks for your comments.\r\n\r\n@jborean93\r\nYour technically argument/limitation about multiple Runspaces is a little above my head, but to your argument:\r\n\r\n> Anyone wishing for these more advanced methods ...\r\n\r\nThe issue is not just an accelerator but everything that comes alone (I think I have chosen a bad title for this issue).\r\nMeaning the general argument for this purpose is:\r\n\r\n > Anyone wishing to improve the performance (where memory usage / the PowerShell pipeline doesn't matter) and therefore pushed* for .Net methods, wishes the same PowerShell experience as it comes to loosely typed variables and defaults.\r\n\r\n(*As recommended in [PowerShell scripting performance considerations](https://docs.microsoft.com/en-us/windows-server/administration/performance-tuning/powershell/script-authoring-considerations) and a lot of StackOverflow answers.)\r\n\r\n@mklement0\r\n> `PSPathInfo` could build on `PathInfo` as a provider-agnostic path-information class, with a public constructor that accepts a path string.\r\n\r\nIs indeed something I had in mind (again, I think I have chosen a bad title for this issue, any suggestion for a better one?).\r\n",
+      "created_at": "2021-02-10T14:43:28Z",
+      "updated_at": "2021-02-10T14:43:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7, regarding the rationale for the working directory-discrepancy, necessitated by support for multiple runspaces per process, see  #3428.",
+      "created_at": "2021-02-10T15:05:22Z",
+      "updated_at": "2021-02-10T21:41:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for a title: perhaps something along the lines of \"Introduce a PowerShell-aware path-information class for convenient .NET interoperability\"?",
+      "created_at": "2021-02-10T15:09:54Z",
+      "updated_at": "2021-02-23T22:55:31Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@mklement0, thanks, for the runspaces referral, I actually think we are one the same page as I wasn't imaging modifying `system.io.fileinfo` by itself but actually placing a PowerShell object/class (as e.g. `[PSFileInfo]`) on top of it where I guess that your suggestion for `[PSPathInfo]` on top of `System.Management.Automation.PathInfo` is actually better.",
+      "created_at": "2021-02-10T16:09:37Z",
+      "updated_at": "2021-02-10T16:09:37Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "The Engine WG reviewed this issue today.  Calling .NET methods with relative paths is a pain point we recognize but we don't believe there is enough value in adding another type e.g. `[PSPathInfo]` just for this scenario when you can use `\"$pwd\\Test.txt\"`.  We do suggest submitting an enhancement request to PSSA for a rule that warns about sending relative paths to .NET members.",
+      "created_at": "2022-02-18T00:00:48Z",
+      "updated_at": "2022-02-18T00:00:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rkeithhill, to be clear: `\"$pwd\\...\"` will _typically_ work, but _not_ in the following cases:\r\n\r\n* If the current PowerShell location is based on a _PowerShell-only_ file-system drive.\r\n* If the path happens to be a full path already (either a full file-system-native path or a full path based on a PowerShell-only drive).\r\n\r\nThe rationale for suggesting `[PSPathInfo]` was that users _wouldn't have to worry about these edge cases_...\r\n\r\nA _design-time_ warning - which depends on users actually using an environment that surfaces these warnings - is a poor substitute.",
+      "created_at": "2022-02-18T00:14:52Z",
+      "updated_at": "2022-02-18T03:48:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "And while _also_ having a PSSA rule - one that points the user to a robust solution (which `\"$pwd\\....\"` isn't) - is always desirable, I don't think one can be implemented robustly, as you cannot know which .NET method parameters represent file-system paths - short of limiting the rule to high-profile built-in APIs or _guessing_ based on the parameter name being or containing the word `path`.\r\n",
+      "created_at": "2022-02-18T08:16:27Z",
+      "updated_at": "2022-02-18T08:16:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  as you cannot know which .NET method parameters represent file-system paths\r\n\r\nI saw in C# design repository a _rejected_ proposal to define new types based on strings. Another option could be to ask in .Net Runtime repository to introduce new attribute to annotate \"paths\". (For third-party API-s we could do annotations with out ETS.)\r\n\r\n---\r\n\r\nI bit wonder why the issue is under WG-Engine, I'd expect WG-Providers :-)\r\n\r\n---\r\n\r\nDespite the absolute freeze on this project (only the occasional functional PRs) I haven't given up hope for innovation and have been devoting a lot of time to Providers lately. I tend to think that we will need not even one, but several types for paths to make Providers faster and more reliable.\r\nI don't see the need for them to have public constructors yet. If such a need was objective, it would have been done long ago in the .Net Runtime. At the same time right now PowerShell Providers do a lot of unnecessary internal work without well-done types for paths.",
+      "created_at": "2022-02-18T08:59:27Z",
+      "updated_at": "2022-02-18T08:59:27Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "> it wonder why the issue is under WG-Engine, I'd expect WG-Providers :-)\r\n\r\nMaybe this should indeed be more common and even go deeper... (needless to say that I am missing some in-depth knowledge here to oversee the whole implication), but a general `[Item]` type (interface?) might actually be the requested class here (including for all other providers). Meaning instead of:\r\n\r\n```PowerShell\r\n[System.IO.File]::ReadAllLines((Get-Item  .\\foo.txt))\r\n```\r\nI might do things along with:\r\n```PowerShell\r\n[System.IO.File]::ReadAllLines([Item] '.\\foo.txt')\r\n\r\nFunction Stream-File([Item]$FilePath) {\r\n    $Stream = [System.IO.StreamReader]$FilePath\r\n    # ...\r\n    $Stream.Dispose()\r\n}\r\n```\r\n\r\nThis will mean that the result of the `[Item]` casting depends on the current provider in case the drive is not provided in the path (as with `*-Item` cmdlets) but it shows how basal this request is.\r\n\r\n",
+      "created_at": "2022-02-18T10:44:24Z",
+      "updated_at": "2022-02-18T10:58:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@iRon7 What is `.\\foo.txt` in follow contexts?\r\n- `Get-Item  .\\foo.txt`\r\n- `[System.IO.File]::ReadAllLines(\".\\foo.txt\")`\r\n\r\nObviously we all can say it is `Path`.\r\nNext question if we know it is `path` can PowerShell know this too?\r\nYes, only if PowerShell has a meta data. For Get-Item it has. For .Net method it hasn't.\r\nWe could add the meta data with ETS. Or get from .Net if there would be an specific attribute.\r\n\r\nAlso notice, PowerShell path it is not only file system path. PowerShell path is used for other Providers too. So we should say about generic means.\r\n\r\nWith the meta data PowerShell has no needs to have specific types with public constructor like `[Item]` - PowerShell can recognize context and does things _magically_.\r\n\r\n",
+      "created_at": "2022-02-18T12:08:04Z",
+      "updated_at": "2022-02-18T12:08:04Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as declined and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-02-19T22:00:42Z",
+      "updated_at": "2022-02-19T22:00:42Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@[iSazonov](https://github.com/iSazonov),\r\n\r\n> We could add the meta data with ETS. Or get from .Net if there would be an specific attribute.\r\n\r\nSounds like a Catch22 (we can't get it into ETS because there is no specific .Net attribute and we can't convert it to a .Net class because there is no ETS), the point that I was trying to make is outside this box. As I see it, there is actually a common attribute *in a PowerShell* (not in .Net) for the concerned **Item** (as from `Get-Item` independent of its provider) which is: `PSPath` (and also `PSProvider`).\r\nIsn't it weird that a script developer has the ability to state almost any system object but not a fundamental PowerShell `item` object as returned by the `Get-Item` cmdlet?\r\n\r\nYour referral to ETS, let me read the [ETS documentation](https://docs.microsoft.com/en-us/powershell/scripting/developer/ets/overview) again:\r\n\r\n> Therefore a script developer must have the ability to state the type of one of their variables and build up their own set of dynamically typed \"objects\" that contain properties and methods and can participate in the type-driven system. ETS solves this problem by providing a common object for the scripting language that has the ability to state its type dynamically and to add members dynamically.\r\n> Fundamentally, ETS resolves the issue mentioned previously by providing the **PSObject** object, which acts as the basis of all object access from the scripting language and provides a standard abstraction for the cmdlet developer.\r\n\r\nSomehow, it feels like **ETS** misses a mark (**item**) for this specific issue.\r\n\r\nAnyways,\r\n\r\n> With the meta data PowerShell has no needs to have specific types with public constructor like [Item] - PowerShell can recognize context and does things *magically*.\r\n\r\n? ... not for this issue.\r\nUnless I would be able to tell PowerShell it concerns an `Item` ([the item *at the specified location* as in `get-item`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.management/get-item)) rather than a `string` or a general `PSObject`.\r\n\r\nFor this, I have created a very simple PowerShell class:\r\n\r\n<details>\r\n  <summary>Item class (prototype)</summary>\r\n  \r\n```PowerShell\r\nclass Item {\r\n    [object]$Object\r\n    Item([object]$Path) {\r\n        if ($Path -is [string]) {\r\n            $this.Object = Get-Item -LiteralPath $Path\r\n        }\r\n        elseif ($Path.PSObject.Properties.Name -Contains 'PSPath') {\r\n            $this.Object = $Path\r\n        }\r\n        else {\r\n            Throw \"Cannot convert value \"\"$Path\"\" to type \"\"$($Path.GetType())\"\" to type \"\"Item\"\".\"\r\n        }\r\n    }\r\n    [string]ToString() {\r\n        return $This.Object.ToString()\r\n    }\r\n}\r\n```\r\n</details>\r\n\r\nNote that the class returns a `string` (`$This.Object.ToString()`) rather than the object itself (`$This.Object`). I was not able to do this in PowerShell (or it might not even be possible at all). Nevertheless, it shows that using a kind of `Item` class, I would be able to convert a relative path string to state a PowerShell `item` object which contains an ETS with an absolute path:\r\n\r\n```PowerShell\r\n$Item = [Item]'.\\Test.txt'\r\n[string]$Item\r\nC:\\Users\\user\\Scripts\\Test\\PowerShell\\Item\\Test.txt\r\n```\r\nor:\r\n```PowerShell\r\n[System.IO.File]::ReadAllLines([Item]'.\\Test.txt')\r\n```\r\nor:\r\n```PowerShell\r\nFunction Stream-File([Item]$FilePath) { ... }\r\n```\r\n\r\n> Also notice, PowerShell path it is not only file system path. PowerShell path is used for other Providers too. So we should say about generic means.\r\n\r\nYes, I do notice that. As with the `Get-Item` cmdlet the `[Item]` class (/interface?) idea assumes the current provider (usual the `FileSystem`) but in the idea, you might also do something specific like:\r\n\r\n```PowerShell\r\n[Item]'Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion'\r\n```\r\n\r\n",
+      "created_at": "2022-02-21T14:49:05Z",
+      "updated_at": "2022-02-21T16:04:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> ```powershell\r\n> [System.IO.File]::ReadAllLines([Item]'.\\Test.txt')\r\n> ```\r\n\r\nIf you want manually annotate in such way you have no need `Item` - you already can make this with `Convert-Path`\r\n```powershell\r\nPS C:\\Windows\\System32> Convert-Path .\\1040\\\r\nC:\\Windows\\System32\\1040\\\r\nPS C:\\Windows\\System32> Convert-Path Temp:\\.ses\r\nC:\\Users\\1\\AppData\\Local\\Temp\\.ses\r\nPS C:\\Windows\\System32>\r\n```\r\nIf you want to get thing magic and transparent you are forced to have a _meta data_. Now you can have meta data for source (that Get-Item returns - PSPath) but you haven't meta data for target - .Net method _path_ parameter itself.",
+      "created_at": "2022-02-21T16:48:05Z",
+      "updated_at": "2022-02-21T16:48:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I know this thread is getting long, but [we've been through both before](https://github.com/PowerShell/PowerShell/issues/14745#issuecomment-776282779):\r\n\r\n* If `Convert-Path` were to finally be made to work with _nonexistent_ paths, such as when you're _creating_ a file - see https://github.com/PowerShell/PowerShell/issues/2993. -  then yes, `[System.IO.File]::ReadAllLines((Convert-Path '.\\Test.txt'))` would be a robust idiom - and one that isn't even dependent on the provider underlying the current location, given that the explicit mandate of `ConvertTo-Path` is to return a native _file-system_ path.\r\n\r\n  * That said, it's far from obvious, syntactically verbose, and somewhat heavy-handed, given the need for a cmdlet call - and for full robustness you'd need to use `[System.IO.File]::ReadAllLines((Convert-Path -LiteralPath '.\\Test.txt'))` with literal paths.\r\n\r\n* `[PSPathInfo] '.\\Test.txt'` is syntactically simpler and doesn't require a cmdlet call. Also, as the linked comment proposes, this use of `[PSPathInfo]` (implicit stringification to its `.ProvderPath` property) would just be a side benefit of the parsing capabilities this type would provide, both in direct use and via parameters declared with this type.\r\n\r\nIf we could do away with the need for _either_ workaround, then all the better - but, @iSazonov, from what I can tell this isn't really an option in this case: \r\n.NET won't accommodate us by adding metadata identifying file-system path parameters in APIs, since the problem is specific to PowerShell - and I don't think adding this metadata on the PowerShell side is feasible (leaving aside that third-party APIs would need such metadata too).\r\n\r\n",
+      "created_at": "2022-02-21T17:08:32Z",
+      "updated_at": "2022-02-21T17:09:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> If Convert-Path were to finally be made to work with nonexistent paths\r\n\r\nWhy not implement? :-) This could be useful in other scenarios too.\r\n\r\n> NET won't accommodate us by adding metadata identifying file-system path parameters in APIs, since the problem is specific to PowerShell\r\n\r\nWe never asked them. :-)\r\n\r\n>  I don't think adding this metadata on the PowerShell side is feasible\r\n\r\nWe already do this for type extensions and formatting. If it's a _really useful_ feature, we could do it for path annotation too (in community module for example).",
+      "created_at": "2022-02-21T18:18:57Z",
+      "updated_at": "2022-02-21T18:18:57Z"
+    }
+  ],
+  "created_at": "2021-02-09T15:11:25Z",
+  "number": 14745,
+  "state": "closed",
+  "title": "Introduce a PowerShell-aware path-information class for convenient .NET interoperability",
+  "updated_at": "2022-02-21T18:18:57Z"
+}

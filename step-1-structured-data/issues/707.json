@@ -1,0 +1,167 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/707",
+  "author": "jpsnover",
+  "body": "PS> ls > test\nBASH> ls >> test\nBASH> cat test  # Content looks correct\nPS> cat test # Content is wrong at the end\n",
+  "closed_at": "2018-01-31T04:29:37Z",
+  "comments": [
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "Need to discuss this at greater length. Some thoughts:\n- There should probably be a global PS variable for setting the encoding to use\n- This global variable might be different across platforms\n",
+      "created_at": "2016-03-24T22:00:23Z",
+      "updated_at": "2016-03-24T22:00:23Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "@joeyaiello do we need to fix this as a bug? A mixed-encoding file is just... wrong. It's bad input. I'm not really sure what `Get-ChildItem` should even do about it.\n",
+      "created_at": "2016-04-13T18:06:51Z",
+      "updated_at": "2016-04-13T18:06:51Z"
+    },
+    {
+      "author": "jpsnover",
+      "author_association": "CONTRIBUTOR",
+      "body": "CAT works so why would it be OK for Get-ChildItem to not work?\n\"If you want things to work avoid the PS tools?\"\n\nOn Wed, Apr 13, 2016 at 11:06 AM, Andy Schwartzmeyer <\nnotifications@github.com> wrote:\n\n> @joeyaiello https://github.com/joeyaiello do we need to fix this as a\n> bug? A mixed-encoding file is just... wrong. It's bad input. I'm not really\n> sure what Get-ChildItem should even do about it.\n> \n> \u2014\n> You are receiving this because you authored the thread.\n> Reply to this email directly or view it on GitHub\n> https://github.com/PowerShell/PowerShell/issues/707#issuecomment-209572132\n",
+      "created_at": "2016-04-14T13:33:21Z",
+      "updated_at": "2016-04-14T13:33:21Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "- Linux uses UTF-8 without a BOM by default\n- .NET's Core implementation does not use a BOM\n- Open question: what's the default encoding on OS X? \n- PS does add a BOM to outputted files (we need to investigate exactly where)\n\nLinux UX sync agrees that \"doing the right thing\" means making sure that PowerShell's default behavior works best with the tooling and ecosystem where it exists. Therefore, we shouldn't break the existing behavior on Windows, and we _should_ change the behavior on Linux. To \"do the right thing\" on Linux, we have to make sure we don't ever add a BOM on Linux. \n\nWe have to test the non-BOM UTF-8 file generated on Linux can be read properly on Windows. \n\nThese changes would need to be made in the following cmdlets:\n- Out-File\n- Set-Content\n\nWe should also create an environment OR PS variable like `$DefaultFileEncoding` or `$FileEncoding` that changes the default behavior of the above cmdlets. \n",
+      "created_at": "2016-05-16T18:56:48Z",
+      "updated_at": "2016-05-16T18:56:48Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "i validated that .NET _does_ put a BOM in the file (in a similar way that we open files), and that our cmdlets do not do anything specific to add the BOM. \n\n```\nPS# $tfile = \"$PWD\\tfile.txt\"\nPS# $utf32enc = [text.encoding]::UTF32\nPS# $fw = [io.filestream]::New($tfile,([io.filemode]::CreateNew))\nPS# $sw = [io.streamwriter]::New($fw,$utf32enc)\nPS# $sw.flush()\nPS# $sw.dispose()\nPS# $fw.dispose()\nPS# format-hex $tfile\n\n           Path: F:\\e\\rs1d\\admin\\monad\\src\\tfile.txt\n\n           00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F\n00000000   FF FE 00 00 00 00 00 00 00 00 00 00 00 00 00 00  .\u00fe..............\n\n```\n\nIt is the case that if you change to utf8 encoding the appropriate BOM is written in the file, \n",
+      "created_at": "2016-05-16T22:22:22Z",
+      "updated_at": "2016-05-16T22:22:22Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "@JamesWTruher the results are different on Linux with .NET Core:\n\n## Out-File\n\nPowerShell, on Linux, prepends a BOM when using UTF-8 encoding:\n\n``` powershell\n> \"hello world\" | Out-File -Encoding utf8 utf8\n> file utf8\nutf8: UTF-8 Unicode (with BOM) text\n```\n\n## .NET Encoding\n\n``` C#\nusing System;\nusing System.Collections.Generic;\nusing System.IO;\nusing System.Text;\n\nnamespace ConsoleApplication\n{\n    public class Program\n    {\n        public static void Main(string[] args)\n        {\n            String[] lines =\n                {\n                    $\"BufferHeight: {Console.BufferHeight}\",\n                    $\"BufferWidth: {Console.BufferWidth}\",\n                    $\"WindowHeight: {Console.WindowHeight}\",\n                    $\"WindowWidth: {Console.WindowWidth}\",\n                    $\"LargestWindowHeight: {Console.LargestWindowHeight}\",\n                    $\"LargestWindowWidth: {Console.LargestWindowWidth}\",\n                    $\"IsErrorRedirected: {Console.IsErrorRedirected}\",\n                    $\"IsOutputRedirected: {Console.IsOutputRedirected}\",\n                    $\"IsInputRedirected: {Console.IsInputRedirected}\",\n                    \"\"\n                };\n\n            using (var stream = File.CreateText(\"Default.log\"))\n            {\n                foreach (var line in lines) { stream.WriteLine(line); }\n            }\n\n            var encodings = new Dictionary<String, Encoding>()\n                {\n                    { \"UTF8-Default.log\", new UTF8Encoding() },\n                    { \"ASCII.log\", new ASCIIEncoding() },\n                    { \"UTF8-ExplicitBOM.log\", new UTF8Encoding(true) },\n                    { \"Unicode.log\", new UnicodeEncoding() },\n                };\n\n            foreach (var encoding in encodings)\n            {\n                using (var file = new FileStream(encoding.Key, FileMode.Create))\n                using (var stream = new StreamWriter(file, encoding.Value))\n                {\n                    foreach (var line in lines) { stream.WriteLine(line); }\n                }\n            }\n        }\n    }\n}\n```\n\n``` sh\n$ dotnet run\n$ for i in *.log; do file $i; done\nASCII.log: ASCII text\nDefault.log: ASCII text\nUnicode.log: Little-endian UTF-16 Unicode text\nUTF8-Default.log: ASCII text\nUTF8-ExplicitBOM.log: UTF-8 Unicode (with BOM) text\n```\n",
+      "created_at": "2016-05-16T22:26:17Z",
+      "updated_at": "2016-05-16T22:26:17Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "Obviously that text was from other experiments :smile: If you include some non-ASCII text:\n\n``` c#\n            String[] lines =\n                {\n                    \"Normal ASCII text\",\n                    \"\u4f60\u597d\"\n                };\n```\n\nYou get:\n\n```\nASCII.log: ASCII text\nDefault.log: UTF-8 Unicode text\nUnicode.log: Little-endian UTF-16 Unicode text\nUTF8-Default.log: UTF-8 Unicode text\nUTF8-ExplicitBOM.log: UTF-8 Unicode (with BOM) text\n```\n\nWhich makes sense, as .NET is properly giving up on encoding non-ASCII characters for ASCII, but encodes as UTF-8 as it's supposed to:\n\n``` sh\n$ cat ASCII.log\nNormal ASCII text\n??\n\n$ cat UTF8-Default.log\nNormal ASCII text\n\u4f60\u597d\n```\n",
+      "created_at": "2016-05-16T22:32:37Z",
+      "updated_at": "2016-05-16T22:32:37Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": ".NET Core's `UTF8Encoder` is specifically set to _not_ emit a [BOM by default](https://github.com/dotnet/coreclr/blob/master/src/mscorlib/src/System/Text/UTF8Encoding.cs/#L69). (Link obtained from the [API browser](https://dotnet.github.io/api/System.Text.UTF8Encoding.html).)\n",
+      "created_at": "2016-05-16T22:34:30Z",
+      "updated_at": "2016-05-16T22:34:30Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I think we're just using https://github.com/dotnet/coreclr/blob/master/src/mscorlib/src/System/Text/Encoding.cs/#L1542 which passes true so the behavior should be the same on Linux.\n",
+      "created_at": "2016-05-16T22:36:37Z",
+      "updated_at": "2016-05-16T22:36:37Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "OMG the fact that `UTF8Encoding` and `Encoding.UTF8` have different explicit default behaviors is absurd.\n",
+      "created_at": "2016-05-16T22:37:31Z",
+      "updated_at": "2016-05-16T22:37:31Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "I just checked with @eerhardt, and he confirmed this is the same behavior as .NET 4.6.1. The two different \"default\" UTF-8 constructors differ in BOM usage.\n",
+      "created_at": "2016-05-16T22:44:07Z",
+      "updated_at": "2016-05-16T22:44:07Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "So, there is no single answer to what .NET defaults to with respect to UTF-8 using a BOM. I logged dotnet/coreclr/issues/5000; but it is highly unlikely to be changed (and wouldn't really matter for us anyway).\n\nI don't really know where this lands us; but at least we know what's going on :smile: \n",
+      "created_at": "2016-05-16T22:59:47Z",
+      "updated_at": "2016-05-16T22:59:47Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "The issue is related to binary pipelines.\n\nAfter you call a native utility (e.g., `ls`) in PowerShell, the output is converted to a `string` -- it's no longer a byte stream. You cannot expect anything good now.\n\nThe best you can do is to use PowerShell utilities since they don't produce byte streams, but objects. And the expected binary pipeline will solve these problems.\n\nQ: Why guessing the encoding is a bad idea?\nA: Guessing encoding can be wrong. And it can be NOT EVEN WRONG. Imagine a utility that produces binary stream that cannot be interpreted as a `string`, e.g., it contains what will be interpreted as `0`, or it is a bitmap.\n\nSee #1908 and #1975.\n",
+      "created_at": "2016-10-04T22:02:30Z",
+      "updated_at": "2016-10-04T22:02:30Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "to handle simple redirection, the following would be possible:\r\n```powershell\r\n$PSDefaultParameterValues['out-file:encoding'] = \"ascii\"\r\n```\r\nthen the following works just fine (on linux)\r\n```powershell\r\ngci > test\r\nbash -c 'ls >> test'\r\nbash -c \"cat test\"\r\ngci test\r\n```\r\nhaving different settings on Linux and Windows would solve the problem, since most linux apps are just going to output ascii. I don't believe there's any hope for combinations of apps which emit unicode ascii when attempting to do redirection\r\n  85 gc test\r\n",
+      "created_at": "2017-02-02T23:13:05Z",
+      "updated_at": "2017-02-02T23:13:05Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think we probably need an RFC of some kind for this behavior that answer some of my open questions (although I think they're worth discussion today because the answer to a few of them may determine the level of abstraction at which that RFC should be written):\r\n\r\n* Given the scarcity of BOM usage w/ UTF-8 text files on Linux, should we have different behavior for `*-Content` cmdlets? \r\n* Related: are there any scenarios where reading an ASCII file as a UTF-8 file without a BOM is incorrect? \r\n* What are some cross-platform scenarios/demos that demonstrate success in this space?\r\n* Can we break existing Windows behavior here? \r\n* Do we need some sort of `$EncodingPreference` (or something like that)? \r\n* Do redirection operators need to do something special here based on said `$EncodingPreference`\r\n* Should we pull in `Invoke-WebRequest`/`Invoke-RestMethod` as part of this work? \r\n* Do we have an uber-level of platform-specific design behavior that we need to abstract behind some global setting (potentially w/ different platform-specific defaults)? ",
+      "created_at": "2017-02-08T23:04:42Z",
+      "updated_at": "2017-02-08T23:04:42Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "Other:\r\n* `$OutputEncoding` is only used for pipes of native commands currently. It also requires that you do `$outputencoding = [System.Text.Encoding]::UTF8` in order to change it. That's not an awesome UX. \r\n* On Windows, `Set-Content` uses ASCII by default, `Out-File` uses UTF-16 by default. \r\n\r\nOpen still:\r\n* Do we use a cmdlet or a preference variable? \r\n\r\nClosed on:\r\n* Okay to have different default behaviors on different systems. \r\n* Right default behavior on Linux is UTF-8 with no BOM. \r\n* Okay to change the all encoding behavior on a single machine (like `$OutputEncoding`) \r\n* No change to current default Windows behavior. \r\n* Need some way to change back to the \"WindowsDefault\" Encoding value that mixes default behavior for Set-Content and Out-File. ",
+      "created_at": "2017-02-09T00:45:24Z",
+      "updated_at": "2017-02-09T00:45:24Z"
+    },
+    {
+      "author": "dahlbyk",
+      "author_association": "NONE",
+      "body": "Came here looking for issue related to this because `>` producing UTF-16 by default is maddening.\r\n\r\n> Do we need some sort of $EncodingPreference (or something like that)?\r\n\r\nPlease!\r\n\r\n> Can we break existing Windows behavior here?\r\n\r\nLess necessary if there's a preference, IMO, though I have never seen a developer respond positively to a file being encoded with UTF-16. If PowerShell 6+ can lead the charge on moving Windows toward UTF-8-without-BOM everywhere that would be amazing.\r\n\r\n> Do redirection operators need to do something special here based on said $EncodingPreference\r\n\r\nThis seems to me to be the primary purpose of `$EncodingPreference` in the first place: changing the encoding used by `>`. Changing the default encoding for `Out-File`, `Set-Content`, etc. is a bonus, but at least those support a parameter (unlike `>`).\r\n\r\nNot sure if `>>` already delegates to `Add-Content`, but it should behave the same: preserve encoding for an existing file, otherwise create a file with the specified (or default) encoding.",
+      "created_at": "2017-03-17T16:33:53Z",
+      "updated_at": "2017-03-17T16:33:53Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "We have an [RFC open for this work](https://github.com/PowerShell/PowerShell-RFC/blob/master/1-Draft/RFC0020-DefaultFileEncoding.md) (please [add your comments in the issue dicussion](https://github.com/PowerShell/PowerShell-RFC/issues/71) @dahlbyk) but it will likely not land in beta1. ",
+      "created_at": "2017-03-20T23:53:16Z",
+      "updated_at": "2017-03-20T23:53:16Z"
+    },
+    {
+      "author": "regs01",
+      "author_association": "NONE",
+      "body": "My humble opinion shares some other opinions above. Default for Out-File should be UTF8 without BOM in every system.",
+      "created_at": "2017-05-16T22:51:39Z",
+      "updated_at": "2017-05-16T22:51:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "For 6.0.0 release we'll be doing a reduced scope version of this https://github.com/PowerShell/PowerShell/issues/4878",
+      "created_at": "2017-09-30T17:20:31Z",
+      "updated_at": "2017-09-30T17:20:31Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "@JamesWTruher could you clarify here what *wasn't* achieved by the implementation that we're shipping in 6.0?",
+      "created_at": "2017-12-19T18:34:00Z",
+      "updated_at": "2017-12-19T18:34:00Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The original issue from @jpsnover no longer repros with RC2 with @JamesWTruher's [changes](https://github.com/PowerShell/PowerShell/pull/5369).  I believe the change from Jim is that we default `$OutputEncoding` to utf-8 NoBOM instead of ASCII.",
+      "created_at": "2018-01-02T20:47:12Z",
+      "updated_at": "2018-01-02T20:47:12Z"
+    }
+  ],
+  "created_at": "2016-03-20T16:21:48Z",
+  "number": 707,
+  "state": "closed",
+  "title": "Resolve UTF-8, UTF-16, ASCII inconsistencies",
+  "updated_at": "2018-01-31T04:29:37Z"
+}

@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7802",
+  "author": "rjmholt",
+  "body": "When a powershell.config.json file is set, there's no handling of an invalid file. Essentially it breaks the whole PowerShell session, and since PowerShell is broken, you can't use `Remove-Item` to unbreak it...\r\n\r\nSteps to reproduce\r\n------------------\r\nWrite some invalid JSON to the powershell.config.json.\r\n\r\nOn Windows this is at ~\\Documents\\PowerShell\\powershell.config.json.\r\n\r\nOn *nix this is at ~/.config/powershell/powershell.config.json.\r\n\r\nWrite something like:\r\n```json\r\nbanana\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\nTrying to start a new PowerShell session looks like this:\r\n```powershell\r\n\r\nUnhandled Exception: Newtonsoft.Json.JsonReaderException: Unexpected character encountered while parsing value: b. Path '', line 0, position 0.\r\n   at Newtonsoft.Json.JsonTextReader.ParseValue()\r\n   at Newtonsoft.Json.JsonTextReader.Read()\r\n   at Newtonsoft.Json.JsonReader.ReadForType(JsonContract contract, Boolean hasConverter)\r\n   at Newtonsoft.Json.Serialization.JsonSerializerInternalReader.Deserialize(JsonReader reader, Type objectType, Boolean checkAdditionalContent)\r\n   at Newtonsoft.Json.JsonSerializer.DeserializeInternal(JsonReader reader, Type objectType)\r\n   at Newtonsoft.Json.JsonSerializer.Deserialize[T](JsonReader reader)\r\n   at System.Management.Automation.Configuration.PowerShellConfig.ReadValueFromFile[T](ConfigScope scope, String key, T defaultValue, Func`4 readImpl)\r\n   at System.Management.Automation.Configuration.PowerShellConfig.GetPowerShellPolicies(ConfigScope scope)\r\n   at System.Collections.Concurrent.ConcurrentDictionary`2.GetOrAdd(TKey key, Func`2 valueFactory)\r\n   at System.Management.Automation.Utils.GetPolicySettingFromConfigFile[T](ConfigScope[] preferenceOrder)\r\n   at System.Management.Automation.Utils.GetPolicySetting[T](ConfigScope[] preferenceOrder)\r\n   at Microsoft.PowerShell.Commands.ModuleCmdletBase.GetModuleLoggingInformation(IEnumerable`1& moduleNames)\r\n   at System.Management.Automation.PSSnapInReader.SetSnapInLoggingInformation(PSSnapInInfo psSnapInInfo)\r\n   at System.Management.Automation.PSSnapInReader.ReadCoreEngineSnapIn()\r\n   at System.Management.Automation.Runspaces.InitialSessionState.ImportCorePSSnapIn()\r\n   at System.Management.Automation.Runspaces.InitialSessionState.CreateDefault2()\r\n   at Microsoft.PowerShell.UnmanagedPSEntry.Start(String consoleFilePath, String[] args, Int32 argc)\r\n   at Microsoft.PowerShell.ManagedPSEntry.Main(String[] args) in C:\\PowerShell\\src\\powershell\\Program.cs:line 22\r\n\r\n```\r\n\r\nIn some scenarios (I haven't worked out which yet) almost random failures seem to occur mid-PowerShell session (i.e. you have a working PowerShell session then create a bad powershell.config.json file). Such as:\r\n```powershell\r\n> Invoke-Build Test\r\nInvoke-Build : AuthorizationManager check failed.\r\nAt line:1 char:1\r\n+ Invoke-Build Test\r\n+ ~~~~~~~~~~~~\r\n+ CategoryInfo          : SecurityError: (:) [], PSSecurityException\r\n+ FullyQualifiedErrorId : UnauthorizedAccess\r\n```\r\n(Deleting the bad powershell.config.json makes this work again)\r\n\r\nExpected Behaviour\r\n---------------------\r\n\r\nFor this to work as a robust feature, I would expect:\r\n- A good user-facing error message stating that the powershell.config.json file is malformed or otherwise invalid.\r\n- PowerShell should ignore the config file entirely if there is a problem with it\r\n- You should still be able to use cmdlets after parsing the config file so you can dig yourself out.\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 10.0.18242\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> PowerShell should ignore the config file entirely if there is a problem with it\r\n\r\nMaybe better stop until user/administrator fix the file?",
+      "created_at": "2018-09-18T05:34:07Z",
+      "updated_at": "2018-09-18T05:34:07Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Well there's always the possibility of starting PowerShell with an invalid config file. So we have to handle it and the question becomes how. I see a couple of possibilities:\r\n1. Crash PowerShell with a stack trace like now\r\n1. Shut PowerShell down immediately and display an error message that the config file is invalid\r\n1. Attempt to partially load the config file, skirting around the invalid part\r\n1. Start PowerShell as if no config file were provided\r\n\r\nIn (1) and (2), the problem is that if PowerShell is the only shell you can use, you've now locked yourself out -- there's nothing you can do, because PowerShell can't be started. It's likely you have another shell or a way to delete the file on the machine, or if you're lucky someone else administers your box. But we have to support all scenarios, and having to fall back to another shell in any case doesn't seem like what we want to tell users.\r\n\r\nThat leaves (3) and (4), and to me (3) would be like finding a parse error in a PowerShell script and executing until that point anyway -- rather than what we actually do, which is execute nothing and tell the user that there's a problem.\r\n\r\nSo I think the solution is (4). PowerShell starts as if there were no config file and displays an error message with a full explanation, including:\r\n- The config file is invalid\r\n- Why it's invalid\r\n- *Where* it's invalid\r\n- The fact that PowerShell started ignoring it and it needs to be fixed to be loaded",
+      "created_at": "2018-09-18T16:39:37Z",
+      "updated_at": "2018-09-18T16:39:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> you've now locked yourself out -- there's nothing you can do, because PowerShell can't be started\r\n\r\nIf exe or some dll was corrupted we'll be locked too.\r\n\r\nI am most worried about security if we allow run without config. If an user accidentally spoils this file and PowerShell starts, then there might be a security hole. /cc @PaulHigin @TravisEz13 \r\n\r\nAnother side. What behavior is for ps1-profiles? Should we follow the rule too?",
+      "created_at": "2018-09-19T04:55:38Z",
+      "updated_at": "2018-09-19T06:46:07Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Ah that is good thinking!\r\n\r\nOn the other hand, if they have write access to the file, they could also edit it to be a different *valid* configuration already.",
+      "created_at": "2018-09-19T05:39:56Z",
+      "updated_at": "2018-09-19T05:39:56Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> If exe or some dll was corrupted we'll be locked too.\r\n\r\nIn the pwsh.exe case there\u2019s not a whole lot we can do.\r\n\r\nIn the DLL case I would hope for a `BadImageFormatException`.\r\n\r\nIdeally in both cases signing saves us.",
+      "created_at": "2018-09-19T05:45:54Z",
+      "updated_at": "2018-09-19T05:45:54Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Profiles are just ps1 scripts right? I assume they get dot sourced at startup. If they contain a parse-error I\u2019m guessing we never execute them, print the error and otherwise behave like no profile exists.",
+      "created_at": "2018-09-19T05:47:46Z",
+      "updated_at": "2018-09-19T05:47:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If we consider a scenario like _login_ shell I guess that profiles can be critical for security too.\r\n\r\nMaybe @mklement0 can clarify what bash behavior is in the scenario.",
+      "created_at": "2018-09-19T06:51:15Z",
+      "updated_at": "2018-09-19T06:51:15Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "cc @PaulHigin ",
+      "created_at": "2018-09-19T17:17:29Z",
+      "updated_at": "2018-09-19T17:17:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\n`bash` - and presumably other POSIX-like shells - behave the same way as described by @rjmholt with respect to PowerShell profiles (note that we don't have a startup problem per se in this case, because the shell by definition has already launched successfully by the time it attempts to source initialization files).\r\n\r\nAs for the security concern:\r\n\r\nPerhaps switching to `NoLanguage` language mode if the config file cannot be read is a solution?\r\nThat would severely limit what can be done in the session (though it probably doesn't close _all_ security holes), while still allowing calling cmdlets such as `Remove-Item` or invoking external programs such as an editor to fix the problem.\r\n\r\n",
+      "created_at": "2018-09-19T17:20:44Z",
+      "updated_at": "2018-09-19T17:21:14Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "`NoLanguage` won't work for an interactive session.  \r\n![image](https://user-images.githubusercontent.com/10873629/45770100-5360c580-bbf6-11e8-8f4b-2357f0f64fe3.png)\r\n\r\nWe would need to turn on every security feature, some of which require configuration parameters, such as how to encrypt the script block logging.\r\nI think the best option is to fail as @iSazonov  suggests, although the error message should be better.\r\n\r\nThe main scenario that I'm concerned about is that the admin edits the systemwide configuration and accidentally corrupts it and  then a non-admin runs PowerShell.  If we then ignore the configuration, we could ignore security setting that were intended to be deployed.",
+      "created_at": "2018-09-19T17:39:41Z",
+      "updated_at": "2018-09-19T17:39:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We should also think about non-interactive sessions. In the case an startup error would be invisible and useless - I'd expect that a record would be added in event log.  An error message should be better for interactive session like \"write error message - sleep 5 sec - abort\".",
+      "created_at": "2018-09-19T17:50:56Z",
+      "updated_at": "2018-09-19T17:50:56Z"
+    },
+    {
+      "author": "hn3000",
+      "author_association": "NONE",
+      "body": "@TravisEz13 \r\nRelying on global configuration for security seems like a mistake, though -- I would have expected configuration to enable insecure things. I believe I should not have to create a global configuration to make powershell safe for everyone to use, the default state should be safe.\r\n\r\nCan you give examples of things needed in a global config to secure powershell?",
+      "created_at": "2018-10-24T07:36:32Z",
+      "updated_at": "2018-10-24T07:36:32Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Sorry for coming late to this discussion.  I think it is Ok to just emit warning if config.json file fails to load.  I agree that the config file should not be used to configure security, and in fact we should ensure that the config file cannot affect session security.  For example PowerShell provides security guarantees in two ways:\r\n\r\n   a. When working with system wide application control such as WDAC (formerly DeviceGuard), e.g., ConstrainedfLanguage mode.\r\n   b. Remote end point sessions, e.g., LanguageMode, command, provider accessibility.\r\n\r\nWe need to make sure the config file cannot affect security stance in these cases, such as changing LanguageMode, or changing visibility of functions, cmdlets, providers, etc.",
+      "created_at": "2018-10-24T17:56:10Z",
+      "updated_at": "2018-10-24T17:56:10Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "On Linux and macOS, you can only configure `ScriptBlock logging` and I suspect other security features via the configuration file.",
+      "created_at": "2018-10-29T22:03:35Z",
+      "updated_at": "2018-10-29T22:03:35Z"
+    }
+  ],
+  "created_at": "2018-09-17T19:20:11Z",
+  "number": 7802,
+  "state": "open",
+  "title": "Invalid powershell.config.json makes PowerShell unusable",
+  "updated_at": "2018-10-29T22:03:35Z"
+}

@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12378",
+  "author": "mklement0",
+  "body": "`Start-ThreadJob` allows passing a script block by way of a `$using:` reference, which is a convenient way to make a function from the caller's scope available to the job:\r\n\r\n```powershell\r\nPS> function foo { 'bar' }; Start-ThreadJob { & $using:function:foo } | Receive-Job -Wait -AutoRemoveJob\r\nbar\r\n```\r\n\r\nThat is, the `foo` function's script block (`[scriptblock]` instance containing the function body) reported by `$function:foo` (namespace variable notation) was referenced via `$using:`, allowing it to be called with `&`.\r\n\r\nUnexpectedly, `ForEach-Object -Parallel`, whose behavior is generally very similar to `Start-ThreadJob`, _explicitly disallows_ referencing `[scriptblock]`-typed values from the caller's scope via `$using:`\r\n\r\nNote:\r\n\r\n* The error message (see below) mentions \"undefined behavior\" - but wouldn't that apply to `Start-ThreadJob` as well? Is the answer to disallow script blocks in _both_?\r\n  \r\n  * If the concern is thread safety: that problem exists for all reference types passed via `$using:`, not just for script blocks that may form closures with outside values from the caller's scope.\r\n\r\n* #12240  proposes an opt-in mechanism for `ForEach-Object -Parallel` to allow copying the calling runspace's state to the parallel threads, which would allow for direct use of function from the caller's scope; however, a lower-overhead way of being able to call functions _selectively_ still seems beneficial.\r\n\r\n* Loosely related: #11698\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nfunction foo { 'bar' }; ForEach-Object -Parallel { & $using:function:foo } | Should -Be 'bar'\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe test should succeed.\r\n\r\n# Actual behavior\r\n\r\nThe test fails, because a statement-terminating error occurs:\r\n\r\n```none\r\nA ForEach-Object -Parallel using variable cannot be a script block. \r\nPassed-in script block variables are not supported with ForEach-Object -Parallel, \r\nand can result in undefined behavior.\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.1\r\n```\r\n",
+  "closed_at": "2022-08-05T02:57:52Z",
+  "comments": [
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0  ScriptBlocks are bound to the runspace where they were created so you can't reliably invoke them in a different runspace without regenerating the scriptblock  in the new runspace. Fortunately regenerating the script block is pretty cheap using the existing (internal) APIs. I'm guessing @PaulHigin is doing this for thread jobs but not for `foreach -parallel`. Paul?\r\n\r\nBTW - another thing to check out are classes. An instance of a PowerShell class is also affinitized to the runspace where it was created, so passing that instance to another runspace won't work reliably.",
+      "created_at": "2020-04-19T18:48:55Z",
+      "updated_at": "2020-04-19T18:48:55Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "As @bpayette states, the concern was script block affinity to the runspace in which it was created.  As @mklement0  mentions, this should also be disallowed for Start-ThreadJob.  And I agree with @mklement0 that with the new upcoming optional \"replicate runspace state\" feature, it may make sense to allow a scriptblock variable by re-creating it in the new runspace.  I'll include that as part of the feature.\r\n\r\nThanks!",
+      "created_at": "2020-04-20T16:05:13Z",
+      "updated_at": "2020-04-20T16:05:13Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Users consistently seem to come to these kinds of features wanting to be able to transfer a scriptblock to the new runspace or process and have it run. This isn't possible to do directly due to those concerns, but perhaps there's  something we can do around automatically serializing/deserializing the scriptblock as it crosses the runspace boundary when the session state isn't replicated.\r\n\r\nEven if it's an opt in via a new `[SerializableScriptblock]` sort of type that automatically re-hydrates (completely re-parsing if necessary, but if I recall correctly the AST can be passed around without these issues?) the scriptblock and binds itself to the new runspace it finds itself in, I think users will find that experience much more intuitive than simply preventing scriptblocks to be passed around at all.",
+      "created_at": "2020-04-20T16:15:45Z",
+      "updated_at": "2020-04-20T16:16:36Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think it makes sense to re-create a new scriptblock unless the runspace in which it is being created is replicated from the client script block, because it (the scriptblock) may be referencing variables, functions, modules that don't exist.  But I see no reason not to do it into a replicated runspace, other than known variable mulit-threading issues.\r\n\r\n/cc @daxian-dbw ",
+      "created_at": "2020-04-20T16:21:19Z",
+      "updated_at": "2020-04-20T16:21:19Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It _might_ be, sure. But just as often as I see that, I'll see someone trying to throw the same self-contained script into a handful of different threads to parallelize a task.\r\n\r\nFor a case like that, I fail to see why permitting such a thing meets so much resistance. \ud83d\ude15 It just means you don't have to waste your time thinking about how you're going to get the script over to that runspace and recreate it.",
+      "created_at": "2020-04-20T16:29:54Z",
+      "updated_at": "2020-04-20T16:30:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I agree with @vexx32: simply transparently recreating the script block in the target runspace - whether it is a replicated one or not -  is sensible default behavior that will cover a lot of use cases, notably the case where the script block is a _function body_ or a similarly _self-contained_ script block, as in the example in the OP.\r\n\r\nAll that is then needed is to _document_ the behavior and limitations, in the context of the `$using:` specifier  in the `about_Remote_Variables` topic.\r\n\r\nI also think it is the sensible default behavior in remoting / background job scenarios: see #11698\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-04-20T16:36:59Z",
+      "updated_at": "2020-04-20T16:36:59Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin IIRC  you can quickly create a new script block by using the AST of the existing script block. There is a non-public API (or constructor?) on scriptblock to do this. I measured the performance and it was quit good. This will be especially important if you're implementing a `Runspce.Clone()`, as you'll have to do this for every function being copied to the new runspace.",
+      "created_at": "2020-04-21T03:31:16Z",
+      "updated_at": "2020-04-21T03:31:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Not sure about scriptblock itself, but ScriptblockAst has a `GetScriptBlock()` method, at least. \ud83d\ude42 ",
+      "created_at": "2020-04-21T04:21:15Z",
+      "updated_at": "2020-04-21T04:21:15Z"
+    },
+    {
+      "author": "Viajaz",
+      "author_association": "NONE",
+      "body": "Maybe a different approach but perhaps `ForEach-Object -Parallel` with `-AsThreadJob` similar to that described in https://github.com/PowerShell/PowerShell/issues/10841 ?\r\n\r\nhttps://github.com/MicrosoftDocs/PowerShell-Docs/issues/4977 implies that `ForEach-Object -Parallel -AsJob` is a ThreadJob but it's a [PSTaskJob](https://github.com/PowerShell/PowerShell/issues/10841#issuecomment-545193567) isn't it?\r\n\r\nDocs imply something similar: https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_thread_jobs?view=powershell-7.1#thread-jobs-and-variables\n\n<blockquote><img src=\"https://docs.microsoft.com/media/logos/logo-powershell-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_thread_jobs\">about Thread Jobs - PowerShell</a></strong></div><div>Provides information about PowerShell thread-based jobs. A thread job is a type of background job that runs a command or expression in a separate thread within the current session process.</div></blockquote>",
+      "created_at": "2021-10-14T05:17:31Z",
+      "updated_at": "2021-10-14T05:17:34Z"
+    },
+    {
+      "author": "segraef",
+      "author_association": "NONE",
+      "body": "Hi there, #16564 fixed #16445 but is it part of [v7.3.0-preview.1](https://github.com/PowerShell/PowerShell/compare/v7.2.0-preview.10...v7.3.0-preview.1) or [7.2.1](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.1)?",
+      "created_at": "2022-02-17T08:37:00Z",
+      "updated_at": "2022-02-17T08:37:00Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "#16564 fix went into v7.3.0-preview branch.  However, it is marked for consideration to backport to v7.2x.",
+      "created_at": "2022-02-17T17:01:46Z",
+      "updated_at": "2022-02-17T17:01:46Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": "hi who add backport label\uff1f\r\nfrom i tested\uff0cps 7.2 ps6.2 has this problem.\r\nbut ps 7.0,ps7.1 normal",
+      "created_at": "2022-08-05T04:39:26Z",
+      "updated_at": "2022-08-05T04:39:26Z"
+    }
+  ],
+  "created_at": "2020-04-18T16:41:27Z",
+  "number": 12378,
+  "state": "closed",
+  "title": "ForEach-Object -Parallel disallows script blocks via $using:, unlike Start-ThreadJob",
+  "updated_at": "2022-08-05T04:39:26Z"
+}

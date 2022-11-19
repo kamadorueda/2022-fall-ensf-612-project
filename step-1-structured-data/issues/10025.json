@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10025",
+  "author": "vexx32",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nCurrently, a pipeline like this is impossible:\r\n\r\n```powershell\r\nGet-Content $Path | ForEach-Object { $_ -f $a } | Set-Content $Path\r\n```\r\n\r\nThis is due to Get-Content not releasing its file handle until the completion of its pipeline. Adding parentheses around the `Get-Content` call to force it to run to completion and collect output before proceeding does work but is a bit clunky, and there's no reason that this shouldn't also work:\r\n\r\n```powershell\r\nGet-Content $Path -Raw | ForEach-Object { $_ -f $a } | Set-Content $Path\r\n```\r\n\r\nCurrently this doesn't, because the file handle is still not released until the pipeline's completion, despite all the data being read at once. There are other caveats to using `-Raw`, but this would at least enable simple operations with less clunky syntax.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nSomething that will help alleviate the issue a little bit is some of the changes to command disposal behaviour in #9900, which causes commands to be disposed as soon as their role in the pipeline is fully completed (after `EndProcessing` / `end{}` is completed).\r\n\r\nBeyond that, the rest of the changes can be implemented in Get-Content itself for -Raw, and it may be worth looking into whether there are other avenues for alleviating the issue.\r\n\r\nFor example, in Set-Content we can have a fallback behaviour whereby if it can't get a write handle on the file, it instead writes to a temporary file, and during EndProcessing() or with a Dispose() step it then copies the file over the original.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Pipeline executes BeginProcessing for every command in the pipeline, then ProcessRecord for every command in the pipeline and then EndProcessing for every command in the pipeline. It is not clear that we could fix here.",
+      "created_at": "2019-06-28T14:42:39Z",
+      "updated_at": "2019-06-28T14:42:39Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Aye, I suspect the main opportunity here would be doing this for the `Get-Content -Raw` case (where the whole file is read at once and submitted to the pipeline as a single object) and then for `Set-Content` to attempt to overwrite at the end of the pipeline.\r\n\r\nPotentially, `Set-Content` could wait until the pipeline is disposed before it actually writes the data to the file, or we could simply defer the write to a temporary file by default before copying it over the original if there is a problem like this that prevents writing during the pipeline.",
+      "created_at": "2019-06-28T14:51:14Z",
+      "updated_at": "2019-06-28T14:51:14Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Pipeline executes BeginProcessing for every command in the pipeline, then ProcessRecord for every command in the pipeline and then EndProcessing for every command in the pipeline. It is not clear that we could fix here.\r\n\r\nIf every command in the pipeline always writes an object for `ProcessRecord` and never writes any objects in `EndProcessing` that is correct.  Otherwise, `EndProcessing` will run after after the last input object is received for each command:\r\n\r\n```powershell\r\n$one = { end { 0; Write-Host '1 end called' }}\r\n$two = { process { $_ } end { Write-Host '2 end called' }}\r\n$three = { process { } end { Write-Host '3 end called'; 0..2;}}\r\n$four = { process { Write-Host $_ } end { Write-Host '4 end called' }}\r\n\r\n& $one | & $two | & $three | & $four\r\n\r\n1 end called\r\n2 end called\r\n3 end called\r\n0\r\n1\r\n2\r\n4 end called\r\n```\r\n\r\nIn the original issue, the idea was that if you add `Out-String` before `Set-Content` then `Get-Content` should be disposed after `Out-String` has consumed all of it's output.  That would be after `EndProcessing` runs for `Get-Content`, but before it runs for `Out-String`.",
+      "created_at": "2019-06-28T15:12:55Z",
+      "updated_at": "2019-06-28T15:12:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This looks like a workaround but cannot be a general fix, as it causes the accumulation of information that for large files will lead to memory exhaustion. Even in other languages, the best practice is to write to an auxiliary file and then rename it to the original one that is more safe. I guess this can be achieved with Rename-Item in the pipeline end.",
+      "created_at": "2019-06-29T04:43:33Z",
+      "updated_at": "2019-06-29T04:43:33Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sure, it can be done manually, but it would be nice if PS could handle that behind the scenes, in my opinion. :smile: \r\n\r\nAlso, that still can't be done in a single pipeline, I don't think, since currently Get-Content won't release the handle until the entire pipeline is complete regardless of the use case.:/",
+      "created_at": "2019-06-29T12:42:43Z",
+      "updated_at": "2019-06-29T12:43:38Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sounds more like a need for an optional switch on `Set-Content` to make it buffer updates and write the content to the file in the end block.",
+      "created_at": "2019-06-29T15:31:11Z",
+      "updated_at": "2019-06-29T15:31:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That would be OK for small to medium files, but if you're writing large files it will probably need to buffer to a temporary file, or we'll have huge memory usage. \ud83d\ude15 ",
+      "created_at": "2019-06-29T15:35:56Z",
+      "updated_at": "2019-06-29T15:35:56Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "But that's what you're doing by using `Get-Content -Raw`, which is the use case you talked about in the first place. My point was that maybe you should be buffering downstream rather than upstream if you want to support one-liner content updates so that it works whether you use raw or not, and it's explicit rather than implicit.",
+      "created_at": "2019-06-29T15:50:04Z",
+      "updated_at": "2019-06-29T15:50:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Even with downstream buffering the operation is dangerous. We should use intermediate/temporary file and rename it or use a transactional file system.",
+      "created_at": "2019-06-29T16:56:12Z",
+      "updated_at": "2019-06-29T16:56:12Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I agree. My point was just about doing \"the work\" downstream. Writing to a temp file and then moving it and/or doing transactional work would be the right way to go.",
+      "created_at": "2019-06-29T17:03:24Z",
+      "updated_at": "2019-06-29T17:03:24Z"
+    },
+    {
+      "author": "HumanEquivalentUnit",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Sounds more like a need for an optional switch on Set-Content to make it buffer updates and write the content to the file in the end block.\r\n\r\nThat's sooo close to `-outvariable`:\r\n\r\n    Get-Content $Path | ForEach-Object { $_ -f $a } | Set-Content $Path\r\n    Get-Content $Path | ForEach-Object { $_ -f $a } -ov B; Set-Content $Path $B\r\n\r\n(nb. small risk of using `get-content -wait` and then having a temporary file grow indefinitely)",
+      "created_at": "2019-07-29T00:40:44Z",
+      "updated_at": "2019-07-31T17:35:01Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Some filesystems support transactions, but unfortunately PS's provider does not.\r\n\r\nBut yeah writing to a temp file would be a good solution if the file is still open when Set-Content tries to get a write handle.",
+      "created_at": "2019-08-19T15:52:56Z",
+      "updated_at": "2019-08-19T15:52:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> but unfortunately PS's provider does not.\r\n\r\nThe code is in the repo but was commented at porting time (Windows only).",
+      "created_at": "2019-08-20T04:06:16Z",
+      "updated_at": "2019-08-20T04:06:37Z"
+    }
+  ],
+  "created_at": "2019-06-28T13:27:54Z",
+  "number": 10025,
+  "state": "open",
+  "title": "Get-Content should release its file handle as early as possible",
+  "updated_at": "2019-08-20T04:06:37Z"
+}

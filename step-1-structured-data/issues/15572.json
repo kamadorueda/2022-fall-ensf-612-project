@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15572",
+  "author": "Maxpxt",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nTo customize the prompt, one defines `function Prompt { ... }`, whose output is displayed as the prompt. In the body of this function, the user may want to display the prompt by printing it themselves instead of returning it:\r\n\r\n```powershell\r\nfunction Prompt { Write-Host \"my prompt> \" -NoNewline }\r\n```\r\n\r\nThis is common when the user wants a colored prompt (`Write-Host -BackgroundColor`) or even a prompt implemented in another language other than PowerShell (`Prompt` just calls a prompt program or a wrapper over a previously loaded dynamic library).\r\n\r\nThe issue is that, currently, when the return value of `Prompt` is `$null` or something that is displayed as an empty string `\"\"`, the default prompt (`PS>`) is displayed:\r\n```powershell\r\nfunction Prompt { \"my prompt >\" }\r\n# Prompt is \"my prompt>\"\r\n\r\nfunction Prompt { $null }\r\n# Prompt is \"PS>\"\r\n\r\nfunction Prompt { \"\" }\r\n# Prompt is \"PS>\"\r\n\r\nAdd-Type -MemberDefinition 'public override string ToString() => \"\";' -Namespace \"My\" -Name \"OpaqueEmpty\"\r\nfunction Prompt { [My.OpaqueEmpty]::new() }\r\n# Prompt is \"PS>\"\r\n```\r\n\r\nThis behavior makes it impossible for one to have an \"empty\" prompt, or, more usefully, a `Prompt` function that prints the prompt itself and does not trigger the default prompt:\r\n\r\n```powershell\r\nfunction prompt { Write-Host \"my prompt> \" -NoNewline -ForegroundColor Blue }\r\n# Prompt is \"my prompt> PS>\"\r\n\r\nfunction prompt { Write-Host \"my prompt> \" -NoNewline -ForegroundColor Blue; \"\" }\r\n# Prompt is \"my prompt> PS>\"\r\n```\r\n\r\nThe proposal is that some mechanism be provided allowing the default prompt to not be displayed even when nothing displayable is returned by `Prompt`.\r\n\r\n## Proposed technical implementation details\r\n\r\n### Alternative 1: Only show the default prompt when `$null` is returned\r\n\r\nModify the current logic that triggers the default prompt to trigger it only when `$null` is returned by the `Prompt` function. This would allow disabling the default prompt by simply returning an empty string `\"\"`.\r\n\r\n```powershell\r\nfunction Prompt { Write-Host \"my prompt> \" -NoNewline; \"\" }\r\n# Prompt would be \"my prompt>\"\r\n```\r\n\r\nIt is worth noting that this is the way [the docs about the prompt](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_prompts?view=powershell-7.1#the-default-prompt) say it currently works:\r\n\r\n> The default prompt appears only when the `Prompt` function generates an error or does not return an object.\r\n\r\nSo, the actual current behavior of triggering the prompt on `\"\"` is in disagreement with the docs.\r\n\r\n#### Advantages\r\n\r\n* This approach is the more intuitive. \"if null then default\" is a common pattern.\r\n* With this approach, the solution is easy to discover by trial and error.\r\n\r\n#### Disadvantages\r\n\r\n* This changes current behavior and, therefore, impacts preexisting code that relies (possibly unintentionally) on this behavior. \r\n\r\n### Alternative 2: A custom type\r\n\r\nAdd a special type or object, say, `PromptConfig` which can be returned by the prompt to instruct the default prompt to not trigger.\r\n\r\n```powershell\r\n$env:NoDefaultPompt\r\nfunction Prompt { Write-Host \"my prompt> \" -NoNewline; [PromptConfig]::NoDefaultPrompt }\r\n# Prompt would be \"my prompt>\"\r\n```\r\n\r\n#### Disadvantages\r\n\r\n* Somewhat inconsistent in that `PromptConfig` return values would be special-cased to not be displayed and configure the prompt instead.\r\n* With this approach, the solution would only be discovered once the user reads the docs.\r\n\r\n### Alternative 3: An environment variable\r\n\r\nAdd an environment variable, say, `$env:NoDefaultPompt`, which defaults to `$false`, but can be set by the user. When `$env:NoDefaultPompt` is `$true`, never show the default prompt, regardless of what happens in the `Prompt` function.\r\n\r\n```powershell\r\n$env:NoDefaultPompt = $true\r\nfunction Prompt { Write-Host \"my prompt> \" -NoNewline }\r\n# Prompt would be \"my prompt>\"\r\n```\r\n\r\n#### Disadvantages\r\n\r\n* \"Leaks\" the local issue (asking not display the default prompt) into a global space (the environment variables).\r\n* The actual behavior of the prompt would now depend on two things, the `Prompt` function and `$env:NoDefaultPompt`.\r\n* With this approach, the solution would only be discovered once the user reads the docs.\r\n",
+  "closed_at": "2021-06-16T00:00:13Z",
+  "comments": [
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "> This behavior makes it impossible for one to have an \"empty\" prompt,\r\n\r\n```\r\nfunction prompt { \"`r\" }\r\nfunction prompt { \"`e\" }\r\n```",
+      "created_at": "2021-06-14T06:16:06Z",
+      "updated_at": "2021-06-14T07:43:48Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-06-16T00:00:12Z",
+      "updated_at": "2021-06-16T00:00:12Z"
+    },
+    {
+      "author": "Maxpxt",
+      "author_association": "NONE",
+      "body": "@237dmitry The point is not for the prompt to be actually empty, but printed inside `Prompt` without `Prompt` returning anything. None of these work:\r\n\r\n```powershell\r\nfunction Prompt { Write-Host \"my prompt>\" -NoNewline; \"`r\" }\r\n```\r\n\r\n![image](https://user-images.githubusercontent.com/19475500/122139542-97bd3680-ce1f-11eb-896a-65362a4548d1.png)\r\n\r\n```powershell\r\nfunction Prompt { Write-Host \"my prompt>\" -NoNewline; \"`e\" }\r\n```\r\n\r\n![image](https://user-images.githubusercontent.com/19475500/122139632-c9360200-ce1f-11eb-882d-8f84adc657ec.png)\r\n\r\n\r\n@rkeithhill Could you open this again?",
+      "created_at": "2021-06-16T00:23:26Z",
+      "updated_at": "2021-06-16T00:23:26Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "This seems to be working as you want.\r\n\r\n![image](https://user-images.githubusercontent.com/5177512/122147280-d221d600-ce15-11eb-85d0-382a81ddbad5.png)\r\n\r\nJust to make sure nothing else is interfering, run `pwsh -noprofile` and try the prompt function. \r\n```powershell\r\nfunction prompt { Write-Host \"my prompt> \" -NoNewline; \"`e\" }\r\n```\r\nAnd maybe the recommendation should be to use this:\r\n```powershell\r\nfunction prompt { Write-Host \"my prompt> \" -NoNewline; \"`e[0m\" }\r\n```",
+      "created_at": "2021-06-16T02:14:24Z",
+      "updated_at": "2021-06-16T02:16:42Z"
+    },
+    {
+      "author": "Maxpxt",
+      "author_association": "NONE",
+      "body": "Just ``\"`e\"`` doesn't work:\r\n\r\n![image](https://user-images.githubusercontent.com/19475500/122153078-a401bd80-ce38-11eb-9bb7-6a7b27f3ff95.png)\r\n\r\nBut ``\"`e[0m\"`` works fine.\r\n\r\nThanks for the help!",
+      "created_at": "2021-06-16T03:25:26Z",
+      "updated_at": "2021-06-16T03:25:26Z"
+    }
+  ],
+  "created_at": "2021-06-13T23:30:29Z",
+  "number": 15572,
+  "state": "closed",
+  "title": "Add the ability to disable the default prompt",
+  "updated_at": "2021-06-16T03:25:26Z"
+}

@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6005",
+  "author": "twitchax",
+  "body": "Functions in the automation API which take arrays should take them as `params`.\r\n\r\nFor example [this](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/InitialSessionState.cs#L1883) should be:\r\n\r\n```csharp\r\n        public void ImportPSModule(params string[] name)\r\n        {\r\n            if (name == null)\r\n                throw new ArgumentNullException(\"name\");\r\n            foreach (string n in name)\r\n            {\r\n                ModuleSpecificationsToImport.Add(new ModuleSpecification(n));\r\n            }\r\n        }\r\n```\r\n\r\nA developer should not _have_ to call this by newing up an array of strings.",
+  "closed_at": "2018-10-05T04:31:33Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems we get extra allocation.\r\n\r\n/cc @lzybkr @daxian-dbw ",
+      "created_at": "2018-01-24T09:04:09Z",
+      "updated_at": "2018-01-24T09:04:09Z"
+    },
+    {
+      "author": "twitchax",
+      "author_association": "NONE",
+      "body": "@iSazonov, what do you mean you get extra allocation?",
+      "created_at": "2018-01-24T09:27:17Z",
+      "updated_at": "2018-01-24T09:27:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "In both cases we do `new string[]`. Although it is so critical - we call this method rarely.",
+      "created_at": "2018-01-24T10:04:31Z",
+      "updated_at": "2018-01-24T10:04:31Z"
+    },
+    {
+      "author": "twitchax",
+      "author_association": "NONE",
+      "body": "Yeah.  I meant more for the sake of developers.  Regardless of the number of times PowerShell 6 calls it, writing an app which hosts PowerShell needs to explicitly new up a `string[]`, which is not syntactically preferred.",
+      "created_at": "2018-01-24T10:27:40Z",
+      "updated_at": "2018-01-24T10:27:40Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "FWIW, I believe adding `params` is a breaking change if you don't recompile your code - you could end up with a missing method exception. This might be a non-issue as there are so few hosts that this might affect.\r\n\r\nA better change that might be sufficient is to add some overloads that take 1, 2, or 3 parameters. These overloads would avoid creating an array and cover the most common cases.",
+      "created_at": "2018-01-24T18:20:18Z",
+      "updated_at": "2018-01-24T18:20:18Z"
+    },
+    {
+      "author": "twitchax",
+      "author_association": "NONE",
+      "body": "How is adding `params` a breaking change?\r\n\r\nAny caller will have to do\r\n\r\n```csharp\r\nstate.ImportPSModule(new string[] { \"Module1\", \"Module2\" });\r\n```\r\n\r\nThat line will still compile with `params`.  How often do developers upgrade their packages and not recompile?  Also, I would need to look at the IL, but my impression was that adding `params` would not change the signature of the method: it would simply allow the caller to use the syntactic sugar.  In the end, only the caller needs to take `params` into account when using the syntactic sugar call: in the case of a method that already news up an \r\n\r\nIt is totally cool to make methods that take 1, 2, or 3 parameters, but that only solves part of the problem, as their may be developers that need more.  The BCL does this by providing methods with 1, 2, or 3 parameters, and then a fourth overload that takes a `params` as its fourth parameter.",
+      "created_at": "2018-01-24T22:48:57Z",
+      "updated_at": "2018-01-24T22:48:57Z"
+    },
+    {
+      "author": "twitchax",
+      "author_association": "NONE",
+      "body": "Actually, it looks like the IL method signature is the same...there is just an attribute applied for syntactic purposes (I would guess).\r\n\r\n```csharp\r\nprivate static void WithArray(string[] array)\r\n{\r\n}\r\n```\r\n\r\ngoes to\r\n\r\n```il\r\n.method private hidebysig static \r\n\tvoid WithArray (\r\n\t\tstring[] 'array'\r\n\t) cil managed \r\n{\r\n\t// Method begins at RVA 0x205e\r\n\t// Code size 2 (0x2)\r\n\t.maxstack 8\r\n\r\n\tIL_0000: nop\r\n\tIL_0001: ret\r\n} // end of method Program::WithArray\r\n```\r\n\r\nAnd with `params`, this\r\n\r\n```csharp\r\nprivate static void WithParams(params string[] array)\r\n{\r\n}\r\n```\r\n\r\ngoes to\r\n\r\n```il\r\n.method private hidebysig static \r\n\tvoid WithParams (\r\n\t\tstring[] 'array'\r\n\t) cil managed \r\n{\r\n\t.param [1]\r\n\t.custom instance void [System.Runtime]System.ParamArrayAttribute::.ctor() = (\r\n\t\t01 00 00 00\r\n\t)\r\n\t// Method begins at RVA 0x2061\r\n\t// Code size 2 (0x2)\r\n\t.maxstack 8\r\n\r\n\tIL_0000: nop\r\n\tIL_0001: ret\r\n} // end of method Program::WithParams\r\n```\r\n\r\nSo, even if a developer did not rebuild against new binaries with `params`, it should still work exactly the same.",
+      "created_at": "2018-01-24T22:51:46Z",
+      "updated_at": "2018-01-24T22:51:46Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm assuming that the callsig in the reference will look different because of the attribute on the parameter.\r\n\r\nFor example, C++/CLI uses an attribute to distinguish between `int` and `long` when they map to the same CLI type.",
+      "created_at": "2018-01-24T22:56:08Z",
+      "updated_at": "2018-01-24T22:56:08Z"
+    },
+    {
+      "author": "twitchax",
+      "author_association": "NONE",
+      "body": "It seems to work fine.  I just tried this scenario, and the call works fine, even if you do not rebuild after a dependency updates to use `params`.",
+      "created_at": "2018-01-25T00:06:43Z",
+      "updated_at": "2018-01-25T00:06:43Z"
+    },
+    {
+      "author": "twitchax",
+      "author_association": "NONE",
+      "body": "This change is obviously not required, it is just normally expected that methods like this take `params` since it just makes life easier for developers.",
+      "created_at": "2018-01-25T00:12:12Z",
+      "updated_at": "2018-01-25T00:12:12Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Thanks for checking, my memory was fuzzy. I might have been remembering modopt/modreq which is on the signature, not on the references.",
+      "created_at": "2018-01-25T00:20:47Z",
+      "updated_at": "2018-01-25T00:20:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is public API - we should PowerShell Committee conclusion. \r\n/cc @SteveL-MSFT ",
+      "created_at": "2018-01-25T05:34:40Z",
+      "updated_at": "2018-01-25T05:34:40Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Maybe not on topic, but related:\r\nIs is possible to filter the imported commands when adding a module to the `InitialSessionState`?\r\n\r\nLike we have on `Import-Module` with for example `-Cmdlet`?\r\n\r\nOtherwise I'd like an overload on `ImportPSModule` with filtering options.\r\n",
+      "created_at": "2018-01-25T10:00:13Z",
+      "updated_at": "2018-01-25T10:00:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Internally we use `Import-Module` cmdlet to import a module in `InitialSessionState`.",
+      "created_at": "2018-01-25T11:20:01Z",
+      "updated_at": "2018-01-25T11:20:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  We believe this is the right change and we should look at all the other public apis to see if this is applicable elsewhere.  It doesn't appear to be a breaking change based on the discussion.",
+      "created_at": "2018-02-21T23:46:03Z",
+      "updated_at": "2018-02-21T23:46:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I found only [`public static void RemoveKeyHandler(string[] key)`](https://github.com/PowerShell/PowerShell/blob/5b5168d72e0a51679667ec26e31d426b5ab4a122/src/Microsoft.PowerShell.PSReadLine/Options.cs#L276) and [`public static int Main(string[] args)`](https://github.com/PowerShell/PowerShell/blob/c1c5344a8897262433141ecbc13bb06ac2c4bbef/src/powershell/Program.cs#L20). The first has still another overload. So I believe there's nothing more to fix.",
+      "created_at": "2018-02-22T18:36:03Z",
+      "updated_at": "2018-02-22T18:36:03Z"
+    }
+  ],
+  "created_at": "2018-01-24T06:07:57Z",
+  "number": 6005,
+  "state": "closed",
+  "title": "`ImportPSModule` on `InitialSessionState` should be `params`.",
+  "updated_at": "2018-10-30T05:58:40Z"
+}

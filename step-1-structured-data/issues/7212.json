@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7212",
+  "author": "PetSerAl",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```powershell\r\n\"'$('-' * 100)'\",\r\n'dir V:\\',\r\n\"'$('-' * 100)'\",\r\n'dir FileSystem::V:\\',\r\n\"'$('-' * 100)'\",\r\n'New-PSDrive V FileSystem V:\\',\r\n'dir V:\\' | docker run -i --rm -v C:\\Host\\Path:V: microsoft/powershell pwsh -Command -\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n`V` drive should be mapped at PowerShell start-up.\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nAttempting to perform the InitializeDefaultDrives operation on the 'FileSystem' provider failed.\r\n----------------------------------------------------------------------------------------------------\r\ndir : Cannot find drive. A drive with the name 'V' does not exist.\r\nAt line:1 char:1\r\n+ dir V:\\\r\n+ ~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (V:String) [Get-ChildItem], DriveNotFoundException\r\n+ FullyQualifiedErrorId : DriveNotFound,Microsoft.PowerShell.Commands.GetChildItemCommand\r\n\r\n----------------------------------------------------------------------------------------------------\r\n\r\n\r\n    Directory: V:\\\r\n\r\n\r\nMode                LastWriteTime         Length Name\r\n----                -------------         ------ ----\r\n-a----        6/30/2018   5:37 AM              0 Host file.txt\r\n\r\n\r\n----------------------------------------------------------------------------------------------------\r\n\r\nName           Used (GB)     Free (GB) Provider      Root\r\n----           ---------     --------- --------      ----\r\nV                 156.80       1705.68 FileSystem    V:\\\r\n\r\n\r\n\r\n\r\n    Directory: V:\\\r\n\r\n\r\nMode                LastWriteTime         Length Name\r\n----                -------------         ------ ----\r\n-a----        6/30/2018   5:37 AM              0 Host file.txt\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```cmd\r\n>ver\r\n\r\nMicrosoft Windows [Version 10.0.17134.112]\r\n\r\n>docker --version\r\nDocker version 18.03.1-ce, build 9ee9f40\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "alexandair",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think this is expected. PowerShell drives created with the New-PSDrive command exist only in the PowerShell session used to create them unless they are mapped drives with the -Persist parameter. ",
+      "created_at": "2018-06-30T09:13:47Z",
+      "updated_at": "2018-06-30T09:13:47Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "this is an actual drive... you shouldn't have to create the drive... ",
+      "created_at": "2018-06-30T23:58:40Z",
+      "updated_at": "2018-06-30T23:58:40Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Although, as a new platform, I'll classify it as an enhancement.",
+      "created_at": "2018-07-01T00:00:00Z",
+      "updated_at": "2018-07-01T00:00:00Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "I was logged [an issue](https://github.com/MicrosoftDocs/azure-docs/issues/31016) when I noticed this behavior when using Azure Storage File Shares with a Windows Container flavored App Service. The problem stems in InitializeDefaultDrives failing, but the operating system mounted drive is mountable with New-PSDrive manually even though I.D.D. fails. \r\n\r\nThe guts of the problem seem to be that there is an [#ifdef UNIX](https://github.com/PowerShell/PowerShell/blob/06391330533c65b464e0c5a62bc3303564ccd324/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L993) put in place for the FileSystemProvider when running on Unix/Linux that bypasses the problem of auto mounting azure file shares in Cloud Shell pwsh (which always runs on Unix now), but now that the App Service guys have added preliminary support for mounting storage file shares in Windows Containers, remoting into the container with pwsh gives a new context for this issue. \r\n\r\n```c#\r\n                        if (newDrive.DriveType == DriveType.Network)\r\n                        {\r\n                            // Platform notes: This is important because certain mount\r\n                            // points on non-Windows are enumerated as drives by .NET, but\r\n                            // the platform itself then has no real network drive support\r\n                            // as required by this context. Solution: check for network\r\n                            // drive support before using it.\r\n#if UNIX\r\n                            continue;\r\n#else\r\n                            displayRoot = GetRootPathForNetworkDriveOrDosDevice(newDrive);\r\n#endif\r\n``` \r\n\r\nSo the problem is now the _#else_ clause is running in this new container/docker context with a Windows base OS and an Azure Storage File Share because while `[System.IO.DriveInfo]::GetDrives()` returns the file share mounted drive, the code path for `GetRootPathForNetworkDriveOrDosDevice` blows up.\r\n\r\nI guess we need some new runtime logic to harden this latter path from Azure file share pseudo network drives. ",
+      "created_at": "2019-06-12T15:51:34Z",
+      "updated_at": "2019-06-12T15:51:34Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13 A year ago this probably had little visibility. It's about to get a whole lot worse when Azure Storage File Shares come out of preview for Windows Container App Services, so if I may suggest you re-prioritize this. I've already seen some people move away from App Services to VMs to get past this problem because it didn't seem surmountable to them. ",
+      "created_at": "2019-06-12T15:55:34Z",
+      "updated_at": "2019-06-12T15:55:34Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "@alexandair The issue is that the file share is seen as a native windows drive by powershell's filesystemprovider and it attempts to create a PSDrive for it in the provider's startup, but it fails. But if we use `new-psdrive z filesystemprovider -root z:\\` it actually works. ",
+      "created_at": "2019-06-12T15:57:51Z",
+      "updated_at": "2019-06-12T15:57:51Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@oising Does this issue only occur in docker mapped drives or is it specific to Azure Storage File Share.  If it's the later, you should file a new feature request.",
+      "created_at": "2019-06-12T17:32:31Z",
+      "updated_at": "2019-06-12T17:32:31Z"
+    }
+  ],
+  "created_at": "2018-06-30T03:06:15Z",
+  "number": 7212,
+  "state": "open",
+  "title": "PowerShell in Docker container does not map container drive mounts at start-up",
+  "updated_at": "2019-06-12T17:32:31Z"
+}

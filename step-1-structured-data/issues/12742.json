@@ -1,0 +1,258 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12742",
+  "author": "rjmholt",
+  "body": "From https://twitter.com/rjmholt/status/1263258755849846784.\r\n\r\nI wasn't able to find an existing issue, closed or open, so I've opened this one.\r\n\r\nExample:\r\n\r\n```powershell\r\nfunction Throw-Break\r\n{\r\n    break\r\n}\r\n\r\ntry\r\n{\r\n    Write-Host \"main\"\r\n    Throw-Break\r\n    Write-Host \"thrown\"\r\n}\r\ncatch\r\n{\r\n    Write-Host \"caught\"\r\n}\r\nfinally\r\n{\r\n    Write-Host \"finally\"\r\n}\r\n\r\nWrite-Host \"postblock\"\r\n```\r\n\r\nPrints:\r\n```\r\nmain\r\nfinally\r\n```\r\n\r\nThis is due to the fact that `break` and `continue` are implemented as exceptions. This behaviour exists in 5.1 and 7.1, but I think we should change it.\r\n\r\nRunning such a script still has exit code 0.\r\n\r\nPossible mitigations:\r\n\r\n- `break` and `continue` become parse errors outside loops and traps. This would introduce a syntactically breaking change between PowerShell versions, which to my mind is something we should always think very carefully about, since there's no compiler step to handle compatibility for us.\r\n- `break` and `continue` become like `throw`, where they emit a terminating error and can be caught like any other error\r\n- `break` and `continue` behave like return and quietly go to the end of the function\r\n- This is expected behaviour...\r\n\r\nI should note that although `exit` also behaves like this, I expect it to do so since I would want it to bubble all the way up uncatchably while still running any finally blocks.\r\n\r\n/cc @daxian-dbw ",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Also worth noting that several modules depend on this behaviour, so:\r\n\r\n- Perhaps it is by design\r\n- Perhaps it should be configurable? (Will slow PowerShell down)\r\n\r\nA PSScriptAnalyzer rule is certainly needed in any event",
+      "created_at": "2020-05-21T01:02:58Z",
+      "updated_at": "2020-05-21T01:02:58Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah this comes up in the PS discord a surprising amount.  My guess was always that it was so you could \"continue\" a loop from a higher scope.  e.g.\r\n\r\n```powershell\r\nfunction Move-ToNext([int] $value) {\r\n    if ($value -eq 5) {\r\n        continue\r\n    }\r\n\r\n    $value\r\n}\r\n\r\nfor ($i = 0; $i -lt 10; $i++) {\r\n    Move-ToNext $i\r\n}\r\n```\r\n\r\n```\r\n0\r\n1\r\n2\r\n3\r\n4\r\n6\r\n7\r\n8\r\n9\r\n```\r\n\r\nTo be clear, I'm not super jazzed about it, but I'm not sure what can be done now.",
+      "created_at": "2020-05-21T01:26:41Z",
+      "updated_at": "2020-05-21T01:26:41Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> To be clear, I'm not super jazzed about it, but I'm not sure what can be done now.\r\n\r\nYeah, giving this more time to sit in my head, I feel the same way. I think it's worth discussing, but it's exactly the behaviour we wish to break that is depended on elsewhere.\r\n\r\nPerhaps we could use insight from @BrucePay or @JamesWTruher on the history",
+      "created_at": "2020-05-21T01:38:15Z",
+      "updated_at": "2020-05-21T01:38:15Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I don't mind that PS sometimes gives you ways to shoot yourself in the foot. That Twitter thread is a good illustration of why this bothers me so much -- it lets you quietly shoot everyone else in the foot as well, with very _very_ little capability to see what's going wrong or ability to debug the problem.\r\n\r\nA random function / cmdlet should not have this kind of flow control over a user's script, IMO.\r\n\r\nIn terms of possible solutions, my vote goes to (in order of personal preference):\r\n\r\n1. Treat it as a parse error. This gives the most noisy and visible error to folks upgrading that their code could be problematic or that its behaviour would be changing otherwise. Anything else means they have to discover it in some other way, or never realize it till their code inexplicably breaks.\r\n2. Treat it like `return`; this lets it behave as it currently does for the immediate scope and then prevents it shooting someone else in the foot. Decent middle ground.\r\n3. Simply have `break` / `continue` outside a loop as a complete no-op. Quiet, probably more likely to break existing things, possibly less likely to break new things.\r\n\r\nI don't think creating an exception out of it is the _best_ idea, but it's definitely more visible than the non-erroring alternatives. Would definitely need a descriptive error though.\r\n\r\nOh, and even if we don't treat it like a parse error I think it goes without saying that this should be a big red flag in PSSA. I still think the behaviour should change and be much less destructive though, regardless.",
+      "created_at": "2020-05-21T02:17:44Z",
+      "updated_at": "2020-05-21T02:22:53Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "There's also a seemingly innocent usage that would break if we made it scope based:\r\n\r\n```powershell\r\n$arrays = [int[][]]::new(3)\r\n$arrays[0] = 0..2\r\n$arrays[1] = 3..6\r\n$arrays[2] = 7..9\r\n\r\nforeach ($array in $arrays) {\r\n    $array | ForEach-Object {\r\n        if ($_ -eq 3) {\r\n            # skip the rest of this array\r\n            continue\r\n        }\r\n\r\n        $_\r\n    }\r\n}\r\n```\r\n\r\nPretty contrived example, but most folks won't understand why that isn't valid. I'm all for a PSSA rule telling folks to not to do this. Whether we like it or not though, this use case seems pretty specifically designed for.  If this *happened* to work because of an implementation detail that'd be one thing, but PowerShell basically told folks this is okay to do \ud83e\udd37 ",
+      "created_at": "2020-05-21T02:34:18Z",
+      "updated_at": "2020-05-21T02:34:18Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Also, you can surface these flow control exceptions through the `PowerShell` API (via `PSInvocationSettings.ExposeFlowControlExceptions`).  So any app depending on that to do some sort of separate specific action on `break` and `continue` will fail (like probably breakpoint actions)",
+      "created_at": "2020-05-21T02:35:54Z",
+      "updated_at": "2020-05-21T02:40:31Z"
+    },
+    {
+      "author": "thomasrayner",
+      "author_association": "NONE",
+      "body": "This feels like it might be a very silly option, but what about making it a parser *warning*? Write to the warning stream and proceed how we do today? ",
+      "created_at": "2020-05-21T03:54:53Z",
+      "updated_at": "2020-05-21T03:54:53Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Last time we tried to have something warn on use, we got an endless litany of complaints (mainly \"if you aren't going to actually remove/break it please stop littering our production script logs with warnings\") -- that was with `Send-MailMessage`.\r\n\r\nAlso... we don't _have_ a mechanism for emitting warnings from the parser itself, as far as I am aware, so we'd be building a new feature set into the parser for it.",
+      "created_at": "2020-05-21T04:15:28Z",
+      "updated_at": "2020-05-21T04:15:46Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Weighing in on this:\r\n[One of the components of PSFramework](https://psframework.org/documentation/documents/psframework/flow-control/invoke-psfprotectedcommand.html) I use the most and for the greatest time savings gained uses this \"feature\". Breaking that would break about 50 modules of mine and quite a few others.\r\n\r\nPowerShell contains quite a few features that can be used towards a bad end but still have some place where they can be wielded towards a benefit (benefit to the using person that is. I _know_ not everybody agrees with me that the linked example is an improvement).\r\nThere are always many ways to shoot yourself in the foot or help someone else do it, if they let you. I do not see us having a mandate to police & enforce coding practices.\r\n\r\nParaphrasing Benjamin Franklin here:\r\n\r\n```text\r\nThose who would give up Liberty, to purchase a Safety, deserve neither Liberty nor Safety.\r\n```\r\n\r\nFor some years now we have a tool in place to test for PowerShell Best practices. I think this is best placed in PSScriptAnalyzer as rules that will complain about this. We offer guidance, but I don't see a justification for us to enforce just how `continue` or `break` get used.\r\n\r\nIf we _really_ , _really_ , _absolutely_ , _irrevocably_ need to insist on breaking this for what I believe to be all the wrong reasons, then the only compromise I could accept without too much rancor and dragging it up for the next ten years would be this:\r\n\r\n+ Have it behave as it currently does, except:\r\n+ The callstack slaughter ends at the sessionstate/module level\r\n+ Modules can opt into disabling that protection in their manifest\r\n\r\nThis would reduce the amount of shooting others into the foot by accident without preventing the ability to use it by intent.\r\n\r\n```text\r\nExample 1:\r\nModuleA: FunctionA\r\nModuleB: FunctionB, FunctionC\r\n\r\nFunctionA calls FunctionB\r\nFunctionB calls FunctionC\r\nFunctionC uses break outside of a loop and is killed\r\nFunctionB dies, since it also does not contain a loop\r\nFunctionA continues, since it is outside of ModuleB and the callstack murder stopped.\r\n```\r\n\r\n```text\r\nExample 2:\r\nModuleA: FunctionA\r\nModuleB: FunctionB, FunctionC\r\nModuleB: Sets flag for transitive continue/break\r\n\r\nFunctionA calls FunctionB\r\nFunctionB calls FunctionC\r\nFunctionC uses break outside of a loop and is killed\r\nFunctionB dies, since it also does not contain a loop\r\nFunctionA ends the current loop, even though it is outside of ModuleB\r\n```\r\n\r\n> Note. I DON'T want this pattern. But if we have to start enforcing people's coding behavior, that would be the least pain for me.\r\n\r\n> On Culture\r\n\r\nIrrespective of pros & cons already mentioned, I believe breaking this at the parser level and forbidding use of this feature is in gross violation of our spirit of community. I'm all for offering guidance on how to do things right, but this would be strong-arming people into a specific pattern.\r\nWe have a practice of welcoming all kinds, cheerfully exchanging ideas with lively debate that not always ends in one perfect solution. Which is fine.\r\n\r\nPlease don't risk that.",
+      "created_at": "2020-05-21T10:45:36Z",
+      "updated_at": "2020-05-21T10:45:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just to offer some info on the implementation, from a comment by @lzybkr on a conceptually related issue [here](https://github.com/PowerShell/PowerShell/issues/3879#issuecomment-304940545):\r\n\r\n> Under the covers, the `break` turns into an exception (always V2 or earlier, V3 onwards if not lexically within a loop statement), the exception is always silent (because you don't really want to think of `break` as an exception, so it's silent even if we don't find a matching loop).\r\n\r\n",
+      "created_at": "2020-05-21T12:12:16Z",
+      "updated_at": "2020-05-21T12:12:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@FriedrichWeinmann the fact that `break` behaves like an exception is an implementation detail. That it can be abused in this way is (IMO) a terrible mistake. If you want to enable that kind of behaviour, just use an actual exception instead of code that can (IMO) unknowingly and without real recourse break users' code.",
+      "created_at": "2020-05-21T13:15:56Z",
+      "updated_at": "2020-05-21T13:16:14Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "> the fact that break behaves like an exception is an implementation detail. That it can be abused in this way is (IMO) a terrible mistake.\r\n\r\nAnd here our opinions fundamentally diverge in that assessment :)\r\nProviding a tool that in the hands of the unwary user will cause damage is not something we can or should prevent IMO.\r\nYou can use `Restart-Computer` to restart a service. Usually not needed (and instead highly disruptive) but in some few scenarios that's actually a good idea.\r\n\r\n> If you want to enable that kind of behaviour, just use an actual exception instead of code that can (IMO) unknowingly and without real recourse break users' code.\r\n\r\nI like the way I can currently provide Flow Control tools to my modules. Not because I couldn't get the same results in other ways, but because _this_ way enables efficiencies (especially coding time & maintenance effort) for me, that I would not be able to do with the \"regular\" usages.\r\nI'm perfectly fine with it, if that means that others can shoot themselves in the foot by using `continue` wrongly. My expectation if we forbid that: They'll move to exit instead (which you can't really forbid for very legitimate use-case reasons even from a linguistic purity perspective).",
+      "created_at": "2020-05-21T13:48:19Z",
+      "updated_at": "2020-05-21T13:48:19Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Funny thought, but ... continue and break are really special kinds of exceptions when used outside a loop, right?\r\nSo ... how about displaying them as regular exceptions, if they manage to kill the entire callstack down to an idle console? That would make the issue visible (with the script location where it happened) in unhandled cases without affecting anybody using it intentionally or legitimately.",
+      "created_at": "2020-05-21T14:23:27Z",
+      "updated_at": "2020-05-21T14:23:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It's not the unwary user this hurts. It's _every_ user of a module whose author makes (to them) an invisible mistake.\r\n\r\nHeck, _dbatools_ made this mistake and it went unnoticed until it crippled an otherwise perfectly fine script. If they're capable of making this mistake, literally any module author is.\r\n\r\nThis mistake shouldn't be possible.",
+      "created_at": "2020-05-21T14:24:04Z",
+      "updated_at": "2020-05-21T14:24:18Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "> So ... how about displaying them as regular exceptions, if they manage to kill the entire callstack down to an idle console? That would make the issue visible (with the script location where it happened) in unhandled cases without affecting anybody using it intentionally or legitimately.\r\n\r\nIf we do this, the _first_ question from everyone will be \"why can't I catch this exception\".\r\n\r\nIt solves nothing, really.",
+      "created_at": "2020-05-21T14:26:09Z",
+      "updated_at": "2020-05-21T14:26:09Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "> It solves nothing, really.\r\n\r\nSure it does.\r\nEvery module author making that mistake when running the code in the editor will actually notice it happening. It may not solve the problem you want solved, but it _does_ help.\r\nAs for \"why can't I catch this exception\": Could be part of the error message to help reduce that confusion. (Yes I know, plenty of folks around that still don't read the red text, even on PS7)\r\n\r\n> Heck, dbatools made this mistake and it went unnoticed until it crippled an otherwise perfectly fine script. If they're capable of making this mistake, literally any module author is.\r\n>\r\n> This mistake shouldn't be possible.\r\n\r\nThat part of the problem PSScriptAnalyzer can help with, where anybody that does at least baseline automatic testing _will_ notice.",
+      "created_at": "2020-05-21T15:11:05Z",
+      "updated_at": "2020-05-21T15:12:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The fact remains that an issue outside the user's code is making their entire use case essentially unresolvable.\r\n\r\nAlso... once again. Just because it's _occasionally_ useful in this one specific edge case that you happened to find useful doesn't mean it's something that should in any way work the way it does across the board.\r\n\r\nIn simple terms, it's _extremely_ destructive. I get it, it's useful _sometimes_. Every other time, it's actively harmful.",
+      "created_at": "2020-05-21T15:15:37Z",
+      "updated_at": "2020-05-21T15:15:37Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "It's an advertised feature that many folks use, whether they know it or not.  *Any* change here would be a pretty huge break.  We can all discuss whether it was a good idea to implement initially, but at the end of the day the only thing that's going to happen is a new PSSA rule.",
+      "created_at": "2020-05-21T15:20:38Z",
+      "updated_at": "2020-05-21T15:20:38Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "I've got a few notes about this topic:\r\n\r\n1. [This has come up over on the Pester project as well.](https://github.com/pester/Pester/issues/412)  \r\n2. This is also the topic of #5811.\r\n3. Unlabeled `break` and `continue` are \"catchable\" without escaping a PowerShell.  I've been using a test fixture to trap on functions that \"throw\" `break`s and `continue`s.  See below.\r\n4. `break $label` and `continue $label` ~~do not seem to be catchable if you don't know $label _a priori_.~~ seem to be catchable only by catching them at a PowerShell boundary [per @SeeminglyScience's comment below](https://github.com/PowerShell/PowerShell/issues/12742#issuecomment-632162877).\r\n\r\n<details>\r\n<summary> code that catches `break` and `continue`</summary>\r\n\r\n```PowerShell\r\nfunction Invoke-Loop\r\n{\r\n    param\r\n    (\r\n        [Parameter(Position=1,Mandatory)]\r\n        [scriptblock]\r\n        $ScriptBlock,\r\n\r\n        [Parameter(Mandatory)]\r\n        [Assuage.Fixtures.Pipeline.LoopBreakResult]\r\n        [Alias('result')]\r\n        $BreakResultOutput\r\n    )\r\n    $usual = $false\r\n    $continued = $false\r\n    $i = 0\r\n    do {\r\n        if ($i -ge 1)\r\n        {\r\n            $i++\r\n\r\n            if ( -not $usual )\r\n            {\r\n                $continued = $true\r\n            }\r\n        }\r\n        else\r\n        {\r\n            $i++\r\n\r\n            % $ScriptBlock\r\n\r\n            $usual = $true\r\n        }\r\n    } while ($i -le 1)\r\n\r\n    if ( $usual )\r\n    {\r\n        $BreakResultOutput.SetResult([Assuage.Fixtures.Pipeline.LoopBreakOccurrence]::DidNotBreak)\r\n        return\r\n    }\r\n    if ( $continued )\r\n    {\r\n        $BreakResultOutput.SetResult([Assuage.Fixtures.Pipeline.LoopBreakOccurrence]::Continued)\r\n        return\r\n    }\r\n    $BreakResultOutput.SetResult([Assuage.Fixtures.Pipeline.LoopBreakOccurrence]::Broke)\r\n}\r\n```\r\n</details>\r\n",
+      "created_at": "2020-05-21T15:26:21Z",
+      "updated_at": "2020-05-21T16:42:02Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r You can catch them a little easier like this:\r\n\r\n```powershell\r\n$sb = { break }\r\n$ps = $null\r\ntry {\r\n    $ps = [powershell]::Create('CurrentRunspace')\r\n    $settings = [System.Management.Automation.PSInvocationSettings]@{\r\n        ExposeFlowControlExceptions = $true\r\n    }\r\n\r\n    $ps.AddScript('. $args[0]', $false).\r\n        AddArgument($sb).\r\n        Invoke($null, $settings)\r\n\r\n} catch [System.Management.Automation.FlowControlException] {\r\n    $PSItem.Exception.GetType().FullName\r\n} finally {\r\n    if ($null -ne $ps) {\r\n        $ps.Dispose()\r\n    }\r\n}\r\n```\r\n\r\nwhich returns:\r\n\r\n```\r\nSystem.Management.Automation.BreakException\r\n```",
+      "created_at": "2020-05-21T15:38:17Z",
+      "updated_at": "2020-05-21T15:38:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Of course, if you simply want to guard against a poorly implemented command that uses an orphaned `break` or `continue` (that it mistakes for exiting just a _pipeline_, for instance, such as in `1..5 | % { if ($_ -gt 2) { break } $_ }`), a dummy loop is enough:\r\n\r\n```powershell\r\ndo { SomeRogueScriptOrFunction } while ($false)\r\n```",
+      "created_at": "2020-05-21T16:01:53Z",
+      "updated_at": "2020-05-21T16:01:53Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">@alx9r You can catch them a little easier like this:\r\n\r\nI think this is getting off topic, but I'm noting this for posterity:  As far as I can tell from #7626, #7593, [#7530(comment)](https://github.com/PowerShell/PowerShell/issues/7530#issuecomment-414839376) passing a scriptblock bound to one runspace for invocation in another is, at best, not supported.",
+      "created_at": "2020-05-21T16:10:07Z",
+      "updated_at": "2020-05-21T16:10:07Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r True, but the example isn't passing it to another runspace.",
+      "created_at": "2020-05-21T16:18:42Z",
+      "updated_at": "2020-05-21T16:18:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let me attempt to summarize:\r\n\r\n* Changing the existing behavior is too much of a breaking change.\r\n\r\n* Given the insidious nature of the current behavior (another instance of dynamic scoping being problematic), as @vexx32 has clearly demonstrated, the mitigation strategies are:\r\n\r\n  * Implement a PSScriptAnalyzer rule, which @rjmholt has already created an issue for: https://github.com/PowerShell/PSScriptAnalyzer/issues/1507\r\n\r\n  * Prominently warn of the pitfalls and provide guidance in the `about_Break` and `about_Continue` help topics: https://github.com/MicrosoftDocs/PowerShell-Docs/issues/5994\r\n\r\n",
+      "created_at": "2020-05-21T16:33:50Z",
+      "updated_at": "2020-05-21T16:36:10Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeppers. As much as I wish it would change, it probably won't. It's a bit annoying, it comes up _quite_ frequently on the community help channels. But it's been this way for a while.\r\n\r\nMuch as I think it should change... I doubt everyone or even most people would agree. A PSSA rule is a good idea, for sure. And a **big** red warning in docs, please. \ud83d\ude01 ",
+      "created_at": "2020-05-21T16:35:23Z",
+      "updated_at": "2020-05-21T16:36:48Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "The core problem is the uncaught break statement. Can we add an error or warning if `break` falls all the way up the stack and exits the running script? \r\n\r\nThis would allow people to continue to use it for their special flow control logic exactly like they are today and we only get the error when it goes wrong. So instead of making the use of break this way a parse error, make the break exception an error when its not caught. This would provide visibility exactly when its needed the most.\r\n\r\n    Error: Execution ended when break/continue was used outside of a loop.\r\n\r\n    ",
+      "created_at": "2020-05-21T17:55:27Z",
+      "updated_at": "2020-05-21T17:55:27Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Can we add an error or warning if break falls all the way up the stack and exits the running script?\r\n\r\nHmmm, actually this might be doable...\r\n\r\nI think https://github.com/PowerShell/PowerShell/issues/12742#issuecomment-632195493 summarises this accurately. Certainly I think we've established it's behaviour that's depended upon and can't be broken in any of the ways that would be helpful. Personally I think https://github.com/PowerShell/PowerShell/issues/12742#issuecomment-631842523 is the most likely reason that this behaves as it does today.\r\n\r\nI'll change the issue title to reflect the possible change we could make (so we can discuss that). Also still hoping @BrucePay might be able to shed some light here.",
+      "created_at": "2020-05-21T18:00:22Z",
+      "updated_at": "2020-05-21T18:00:22Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Hmmm, actually this might be doable...\r\n\r\nThis may be quite hard, since a stack frame doesn't know about its parents generally. One thing that might be possible is to implement a handler for these exceptions in the host or PSReadLine or basically wherever is responsible for running the whole execution",
+      "created_at": "2020-05-21T18:01:13Z",
+      "updated_at": "2020-05-21T18:02:30Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Note that I have seen folks who only ever write \"controller\" style scripts use `break` to exit early.  I've also seen those folks use a pattern like this:\r\n\r\n```powershell\r\ntry {\r\n    # Entire script here\r\n} catch {\r\n    continue\r\n}\r\n```\r\n\r\nThey put `continue` in the catch block because PSSA warns them about an empty catch block, and because nothing comes after the catch it *appears* to work.\r\n\r\nI know this is pretty much the exact scenario we want to stop, but even throwing if the flow control exception reaches `Executor` will break production scripts (well, it wouldn't change behavior but would report as failed).",
+      "created_at": "2020-05-21T18:11:33Z",
+      "updated_at": "2020-05-21T18:11:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "*sigh*.\r\n\r\nLet's just fix this cursed thing properly. \ud83e\udd23 ",
+      "created_at": "2020-05-21T18:17:58Z",
+      "updated_at": "2020-05-21T18:17:58Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I know this is pretty much the exact scenario we want to stop, but even throwing if the flow control exception reaches Executor will break production scripts (well, it wouldn't change behavior but would report as failed).\r\n\r\nYeah, perhaps that's too great a breaking change. But perhaps still worth considering it.",
+      "created_at": "2020-05-21T18:28:32Z",
+      "updated_at": "2020-05-21T18:28:32Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt Since it can be done at the host level, PSES could be a guinea pig.  Have the editor services host use `ExposeFlowControlExceptions`, catch them, and write a warning.  Then see if anyone yells \ud83e\udd37.  That at the very least won't break any in place automation",
+      "created_at": "2020-05-21T18:40:10Z",
+      "updated_at": "2020-05-21T18:41:19Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> And a big red warning in docs, please\r\n\r\n@vexx32 You have to open a feature request for Markdown standard \ud83d\ude04 ",
+      "created_at": "2020-05-22T06:07:27Z",
+      "updated_at": "2020-05-22T06:07:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Users use traces to discover bugs in their scripts. So we could add the flow control exceptions (break, continue and Select -First) in trace (if not already done).",
+      "created_at": "2020-05-22T06:13:57Z",
+      "updated_at": "2020-05-22T06:13:57Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> > And a big red warning in docs, please\r\n> \r\n> @vexx32 You have to open a feature request for Markdown standard \ud83d\ude04\r\n\r\nI know it's a joke, but the microsoft docs flavor of markdown does have this already \ud83c\udf89 \r\n\r\nSee [Alerts (Note, Tip, Important, Caution, Warning)](https://docs.microsoft.com/en-us/contribute/markdown-reference#alerts-note-tip-important-caution-warning).  I think it'd look fine unrendered in a console too \ud83e\udd37 ",
+      "created_at": "2020-05-22T13:25:33Z",
+      "updated_at": "2020-05-22T13:25:33Z"
+    }
+  ],
+  "created_at": "2020-05-21T00:32:45Z",
+  "number": 12742,
+  "state": "open",
+  "title": "Write error when a break or continue exception bubbles all the way to the top level of an execution",
+  "updated_at": "2020-05-22T13:25:33Z"
+}

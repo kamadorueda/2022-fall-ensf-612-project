@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16047",
+  "author": "dwtaber",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nIn 7.2.0-preview.9, `ConvertTo-SecureString` with either `-Key` or `-SecureKey` truncates the payload down to the nearest multiple of eight characters.  `ConvertFrom-SecureString` seems to be fine; SecureStrings created in 7.1.4 and imported to 7.2.0-preview.9 aren't truncated when converted to plaintext.\n\n### Expected behavior\n\n```console\nPS> $Key = [Byte[]]::New(32)\r\n>> '[8Chars][8Chars][Not8]' |\r\n>> ConvertTo-SecureString -AsPlainText -Force |\r\n>> ConvertFrom-SecureString -Key $Key |\r\n>> ConvertTo-SecureString -Key $Key |\r\n>> ConvertFrom-SecureString -AsPlainText\r\n[8Chars][8Chars][Not8]\r\n\r\nPS> $Key = [Byte[]]::New(32)\r\n>> '\ud83d\udfe5\ud83d\udfe7\ud83d\udfe8\ud83d\udfe9\ud83d\udfe6\ud83d\udfea' |\r\n>> ConvertTo-SecureString -AsPlainText -Force |\r\n>> ConvertFrom-SecureString -Key $Key |\r\n>> ConvertTo-SecureString -Key $Key |\r\n>> ConvertFrom-SecureString -AsPlainText\r\n\ud83d\udfe5\ud83d\udfe7\ud83d\udfe8\ud83d\udfe9\ud83d\udfe6\ud83d\udfea\n```\n\n\n### Actual behavior\n\n```console\nPS> $Key = [Byte[]]::New(32)\r\n>> '[8Chars][8Chars][Not8]' |\r\n>> ConvertTo-SecureString -AsPlainText -Force |\r\n>> ConvertFrom-SecureString -Key $Key |\r\n>> ConvertTo-SecureString -Key $Key |\r\n>> ConvertFrom-SecureString -AsPlainText\r\n[8Chars][8Chars]\r\n\r\nPS> $Key = [Byte[]]::New(32)\r\n>> '\ud83d\udfe5\ud83d\udfe7\ud83d\udfe8\ud83d\udfe9\ud83d\udfe6\ud83d\udfea' |\r\n>> ConvertTo-SecureString -AsPlainText -Force |\r\n>> ConvertFrom-SecureString -Key $Key |\r\n>> ConvertTo-SecureString -Key $Key |\r\n>> ConvertFrom-SecureString -AsPlainText\r\n\ud83d\udfe5\ud83d\udfe7\ud83d\udfe8\ud83d\udfe9\n```\n\n\n### Error details\n\n_No response_\n\n### Environment data\n\n```powershell\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0-preview.9\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0-preview.9\r\nOS                             Microsoft Windows 10.0.22449\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": "2021-09-09T15:47:51Z",
+  "comments": [
+    {
+      "author": "dwtaber",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm a little out of my depth, but could [this breaking change to System.Security.Cryptography.CryptoStream](https://github.com/dotnet/runtime/pull/53644) be the culprit?",
+      "created_at": "2021-09-05T23:37:01Z",
+      "updated_at": "2021-09-05T23:37:01Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "@dwtaber out of my depth too, but i believe you're right.\r\n\r\nThere is a breaking change in _net 6.0 Preview 6_ inside the API **System.Security.Cryptography.CryptoStream.Read**\r\n\r\nBreaking Change Documentation : \r\nhttps://docs.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/6.0/partial-byte-reads-in-streams\r\n\r\nThe API is used Line 372 : \r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/17986d88c10eb6271b1aad2ca955889e45e2b285/src/System.Management.Automation/security/SecureStringHelper.cs#L334-L388\r\n\r\n\n\n<blockquote><img src=\"https://docs.microsoft.com/dotnet/media/dotnet-logo.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/6.0/partial-byte-reads-in-streams\">Breaking change: Partial and zero-byte reads in DeflateStream, GZipStream, and CryptoStream - .NET</a></strong></div><div>Learn about the .NET 6.0 breaking change in core .NET libraries where DeflateStream, GZipStream, and CryptoStream handle partial and zero-byte reads differently.</div></blockquote>",
+      "created_at": "2021-09-07T02:26:15Z",
+      "updated_at": "2021-09-07T02:26:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, looks like we'll need to add a loop in around that code to ensure we're reading all the data.\n\nThat's a very strange way to write a stream api, to me at least. ",
+      "created_at": "2021-09-07T11:49:40Z",
+      "updated_at": "2021-09-07T11:49:40Z"
+    },
+    {
+      "author": "dwtaber",
+      "author_association": "CONTRIBUTOR",
+      "body": "The following change to the CryptoStream using statement starting at line 363 of SecureStringHelper.cs appears to work for me:\r\n```csharp\r\nusing (CryptoStream cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read))\r\n{                \r\n    int totalBytesRead = 0;\r\n    var tempDecryptedData = ms.ToArray().AsSpan();\r\n    //\r\n    // decrypt the data\r\n    //\r\n    while (totalBytesRead < encryptedData.Length)\r\n    {\r\n        int bytesRead = cs.Read(tempDecryptedData.Slice(totalBytesRead));\r\n        if (bytesRead == 0) { break; }\r\n        totalBytesRead += bytesRead;\r\n    }\r\n    decryptedData = new byte[totalBytesRead];\r\n\r\n    for (int i = 0; i < totalBytesRead; i++)\r\n    {\r\n        decryptedData[i] = tempDecryptedData[i];\r\n    }\r\n    \r\n    s = New(decryptedData);\r\n    Array.Clear(decryptedData, 0, decryptedData.Length);\r\n    tempDecryptedData.Clear();\r\n    \r\n    return s;\r\n}\r\n```\r\n\r\nAre there any security implications or other glaring issues with the code above?  If not, is there a better way to achieve the result?  I'm new to collaborating on a project like this and don't want to create a pull request prematurely.",
+      "created_at": "2021-09-07T13:58:56Z",
+      "updated_at": "2021-09-07T13:58:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think rather than doing `.ToArray().AsSpan()` for the `tempDecryptedData` we're probably better off just creating a new Span or array of the appropriate length instead, which is more similar to the original code. Otherwise I'd expect that'll end up reading the memory stream multiple times, which might break some things.\r\n\r\nOther than that, I think that would work? Would need to be tested of course, but that looks pretty good. You could probably skip the `for` loop as well, because the decrypted data will already be in `tempDecryptedData`, so that can end up as the final span, and you can call `.ToArray()` on that if you really need to. \r\n\r\nLooking at the docs for `CryptoStream.Read` I think you also need to specify the offset and count anyway, it doesn't look like its Read method has optional parameters: https://docs.microsoft.com/en-us/dotnet/api/system.security.cryptography.cryptostream.read?view=net-5.0\r\n\r\n... Hm... The crypto stream API doesn't seem like it has a lot of span-friendly overloads \ud83d\ude15\r\nThat might cause some issues for how you want to solve this. Best bet is to test it and see if it compiles / behaves like you expect.\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/api/system.security.cryptography.cryptostream.read\">CryptoStream.Read(Byte[], Int32, Int32) Method (System.Security.Cryptography)</a></strong></div><div>Reads a sequence of bytes from the current stream and advances the position within the stream by the number of bytes read. </div></blockquote>",
+      "created_at": "2021-09-07T14:39:19Z",
+      "updated_at": "2021-09-07T14:39:33Z"
+    },
+    {
+      "author": "dwtaber",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I think rather than doing `.ToArray().AsSpan()` for the `tempDecryptedData` we're probably better off just creating a new Span or array of the appropriate length instead, which is more similar to the original code. Otherwise I'd expect that'll end up reading the memory stream multiple times, which might break some things.\r\n> \r\n> Other than that, I think that would work? Would need to be tested of course, but that looks pretty good. You could probably skip the `for` loop as well, because the decrypted data will already be in `tempDecryptedData`, so that can end up as the final span, and you can call `.ToArray()` on that if you really need to.\r\n> \r\n> Looking at the docs for `CryptoStream.Read` I think you also need to specify the offset and count anyway, it doesn't look like its Read method has optional parameters: https://docs.microsoft.com/en-us/dotnet/api/system.security.cryptography.cryptostream.read?view=net-5.0\r\n> \r\n> ... Hm... The crypto stream API doesn't seem like it has a lot of span-friendly overloads \ud83d\ude15\r\n> That might cause some issues for how you want to solve this. Best bet is to test it and see if it compiles / behaves like you expect.\r\n> \r\n\r\nWeird that it's not documented there, but it looks like `CryptoStream` inherits `Stream.Read(Span<byte> buffer)`.\r\n(Edit: there's apparently also a [new overload for `Array.Clear`](https://docs.microsoft.com/en-us/dotnet/api/system.array.clear?view=net-6.0#System_Array_Clear_System_Array_) that clears an entire array without requiring a start index and count to be specified, so I've made use of that as well.)\r\n\r\nYou were right about the `for` loop; it doesn't appear to be necessary.  I _think_ the `ToArray()` at the end is necessary, as `SecureStringHelper.New` wants `byte[]`, and I don't think there's any implicit conversion from `Span<T>` to `T[]`.  Here's a revised version of my possible fix.  It does compile and works in cases similar to the ones shown in the issue description, for at least as many as 512 characters.\r\n\r\n```csharp\r\nusing (CryptoStream cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read))\r\n{                \r\n    int totalBytesRead = 0;\r\n    var tempDecryptedData = new Span<byte>(ms.ToArray());\r\n    //\r\n    // decrypt the data\r\n    //\r\n    while (totalBytesRead < encryptedData.Length)\r\n    {\r\n        int bytesRead = cs.Read(tempDecryptedData.Slice(totalBytesRead));\r\n        if (bytesRead == 0) { break; }\r\n        totalBytesRead += bytesRead;\r\n    }\r\n    decryptedData = tempDecryptedData[0..totalBytesRead].ToArray();\r\n    \r\n    s = New(decryptedData);\r\n    Array.Clear(decryptedData);\r\n    tempDecryptedData.Clear();\r\n    \r\n    return s;\r\n}\r\n```\r\n\r\nThere seem to be some extraneous bytes at the end of `tempDecryptedData`; if the range isn't specified when converting to `byte[]`, the `SecureString` returned by the method winds up with a handful of extra bytes that, in the cases I tried, wound up getting interpreted as roughly three to five (seemingly) random non-Latin characters at the end of the intended string.  The characters were different each time I ran the same set of commands; I'm not sure if that's because the random key was different each time, or maybe some other factor.  Specifying the `[0..totalBytesRead]` range to be converted to `byte[]` appears to resolve the issue, but I mention it in case it points to some potential security issue or edge case that I wouldn't know to look for.",
+      "created_at": "2021-09-07T16:38:22Z",
+      "updated_at": "2021-09-07T16:51:20Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "WG-Security\r\n\r\nThanks for finding this.  I am just beginning to look into it and will propose a PR if no one else does.",
+      "created_at": "2021-09-07T17:22:41Z",
+      "updated_at": "2021-09-07T17:22:41Z"
+    },
+    {
+      "author": "dwtaber",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm going over the documentation re: contributing to make sure I get the PR right.  I do have a potentially silly question that I haven't run into a specific answer for yet re: testing.  Is it okay to modify an extant Pester test, or is it preferable to make a whole new one?  \\test\\powershell\\Modules\\Microsoft.PowerShell.Security\\SecureString.Tests.ps1 would have caught this bug with only a little modification, so making the necessary adjustments seems like the path of least resistance, but I'm happy to write a new test if that's the way things are done.\r\n\r\nApologies if the answer's somewhere I should've seen it, or if I shouldn't be asking here.",
+      "created_at": "2021-09-07T19:14:18Z",
+      "updated_at": "2021-09-07T19:14:18Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "As long as the test still serves its original purpose (assuming that purpose still makes sense, of course) then yeah that should usually be fine.\r\n\r\nAn explicit test _might_ be preferable in this case, just because of the esoteric nature of the bug -- probably would be good to link to the breaking change doc that [was mentioned](https://github.com/PowerShell/PowerShell/issues/16047#issuecomment-913944035) here in a comment near the test as well.",
+      "created_at": "2021-09-07T19:37:28Z",
+      "updated_at": "2021-09-07T19:37:28Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I was thinking of using a different pattern.\r\n\r\n```csharp\r\n        internal static SecureString Decrypt(string input, byte[] key, byte[] IV)\r\n        {\r\n            Utils.CheckArgForNullOrEmpty(input, \"input\");\r\n            Utils.CheckKeyArg(key, \"key\");\r\n\r\n            //\r\n            // prepare the crypto stuff\r\n            //\r\n            Aes aes = Aes.Create();\r\n            byte[] encryptedData = ByteArrayFromString(input);\r\n            var decryptor = aes.CreateDecryptor(key, IV ?? aes.IV);\r\n            using (var ms = new MemoryStream(encryptedData))\r\n            using (var sourceStream = new CryptoStream(ms, decryptor, CryptoStreamMode.Read))\r\n            using (var targetStream = new MemoryStream())\r\n            {\r\n                //\r\n                // decrypt the data\r\n                //\r\n                sourceStream.CopyTo(targetStream);\r\n                byte[] decryptedData = targetStream.ToArray();\r\n                try\r\n                {\r\n                    return New(decryptedData);\r\n                }\r\n                finally\r\n                {\r\n                    Array.Clear(decryptedData, 0, decryptedData.Length);\r\n                }\r\n            }\r\n        }\r\n```\r\nAlso, I noticed that the Encrypt() method doesn't dispose disposable objects or always clear the clear text data.  So I feel it should be cleaned up too.  I'll submit a PR tomorrow and let you take a look.\r\n",
+      "created_at": "2021-09-07T22:58:41Z",
+      "updated_at": "2021-09-07T22:58:41Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I have created a PR for this (see above).  Please take a look.",
+      "created_at": "2021-09-08T22:53:14Z",
+      "updated_at": "2021-09-08T22:53:14Z"
+    },
+    {
+      "author": "dwtaber",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I have created a PR for this (see above). Please take a look.\r\n\r\nI'm no expert, but that definitely seems like a much cleaner and more straightforward approach.  Parts of the original code seemed clunky enough that I figured they must be necessary for reasons I just wasn't seeing.  I'm happy to learn I was wrong about that!  Is there a performance reason to stick with `Array.Clear(Array, Int32, Int32)` rather than use the new `Array.Clear(Array)` overload in the `finally` block?\r\n\r\n> An explicit test might be preferable in this case, just because of the esoteric nature of the bug\r\n\r\nSorry, terminology misfire on my part; I wasn't thinking in terms of each `It` block constituting a test.  Anyway, yeah, my plan was to replace `$string = \"ABCD\"` in the `BeforeAll` block with something long enough to reveal this issue, e.g. `$String = \"PrimeNumberOfCharacters\"`, and to add this `It` block:\r\n```powershell\r\nIt \"can convert back from a secure string using AES\" {\r\n    $key = [byte[]]::new(24)\r\n    $secureString1 = ConvertTo-SecureString -AsPlainText -Force -String $string\r\n    $encryptedString = ConvertFrom-SecureString -SecureString $secureString1 -Key $key\r\n    $secureString2 = ConvertTo-SecureString -String $encryptedString -Key $key\r\n    $plaintextString = ConvertFrom-SecureString -AsPlainText -SecureString $secureString2\r\n    $plaintextString | Should -Be $string\r\n}\r\n```\r\n\r\nEdit: just noticed that the PR already includes updated tests.  Huzzah!",
+      "created_at": "2021-09-08T23:48:37Z",
+      "updated_at": "2021-09-09T00:06:03Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, I believe I have covered all issues in the PR.  Feel free to post any additional comments directly in the PR.  I am closing this issue since it has been addressed.\r\n\r\nThanks for finding this and helping with the fix!",
+      "created_at": "2021-09-09T15:47:51Z",
+      "updated_at": "2021-09-09T15:49:03Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #16068, which has now been successfully released as `v7.3.0-preview.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.3.0-preview.1)\n",
+      "created_at": "2021-12-16T20:01:00Z",
+      "updated_at": "2021-12-16T20:01:00Z"
+    }
+  ],
+  "created_at": "2021-09-04T01:03:55Z",
+  "number": 16047,
+  "state": "closed",
+  "title": "ConvertTo-SecureString truncates to multiples of 8 characters",
+  "updated_at": "2021-12-16T20:01:00Z"
+}

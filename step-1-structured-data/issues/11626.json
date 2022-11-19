@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11626",
+  "author": "gurnec",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\nPS D:\\> New-Item 7n\r\n```\r\n\r\n# Expected behavior\r\n\r\n(and current behavior in PS 6)\r\n\r\n```none\r\n    Directory: D:\\\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a---           1/18/2020  1:24 PM              0 7n\r\n```\r\n\r\n# Actual behavior\r\n\r\nA file with an unexpected name is created.\r\n\r\n```none\r\n    Directory: D:\\\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a---           1/18/2020  1:24 PM              0 7\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.2\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n----------\r\n\r\nWhen the other numeric types are used as an argument, PS wraps them inside a `[psobject]` if their numeric and string representations differ so that PS can extract the original string if needed later (e.g. if it's bound to a `[string[]]` parameter as with `New-Item` above.) Thus `New-Item 7ul` works as expected, but `New-Item 7n` does not.\r\n\r\nI'm sorry but I don't know how/where this happens in the code though....\r\n\r\nMentioning @vexx32 because I believe they created the BigInt type-suffix support (thanks!).",
+  "closed_at": "2020-05-12T23:31:38Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That's a good point. I'm not sure _where_ this handling happens. Perhaps @SeeminglyScience could point us in the right direction?\r\n\r\nInferring from the fact that `7ul` works correctly (which is _also_ a new addition), the fact that `7n` does not seems to indicate that whatever the parameter binder(?) is looking for is likely a static set of types, or perhaps just numeric values. It probably doesn't consider BigInteger numeric since it's not a primitive but rather a struct. \ud83e\udd14 ",
+      "created_at": "2020-01-18T19:15:54Z",
+      "updated_at": "2020-01-18T19:17:27Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "When a numeric literal is sent to a command, it's wrapped in a `PSObject` with it's internal `TokenText` property set to the original string determined at parse time.\r\n\r\nThis isn't happening for big int literals, the `TokenText` property is null.  There's a few reasons that could be happening, the check to see if the argument should be wrapped is done here:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/70d4a899310f5460700f0be8cba5a2af1d4a0305/src/System.Management.Automation/engine/parser/Compiler.cs#L4174-L4183\r\n\r\nSo one of those checks (probably the `IsNumeric` check since bigint's type code is `Object`) needs to be tweaked.",
+      "created_at": "2020-01-18T19:49:56Z",
+      "updated_at": "2020-01-18T19:49:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting, thank you! \ud83d\ude0a \r\n\r\nSo... hm.. Either we'd have to add an additional piece of logic to special case for the BigInteger case... or we'd have to alter the type code information so it reads it as numeric. It _seems_ like the latter would be the better move, but that's only if that's feasible.\r\n\r\nI'm not really sure how the type code stuff works; is that built into .NET or something handled in LanguagePrimitives? I remember seeing stuff related to it in there, but I'm not sure if that's something we can change from the PowerShell side of things? \ud83e\udd14 ",
+      "created_at": "2020-01-19T06:29:31Z",
+      "updated_at": "2020-01-19T06:29:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I added new condition to pass line 4177 and it is not full fix.",
+      "created_at": "2020-01-19T16:27:52Z",
+      "updated_at": "2020-01-19T16:27:52Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@iSazonov I changed it to:\r\n\r\n```csharp\r\nif (constElement != null\r\n    && (LanguagePrimitives.IsNumeric(LanguagePrimitives.GetTypeCode(constElement.StaticType))\r\n    || constElement.StaticType == typeof(System.Numerics.BigInteger)))\r\n```\r\n\r\nand `Write-Host 7n` wrote `7n`.",
+      "created_at": "2020-01-19T16:44:00Z",
+      "updated_at": "2020-01-19T16:44:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "My tests:\r\n```powershell\r\nSelect-String -InputObject 7n -Pattern 7n\r\n# and\r\nNew-Item 7n\r\n```",
+      "created_at": "2020-01-19T17:18:48Z",
+      "updated_at": "2020-01-19T17:20:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Looks like we need to add another test case for functions. Cmdlets seem to work with that change, but there's something else that needs to happen, it seems...\r\n\r\n```powershell\r\nfunction Test-StringLiteral {\r\n    param([string]$Value)\r\n    $Value\r\n}\r\n# ...\r\nPS> Test-StringLiteral -Value 7n\r\n7\r\n```\r\n\r\nThis appears to still be problematic for both simple and advanced functions.\r\n\r\nEDIT: I found another reference to the `IsNumeric()` method that seems relevant here:\r\nhttps://github.com/PowerShell/PowerShell/blob/d58a82ad19fbfad81e85778c8b08cb1b28f58fce/src/System.Management.Automation/engine/runtime/ScriptBlockToPowerShell.cs#L649-L660\r\n\r\nHowever, even with that changed similarly to the above suggestions, I'm still not seeing script functions behave correctly with BigInteger, while they will behave perfectly well with other suffixed numerals. Time to do some more digging!!",
+      "created_at": "2020-01-20T05:40:41Z",
+      "updated_at": "2020-01-20T05:56:15Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Aaaand one further update -- adding BigInteger to the array of `s_numericTypes` in `LanguagePrimitives` seems to completely sort this out, for simple & advanced functions and all! \ud83c\udf89\r\n\r\nWill PR a thorough fix shortly! Thanks for the pointers, everyone! \ud83d\udc96 \ud83d\ude0a ",
+      "created_at": "2020-01-20T06:26:22Z",
+      "updated_at": "2020-01-20T06:26:22Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11634, which has now been successfully released as `v7.1.0-preview.3`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.3)\n",
+      "created_at": "2020-05-19T18:10:18Z",
+      "updated_at": "2020-05-19T18:10:18Z"
+    }
+  ],
+  "created_at": "2020-01-18T18:54:18Z",
+  "number": 11626,
+  "state": "closed",
+  "title": "Unquoted arguments using the BigInteger type-suffix can cause breaking changes",
+  "updated_at": "2020-05-19T18:10:19Z"
+}

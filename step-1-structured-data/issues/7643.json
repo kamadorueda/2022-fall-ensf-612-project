@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7643",
+  "author": "alexandair",
+  "body": "I'm confused with the `PSEdition` column that we get in the output of the `Get-Module` cmdlet.\r\nThis is the output in the Cloud Shell, on a Linux box.\r\nWhat does it mean that some modules have \"Desk\" and others \"Core\"?\r\n\r\n```\r\nModuleType Version    Name                                PSEdition\r\n---------- -------    ----                                --------- \r\nScript     0.8.6      AzurePSDrive                        Desk\r\nManifest   1.1.0.0    Microsoft.PowerShell.Archive        Desk \r\nManifest   6.1.0.0    Microsoft.PowerShell.Host           Core\r\nManifest   6.1.0.0    Microsoft.PowerShell.Management     Core \r\nManifest   6.1.0.0    Microsoft.PowerShell.Security       Core \r\nManifest   6.1.0.0    Microsoft.PowerShell.Utility        Core \r\nScript     1.1.7.0    PackageManagement                   Desk \r\nScript     1.6.0      PowerShellGet                       Desk\r\nScript     0.8.9      PSCloudShellUtility                 Desk \r\nScript     0.0        PSDesiredStateConfiguration         Desk\r\nScript     2.0.0      PSReadLine                          Desk\r\nBinary     1.1.1      ThreadJob                           Desk   \r\n```\r\n\r\n",
+  "closed_at": "2018-08-28T03:09:55Z",
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Hi @alexandair, the `PSEdition` field declares what \"Editions\" of PowerShell a module is compatible with.\r\n\r\nSince PowerShell 5.1, a module can declare what PowerShell editions it's compatible with, with those editions currently being \"PowerShell Core\" and \"Windows PowerShell\" -- basically this is a CoreCLR vs FullCLR differentiation. You can read more about that here: https://docs.microsoft.com/en-gb/powershell/gallery/concepts/module-psedition-support.\r\n\r\nNaturally, it would make no sense to display this normally; if you've got a module loaded in PowerShell Core, then it must be Core-compatible. Moreover, that field has historically been a hint for people using the module to know what it's compatible with -- we never actually processed it in any way, except to check that it's one of the values that's allowed; it doesn't change the way a module behaves.\r\n\r\n**But**, we recently did a lot of work to port a number of PowerShell modules shipped with Windows itself (under the `$env:windir\\System32\\WindowsPowerShell\\v1.0\\Modules\\` path) so that they work with PowerShell Core, a step toward increasing PowerShell Core's value proposition for Windows PowerShell users.\r\n\r\nHowever, because there are thousands of Windows PowerShell modules in Windows, we knew we couldn't port them all at once. So after we added the Windows PowerShell module path into the PowerShell Core module path, we leveraged the `CompatiblePSEditions` field to differentiate between the modules that we have confirmed compatible, with those we have not. Basically we changed all the modules we confirmed as compatible with PowerShell Core to include `Core` in their `CompatiblePSEditions` module manifest field.\r\n\r\nSo now if you try to import a module from the Windows PowerShell system module path and it's not marked as Core-compatible, it will fail. But note that this **only applies to modules on the Windows PowerShell system module path on Windows**; modules loaded from anywhere else will have their `CompatiblePSEditions` field ignored and will just load as normal. On Linux or macOS, there is no check for modules loaded from any path ever.\r\n\r\nAnyway, because we simply couldn't check all those modules (some of them are pretty hard to test because they do things like setup data clusters or DNS zones), we also included an override mechanism so that you can still import a module if it not marked as Core-compatible (`Import-Module -SkipEditionCheck Dism` for example). Since you can do this, it's helpful to know in `Get-Module -ListAvailable` which modules have been marked as compatible with what edition. So that's why the field appears there.\r\n\r\nThe last thing is that not marking the `CompatiblePSEditions` field in a manifest will make it default to `@(\"Desktop\")`, since prior to PowerShell Core you probably wouldn't use that field and we can only assume the module is compatible with Windows PowerShell. This is why we don't check this field for modules that aren't from Windows PowerShell -- normal modules that don't have this field would default to only Desktop-compatible and would fail to load; we'd break everything. Further, versions of PowerShell older than 5.1 would error on the `CompatiblePSEditions` manifest field, so writing a PowerShell module supported by both PowerShell Core 6 and PowerShell 4 would be impossible. So the field is not required for 3rd party modules -- we only check those modules shipped as part of Windows. We decided that when displaying this field in `Get-Module` it's better to be accurate to what's in the manifest rather than the interpreted compatibility.\r\n\r\n### Summary\r\n- This is a Windows-only phenomenon to mark module compatibility with Windows PowerShell (marked as `Desk` or `Desktop`) and PowerShell Core (marked as `Core`). It's possible to be compatible with both -- you'd see that in `Get-Module` output as `Core,Desk`.\r\n- We marked some Windows PowerShell modules shipped with Windows as compatible with PowerShell Core after testing them, but not all of them (because there are so many).\r\n- We built in mechanisms to allow users to see the compatibility of modules with PowerShell Core and give them the ability to control their import.\r\n- This compatiblity marking doesn't affect 3rd party modules and adding it in isn't always desirable, so you will see 3rd party modules that work fine in PowerShell Core marked with their compatibility as only `Desktop` (because that is the default).\r\n- On Linux, this whole phenomenon can be ignored -- it doesn't mean anything at all.\r\n\r\nYou can read more about this whole feature here: https://github.com/PowerShell/PowerShell-RFC/blob/master/2-Draft-Accepted/RFC0025-PSCore6-and-Windows-Modules.md.\r\n\r\nI'll close this up now that it's answered. But please comment if you have any other questions or suggestions.",
+      "created_at": "2018-08-28T03:09:55Z",
+      "updated_at": "2018-08-28T03:16:09Z"
+    },
+    {
+      "author": "alexandair",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rjmholt\r\nThank you for your detailed answer.\r\nHere are a couple of things that I think are not right with how PSEdition property is used:\r\n\r\n- If PSEdition property is not relevant on Linux, it shouldn't be exposed on Linux\r\n- \"Desk\" value should be \"Desktop\"\r\n- If the module is supported in both-Windows PowerShell and PowerShell Core-I would expect value to be \"Desk, Core\" (for example, AzurePSDrive is compatible with both editions)\r\n- If I run this in PowerShell Core on Windows, I would expect all Core-compatible modules to be marked  as \"Core\". If they are marked as \"Desk\", by default, I would think that compatibility is not met, and I could expect certain issues using that module on PowerShell Core\r\n\r\nCurrent behavior doesn't provide a satisfying user experience. Either on Windows or Linux.\r\n",
+      "created_at": "2018-08-28T08:36:41Z",
+      "updated_at": "2018-08-28T08:36:41Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "On the second point, `Desk` is used rather than `Desktop` because the format column it needs to fit in is 9 characters wide. `Core,Desk` is 9 characters. A longer representation of `Desktop` would break the formatting",
+      "created_at": "2018-08-28T08:50:44Z",
+      "updated_at": "2018-08-28T08:54:16Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "On point three, the current decision is to represent what is actually given in the module manifest rather than how PowerShell interprets it. We decided that `Get-Module` should be representing the manifest as faithfully as possible; rather than PowerShell trying to do magic and creating problems, the module owners just need to mark edition compatibility. `AzurePSDrive` [does not have a `CompatiblePSEditions` field](https://github.com/PowerShell/AzurePSDrive/blob/development/AzurePSDrive.psd1) or a `PowerShellVersion` field, so it hasn't been marked as Core-compatible.",
+      "created_at": "2018-08-28T08:57:06Z",
+      "updated_at": "2018-08-28T08:57:06Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Modules are marked as Desktop-compatible-only by default because prior to PowerShell Core there was no marking. So we are forced to interpret no marking as \"legacy\", i.e. Desktop-compatible-only.",
+      "created_at": "2018-08-28T08:59:50Z",
+      "updated_at": "2018-08-28T08:59:50Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "There are two things that you've raised that probably need refining as the edition-compatibility concept matures:\r\n- Should `Get-Module` et al. give an unaltered representation of the module manifest, or show how PowerShell interprets it given the path the module is on and how it was loaded? The problem is that it's possible to force loading an incompatible module as if it's compatible, but then showing the compatibility field as `Core` would be pointless. You know if the module is counted as \"compatible\" in the session, since it's loaded. So you probably want to know how the module has been *marked*. One point there is that I'm not sure we should even have `Desk` when the `CompatiblePSEditions` field is not provided.\r\n- Should we bother showing the edition compatibility at all in contexts where it doesn't matter (i.e. on non-Windows or when `-ListAvailable` isn't used)? Again the question is one of representing the manifest vs what's relevant to the current session; you might write a Desktop-compatible module on Linux and want to check that it registers as such.\r\n\r\nA crucial point to make also is that PowerShell can't determine if a module is actually fully compatible or not. That question is formally undecidable. If you load an incompatible module, it might break or not do the right thing in certain cmdlets. A human has to perform the compatibility verification (i.e. they have tests in PowerShell Core). Ideally all modules would fail to import if not marked as Core-compatible, but that would be a huge breakage.",
+      "created_at": "2018-08-28T09:08:16Z",
+      "updated_at": "2018-08-28T09:23:29Z"
+    }
+  ],
+  "created_at": "2018-08-27T23:29:50Z",
+  "number": 7643,
+  "state": "closed",
+  "title": "[6.1.0-rc.1] What does PSEdition in the output of Get-Module actually mean?",
+  "updated_at": "2018-08-28T09:23:29Z"
+}

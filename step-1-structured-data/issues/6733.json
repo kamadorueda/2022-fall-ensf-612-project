@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6733",
+  "author": "mklement0",
+  "body": "See also: #12168\r\n\r\nNote: This is an obscure edge case. \r\n\r\n~~For the most part, malformed wildcard patterns are _quietly ignored_ and fall back to _literal_ treatment (e.g., `Get-Item a].txt` matches a file literally named `a].txt`) - that inconsistency could be considered problematic in itself, however.~~\r\n\r\n_Update: A pattern such as `a].txt` is actually valid, because the `]` is not special unless preceded by `[`. However, patterns such as `a[].txt` and `a[.txt` and `a[foo.txt` are invalid, and the problem is that they are not consistently reported as such. The rest of this post has been revised accordingly._\r\n\r\nWhen an invalid wildcard pattern - e.g., one that ends in `[]`  before the filename extension - is passed to `Get-Item` or `Get-ChildItem`, the error that _should_ occur occurs _only_ if at least two files exists that have the same matching prefix (the exact logic is not clear to me).\r\n\r\n(@BrucePay states that the source of the error is the FileSystem provider itself, not the cmdlets mentioned.)\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n# Assume that no `tmp*.txt` files exist.\r\nGet-Item tmp[].txt\r\n'---'\r\n$null = New-Item -Force tmp.txt; Get-Item tmp[].txt\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. \r\nThe specified wildcard character pattern is not valid: tmp[].txt\r\n---\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. \r\nThe specified wildcard character pattern is not valid: tmp[].txt\r\n```\r\n\r\nThat is, two instances of the same `The specified wildcard character pattern is not valid` error should occur, irrespective of whether any `tmp*.txt` files exist or not.\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n---\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. \r\nThe specified wildcard character pattern is not valid: tmp[].txt\r\n```\r\n\r\nThat is, in the absence of any `tmp*.txt` files, the invalid wildcard expression was not reported as invalid.\r\n\r\nEnvironment data\r\n----------------\r\n\r\nOriginally reported for 6.0.2, updated for:\r\n\r\n```powershell\r\nPowerShell Core v7.0.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0  Just FYI, there is a single wildcard library that is used by everything handling wildcards so the behaviour will be the same everywhere. As a consequence, there is no need to report `-like` as a separate case. \r\n\r\nWRT your first issue, the character ']' is only special if preceded by '[' which is fine and by design. Regular expressions behave the same way\r\n```\r\nPS[1] (351) > \"abc]def\" -match \"abc]\"\r\nTrue\r\nPS[1] (353) > \"abc]def\" -like \"abc]*\"\r\nTrue\r\n```\r\nSimilarly, empty character classes are (and should be) an error both in wildcards and in regular expressions:\r\n```\r\nPS[1] (354) > \"abc]def\" -like \"abc[]*\"\r\nThe specified wildcard character pattern is not valid: abc[]*\r\nAt line:1 char:1\r\n+ \"abc]def\" -like \"abc[]*\"\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [], ParentContainsErrorRecordExcepti\r\n   on\r\n    + FullyQualifiedErrorId : RuntimeException\r\n\r\nPS[1] (355) > \"abc]def\" -match \"abc[]\"\r\nparsing \"abc[]\" - Unterminated [] set.\r\nAt line:1 char:1\r\n+ \"abc]def\" -match \"abc[]\"\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : OperationStopped: (:) [], ArgumentException\r\n    + FullyQualifiedErrorId : System.ArgumentException\r\n```\r\n\r\nThe patterns are well-formed but invalid.\r\n\r\n> As with other malformed wildcard patterns\r\n\r\nWhat other malformed wildcard patterns? The only other wildcard metacharacters are * and ? which,  tautologically, cannot be malformed.\r\n",
+      "created_at": "2018-04-26T00:14:22Z",
+      "updated_at": "2018-04-26T00:14:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  a single wildcard library that is used by everything handling wildcards so the behaviour will be the same everywhere.\r\n\r\nThat's good to know.\r\n(A notable exception is the `FileSystem` provider's  `-Filter` parameter.)\r\n\r\n> What other malformed wildcard patterns? \r\n\r\nI meant any use of wildcard metacharacters that do not participate in a valid expression.\r\n\r\nAs you point out, `*` and `?`, due to their being single-character constructs, are by definition valid, and `]` without a preceding `[` is treated as a literal.\r\n\r\nThat leaves us with `[`  variations: any `[`-initiated construct that is either immediately followed by `]` or has no closing `]` is invalid; to give a few examples, all of which fail with `The specified wildcard character pattern is not valid:`\r\n\r\n```powershell\r\n'a' -like 'a[]' \r\n'a' -like 'a[' \r\n'a' -like 'a[whatever' \r\n```\r\n\r\nNote, however,  that while these patterns cause errors with `-like`, they  do _not_ do so (unconditionally) with `Get-Item -Path` / `Get-ChildItem -Path`.\r\n\r\n**For instance, `Get-Item a[.txt` and `Get-Item a[].txt` do not  _generally_ fail, despite the patterns being invalid - and, as it turns out, that's the true problem here.**\r\n\r\n(Contrast this with my original example, `Get-Item a].txt`, in which, based on your explanation, `a].txt` is rightfully considered a _literal_ name and matched accordingly).\r\n",
+      "created_at": "2018-04-26T02:29:29Z",
+      "updated_at": "2018-04-26T02:39:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\nOn a tangential note:\r\n\r\n> The patterns [ 'abc[]*'  and 'abc[]' ] are well-formed but invalid.\r\n\r\nI'm curious what you mean by _well-formed_ in this context, given that these patterns result in a syntax error.\r\n\r\nAt least in the context of XML, _well-formed_ refers to _syntactically_ valid input (whereas _valid_ refers to well-formed input that additionally conforms to a prescribed structure), which is not the case here.\r\n\r\n",
+      "created_at": "2018-04-26T16:20:36Z",
+      "updated_at": "2018-04-26T16:20:36Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "> I'm curious what you mean by well-formed in this context, given that these patterns result in a syntax error.\r\n\r\nNo - they result in a `WildcardPatternException` which is documented as \"Thrown when a wildcard pattern is invalid.\"",
+      "created_at": "2018-04-26T19:36:13Z",
+      "updated_at": "2018-04-26T19:36:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks; I spoke loosely: I meant a _wildcard_ syntax error, not a _PowerShell_ syntax error, or more informally, \"something that isn't accepted as a wildcard pattern for formal reasons\".\r\n\r\nSo, to return to the question, what does _well-formed_ mean in this context?\r\n\r\nAnd please don't forget to re-label this issue a bug (to recap: in the absence of `tmp`-prefixed filenames, `Get-Item tmp[].txt` neglects to complain about the invalid wildcard pattern).\r\n\r\n",
+      "created_at": "2018-04-26T19:41:47Z",
+      "updated_at": "2018-04-26T19:41:47Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "> For instance, Get-Item a[.txt and Get-Item a[].txt do not generally fail, despite the patterns being invalid - and, as it turns out, that's the true problem here.\r\n\r\nFor the core cmdlets, wildcard processing is handled by the underlying providers. Providers are funny beasts because they try to use the much faster native globbing capabilities of the underlying store (e.g. on Windows, where the files system API directly understands '*'). However these native capabilities don't match our wildcards so there are inconsistencies. Also quoting in the file system provider is fiercely broken - so much so that we added `-Literalpath` in V2 as a workaround for these issues after giving up on trying to fix the providers (ok - and probably concerns about breaking changes.)   So in summary, it's a problem with the filesystem provider, not the cmdlets.  Perhaps the bug should be re-titled \"The Filesystem provider does not reliably report invalid wildcard patterns.\" or some such. And while actually fixing the existing provider's general behaviour seems unlikely but it should be possible to make it error out consistently (though that is a breaking change.) Out of curiosity - have you seen similar inconsistencies in the other providers e.g. the registry ?\r\n\r\nAnyway, if you'll update the title (and description?) , I'll mark it appropriately. Thanks.\r\n\r\n> So, to return to the question, what does well-formed mean in this context?\r\n\r\nSyntactically valid but semantically useless.\r\n",
+      "created_at": "2018-04-26T20:09:25Z",
+      "updated_at": "2018-04-26T20:09:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @BrucePay, I've updated the title as you've suggested.\r\n\r\n>  Out of curiosity - have you seen similar inconsistencies in the other providers e.g. the registry ?\r\n\r\nA quick test suggests that the other providers are not affected:\r\n\r\n```powershell\r\nGet-PsDrive | ? { $_.Provider.Name -ne 'FileSystem' } | Group-Object Provider | \r\n  ForEach-Object { $oldpwd = $PWD } { \r\n    $drive = ($_.Group[0].Name + ':'); \r\n    Write-Verbose -Verbose $drive; Set-location $drive; \r\n    try { Get-Item 'zzzz[]' } catch { $_ } \r\n  } { Set-Location $oldPwd }\r\n```\r\n\r\nThe above yields:\r\n\r\n```na\r\nVERBOSE: Alias:\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: zzzz[]\r\nAt C:\\Users\\jdoe\\Desktop\\pg\\pg.ps1:5 char:11\r\n+     try { Get-Item 'zzzz[]' } catch { $_ }\r\n+           ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Get-Item], ParameterBindingException\r\n    + FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.GetItemCommand\r\n\r\nVERBOSE: Cert:\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: zzzz[]\r\nAt C:\\Users\\jdoe\\Desktop\\pg\\pg.ps1:5 char:11\r\n+     try { Get-Item 'zzzz[]' } catch { $_ }\r\n+           ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Get-Item], ParameterBindingException\r\n    + FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.GetItemCommand\r\n\r\nVERBOSE: Env:\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: zzzz[]\r\nAt C:\\Users\\jdoe\\Desktop\\pg\\pg.ps1:5 char:11\r\n+     try { Get-Item 'zzzz[]' } catch { $_ }\r\n+           ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Get-Item], ParameterBindingException\r\n    + FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.GetItemCommand\r\n\r\nVERBOSE: Function:\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: zzzz[]\r\nAt C:\\Users\\jdoe\\Desktop\\pg\\pg.ps1:5 char:11\r\n+     try { Get-Item 'zzzz[]' } catch { $_ }\r\n+           ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Get-Item], ParameterBindingException\r\n    + FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.GetItemCommand\r\n\r\nVERBOSE: HKCU:\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: zzzz[]\r\nAt C:\\Users\\jdoe\\Desktop\\pg\\pg.ps1:5 char:11\r\n+     try { Get-Item 'zzzz[]' } catch { $_ }\r\n+           ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Get-Item], ParameterBindingException\r\n    + FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.GetItemCommand\r\n\r\nVERBOSE: Variable:\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: zzzz[]\r\nAt C:\\Users\\jdoe\\Desktop\\pg\\pg.ps1:5 char:11\r\n+     try { Get-Item 'zzzz[]' } catch { $_ }\r\n+           ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Get-Item], ParameterBindingException\r\n    + FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.GetItemCommand\r\n\r\nVERBOSE: WSMan:\r\nGet-Item : Cannot retrieve the dynamic parameters for the cmdlet. The specified wildcard character pattern is not valid: zzzz[]\r\nAt C:\\Users\\jdoe\\Desktop\\pg\\pg.ps1:5 char:11\r\n+     try { Get-Item 'zzzz[]' } catch { $_ }\r\n+           ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Get-Item], ParameterBindingException\r\n    + FullyQualifiedErrorId : GetDynamicParametersException,Microsoft.PowerShell.Commands.GetItemCommand\r\n```",
+      "created_at": "2018-04-26T20:24:20Z",
+      "updated_at": "2018-04-26T20:24:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for the change being breaking:\r\n\r\nI don't think that's too much of a concern, because something like `Get-Item tmp[].txt` never did anything _useful_: When it doesn't complain about the invalid pattern, it just fails quietly - it doesn't even match a file _literally_ named `tmp[].txt`.",
+      "created_at": "2018-04-26T20:31:32Z",
+      "updated_at": "2018-04-26T20:31:32Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The topic of a square bracket in filenames and paths keeps coming up.  I'm wondering if the following proposal makes sense:\r\n\r\n1. if the path exists, then use it before analyzing for any wildcard characters\r\n2. if the path contains invalid wildcard characters, treat as literal rather than returning an error about invalid wildcards\r\n3. otherwise, current behavior\r\n",
+      "created_at": "2020-03-25T23:11:48Z",
+      "updated_at": "2020-03-25T23:11:48Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, I think that makes the most sense, @SteveL-MSFT. ",
+      "created_at": "2020-03-26T01:44:19Z",
+      "updated_at": "2020-03-26T01:44:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Please see the discussion in https://github.com/PowerShell/PowerShell/issues/12168#issuecomment-604383872",
+      "created_at": "2020-03-26T11:53:36Z",
+      "updated_at": "2020-03-26T11:53:36Z"
+    }
+  ],
+  "created_at": "2018-04-25T20:32:56Z",
+  "number": 6733,
+  "state": "open",
+  "title": "The FileSystem provider does not reliably report invalid wildcard patterns",
+  "updated_at": "2021-11-30T15:05:28Z"
+}

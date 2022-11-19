@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4262",
+  "author": "SteveL-MSFT",
+  "body": "On CoreFx, UseShellExecute for Process start is false by default to be cross platform compatible.\r\nIn the case of a folder, Process.Start() returns Access Denied as it's not an executable.\r\nOn Windows we can use the ShellExecute path to have explorer open the folder.\r\n\r\nFix https://github.com/PowerShell/PowerShell/issues/4252\r\nFix https://github.com/PowerShell/PowerShell/issues/4282\r\n\r\n<!--\r\n\r\nIf you are a PowerShell Team member, please make sure you choose the Reviewer(s) and Assignee for your PR.\r\nIf you are not from the PowerShell Team, you can leave the fields blank and the Maintainers will choose them for you. If you are familiar with the team, feel free to mention some Reviewers yourself.\r\n\r\nFor more information about the roles of Reviewer and Assignee, refer to CONTRIBUTING.md.\r\n\r\n-->\r\n",
+  "closed_at": "2017-07-28T05:17:39Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "How about organizing the code in the following way, so that we can directly use the exception thrown from .NET Core to handle `NanoServer` and `IoT` cases.\r\n\r\n```CSharp\r\n#if UNIX\r\n        // Error code 13 -- Permission denied.\r\n        const int NOT_EXECUTABLE = 13;\r\n#else\r\n        // Error code 193 -- BAD_EXE_FORMAT (not a valid Win32 application).\r\n        const int NOT_EXECUTABLE = 193;\r\n#endif\r\n\r\n        if (ShouldProcess(resource, action))\r\n        {\r\n            var invokeProcess = new System.Diagnostics.Process();\r\n            bool invokeDefaultProgram = false\r\n\r\n            if (Directory.Exists(path) && !Platform.IsNanoServer && !Platform.IsIoT)\r\n            {\r\n                // Path points to a directory and it's not NanoServer or IoT, so we can opne the file explorer\r\n                invokeDefaultProgram = true;\r\n            }\r\n            else\r\n            {\r\n                try\r\n                {\r\n                    // Try Process.Start first. This works for executables on Win/Unix platforms\r\n                    invokeProcess.StartInfo.FileName = path;\r\n                    invokeProcess.Start();\r\n                }\r\n                catch (Win32Exception ex) when (ex.NativeErrorCode == NOT_EXECUTABLE)\r\n                {\r\n                    // The file is possibly not an executable. If it's headless SKUs, rethrow.\r\n                    if (Platform.IsNanoServer || Platform.IsIoT) { throw; }\r\n                    // Otherwise, try invoking the default program that handles this file.\r\n                    invokeDefaultProgram = true\r\n                }\r\n            }\r\n\r\n            if (invokeDefaultProgram)\r\n            {\r\n#if UNIX\r\n                const string quoteFormat = \"\\\"{0}\\\"\";\r\n                invokeProcess.StartInfo.FileName = Platform.IsLinux ? \"xdg-open\" : /* OS X */ \"open\";\r\n                if (NativeCommandParameterBinder.NeedQuotes(path))\r\n                {\r\n                    path = string.Format(CultureInfo.InvariantCulture, quoteFormat, path);\r\n                }\r\n                invokeProcess.StartInfo.Arguments = path;\r\n                invokeProcess.Start();\r\n#else\r\n                ShellExecuteHelper.Start(invokeProcess.StartInfo);\r\n#endif\r\n            }\r\n        }\r\n```",
+      "created_at": "2017-07-17T16:39:29Z",
+      "updated_at": "2017-07-17T16:39:29Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Travis CI froze at `Describing Web cmdlets tests using the cmdlet's aliases` for several runs, I'm afraid it could be a side effect from the `xdg-mime` ...",
+      "created_at": "2017-07-18T18:42:06Z",
+      "updated_at": "2017-07-18T18:42:06Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Any other feedback?",
+      "created_at": "2017-07-27T23:42:55Z",
+      "updated_at": "2017-07-27T23:42:55Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Very interesting approach of using `xdg-mime` and `AppleScript` to validate results!",
+      "created_at": "2017-07-28T05:16:17Z",
+      "updated_at": "2017-07-28T05:16:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Many thanks to @mklement0 for the idea to use  AppleScript!",
+      "created_at": "2017-07-28T05:24:33Z",
+      "updated_at": "2017-07-28T05:24:33Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@SteveL-MSFT  `Should invoke text file '<TestFile>' without error on Mac` is failing intermittently after this change\r\nhttps://travis-ci.org/PowerShell/PowerShell/jobs/258709720\r\nAlso, @daxian-dbw  PR here:\r\nhttps://travis-ci.org/PowerShell/PowerShell/jobs/258716345",
+      "created_at": "2017-07-28T21:31:56Z",
+      "updated_at": "2017-07-28T21:34:50Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I don't know for sure, but I presume that the issue arises from startup timing issues in the `'tell application \"TextEdit\" to count of windows'` AppleScript command, where the count returned may - unpredictably - either be `0` or `1` (or greater), if previously opened windows are automatically being restored (which macOS apps do by default).  \r\n\r\nThough - unless a previous run failed - a previous test run shouldn't leave an open window behind (I don't know how these tests are being run).\r\n\r\nNote that in a given macOS session this is not a concern with _Finder_, which can be assumed to be always running.\r\n\r\nA more defensive approach that _may_ fix the issue is:\r\n\r\n* to _start_ `TextEdit` with an initial, separate command that explicitly bypasses restoring previously opened windows: `open -F -a TextEdit`.\r\n\r\n* after the test, to _quit_ `TextEdit` with `'tell application \"TextEdit\" to quit' | osascript`\r\n",
+      "created_at": "2017-07-28T22:28:16Z",
+      "updated_at": "2017-07-28T22:28:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I've submitted a [PR](https://github.com/PowerShell/PowerShell/pull/4382) to address this.  First, I didn't realize the `invoke-item` tests were CI, they should have been Feature.  Second, I increased the timeout waiting for Finder since it seems slower on Travis-CI.",
+      "created_at": "2017-07-29T00:04:15Z",
+      "updated_at": "2017-07-29T00:04:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: If the increased timeout (for _TextEdit_, not Finder) fixes the issue, that's great.\r\n\r\nAgain, speaking in the abstract, not knowing the details of how Travis-CI runs, purely from a macOS / AppleScript perspective:\r\n\r\nNote how the failing test expected _3_ open windows, suggesting that TextEdit either was already open with 2 windows, or, more likely, that it had been open in a _previous_ session with 2 windows, which, on restarting, TextEdit _implicitly_ tries to reopen, which is a standard macOS feature named [_Resume_](https://support.apple.com/en-us/HT204005).\r\n\r\nBoth scenarios can cause unpredictable behavior:\r\n\r\n* If TextEdit happens _not_ to be running at the time of executing AppleScript `tell application \"TextEdit\" to count windows`, the window count reported is _unreliable_, because there can be race conditions that result in a lower window count being reported than the actual count of windows ultimately restored.\r\n\r\n* If TextEdit is already running and you're reopening an _already opened_ document, the window count will not change, because the existing window is simply _activated_.\r\n\r\nFor that reason, the defensive approaches I recommended earlier should generally make for a more robust solution (open TextEdit _without_ restoring previously opened windows, _quit_ TextEdit after the test is done).\r\n\r\n\r\n",
+      "created_at": "2017-07-29T01:41:50Z",
+      "updated_at": "2017-07-29T04:02:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: \r\n\r\nP.S.: Taking a step back: Arguably, in a CI environment, any macOS image should be configured with the Resume feature turned _off_ _system-wide_ (that feedback is probably for Travis CI):\r\n\r\n* To turn Resume off persistently system-wide:\r\n\r\n    * programmatically:\r\n\r\n          defaults write NSGlobalDomain NSQuitAlwaysKeepsWindows -bool false\r\n\r\n    * interactively: \r\n          \r\n         Go to `System Preferences > General`  and check `Close windows when quitting an app`.\r\n\r\n\r\n",
+      "created_at": "2017-07-29T01:57:00Z",
+      "updated_at": "2017-07-29T01:57:00Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 I see what you're saying now.  I'll update it if it becomes an issue, currently have other issues to address.  I appreciate the information you're providing.",
+      "created_at": "2017-07-29T03:51:16Z",
+      "updated_at": "2017-07-29T03:51:16Z"
+    }
+  ],
+  "created_at": "2017-07-15T01:58:26Z",
+  "number": 4262,
+  "state": "closed",
+  "title": "Support Invoke-Item -Path <folder>",
+  "updated_at": "2017-07-29T04:02:12Z"
+}

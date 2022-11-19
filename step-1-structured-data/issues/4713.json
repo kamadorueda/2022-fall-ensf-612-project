@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4713",
+  "author": "alx9r",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```powershell\r\nNew-Module m {\r\n    class c { \r\n        [object] Invoke () { return Invoke-Something }\r\n    }\r\n    function Invoke-Something { 'Invoke-Something' }\r\n    function New-InstanceOfC { [c]::new() }\r\n    function Invoke-MethodOfC { (New-InstanceOfC).Invoke() }\r\n    Export-ModuleMember *OfC\r\n} | Out-Null\r\n\r\n(New-InstanceOfC).Invoke()\r\nInvoke-MethodOfC\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nI expected both calls to `Invoke-Something` to succeed and output\r\n```none\r\nInvoke-Something\r\nInvoke-Something\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\nNeither call to `Invoke-Something` succeeds.\r\n\r\n```none\r\nInvoke-Something : The term 'Invoke-Something' is not recognized as the name of a cmdlet, function, script file, or\r\noperable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try\r\nagain.\r\nAt C:\\Users\\un1\\Desktop\\test.ps1:3 char:37\r\n+         [object] Invoke () { return Invoke-Something }\r\n+                                     ~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : ObjectNotFound: (Invoke-Something:String) [], CommandNotFoundException\r\n    + FullyQualifiedErrorId : CommandNotFoundException\r\n\r\nInvoke-Something : The term 'Invoke-Something' is not recognized as the name of a cmdlet, function, script file, or\r\noperable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try\r\nagain.\r\nAt C:\\Users\\un1\\Desktop\\test.ps1:3 char:37\r\n+         [object] Invoke () { return Invoke-Something }\r\n+                                     ~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : ObjectNotFound: (Invoke-Something:String) [], CommandNotFoundException\r\n    + FullyQualifiedErrorId : CommandNotFoundException\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-beta\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-beta.6\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I can't speak to the underlying design issues (how things _should_ work in this case), but I can offer a pointer:\r\n\r\nYour code would work if you put the module code into a `*.psm1` file instead and import it with `Import-Module` or `using module`.\r\n\r\nNote that only with `using module` is the module's custom class truly imported into the caller's scope and accessible as `[c]` (modules neither by default export custom classes nor allow their explicit exporting; they're imported (implicitly) only with a `using module` statement, which is used at _parse_ time and must be the very 1st statement in the script).",
+      "created_at": "2017-09-01T19:54:31Z",
+      "updated_at": "2017-09-01T19:54:31Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">Your code would work if you put the module code into a *.psm1 file instead and import it with Import-Module...\r\n\r\nInteresting.  I confirmed this behavior.  I wonder if there is a good reason for the discrepancy in behaviors between the `.psm1`-backed and dynamic modules.\r\n\r\n",
+      "created_at": "2017-09-01T20:30:09Z",
+      "updated_at": "2017-09-01T20:30:09Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw I remember discussing this with you. What are the exact mechanics here?",
+      "created_at": "2018-04-19T18:23:06Z",
+      "updated_at": "2018-04-19T18:23:06Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "This issue is a duplicate of #2841 \r\n\r\nAll classes in a script block, including those in the nested script blocks, are emitted when the top level script block (`scriptblockast.Parent == null`) is compiled. After emitting the dyanmic types, the compiler will generate code to initialize the produced types when the top-level script block runs, of which one task is to associate thsoe types with the current active session state, so instances of those types can run methods using that session state.\r\n\r\nThis casues a problem to `New-Module m { class c { ... } }`, where the class `c` is supposed to be associated with the module session state when it's evaluated within `New-Module`, but it has already been associated with the active session state when running the top-level scirpt block `New-Module`.\r\nThe instance of `foo` cannot find `Invoke-Something` because it's not using the module session state when running `Invoke()`.\r\n\r\nWhen `Invoke()` runs, it's actually using the outer session state to resolve the command, and in this case, if `Invoke-Something` is defined in the scope chain in the outer session state, then it will find it. See the below code for comparison.\r\n```\r\n& {\r\n function Invoke-Something { \"Something\" }\r\n New-Module m {\r\n     class c {\r\n         [object] Invoke () { return Invoke-Something }\r\n     }\r\n     function New-InstanceOfC { [c]::new() }\r\n } | Out-Null\r\n (New-InstanceOfC).Invoke()\r\n }\r\nSomething\r\n```",
+      "created_at": "2018-05-02T23:46:08Z",
+      "updated_at": "2018-05-02T23:46:08Z"
+    }
+  ],
+  "created_at": "2017-08-31T00:16:38Z",
+  "number": 4713,
+  "state": "open",
+  "title": "PowerShell class methods cannot invoke non-exported functions.",
+  "updated_at": "2018-05-02T23:46:09Z"
+}

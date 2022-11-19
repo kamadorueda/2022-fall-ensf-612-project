@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9847",
+  "author": "Brad-Christie",
+  "body": "Any reason why `hidden` has no bearing on `ConvertTo-Json`? Seems that `Get-Member` honors visibility, but JSON serialization does not.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nClass Person {\r\n  hidden [string] $FirstName\r\n  hidden [string] $LastName\r\n\r\n  [string] $FullName\r\n\r\n  Person([string]$First, [string]$Last) {\r\n    $this.FirstName = $First\r\n    $this.LastName = $Last\r\n\r\n    $this.FullName = $First, $Last -join \" \"\r\n  }\r\n\r\n  [string] ToString() {\r\n    Return $this.FullName\r\n  }\r\n}\r\n\r\n$jDoe = [Person]::new(\"John\", \"Doe\")\r\n\r\nWrite-Output \"`nProperties:\"\r\n$jDoe | Get-Member -MemberType \"Property\" | Format-Table \"Name\", \"MemberType\"\r\n\r\nWrite-Output \"`nJSON:\"\r\n$jDoe | ConvertTo-Json\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nProperties:\r\n\r\nName     MemberType\r\n----     ----------\r\nFullName   Property\r\n\r\n\r\nJSON:\r\n{\r\n  \"FullName\": \"John Doe\"\r\n}\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nProperties:\r\n\r\nName     MemberType\r\n----     ----------\r\nFullName   Property\r\n\r\n\r\nJSON:\r\n{\r\n  \"FirstName\": \"John\",\r\n  \"LastName\": \"Doe\",\r\n  \"FullName\": \"John Doe\"\r\n}\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.1\r\nPSEdition                      Core\r\nGitCommitId                    6.2.1\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nFWIW, Appears `ConvertTo-Xml -As \"String\"` _does_ honor visibility:\r\n\r\n```none\r\n<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<Objects>\r\n  <Object Type=\"Person\">\r\n    <Property Name=\"FullName\" Type=\"System.String\">John Doe</Property>\r\n  </Object>\r\n</Objects>\r\n```\r\n\r\nAlso, did see #6652 and there's some mention re: hidden with regards to format-* but didn't see anythign related to JSON serialization.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @markekraus I think you're probably the best person to ask about why this works this way / how we might align it more with other `Convert` cmdlets. \ud83d\ude42 ",
+      "created_at": "2019-06-06T20:40:00Z",
+      "updated_at": "2019-06-06T20:40:00Z"
+    },
+    {
+      "author": "Brad-Christie",
+      "author_association": "NONE",
+      "body": "Looked quickly, appears XML uses a `CustomSerialization` serializer, which appears to [iterate the PSObject.properties](https://github.com/PowerShell/PowerShell/blob/aba3bd5df1ea9d97790e7b232e50995e9f3d1e37/src/Microsoft.PowerShell.Commands.Utility/commands/utility/CustomSerialization.cs#L608) itself, which I assume implements some kind of filtering mechanism (through the `PSMemberInfoIntegratingCollection<>`). [`ConvertTo-Json`](https://github.com/PowerShell/PowerShell/blob/50efc4192d99bbbe20c34e03ab04aa2f7d7d82b1/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/ConvertToJsonCommand.cs), however, appears to [hand it off](https://github.com/PowerShell/PowerShell/blob/50efc4192d99bbbe20c34e03ab04aa2f7d7d82b1/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/ConvertToJsonCommand.cs#L128) to newtonsoft without allowing it the benefit of examining context, therefore it implicitly assembles it via reflection.\r\n\r\nLooks like you'd have to create a ContractResolver and pass it off that context for it to work the same, at least from what I gathered from doing a preliminary. \ud83e\udd37\u200d\u2642\ufe0f",
+      "created_at": "2019-06-06T21:18:30Z",
+      "updated_at": "2019-06-06T21:35:27Z"
+    },
+    {
+      "author": "thezim",
+      "author_association": "CONTRIBUTOR",
+      "body": "Someone correct me if I\u2019m wrong but isn\u2019t serialization/deserialization a misnomer for the Convert* cmdlets? You are never going to get a functional class back out of a \u201cserialized\u201d class unless it a POCO to start with. It\u2019s something different by then in the example here.",
+      "created_at": "2019-06-11T03:33:22Z",
+      "updated_at": "2019-06-11T03:33:22Z"
+    },
+    {
+      "author": "Brad-Christie",
+      "author_association": "NONE",
+      "body": "@thezim I can appreciate that, but not looking to convert back. The example was handy given I ran into the issue, but the original intent is to use a model to build a final object. That object is then consumed by an external system, and I'd rather not expose the intermediary properties.\r\n\r\nThat said, It's still inconsistent behavior. Get-Member and Csv, Html & Xml work, so (IMHO) ConvertTo-Json should work too.",
+      "created_at": "2019-06-11T11:42:32Z",
+      "updated_at": "2019-06-11T11:43:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just to affirm that the current behavior is indeed unexpected:\r\n\r\n`Select-Object` (with wildcards) and `ConvertTo-Csv` / `Export-Csv` - sensibly - do _not_ include hidden properties - `ConvertTo-Json` should act the same.\r\n\r\n(`Export-CliXml` does, but there it makes sense (as-faithful-as-possible serialization); the rarely used `ConvertTo-Xml` does _not_).\r\n",
+      "created_at": "2019-11-17T21:57:52Z",
+      "updated_at": "2019-11-17T21:57:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "May be fixed in #11198 as a side effect. :-)",
+      "created_at": "2019-11-26T10:54:42Z",
+      "updated_at": "2019-11-26T10:54:42Z"
+    }
+  ],
+  "created_at": "2019-06-06T20:36:38Z",
+  "number": 9847,
+  "state": "open",
+  "title": "Class hidden properties still serialized to JSON",
+  "updated_at": "2021-01-15T10:43:34Z"
+}

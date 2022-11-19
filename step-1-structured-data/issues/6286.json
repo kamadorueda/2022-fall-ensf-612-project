@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6286",
+  "author": "alx9r",
+  "body": "I've been experimenting with an improved test fixture for PowerShell commands.  I am hoping to find a way to distinguish between script- and statement-terminating errors (using the terminology from PowerShell/PowerShell-Docs#1583).  A (very) simplified version of the core of the test fixture looks something like this:\r\n\r\n```PowerShell\r\nfunction TestFixture\r\n{\r\n    param\r\n    (\r\n        [System.Management.Automation.CommandInfo]\r\n        $CommandUnderTest\r\n        # ...\r\n    )\r\n    # ...\r\n    try\r\n    {\r\n        # ...\r\n        UpstreamFixturePart $InputObject |\r\n            & $CommandUnderTest @NamedArgs @ArgumentList |\r\n            DownstreamFixture\r\n        # ...\r\n    }\r\n    catch\r\n    {\r\n        # ...\r\n    }\r\n}\r\n```\r\n\r\nThe obvious way to distinguish between a script- and statement-terminating error is to test control flow behavior when the error occurs (see #6098 for an example).  The `try {}` around `$CommandUnderTest` in `TestFixture` is necessary to capture and record exceptions as they are thrown, and keep flow of control within the test fixture.  Unfortunately, the presence of that `try{}` block precludes the using control flow behavior to distinguish script- from statement-terminating errors because both kinds of errors result in the same control flow (ie. both jump to the catch block).\r\n\r\nI was hoping that `.WasThrownByThrowStatement` would provide enough information to distinguish between the two.  Unfortunately per #6288 and  [#3647 (comment)](https://github.com/PowerShell/PowerShell/issues/3647#issuecomment-369721446) that is not currently sufficient to distinguish.\r\n\r\n1. Is there a way to distinguish between script- and statement-terminating errors once they are caught in the scriptblock?\r\n2. Is there a way to preserve the distinction in control flow behavior between a statement- and script-terminating errors _and_ retain control of flow in the fixture?\r\n3. Is there some other way to distinguish between script- and statement-terminating errors in this scenario?",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Related #4837, #4781\r\n~Dup #3158~",
+      "created_at": "2018-03-02T05:22:31Z",
+      "updated_at": "2018-03-02T16:15:45Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@iSazonov This issue is not a dup of #3158:\r\n\r\n* #3158 is about distinguishing between terminating and non-terminating errors recorded in `$Error`\r\n* this issue is about distinguish between two kinds of terminating errors, script- and statement-terminating errors in a catch block",
+      "created_at": "2018-03-02T15:14:58Z",
+      "updated_at": "2018-03-02T15:14:58Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@mklement0 If you have the time, could you take a look at this and see if you have any ideas for how to achieve this?",
+      "created_at": "2018-03-13T17:36:34Z",
+      "updated_at": "2018-03-13T17:36:34Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Hi @alx9r, There aren't really three kinds of errors as such, just three dispositions of one kind of error. For example, if a command writes an error to error output, it's non-terminating. If `-ErrorAction Stop` is specified, that non-terminating write becomes a statement-terminating error. If there is a trap or try/catch in scope, the statement-terminating error is thrown to the catch block.  In this scenario, the same error object eventually becomes all three \"types\" as it flows through the system - it began as non-terminating, became terminating and then became an exception. (Note that the automatic change from statement-terminating error to exception in the presence of trap or try/catch is a fundamental semantic for PowerShell.) ",
+      "created_at": "2018-03-14T19:54:55Z",
+      "updated_at": "2018-03-14T19:54:55Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "\r\n@BrucePay \r\n>If -ErrorAction Stop is specified, that non-terminating write becomes a statement-terminating error.\r\n\r\nIn my experimentation `Write-Error -ea Stop`, for example, does not cause a statement-terminating error. \r\n Rather, `Write-Error -ea Stop` seems to always throw an exception.  In my experimentation the effect of `-ErrorAction` has been consistent with being an implementation detail of the command to which it is passed.   Do you mean `$ErrorActionPreference = 'Stop'` here?  \r\n\r\n>In this scenario, the same error object eventually becomes all three \"types\" as it flows through the system - it began as non-terminating, became terminating and then became an exception.\r\n\r\nI think I understand the escalation concept you are describing.  I have not, however, come across any one error source that observably escalates from non-terminating to statement-terminating to exception in the idealized way you describe.  Do you have an example of a command that observably behaves the way you describe?  Or are you describing an unobservable internal escalation process here?\r\n\r\n--------\r\n\r\nI arrived at the following table empirically ([test code here](https://gist.github.com/alx9r/3d3463cb7da2265f82b8fa1e075731ae)).  \r\n\r\n|ref.| Statement |  In `try{}`? | `ErrorActionPreference` | Exception Thrown by statement? |\r\n|---|-------------|---------------------------|-----------|---------------|\r\n| 1 |`throw`       | x | not `SilentlyContinue` | yes |\r\n| 2 |`throw`       | yes | `SilentlyContinue` | yes |\r\n| 3 |`throw`       | no | `SilentlyContinue` | no |\r\n| 4 |`ThrowTerminatingError()` | yes | x | yes |\r\n| 5 |`ThrowTerminatingError()` | no | `Stop`| yes |\r\n| 6 |`ThrowTerminatingError()` | no | `Continue` |  no |\r\n| 7 |`Write-Error -ea Stop` | x | x | yes | \r\n| 8 |`Write-Error` | x | `Stop` | yes |\r\n| 9 |`Write-Error` | x | `Continue` | no |\r\n\r\nx = does not matter\r\n\r\nAnother way to ask my original question is as follows:\r\n\r\nIs there a way to distinguish between a caught exception thrown by `throw` (ie. ref. 1 and 2) and an exception thrown by `ThrowTerminatingError()` (ie. ref. 4)?\r\n\r\nIn yet other words, is there a way to infer from a caught exception whether that exception would have been thrown in the absence of the `try{}catch{}` that caught it?\r\n\r\n",
+      "created_at": "2018-03-15T01:13:17Z",
+      "updated_at": "2018-03-15T01:13:40Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@alx9r: Nice writeup; to add to the general part:\r\n\r\nIndeed, to recap from the [error-handling saga](https://github.com/PowerShell/PowerShell-Docs/issues/1583):\r\n\r\n*  _Preference variable_ `$ErrorActionPreference = 'Stop'` makes _both_ nonterminating and statement-terminating errors throw an unhandled-by-default exception (for which I coined the term _script-terminating_ error, which I'll use in the remainder of this post).\r\n   \r\n* _Common parameter_ `-ErrorAction Stop`, by contrast, only affects _nonterminating_ errors and promotes them _directly to script-terminating_ errors.\r\n\r\nThis directly contradicts the docs, which do not distinguish between preference-variable and common-parameter use and categorically claim that `Stop` only affects _nonterminating_ errors (which is only true with the _common parameter_).\r\n\r\nYou can't help but wonder if the original intent was:\r\n\r\n* to never affect statement-terminating errors with _preference variable_ `$ErrorActionPreference = 'Stop'`, in line with the _common parameter_'s behavior and the documentation.\r\n\r\n* to have both `$ErrorActionPreference = 'Stop'` and `-ErrorAction Stop` promote _nonterminating_ errors to _statement_-terminating ones rather than to script-terminating ones.\r\n   * This would explain why `-ErrorAction Stop` has no effect on statement-terminating errors: they already _are_ statement-terminating errors; in other words: they already are in the desired target state.\r\n\r\nIn other words: the original intent may have been to _never_ terminate the script _by default_ , except with the use of `Throw`, and to instead _require_ use of `try`/`catch` or `trap` in order to effect termination.\r\n  * The [`Throw` documentation](https://github.com/PowerShell/PowerShell-Docs/blob/staging/reference/6/Microsoft.PowerShell.Core/About/about_Throw.md) confusingly talks about generating a \"terminating error\" too, without pointing out the fundamental distinction from a _statement_-terminating error.\r\n  * Additionally, the documentation's example use case shows use of `Throw` to enforce a mandatory parameter without prompting; of course, using this technique results in a _script_-terminating error, whereas cmdlets normally only generate _statement_-terminating errors, even in the face of incorrect syntax and, if the PowerShell instance was invoked with `-NonInteractive`, in the absence of mandatory parameters (declared without `Throw`).\r\n\r\n@BrucePay, can you shed light on this?\r\n",
+      "created_at": "2018-03-15T13:21:40Z",
+      "updated_at": "2018-03-15T13:24:16Z"
+    }
+  ],
+  "created_at": "2018-03-01T21:06:11Z",
+  "number": 6286,
+  "state": "open",
+  "title": "Is there a way to distinguish between caught script- and statement-terminating errors?",
+  "updated_at": "2018-03-15T13:24:16Z"
+}

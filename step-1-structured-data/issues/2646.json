@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2646",
+  "author": "EliadTech",
+  "body": "<!--\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](../docs/FAQ.md).\r\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\r\n- Fill out the following repro template\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\nRun Send-MailMessage with CC or BCC, but without TO, and with BodyAsHTML.\r\n\r\nExpected behavior\r\n-----------------\r\nEither throw error and break (because TO is empty) or send the email (to CC or BCC) without an error.\r\n\r\nActual behavior\r\n---------------\r\nYou get an error that the email address is invalid and the email is sent but empty.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.0.9740.0\r\nWSManStackVersion              3.0\r\nSerializationVersion           1.1.0.1\r\nCLRVersion                     4.0.30319.34014\r\nBuildVersion                   6.3.9740.0\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.2\r\n\r\n```\r\n",
+  "closed_at": "2018-09-18T21:32:32Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Just tried this on PS5.1 and can't replicate as TO cannot be empty\n\n``` powershell\nPS C:\\Users\\slee\\repos\\PowerShell> Send-MailMessage -Cc foo@bar.com -BodyAsHtml\n\ncmdlet Send-MailMessage at command pipeline position 1\nSupply values for the following parameters:\nFrom: test@test.com\nSubject: test\nTo[0]:\nSend-MailMessage : Cannot validate argument on parameter 'To'. The argument is null, empty, or an element of the\nargument collection contains a null value. Supply a collection that does not contain any null values and then try the\ncommand again.\nAt line:1 char:1\n+ Send-MailMessage -Cc foo@bar.com -BodyAsHtml\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : InvalidData: (:) [Send-MailMessage], ParameterBindingValidationException\n    + FullyQualifiedErrorId : ParameterArgumentValidationError,Microsoft.PowerShell.Commands.SendMailMessage\n```\n",
+      "created_at": "2016-11-15T22:21:26Z",
+      "updated_at": "2016-11-15T22:21:26Z"
+    },
+    {
+      "author": "EliadTech",
+      "author_association": "NONE",
+      "body": "That's because you left BodyAsHtml empty.\nI've just tested it again on PS 5.1.\nTry this:\n`Send-MailMessage -Cc foo@bar.com -BodyAsHtml 'Blablabla' -smtpserver exchange.bar.com -subject test -from tester@bar.com\n`\n",
+      "created_at": "2016-11-16T06:39:42Z",
+      "updated_at": "2016-11-16T06:41:16Z"
+    },
+    {
+      "author": "dayroncj",
+      "author_association": "NONE",
+      "body": "For future readers...\r\n\r\nThe error is because \"-To\" parameter cant be null or empty.  If the intend is to use \"-Bcc\" rather \"-To\", you can use a dummy email address like 'noreply@noreply.com' and set the \"-Bcc\" paramter with all the recipients.\r\n\r\nFor last, -BodyAsHtml is a boolean parameter thus no value is neccesary.",
+      "created_at": "2017-03-23T11:58:10Z",
+      "updated_at": "2017-03-23T11:58:10Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "To summarize the issue:\r\nThe cmdlet was used in a wrong way where the Boolean switch `-BodyAsHtml` was used in a similar fashion like `-Body`.\r\nSince the switch `-BodyAsHtml` takes no input object, the positional parameters kicks in. As all other parameters are named, the first positional parameter will be `-To`.\r\nHence the provided sample call\r\n```powershell\r\nSend-MailMessage -Cc foo@bar.com -BodyAsHtml 'Blablabla' -smtpserver exchange.bar.com -subject test -from tester@bar.com\r\n```\r\ncould be written as\r\n```powershell\r\nSend-MailMessage -Cc foo@bar.com -BodyAsHtml -To 'Blablabla' -smtpserver exchange.bar.com -subject test -from tester@bar.com\r\n```\r\n\r\nInput 'Blablabla' can be bound to parameter `-To` as it is of type string. No problem occurs during binding. \r\nLater the string values for `-To`,`-Cc` and `-Bcc` are checked for correct format. This happens in the following lines of code in `Send-MailMessage`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/1abf290f839f766400a64ddd8b853709489c8aa5/src/Microsoft.PowerShell.Commands.Utility/commands/utility/Send-MailMessage.cs#L286-L319\r\n\r\nIt can be seen that in Line 315 an error is written, but the cmdlet won't terminate because of this error.\r\n\r\nUltimately the mail will be sent, though the \"To\" member of the `_mMailMessage` object is empty.\r\n\r\nPossible solutions:\r\n\r\n1. Make cmdlet parameters for `-To`,`-Cc` and `-Bcc` of type `System.Net.Mail.MailAddress`. This would perform a format check right away and abort the action if not all provided email addresses are valid.\r\nThis definitely would be a breaking change, since the current behavior allows invalid mail addresses to be specified, where PS will provide an error, but the mail could still be sent to all other addresses.\r\nThis current behavior can be convenient if you have a list of email addresses, but at least one mail address is not in the correct format, e.g.\r\n```powershell\r\nSend-MailMessage -To valid@test.com, notvalid@ ...\r\n```\r\nThe email would still be sent to all valid addresses.\r\n\r\n2. Validate that `-To` at least has one valid email address if addresses in `-Cc` and/or `-Bcc` are given. Easily spoken, the property \"To\" of `_mMailMessage` is not allowed to be empty.",
+      "created_at": "2018-08-25T21:00:12Z",
+      "updated_at": "2018-08-25T21:04:00Z"
+    },
+    {
+      "author": "adityapatwardhan",
+      "author_association": "MEMBER",
+      "body": "@ThreeFive-O Thanks for the detailed analysis. Can this issue be closed since, the cmdlet is behaving as expected?",
+      "created_at": "2018-09-17T17:07:58Z",
+      "updated_at": "2018-09-17T17:07:58Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "@adityapatwardhan In my opinion this issue can be closed. But another issue or PR should be made to improve the user experience when using non-valid email addresses in `-To`, `-Cc` and `-Bcc`.\r\nIt's on my To-Do, but other PRs for this cmdlet are more important, which I want to fix first.",
+      "created_at": "2018-09-17T17:14:25Z",
+      "updated_at": "2018-09-17T17:14:25Z"
+    }
+  ],
+  "created_at": "2016-11-09T07:49:52Z",
+  "number": 2646,
+  "state": "closed",
+  "title": "Send-MailMessage throw error and send the email",
+  "updated_at": "2018-09-18T21:32:32Z"
+}

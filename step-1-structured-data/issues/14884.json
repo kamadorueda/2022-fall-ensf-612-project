@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14884",
+  "author": "jazzdelightsme",
+  "body": "Just like re-executing `Add-Type` for a snippet of C# code that has not changed, reloading a module that uses classes should also continue to work--even if a script file that contains the [unmodified] class has changed.\r\n\r\n(I felt this problem was covered by #14250, but the owner closed it, and this problem is still irritating us, to the point we might just rip out all usage of PowerShell classes.)\r\n\r\nThis does not only come up during development scenarios. For example, I have a module that auto-updates itself, and then instructs the end user to run \"`Import-Module [...] -Force`\" to pick up the changes. (And then I get complaints from users when the module breaks in a really nonsensical-looking way.)\r\n\r\nThe key to the repro below is touching the file where the class is defined (before re-importing the module). You don't have to change the class definition; just add some whitespace somewhere else in the file. Which makes me think that the logic out there for deciding whether to generate a new runtime type for the class is making its decision based on whether the containing file has changed or not, but could do better by looking at just the extent where the class is defined.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nmkdir Repro_gh_14250 | Out-Null\r\npushd Repro_gh_14250\r\nNew-ModuleManifest -Path .\\Repro.psd1 -RootModule Repro.psm1\r\n\r\n@'\r\n$script:data = [ordered] @{\r\n    First = @(\"Primo\", 123)\r\n    Second = @(\"Secundo\", 456)\r\n}\r\n\r\nclass ReproType\r\n{\r\n    [string] $Name\r\n    [int] $Number\r\n}\r\n\r\n$TheList = @()\r\nforeach( $key in $script:data.Keys )\r\n{\r\n    $newThing = [ReproType]::new()\r\n    $newThing.Name = $script:data[ $key ][ 0 ]\r\n    $newThing.Number = $script:data[ $key ][ 1 ]\r\n\r\n    $TheList += $newThing\r\n}\r\n\r\nfunction Get-TheList\r\n{\r\n    [CmdletBinding()]\r\n    param()\r\n\r\n    process { return $TheList }\r\n}\r\n'@ > Stuff1.ps1\r\n\r\n@'\r\nfunction Show-TheList\r\n{\r\n    [CmdletBinding()]\r\n    param( [ReproType[]] $TheItems )\r\n\r\n    process\r\n    {\r\n        foreach( $item in $TheItems )\r\n        {\r\n            Write-Host $item.Name -Fore Cyan -NoNewline\r\n            Write-Host \": \" -NoNewline\r\n            Write-Host $item.Number -Fore Yellow\r\n        }\r\n    }\r\n}\r\n\r\nfunction Repro\r\n{\r\n    [CmdletBinding()]\r\n    param()\r\n\r\n    $stuff = @( Get-TheList )\r\n    Show-TheList $stuff\r\n}\r\n'@ > Stuff2.ps1\r\n\r\n@'\r\n\r\n. \"$PSScriptRoot\\Stuff1.ps1\"\r\n. \"$PSScriptRoot\\Stuff2.ps1\"\r\n\r\n'@ > Repro.psm1\r\n\r\nipmo .\\Repro.psd1 -Force\r\nRepro\r\n'# nothing' >> .\\Stuff1.ps1\r\nipmo .\\Repro.psd1 -Force\r\nRepro    # EXPECTED: it works. ACTUAL: Cannot process argument transformation on parameter 'TheItems'. Cannot convert the \"ReproType\" value of type \"ReproType\" to type \"ReproType\".\r\n\r\n```\r\n\r\n## Expected behavior\r\n\r\nNo problems after reloading the module.\r\n\r\n## Actual behavior\r\n\r\nAfter reloading the module, I get errors when using the [unmodified] class:\r\n\r\n```none\r\nCannot process argument transformation on parameter 'TheItems'. Cannot convert the \"ReproType\" value of type \"ReproType\" to type \"ReproType\"\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0-preview.3\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0-preview.3\r\nOS                             Microsoft Windows 10.0.20293\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Just like re-executing `Add-Type` for a snippet of C# code that has not changed reloading a module that uses classes should also continue to work--even if a script file that contains the [unmodified] class has changed.\r\n\r\nA couple of questions on the expectations of the change:\r\n\r\n- Which `SessionState` (module) would you expect it to be bound to?\r\n- Would you expect all static properties to remain unchanged or would you expect them reinitialized to default and for static constructors to be reinvoked?\r\n- If you have a static constructor that changes module state, would you expect the new module instance to reflect those changes?",
+      "created_at": "2021-02-23T03:30:42Z",
+      "updated_at": "2021-02-23T17:39:14Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Which SessionState (module) would you expect it to be bound to?\r\n\r\nThe new one. (The old version of the module is effectively gone, replaced by force-importing the updated version.)\r\n\r\n> Would you expect all static properties to remain unchanged or would you expect them reinitialized to default and for static constructors to be reinvoked?\r\n\r\nReinitialized to default; static constructors re-invoked.\r\n\r\n> If you have a static constructor that changes module state, would you expect the new module instance to reflect those changes?\r\n\r\nYes.\r\n\r\nIn other words, I expect force-importing the module to be [nearly*] equivalent to just importing that version of the module in a session where no previous version had been loaded. (*of course that does not apply to global session state)",
+      "created_at": "2021-02-23T05:52:26Z",
+      "updated_at": "2021-02-23T05:52:26Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "> > Just like re-executing Add-Type for a snippet of C# code\r\n\r\nI should add that yes, I understand my expectations for C# code are not quite the same as for PowerShell classes. I think this is simply fallout from the fact that C# classes added via `Add-Type` are not tied to session state, but are necessarily global. This is due to limitations of .NET (can't unload the type when a module is unloaded, for example).\r\n\r\nBecause C# classes are effectively global state, that means they continue to work just fine when the module is reloaded. It is true that static constructors are not re-run when the module is re-imported, so if I were storing state in C# static members, I would have to understand that these would be tied to global session state, not module (and therefore state from before the reload could be around afterward). But for PowerShell classes (a first-class, built-in thing), if they are going to be tied to the module, then they should be tied to the module, and continue to work, even when the module is reloaded.",
+      "created_at": "2021-02-23T06:11:21Z",
+      "updated_at": "2021-02-23T06:11:21Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> But for PowerShell classes (a first-class, built-in thing), if they are going to be tied to the module, then they should be tied to the module, and continue to work, even when the module is reloaded.\r\n\r\nI should clarify that they *do* work when reloaded, the difference is largely in design.  `using module` is a parse time concept where `Import-Module` is a runtime concept.  It's possible that this could be made to work in *very* specific situations by reusing the type definition and manually reinitializing everything *only* when `Import-Module -Force` is used.\r\n\r\nThat's a pretty big work item with a lot of risk but I can't quickly see why it'd be impossible.  Though the situations where that is feasible would be pretty limited, so for a user outside of this thread it would be challenging to figure out why it's working sometimes and failing others.",
+      "created_at": "2021-02-23T16:49:22Z",
+      "updated_at": "2021-02-23T17:39:26Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I should clarify that they do work when reloaded\r\n\r\nSorry, I don't mean to be obtuse, but: the point of this Issue is that they demonstrably do NOT work when reloaded (see the repro steps). I am not sure where our miscommunication is... can you please clarify?",
+      "created_at": "2021-02-23T17:27:38Z",
+      "updated_at": "2021-02-23T17:27:38Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Sorry, I don't mean to be obtuse, but: the point of this Issue is that they demonstrably do NOT work when reloaded (see the repro steps). I am not sure where our miscommunication is... can you please clarify?\r\n\r\nAhh I see, this is different from the issue you linked as none of it is exposed outside the module.  Type is probably cached in the AST and not correctly invalidated. Outside of function signatures (parameter types, attributes, etc) it'll work with forced reloads though.\r\n\r\nI went ahead and hid my other comments as outdated, thanks for the correction.",
+      "created_at": "2021-02-23T17:43:58Z",
+      "updated_at": "2021-02-23T20:25:03Z"
+    }
+  ],
+  "created_at": "2021-02-22T22:13:04Z",
+  "number": 14884,
+  "state": "open",
+  "title": "Class broken when containing file is updated (Cannot convert the \"ReproType\" value of type \"ReproType\" to type \"ReproType\")",
+  "updated_at": "2021-05-06T17:15:21Z"
+}

@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4519",
+  "author": "FriedrichWeinmann",
+  "body": "Hi,\r\n\r\nI'm trying to create a parameter class that can be directly bound to a `PSCredential` parameter.\r\nA simple example use of the objective:\r\n```PowerShell\r\n$cred = [DbaCredential]\"foo\\bar\"\r\nGet-WmiObject -ComputerName \"computer1\" -Credential $cred -Class \"Win32_OperatingSystem\"\r\n```\r\nThis parameter class is basically a functionality wrapper around the PSCredential object (So I didn't try to reinvent security. Not good enough for that). When using it like this however I am rewarded by a seriously awesome message in red:\r\n![image](https://user-images.githubusercontent.com/23364253/29043132-19163e1e-7bba-11e7-9f98-7679a72dfc92.png)\r\n\r\nNow, this parameter class is for module-internal use only, so I suppose I could just call it like this:\r\n```PowerShell\r\n$cred = [DbaCredential]\"foo\\bar\"\r\nGet-WmiObject -ComputerName \"computer1\" -Credential $cred.Credential -Class \"Win32_OperatingSystem\"\r\n```\r\nWhich would work just fine. My queen and project leader however would appreciate to not confuse random contributors (because we already have a lot of fancy features and we don't want to scare them away. They are trying to help after all). Every little thing adds up and so I've spent a few hours trying to make it work.\r\nBy now I really want to know what the heck is happening here, out of sheer bloody-mindedness!\r\n\r\nWhat I've tried so far:\r\n\r\n - Set up implicit conversion\r\n - Implemented `IConvertible`\r\n - Created a PSTypeConverter for the conversion and attached it to the input type.\r\n\r\nGuess what ... none of it worked.\r\nGiving up on it, I dug down into the exception and PowerShell code (well ... it was more a parallel thing, alternating between the two):\r\n\r\n - The parameter binding passes it to the `CredentialAttribute`'s `Transform` method. This in return calls `LanguagePrimitives`'s `T FromObjectAs<T>` method to have it bake a `PSCredential` object. In that method it tries to cast to PSCredential _which should be working, dangit!_ , returns null instead and the `Transform` method throws the exception which is then relayed by the parameter binding.\r\n\r\nWhat is happening here and what did I forget? Any ideas?\r\n\r\nThe current implementation can be checked out on our [dbatools](https://github.com/sqlcollaborative/dbatools/tree/DbaCredentialParameter) project's DbaCredentialParameter branch\r\n\r\nThanks in advance for any ideas, inspiration or suggestions,\r\nCheers,\r\nFred",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "In case you don't strictly need an actual _.NET_ type, here's a simple all-PowerShell alternative using PowerShell's ETS (extended type system):\r\n\r\n* Define a function `New-DbaCredential` that creates `[PSCredential]` instances that are ad-hoc-decorated with the additional members you needed and assign them custom _PS_ type name `DbaCredential`.\r\n\r\n* The resulting instances will still behave like `[PSCredential]` in the context of cmdlet calls, yet you can access the extra members as needed; `Get-Member` will report the made-up type name `DbaCredential`.\r\n\r\n```powershell\r\n\r\nfunction New-DbaCredential {\r\n\r\n  param([string] $UserName = (whoami), $Foo, $Bar)\r\n\r\n  # Construct a [PSCredential] instance...\r\n  # Note: This will prompt for a password.\r\n  $cred = Get-Credential -UserName $UserName -Message 'Enter password:'\r\n\r\n  # Now shamelessy lie about the output object's type...\r\n  $cred.pstypenames.Insert(0, 'DbaCredential')\r\n\r\n  # ... and decorate it with your custom properties and output the result.\r\n  Add-Member -InputObject $cred  -PassThru -NotePropertyMembers @{ Foo = $Foo; Bar = $Bar }\r\n\r\n}\r\n```\r\n\r\nNow you can construct instances of your custom \"type\":\r\n\r\n```powershell\r\n> $custCred = New-DbaCredential -UserName jdoe -Foo f -Bar b; $custCred\r\n\r\nFoo Bar UserName                     Password\r\n--- --- --------                     --------\r\nf   b   jdoe     System.Security.SecureString\r\n```\r\n\r\n```powershell\r\n> $custCred.pstypenames\r\nDbaCredential\r\nSystem.Management.Automation.PSCredential\r\nSystem.Object\r\n```\r\n\r\n```powershell\r\n> $custCred -is [PSCredential]\r\nTrue\r\n```\r\n\r\n\r\n",
+      "created_at": "2017-08-10T20:35:06Z",
+      "updated_at": "2017-08-10T21:06:59Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Heya, thanks for the input.\r\nIndeed, that would do for adding some new members on a limited scale.\r\n\r\nDesign goal:\r\n\r\n - Add input validation that gets inherited through\r\n - Avoid any changes in handling internally\r\n - Eliminate credential prompts on older PowerShell versions, without an eternal chain of if/else\r\n - Flexibly convert input of specified types without blanket-accepting everything\r\n\r\nSo basically, all we want to tell our contributors is `Instead of a [PSCredential], make it a [DbaCredential] parameter` and the rest will take care of itself.\r\n\r\nHowever - sorry - it really is beside the point for the purpose of this question. Because for me it really is about what is happening here on parameter binding. Maybe it is a bug. Maybe I am missing something. I want to know, in order to further my understanding of how parameter binding works.",
+      "created_at": "2017-08-11T02:04:09Z",
+      "updated_at": "2017-08-11T02:04:09Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Without debugging, I'm guessing the problem is [here](https://github.com/PowerShell/PowerShell/blob/0bfee35525c04761dad542c7b52403f0643de716/src/System.Management.Automation/security/CredentialParameter.cs#L59) - `LanguagePrimitives.FromObjectAs` is essentially the C# `as` operator, but this method also unwraps a `PSObject`.\r\n\r\nThis means your implicit conversion operator will not help, the transformation is converting your value to `null`.  The fix might be as simple as using `LanguagePrimitives.TryConvertTo<PSCredential>` instead.",
+      "created_at": "2017-08-11T05:48:43Z",
+      "updated_at": "2017-08-11T05:48:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@FriedrichWeinmann: Got it, thanks for the feedback (on my somewhat self-indulgent workaround). \r\n\r\nKudos for a sophisticated approach. \r\n\r\nThe link to your source doesn't seem to work, but [this one does](https://github.com/sqlcollaborative/dbatools/blob/master/bin/projects/dbatools/dbatools/Parameter/DbaCredentialParameter.cs).",
+      "created_at": "2017-08-11T08:53:24Z",
+      "updated_at": "2017-08-11T08:53:24Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Heya @lzybkr ,\r\nthanks for the pointer, though it's more [this](https://github.com/PowerShell/PowerShell/blob/0bfee35525c04761dad542c7b52403f0643de716/src/System.Management.Automation/security/CredentialParameter.cs#L53) position that had me confounded. That string wouldn't work was kinda expected, but in the call from line 53 it tries to coerce it into a PSCredential object by casting it - which bloody darned well should be working, as far as I can see.\r\n\r\nJust did a short code extraction of it though, in order to test things out:\r\n```PowerShell\r\nAdd-Type @\"\r\n using System;\r\n using System.Management.Automation;\r\n\r\n public static class test\r\n {\r\n     public static PSCredential FromObjectAs(Object castObject)\r\n         {\r\n             PSCredential returnType = default(PSCredential);\r\n\r\n             // First, see if we can cast the direct type\r\n             PSObject wrapperObject = castObject as PSObject;\r\n             if (wrapperObject == null)\r\n             {\r\n                 returnType = (PSCredential)castObject;\r\n             }\r\n             // Then, see if it is an PSObject wrapping the object\r\n             else\r\n             {\r\n                 returnType = (PSCredential)wrapperObject.BaseObject;\r\n             }\r\n\r\n             return returnType;\r\n         }\r\n }\r\n \"@\r\n[test]::FromObjectAs($cred)\r\n```\r\nAnd it definitely is throwing an invalid cast exception.\r\nI just don't see why ...",
+      "created_at": "2017-08-15T06:14:13Z",
+      "updated_at": "2017-08-15T06:14:13Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@FriedrichWeinmann - in your example, your implicit operator is not called because the **static** type of the parameter is `object`. Something like this should work:\r\n\r\n```C#\r\n   returnType = (PSCredential)(castObject as DbaCredentialParameter)\r\n```\r\n\r\nOf course this can't work in PowerShell because PowerShell won't statically know your type.\r\n\r\n",
+      "created_at": "2017-08-15T17:38:12Z",
+      "updated_at": "2017-08-15T17:38:12Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "argh. Alright and good to know, thanks for the info.\r\nSo basically, in order for it to work, I'd have to add that operator to `Object` itself? Somehow I doubt the system makes that possible ... :(\r\nBut thank you very much for explaining that. Doesn't look like there's much I can do then (Still gonna poke around a bit when I've got the time).",
+      "created_at": "2017-08-16T06:09:55Z",
+      "updated_at": "2017-08-16T06:09:55Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Alright, did some poking around:\r\n\r\n - Cannot extend class to add operators when it's not in my own library\r\n - Cannot extend PSCredential, as it is sealed (whyever. I'm sure that made sense to some people, can't for the heck of me see it though)\r\n - Cannot undo the credential attribute\r\n\r\nErgo: Mission impossible.\r\n\r\nWhile I'm somewhat disgruntled over the entire parameter binding/type coercion system being ignored for pscredentials, just to force credential prompt (which can be implemented in a different way btw - at least our prompt works just fine as well and we don't mess with parameter attributes), there is little I can do about it. Given that ... well, time to call it a day and spend my time on something with a better effort/success ratio ;)\r\n\r\nCheers,\r\nFred",
+      "created_at": "2017-08-17T00:01:36Z",
+      "updated_at": "2017-08-17T00:01:36Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Your questioned is answered - but there are changes we can make to the engine to enable your scenario - it won't help with Windows PowerShell, but going forward it might be helpful, right?",
+      "created_at": "2017-08-17T00:16:01Z",
+      "updated_at": "2017-08-17T00:16:01Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Indeed you could and in the long term it would be helpful.\r\nBasically, supporting consistency in the type coercion process would help. It's extremely flexible and powerful, so hardcoding for a specific input type is not helpful as far as I can see it, so yes, I'd appreciate it. I don't really know how much impact 'fixing' this would have compared to the effort to do it - I use parameter classes heavily, but I don't know anybody else who does so - but even then it would make powershell behavior more uniform and consistent.\r\n\r\nBtw, I solved the prompt-for-credential issue with a constructor that accepts string. So when you just pass a name, it'll prompt as part of the default coercion process while binding the parameter (and I added a \"remember\" checkbox, so it'll remember the credential matched to the name for the duration of the process).\r\n\r\nThe link above is dead, but that's because the branch was merged into [development](https://github.com/sqlcollaborative/dbatools/tree/development). So if you want to check out our implementation, just download it and run `[DbaCredential]\"foo\"` (or build a dummy function to actually have it operate as parameter type).",
+      "created_at": "2017-08-17T00:33:04Z",
+      "updated_at": "2017-08-17T00:33:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe we could enhance binding to support IConvertible/PSTypeConverter ",
+      "created_at": "2021-01-15T04:59:57Z",
+      "updated_at": "2021-01-15T04:59:57Z"
+    }
+  ],
+  "created_at": "2017-08-07T20:03:08Z",
+  "number": 4519,
+  "state": "open",
+  "title": "PSCredential Parameterbinding quirks",
+  "updated_at": "2021-01-15T05:00:15Z"
+}

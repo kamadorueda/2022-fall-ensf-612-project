@@ -1,0 +1,181 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13640",
+  "author": "mklement0",
+  "body": "PR #12386 introduced _experimental_ feature `PSNativePSPathResolution`, which as of (at least) PowerShell Core 7.1.0-preview.7 has become a _default_ feature.\r\n\r\n* For problems with this feature in general, see #13644\r\n\r\nIts purpose is to translate _PowerShell-drive-based_ paths to _native filesystem_ paths, because external executables only understand the latter.\r\n\r\nThis translation is currently overzealous in that it nonsensically translates an argument that _starts with `:`_ (which clearly isn't a _drive-based path_).\r\n\r\n@DHowett has pinpointed the problematic behavior to: https://github.com/PowerShell/PowerShell/blob/3effa204103460c996a8612aa70718fdf924047d/src/System.Management.Automation/engine/NativeCommandParameterBinder.cs#L388-L406\r\n\r\n## Steps to reproduce\r\n\r\nOn Unix:\r\n\r\n```powershell\r\n/bin/echo :foo | Should -Be ':foo'\r\n```\r\n\r\nOn Windows:\r\n\r\n```\r\ncmd /c echo :foo | Should -Be ':foo'\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe test should succeed.\r\n\r\n## Actual behavior\r\n\r\nThe test fails, because the the current location's path is unexpectedly prepended to `:`\r\n\r\n```powershell\r\nExpected strings to be the same, but they were different. Expected length: 4 Actual length:   44 Strings differ at index 0.\r\nExpected: ':foo' But was:  '/Users/jdoe...'\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.7\r\n```\r\n",
+  "closed_at": "2022-07-19T00:25:47Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The bug is not in PSNativePSPathResolution. It is in `globber.GetProviderPath()`. Try `dir :` for demo.",
+      "created_at": "2020-09-16T03:13:33Z",
+      "updated_at": "2020-09-16T03:13:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You're right: ~~the bug also affects~~ The behavior also applies to arguments to _cmdlets_ that expect _item paths_, such as `Get-ChildItem` (`dir`).\r\n\r\nAnd it also surfaces if there's no globbing involved whatsoever: `Get-ChildItem -LiteralPath :`.\r\n\r\nAs such, it goes back to Windows PowerShell.\r\n\r\n[Update: `:` is simply interpreted as the start of a relative path.]\r\n\r\nHowever, with respect to _external executables_ it only surfaces since `PSNativePSPathResolution` was made a regular feature.\r\n",
+      "created_at": "2020-09-16T03:22:39Z",
+      "updated_at": "2020-09-16T15:48:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is not clear how should we react on ':name' or 'name:name' in both cases.",
+      "created_at": "2020-09-16T03:27:07Z",
+      "updated_at": "2020-09-16T03:27:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "In IsAbsolutePath() I see the comment:\r\n```\r\n                // If the : is the first character in the path then we\r\n                // must assume that it is part of the path, and not\r\n                // delimiting the drive name.\r\n```\r\nSo for `dir :` scenario it is by design and for first scenario we could do the same if first char is ':' but it it is still not clear what we should do for `name:name` in both scenarios.",
+      "created_at": "2020-09-16T04:10:38Z",
+      "updated_at": "2020-09-16T04:10:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Current behavior for path like `name1:name2` - throw if drive `name1` is not found. Should we change this and consider  `name1:name2` as file/directory name (if drive `name1` is not found) because we allow `:name`?",
+      "created_at": "2020-09-16T04:49:24Z",
+      "updated_at": "2020-09-16T04:49:24Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think we're missing the point here quite a bit tbh.\r\n\r\nThe problem that was originally raised on #13638 is that because we're looking for paths on all input parameters, we're breaking some use cases where an argument string is literally just `thing:thing` or even just `:thing` because PS is treating that as a relative path and it's being resolved to a full path. \r\n\r\n@DHowett's original example was:\r\n\r\n```\r\n& git log \":(top,exclude).git/\" \":(top,exclude)**/*.rec\"\r\n```\r\n\r\nThat's not meant to be a _path_ in the same way that PowerShell tends to think of paths. Some of these need to passed along _without_ being resolved at all, not as a file name/directory name or anything. With PSNativePSPathResolution a standard feature, if PS thinks it's a relative path it's _resolving_ it to what it thinks the full path \"should\" be. Which means an argument like this will never be passed to the executable verbatim. Which is going to be endlessly problematic.\r\n\r\nIf we get `name1:name2` and `name1` isn't a recognised physical drive or PSDrive, IMO it should be passed along verbatim.",
+      "created_at": "2020-09-16T13:01:36Z",
+      "updated_at": "2020-09-16T13:02:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Which is going to be endlessly problematic.\r\n\r\nIt seems only reliable way to implement PSNativePSPathResolution it is to know that native application expects a path.",
+      "created_at": "2020-09-16T14:15:51Z",
+      "updated_at": "2020-09-16T15:20:40Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> If we get name1:name2 and name1 isn't a recognised physical drive or PSDrive, IMO it should be passed along verbatim.\r\n\r\nIndeed, @vexx32, and that is actually how it _mostly_ already works (except that action is only required for _PSDrives_, not native filesystem drives), with an argument-initial `:` constituting the only exception that amounts to a _bug_, as described in the OP.\r\n\r\nSo the bottom line is: An argument that _starts with `:`_ is by definition _not_ a path based on a PS drive and therefore no attempt should be made to translate it to a native path.\r\n\r\nNote, however, that that doesn't necessarily mean _verbatim_, because on Unix _globbing_ may still have to be performed on an (unquoted)  `:`-prefixed argument, given that there you may have, say, a subdir named `:foo` containing `.txt` files, which should be glob-expanded by something like `/bin/echo :foo/*.txt` (to pass individual arguments `:foo/bar.txt`, ...)\r\n\r\n---\r\n\r\nI got confused by the behavior of `Get-ChildItem :` (and other provider cmdlets),  but that is really a separate issue:\r\n\r\nA filesystem-path-argument-initial `:` is interpreted as a _relative path_, but on Windows (unlike on Unix), file/directory _names_ mustn't contain `:`, so there is no point in trying to interpret as such.\r\n\r\nDoing so is probably not a big deal in practice,  (`cmd.exe` similarly yields a `File Not Found`), but the current error message, which claims _nonexistence_ (`Cannot find path '...' because it does not exist`) with the _full path_ based on the current location is a bit confusing.\r\n\r\n\r\n",
+      "created_at": "2020-09-16T14:18:38Z",
+      "updated_at": "2020-09-16T14:18:38Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Oh, `:` is a valid item name on Unix? Didn't know that. I guess I assumed it wasn't considered valid because that's what the path separator usually is on Unix systems. \ud83e\udd14 ",
+      "created_at": "2020-09-16T14:20:28Z",
+      "updated_at": "2020-09-16T14:20:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It seems only reliable way to implement PSNativePSPathResolution it is to know that native application expect a path.\r\n\r\n@iSazonov, unfortunately, that is impossible, and the current feature is _guesswork_, for sure, but I suspect that it will work seamlessly in the vast majority of cases.\r\n\r\nThat said, it's important:\r\n\r\n* To document the magic in detail.\r\n\r\n* To provide a way to _bypass_ the magic on demand.\r\n  * Currently, using _single_-quoting (`'...'`) rather than double-quoting (`\"...\"`) provides this bypass, but I think that is conceptually problematic and obscure and only works with _literal_ arguments to boot.\r\n\r\n> Oh, : is a valid item name on Unix? Didn't know that. I guess I assumed it wasn't considered valid because that's what the path separator usually is on Unix systems\r\n\r\n@vexx32, yes, that's surprising, but note that, similarly, `;` is a valid filename character on Windows.\r\n\r\n",
+      "created_at": "2020-09-16T14:23:48Z",
+      "updated_at": "2020-09-16T14:25:10Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "Incidentally, single quoting won't work for the use case that led me to discover the issue.\n\nMy original code was closer to...\n\n```\n& git log (Get-ExcludedLogPatterns)\n```\n\n...which I do not believe I can single-quote (or use `--%` on!)",
+      "created_at": "2020-09-16T15:26:35Z",
+      "updated_at": "2020-09-16T15:29:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> unfortunately, that is impossible, and the current feature is guesswork, for sure,\r\n\r\nI will reference this from #13428 native cmdlet class :-)\r\n\r\n> unfortunately, that is impossible, and the current feature is guesswork, for sure, but I suspect that it will work seamlessly in the vast majority of cases. \r\n\r\nIn the case we need an way to temporary disable the feature. It can fall us in bad history like `--%` and quotes.",
+      "created_at": "2020-09-16T15:27:48Z",
+      "updated_at": "2020-09-16T15:27:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@DHowett, with additional work - which invariably involves creating an auxiliary environment variable that pollutes the child process' environment - you _can_ use `--%` to work around the problem, but it is obviously cumbersome :\r\n\r\n```powershell\r\nPS> $env:_aux_arg = ':foo'; cmd --% /c echo %_aux_arg%\r\n:foo\r\n```\r\n\r\n---\r\n\r\n@iSazonov, implementing wrappers around all external CLIs that accept file-system paths is obviously impossible.\r\n\r\n> In the case we need a way to temporary disable the feature. It can fall us in bad history like --% and quotes.\r\n\r\nI agree, and, as stated, the current mechanism - single-quoting - is both obscure and inadequate, due to only working with _literals_.\r\n\r\nI'm not sure there's a good _in-call_ solution, and that makes me wonder whether this feature - as helpful as it may be in many cases - is worth implementing at all.\r\n",
+      "created_at": "2020-09-16T15:45:44Z",
+      "updated_at": "2020-09-18T22:43:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  implementing wrappers around all external CLIs that accept file-system paths is obviously impossible.\r\n\r\nYes, but the intention is to have API so that users can easily implement helpers for important/popular native application. For the case with `git` we could explicitly define parameters and specify which parameters the paths accept so that the engine can convert them correctly.\r\n",
+      "created_at": "2020-09-16T16:40:07Z",
+      "updated_at": "2020-09-16T16:40:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, I think that these wrappers are the wrong way to go, as previously argued in #13428, but we should continue this discussion there.\r\n\r\nAs for the issue at hand:\r\n\r\n* Even in the context of the current `PSNativePSPathResolution` implementation, the behavior with an `:`-initial argument is clearly a _bug_.\r\n\r\n* I've created #13644, where we can continue the discussion about the general problems with `PSNativePSPathResolution`.\r\n\r\n\r\n",
+      "created_at": "2020-09-16T18:44:41Z",
+      "updated_at": "2020-09-16T18:44:41Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "I do not believe that `Issue-Question` is the appropriate label for this issue. This is a significant regression in native tool use from one preview release to another, and we are at risk of shipping with it.",
+      "created_at": "2020-09-18T22:38:18Z",
+      "updated_at": "2020-09-18T22:38:18Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @SteveL-MSFT ",
+      "created_at": "2020-09-18T22:47:46Z",
+      "updated_at": "2020-09-18T22:47:46Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT, @joeyaiello - since we just hit RC1, here's a gentle ping on potentially shipping catastrophic and unavoidable behavior for invoking native executables. :smile:",
+      "created_at": "2020-10-02T17:06:08Z",
+      "updated_at": "2020-10-02T17:06:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "For 7.1, I'm going to revert the change to make this non-experimental",
+      "created_at": "2020-10-02T19:03:28Z",
+      "updated_at": "2020-10-02T19:03:28Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "We marked #13734 for back port to the 7.1 release branch",
+      "created_at": "2020-10-13T21:21:36Z",
+      "updated_at": "2020-10-13T21:21:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@TravisEz13 You say about 7.1 label here but a label in the PR is 7.0 - typo?",
+      "created_at": "2020-10-14T03:46:31Z",
+      "updated_at": "2020-10-14T03:46:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Looking the code I found that expansion of `~` (Home) is weird - it is on Windows only.",
+      "created_at": "2021-12-15T04:35:08Z",
+      "updated_at": "2021-12-15T04:35:08Z"
+    },
+    {
+      "author": "ImportTaste",
+      "author_association": "NONE",
+      "body": "This should really have the option of being controlled via a variable like PSNativeCommandArgumentPassing does, so it can be toggled off temporarily without restarting the terminal.",
+      "created_at": "2022-06-19T22:06:58Z",
+      "updated_at": "2022-06-19T22:06:58Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #17670, which has now been successfully released as `v7.3.0-preview.7`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.3.0-preview.7)\n",
+      "created_at": "2022-08-12T00:01:41Z",
+      "updated_at": "2022-08-12T00:01:41Z"
+    }
+  ],
+  "created_at": "2020-09-15T23:26:04Z",
+  "number": 13640,
+  "state": "closed",
+  "title": "Translating PSDrive-based path arguments for external (native) executables is overzealous (PSNativePSPathResolution)",
+  "updated_at": "2022-08-12T00:01:41Z"
+}

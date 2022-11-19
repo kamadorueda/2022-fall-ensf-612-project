@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16022",
+  "author": "derSchweiger",
+  "body": "Currently it's not possible to fire up a runspace instance in .NET Core. As soon as the .Open() method is called, the program gets stuck and errors after some time.\r\n\r\n### Steps to reproduce\r\n\r\nCorresponding code:\r\n```\r\nRunspace rs;\r\nvar pspi = new PowerShellProcessInstance();\r\npspi.Process.StartInfo.FileName = @\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\";\r\npspi.Process.Start();\r\nrs = RunspaceFactory.CreateOutOfProcessRunspace(new TypeTable(new string[0]), pspi);\r\nrs.Open();\r\n\r\nusing (PowerShell powershell = PowerShell.Create()) {\r\n    powershell.Runspace = rs;\r\n    powershell.AddScript(<some code>);\r\n    var output = powershell.Invoke();\r\n}\r\n```\r\n\r\n### Expected behavior\r\nOpen the runspace instance like in .NET Framework.\r\n\r\n\r\n### Actual behavior\r\n\r\nThe following Error occurs. \r\n\r\n```\r\nSystem.Management.Automation.Remoting.PSRemotingTransportException HResult=0x80131501 \r\nNachricht = The background process reported an error with the following message: D \r\nQuelle = System.Management.Automation\r\n```\r\n\r\n\r\n### Environment data\r\n\r\n- .NET Core 5.0 Console Application\r\n- Packages: Microsoft.PowerShell.SDK & System.Management.Automation (up-to-date)\r\n- Windows 10 Pro",
+  "closed_at": "2021-09-03T13:12:27Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Is it expected that pwsh's `OpenOutOfProcessRunspace` should work with Windows PowerShell rather than pwsh @PaulHigin ?",
+      "created_at": "2021-08-31T22:16:43Z",
+      "updated_at": "2021-08-31T22:16:43Z"
+    },
+    {
+      "author": "derSchweiger",
+      "author_association": "NONE",
+      "body": "Initializing the runspace with the `.CreateRunspace()` method instead of `.CreateOutOfProcessRunspace()` works but than it's not possible to use the cmdlet \"Add-PSSnapin\" anymore. I've to preload multiple powershell runspaces with the Exchange Management Shell Snapin. So this is kind of an unfortunate situation.",
+      "created_at": "2021-09-01T06:31:30Z",
+      "updated_at": "2021-09-01T06:31:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, Add-PSSnapin has been deprecated for years now. There are [newer Exchange modules](https://docs.microsoft.com/en-us/powershell/exchange/connect-to-exchange-online-powershell?view=exchange-ps) available that don't use snap-ins available, though I don't know whether it works for what you're looking for specifically.",
+      "created_at": "2021-09-01T12:13:04Z",
+      "updated_at": "2021-09-01T12:13:04Z"
+    },
+    {
+      "author": "derSchweiger",
+      "author_association": "NONE",
+      "body": "This module only supports Exchange Online and no On-Premise infrastructure - therefore, unfortunately, this doesn't fit into our needs. Since the \"Add-PSSnapin\" doesn't work with the newer Powershell SDKs, I've tried to open a \"standalone\" Powershell process with the `.CreateOutOfProcessRunspace()` method and import the Snapin afterwards.\r\nHowever, if this method isn't supported either, I think that there is no chance to load the Exchange PSSnapin in a persistant runspace?",
+      "created_at": "2021-09-01T12:52:25Z",
+      "updated_at": "2021-09-01T12:52:25Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "There is definitely a way to do it, though I'm not super familiar with how it works. From a scan through the code used for `Import-Module -UseWindowsPowerShell` it looks like `New-PSSession` is used to create a session with Windows PowerShell, and then that session is used to send commands into it.\r\n\r\nSee:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/e2ee8e7e1fa3854fb22dc1c494c01351f19ddff6/src/System.Management.Automation/engine/Modules/ImportModuleCommand.cs#L1912-L1915\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/e2ee8e7e1fa3854fb22dc1c494c01351f19ddff6/src/System.Management.Automation/engine/Modules/ImportModuleCommand.cs#L2018-L2091\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/e2ee8e7e1fa3854fb22dc1c494c01351f19ddff6/src/System.Management.Automation/engine/Modules/ModuleCmdletBase.cs#L4827-L4850",
+      "created_at": "2021-09-01T12:59:51Z",
+      "updated_at": "2021-09-01T12:59:51Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@derSchweiger Yes, WindowsPowerShell is supported with PowerShellProcessInsance, but you are not using it correctly.  You should not use the default constructor but one of the parameterized constructors that sets up the internal state.  PowerShell has to be started in 'server mode' in the new process instance.  Yours does not run in server mode and so cannot communicate over the remote channel, and you see the hang.  Also you should provide the default type table to ensure common types are re-hydrated over the connection.\r\n\r\n```powershell\r\nPS C:\\> $typeTable = [System.Management.Automation.Runspaces.TypeTable]::LoadDefaultTypeFiles()\r\n\r\nPS C:\\> [System.Management.Automation.Runspaces.PowerShellProcessInstance]::new\r\n\r\nOverloadDefinitions\r\n-------------------\r\nSystem.Management.Automation.Runspaces.PowerShellProcessInstance new(version **powerShellVersion**, pscredential\r\ncredential, scriptblock initializationScript, bool useWow64, string workingDirectory)\r\nSystem.Management.Automation.Runspaces.PowerShellProcessInstance new(version **powerShellVersion**, pscredential\r\ncredential, scriptblock initializationScript, bool useWow64)\r\n```\r\n\r\nFor example:\r\n```powershell\r\nPS C:\\> $typeTable = [System.Management.Automation.Runspaces.TypeTable]::LoadDefaultTypeFiles()\r\nPS C:\\> $pi = [System.Management.Automation.Runspaces.PowerShellProcessInstance]::new(\"5.1\", $null, $null, $false)\r\nPS C:\\> $rs = [runspacefactory]::CreateOutOfProcessRunspace($typeTable, $pi)\r\nPS C:\\> $rs.Open()\r\nPS C:\\> $ps = [powershell]::Create($rs)\r\nPS C:\\> $ps.AddScript('$psversionTable').Invoke()\r\n\r\nName                           Value\r\n----                           -----\r\nPSRemotingProtocolVersion      2.3\r\nCLRVersion                     4.0.30319.42000\r\nPSVersion                      5.1.19041.1151\r\nBuildVersion                   10.0.19041.1151\r\nWSManStackVersion              3.0\r\nSerializationVersion           1.1.0.1\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSEdition                      Desktop\r\n```\r\n\r\n",
+      "created_at": "2021-09-01T15:58:24Z",
+      "updated_at": "2021-09-01T15:58:24Z"
+    },
+    {
+      "author": "derSchweiger",
+      "author_association": "NONE",
+      "body": "@vexx32 connecting with a new PSSession should work, but that's my least favorized method because I would have to handle Exchange requests differently than usual requests. I'll use it, if there is no other option to import the Exchange Management Shell Snapin. I aim at deploying a single method to query all Powershell requests - regardless if it's for Exchange or any other cmdlet.\r\n\r\n@PaulHigin it seems like that this did the trick. I will test it and provide you with feedback afterwards.\r\n\r\nThanks to both of you!\r\n\r\n\r\n\r\n",
+      "created_at": "2021-09-02T14:04:21Z",
+      "updated_at": "2021-09-02T14:04:21Z"
+    },
+    {
+      "author": "derSchweiger",
+      "author_association": "NONE",
+      "body": "Everything works as it should. Thank you very much, I appreciate it!",
+      "created_at": "2021-09-03T13:12:27Z",
+      "updated_at": "2021-09-03T13:12:27Z"
+    }
+  ],
+  "created_at": "2021-08-31T14:16:30Z",
+  "number": 16022,
+  "state": "closed",
+  "title": ".NET Core: Opening a Runspace fails",
+  "updated_at": "2021-09-03T13:12:28Z"
+}

@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7157",
+  "author": "mklement0",
+  "body": "The current behavior may well be by design, but it would be helpful to understand why  - and document it.\r\n\r\n* Script blocks passed to dedicated `[scriptblock]`-typed parameters such as in the context of  `ForEach-Object` and `Where-Object`  run directly in the _caller's scope_.\r\n\r\n* Delay-bind script-block arguments / script blocks in calculated properties, by contrast, run in a _child_ scope, so that direct attempts to modify variables in the caller's scope create new local instances instead.\r\n\r\nContrast the following two commands:\r\n\r\n```powershell\r\n# $i in the script block is the *caller's* $i, so modifying it works across invocations.\r\nPS> $i = 0; 'a', 'b' | ForEach-Object { (++$i) }\r\n1\r\n2\r\n```\r\n\r\n```powershell\r\n# The script block runs in a *child* scope, so modifying $i modifies a local copy that\r\n# goes out of scope with the script block.\r\nPS> $i = 0; 'a', 'b' | Select-Object { (++$i) }\r\n\r\n (++$i) \r\n--------\r\n       1\r\n       1\r\n```\r\n\r\nNote how `$i` didn't increment across calls.\r\n\r\n---\r\n\r\nIf you do want `$i` to increment across calls, you currently need a somewhat obscure workaround based on `[ref]`:\r\n\r\n```powershell\r\nPS> $iRef = [ref] 0; 'a', 'b' | Select-Object { (++$iRef.Value) }\r\n\r\n (++$iRef.Value) \r\n-----------------\r\n                1\r\n                2\r\n\r\n```\r\n\r\n---\r\n\r\nChanging the behavior to consistently execute script blocks in the caller's would be a breaking change, though presumably of type [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\nWritten as of:\r\n\r\n```powershell\r\nPowerShell Core v6.1.0-preview.3\r\n```\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "This behavior is so subtle that people might have been implicitly taking advantage of the fact that delay-bind scripts doesn't **pollute** the caller's scope.\r\n\r\nMy understanding is that pipeline-extraction scripts (`ValueFromPipeline(ByPropertyName)`) are mapping that are supposed to be pure (free of side-effect), while clearly `ForEach-Object` is more on the side of imperative paradigm, resembling the `foreach` statement. The choice for `Where-Object` is somehow arbitrary, but is useful for the case\r\n\r\n```powershell\r\n$i = 0;\r\nGet-Items | Where-Object { (++$i) % 2 }\r\n```\r\n\r\nOne might ask why such usage wouldn't benefit the pipeline-extraction scenario, i.e., **what's wrong if we execute the extraction scripts in the caller's scope**. The answer is that there might be multiple parameters delay-bound. If the extraction script blocks have side effects, the order of extraction would affect the result. E.g., consider\r\n\r\n```powershell\r\n# Imaginary\r\n$i = 0;\r\nGet-SomeItem | Use-SomePipeline -IndexMod2 { <# ??? #> } -IndexMod3 { <# ??? #> }\r\n\r\n# Currently possible version\r\n$i = [pscustomobject]@{ 'Value' = 0 };\r\nGet-SomeItem | Use-SomePipeline -IndexMod2 { <# ??? #> } -IndexMod3 { <# ??? #> }\r\n```\r\n\r\nIt is impossible to write the script correctly without knowing the order of delay-binding -- should I increase `$i` in the script for `IndexMod2` or `IndexMod3`? I'm not sure whether PowerShell has the order of which parameter is bound before which documented. If that's undocumented, that's undefined to me, and if the extraction scripts had side effects, the whole script wouldn't be useful because of undefined behavior.\r\n\r\nThe invocation order for `ForEach-Object` and `Where-Object` is clear, so it makes sense to allow execution in the caller's scope.",
+      "created_at": "2019-03-14T23:35:42Z",
+      "updated_at": "2019-03-14T23:35:42Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> clearly ForEach-Object is more on the side of imperative paradigm\r\n\r\nAgreed. For `Foreach-Object` and `Where-Object`, running in the caller's scope allows us to do more than just writing results to the pipeline.\r\nAlso, `Foreach-Object` has `-Begin`, `-Process` and `-End` three script blocks, and they need to run in the same scope.\r\n\r\nAs for delay-bind script blocks in parameter binding, the purpose is simply to do some quick transformation/calculation on the value from pipeline, and it makes sense to isolate the execution to not pollute the caller's scope.",
+      "created_at": "2019-03-15T03:22:09Z",
+      "updated_at": "2019-03-15T03:22:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> This behavior is so subtle \r\n\r\nThe behavioral _distinction_ is indeed so subtle that it invites everlasting confusion.\r\nEven if you understand the rationale - and the multiple-delay-bind-script-block scenario is a good argument _for_ the distinction _in principle_, but, due to its exoticness, to my mind _not in practice_ - _remembering_ it is a challenge.\r\n\r\n> it makes sense to isolate the execution to not pollute the caller's scope.\r\n\r\nTo paraphrase a common saying: One person's pollution is another person's treasure.\r\n\r\nGiven:\r\n\r\n```powershell\r\nPS> $i = 0; 'a', 'b' | ForEach-Object { (++$i) }\r\n1\r\n2\r\n```\r\n\r\nwhy shouldn't a delay-bind script block with `Rename-Item` work the same?\r\n\r\n```powershell\r\n# Does NOT work as intended, because a *local* $i variable is created on every invocation.\r\nPS>  $i = 0; $null = New-Item -Force tf-a, tf-b; Get-Item tf-? |\r\n           Rename-Item -NewName { '{0}-{1}' -f ++$i, $_.Name  } -WhatIf\r\nWhat if: Performing ... \"Rename File\" on target \"Item: .../tf-a Destination: .../1-tf-a\".\r\nWhat if: Performing ... \"Rename File\" on target \"Item: .../tf-b Destination: .../1-tf-b\".\r\n```\r\n\r\nThat is not a hypothetical example, by the way: it's a real-world scenario for renaming files with sequence numbers that I've come across multiple times on Stack Overflow.\r\n\r\n\r\n",
+      "created_at": "2019-03-15T03:51:53Z",
+      "updated_at": "2019-03-15T03:55:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.: The flip side of this issue is that it's currently extremely cumbersome to implement your own cmdlet / advanced function that processes a given script block in the _caller's_ scope (\"dot-sourced\") with `$_` support, the way that `ForEach-Object`  / `Where-Object` / `Measure-Command` do - see #3581",
+      "created_at": "2019-03-15T04:02:07Z",
+      "updated_at": "2019-03-15T04:02:07Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, I've hit that one too @mklement0. Takes me a few attempts to realize what I'm doing wrong, and thankfully the solution is relatively easy -- just scope-bind the variable properly (either to $script: or $global: usually works OK.) \ud83d\ude04 ",
+      "created_at": "2019-03-15T04:02:29Z",
+      "updated_at": "2019-03-15T04:02:29Z"
+    },
+    {
+      "author": "wisemoth",
+      "author_association": "NONE",
+      "body": "> the solution is relatively easy -- just scope-bind the variable properly (either to $script: or $global: usually works OK.) \ud83d\ude04\r\n\r\n@vexx32 Would you please be able to expand on this?  Pretty sure I'm up against this issue, so wanted to explore your suggestion further.\r\n\r\n",
+      "created_at": "2020-06-17T08:58:40Z",
+      "updated_at": "2020-06-17T08:58:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0's not-working example was:\r\n```ps1\r\n$i = 0\r\n$null = New-Item -Force tf-a, tf-b; Get-Item tf-? |\r\n    Rename-Item -NewName { '{0}-{1}' -f ++$i, $_.Name  } -WhatIf\r\n```\r\n\r\nIn that case you can workaround it with something like:\r\n\r\n```ps1\r\n$script:i = 0\r\n$null = New-Item -Force tf-a, tf-b; Get-Item tf-? |\r\n    Rename-Item -NewName { '{0}-{1}' -f ++$script:i, $_.Name  } -WhatIf\r\n```\r\n\r\nGenerally you should only run into this kind of issue if you've a need to _set_ or change the variable value from inside the delay-bind scriptblock. \ud83d\ude42 ",
+      "created_at": "2020-06-17T13:25:09Z",
+      "updated_at": "2020-06-17T13:25:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @vexx32. Note that there's also the more obscure `[ref]`-based workaround from the OP, which, however, does have that advantage that it predictably targets the _parent_ scope (the caller's specific scope), whatever it may be (you could alternatively implement this via `Get-Variable` / `New-Variable -PassThru` in the calling scope):\r\n\r\n```powershell\r\n[ref] $iRef = 0; $null = New-Item -Force tf-a, tf-b; Get-Item tf-? |\r\n           Rename-Item -NewName { '{0}-{1}' -f ++$iRef.Value, $_.Name  } -WhatIf\r\n```",
+      "created_at": "2020-06-17T13:37:46Z",
+      "updated_at": "2020-06-17T13:38:30Z"
+    }
+  ],
+  "created_at": "2018-06-24T14:22:04Z",
+  "number": 7157,
+  "state": "open",
+  "title": "Do delay-bind scriptblocks / scriptblocks in calculated properties run in a child scope by design?",
+  "updated_at": "2021-06-24T23:09:48Z"
+}

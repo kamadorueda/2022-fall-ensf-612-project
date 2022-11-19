@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8315",
+  "author": "sba923",
+  "body": "Files in the OneDrive sync folder with the \"Files on Demand\" feature make use of a number of specific attribute bits, such as:\r\n\r\n0x00000200 | SparseFile\r\n0x00000400 | ReparsePoint\r\n0x00001000 | Offline\r\n0x00080000 | Pinned\r\n0x00100000 | Unpinned\r\n\r\n(non-exhaustive list)\r\n\r\nIn PowerShell 6.1, some of the bits are masked out, so code that runs in Windows PowerShell 5.1 will not run correctly under PowerShell 6.1.\r\n\r\n(this might be related to underlying .NET Core behavior, but the PS6 user\u2026 doesn't care ;-) )\r\n\r\n# Steps to reproduce\r\n\r\nRun the following commands under PowerShell 6.1:\r\n\r\n```\r\n\"'{0:x}' -f (gi 'C:\\Users\\steph\\OneDrive\\Always keep on this device.txt').Attributes\r\n\"'{0:x}' -f (gi 'C:\\Users\\steph\\OneDrive\\Free up space.txt').Attributes\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe output should be:\r\n```\r\n00080420\r\n00401620\r\n```\r\nlike in Windows PowerShell 5.1.\r\n\r\n# Actual behavior\r\nInstead, PowerShell 6.1 outputs:\r\n\r\n```\r\n00080020\r\n00400020\r\n```\r\n\r\n# Environment data\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-02-04T20:11:47Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "It appears to be a .NET limitation. Calling the API directly returns the same result as PowerShell.\r\n```powershell\r\n'{0:x}' -f ([system.io.file]::GetAttributes((resolve-path ~/onedrive/documents/mydoc.txt)))\r\n```",
+      "created_at": "2018-11-20T21:05:18Z",
+      "updated_at": "2018-11-20T21:05:18Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@sba923 would you mind opening an issue in [corefx repo](https://github.com/dotnet/corefx/issues)?",
+      "created_at": "2018-11-21T06:21:46Z",
+      "updated_at": "2018-11-21T06:21:46Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Done, it's at https://github.com/dotnet/corefx/issues/33644",
+      "created_at": "2018-11-21T08:04:45Z",
+      "updated_at": "2018-11-21T15:35:54Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Reopening as it appears the Windows APIs want this to be an application decision",
+      "created_at": "2018-12-05T02:18:11Z",
+      "updated_at": "2018-12-05T02:18:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "We probably need to call: https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/content/ntifs/nf-ntifs-rtlsetprocessplaceholdercompatibilitymode\r\n",
+      "created_at": "2018-12-05T20:44:23Z",
+      "updated_at": "2018-12-05T20:44:23Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think so too. But this looks like underdocumented to me, I would have no idea as to how to use that API...",
+      "created_at": "2018-12-06T20:24:35Z",
+      "updated_at": "2018-12-06T20:24:35Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "After all, this wasn't too hard ;-)\r\n\r\n````\r\nnamespace TestFileAttributes\r\n{\r\n    class Program\r\n    {\r\n\r\n        [DllImport(\"ntdll.dll\")]\r\n        static extern sbyte RtlQueryProcessPlaceholderCompatibilityMode();\r\n        [DllImport(\"ntdll.dll\")]\r\n        static extern sbyte RtlSetProcessPlaceholderCompatibilityMode(sbyte pcm);\r\n\r\n        const sbyte PHCM_APPLICATION_DEFAULT = 0;\r\n        const sbyte PHCM_DISGUISE_PLACEHOLDER = 1;\r\n        const sbyte PHCM_EXPOSE_PLACEHOLDERS = 2;\r\n        const sbyte PHCM_MAX = 2;\r\n        const sbyte PHCM_ERROR_INVALID_PARAMETER = -1;\r\n        const sbyte PHCM_ERROR_NO_TEB = -2;\r\n\r\n        class PlaceholderCompatibilityMode\r\n        {\r\n            public static string ToString(sbyte pcm)\r\n            {\r\n                switch(pcm)\r\n                {\r\n                    case 0: return \"PHCM_APPLICATION_DEFAULT\";\r\n                    case 1: return \"PHCM_DISGUISE_PLACEHOLDER\";\r\n                    case 2: return \"PHCM_EXPOSE_PLACEHOLDERS\";\r\n                    case -1: return \"PHCM_ERROR_INVALID_PARAMETER\";\r\n                    case -2: return \"PHCM_ERROR_NO_TEB\";\r\n                    default: return String.Format(\"(??? unsupported PlaceholderCompatibilityMode value: {0} ???)\", pcm);\r\n                }\r\n            }\r\n        }\r\n\r\n        static void Main(string[] args)\r\n        {\r\n            var filepath = args[0];\r\n            sbyte pcm = RtlQueryProcessPlaceholderCompatibilityMode();\r\n            Console.WriteLine(\"Current placeholder compatibility mode: {0} ({1})\", pcm, PlaceholderCompatibilityMode.ToString(pcm));\r\n            var attr = System.IO.File.GetAttributes(filepath);\r\n            Console.WriteLine(\"Attributes for '{0}': 0x{1:x}\", filepath, attr);\r\n            sbyte newpcm = PHCM_EXPOSE_PLACEHOLDERS;\r\n            Console.WriteLine(\"Setting placeholder compatibility mode to: {0} ({1})\", newpcm, PlaceholderCompatibilityMode.ToString(newpcm));\r\n            RtlSetProcessPlaceholderCompatibilityMode(newpcm);\r\n            attr = System.IO.File.GetAttributes(filepath);\r\n            Console.WriteLine(\"Attributes for '{0}': 0x{1:x}\", filepath, attr);\r\n        }\r\n    }\r\n}\r\n````\r\n\r\nHere's the output:\r\n\r\n````\r\nCurrent placeholder compatibility mode: 1 (PHCM_DISGUISE_PLACEHOLDER)\r\nAttributes for 'c:\\users\\steph\\OneDrive\\Free up space.txt': 0x00500020\r\nSetting placeholder compatibility mode to: 2 (PHCM_EXPOSE_PLACEHOLDERS)\r\nAttributes for 'c:\\users\\steph\\OneDrive\\Free up space.txt': 0x00501620\r\n````\r\n",
+      "created_at": "2018-12-09T06:50:52Z",
+      "updated_at": "2018-12-09T06:50:52Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Would this fall under things that would need to have some of the code put in https://github.com/PowerShell/PowerShell-Native perhaps?",
+      "created_at": "2018-12-09T12:04:00Z",
+      "updated_at": "2018-12-09T12:04:00Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 `PowerShell-Native` is for specific native code such as integrating with WinRM and some native Unix APIs.  (Over time, `PowerShell-Native` should get smaller and smaller if we can just use .NET Core)\r\n\r\nThis code should be in this repo.",
+      "created_at": "2018-12-10T19:03:19Z",
+      "updated_at": "2018-12-10T19:03:19Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "What are the next steps? I don't think the code change itself is that big (could even do it myself) but where should it end up?",
+      "created_at": "2019-01-07T16:46:47Z",
+      "updated_at": "2019-01-07T16:46:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I guess you'd need to place the code that enables the flags to be returned somewhere in the `Start()` method for the `FileSystemProvider`, perhaps? It will need to be wrapped in `#if !UNIX` flags since it's a Windows-specific API or something along those lines.\r\n\r\nThat way the .NET Core built in methods for pulling attributes should then return the proper values, if I understand this correctly.",
+      "created_at": "2019-01-07T16:51:35Z",
+      "updated_at": "2019-01-07T16:51:54Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@sba923 are you able to work on a PR for this?  I agree with @vexx32 that putting it in [`Start()`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L356) makes sense",
+      "created_at": "2019-01-22T18:15:09Z",
+      "updated_at": "2019-01-22T18:15:09Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "I probably can. Where can I find information about the process, testing methodology, coding rules etc.?\r\n\r\nNext to that I need to determine how to:\r\n- make that code Windows-only in the PowerShell source\r\n- make that code conditional to running on Windows versions that do support those (poorly documented) APIs which seem to have evolved with the latest Redstone versions if I compare the SDK header contents",
+      "created_at": "2019-01-23T06:17:32Z",
+      "updated_at": "2019-01-23T06:17:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "> make that code Windows-only in the PowerShell source\r\n\r\nThis is pretty straightforward, I think. If you poke about in the code one you'll see compiler directives like `#if !UNIX/#endif` for things that shouldn't be compiled on Unix platforms; I think using that should be sufficient. If you wrap both the necessary fields and the code that triggers the setting to enable  the feature in those you should be good. More on those here: https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/preprocessor-directives/preprocessor-if\r\n\r\nAs for the latter, we'll need to figure out which Windows versions support the API, if there are any versions where it's safe to leave in where it will just no-op or something, and if there are versions we need to exclude it from.",
+      "created_at": "2019-01-23T11:22:48Z",
+      "updated_at": "2019-01-23T11:23:17Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm of course familiar with preprocessor directives ;-) but for some reason I didn't want to go fishing around in the code to _guess_ what mechanism(s) is (are) used to distinguish Windows and Unix builds... `#if !UNIX / #endif` it is...\r\n\r\nI've inserted the p/Invoke declarations just below `#region CmdletProvider members` and the code at the end of the `Start()` method just before the `return` statement. This works like a charm.\r\n\r\nNow I'm looking for documentation that describes how to deal in p/Invoke for \"optionally available methods.\" IOW, what happens if you do `[DllImport(\"foo.dll\")]` <function declaration> if the function isn't exported by `foo.dll`? ",
+      "created_at": "2019-01-23T21:11:59Z",
+      "updated_at": "2019-01-23T21:11:59Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "... Hmm. /cc @indented-automation as he's really the only person I know with pretty extensive p/invoke experience. Any idea, Chris?",
+      "created_at": "2019-01-23T21:15:50Z",
+      "updated_at": "2019-01-23T21:15:50Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Take a look at https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L2450 it does a runtime check as that flag is only availble on Win10 and it appears this api is only available on Win10.  Doing the DllImport itself shouldn't be an issue if you don't invoke that method.",
+      "created_at": "2019-01-24T01:50:49Z",
+      "updated_at": "2019-01-24T01:50:49Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Checking `Environment.OSVersion.Version` definitely works. What I was remembering reading is [https://blogs.windows.com/buildingapps/2015/09/15/dynamically-detecting-features-with-api-contracts-10-by-10/#3HubB7h03hufW5g4.97](url) but after giving it some thought that's something for UWP apps, which PowerShell Core isn't. \r\n\r\nFor now I'm checking that we're running at least Windows 10 version 1803 ('cos that's what [https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/content/ntifs/nf-ntifs-rtlsetprocessplaceholdercompatibilitymode](url) mentions as prerequisite, but I'm wondering whether the code should just trust that documentation...). \r\n\r\nI presume I ought to write a test case that will get added to the global PowerShell Core CI test suite?\r\n\r\nAnd I need to get familiar with the PR creation / contribution process / workflow. Will start by reading the docs... ;-)",
+      "created_at": "2019-01-24T06:07:41Z",
+      "updated_at": "2019-01-24T06:30:55Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "PR ready to merge, awaiting review by code owners @BrucePay  and @anmenaga ",
+      "created_at": "2019-01-26T09:31:10Z",
+      "updated_at": "2019-01-26T09:31:10Z"
+    }
+  ],
+  "created_at": "2018-11-19T20:55:00Z",
+  "number": 8315,
+  "state": "closed",
+  "title": "Some bits in the file attributes are masked out",
+  "updated_at": "2019-02-05T03:02:42Z"
+}

@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7770",
+  "author": "vexx32",
+  "body": "Rather than either producing a sensible error, or behaving in a reasonably predictable manner, `Get-Content` incorrectly throws an `Access Denied` error when pointed at a container object. This is *also* the case when using the variable accessor syntax.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nPS> Get-Content c:\\\r\n```\r\nor\r\n```powershell\r\nPS> ${c:\\}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nOption #1: A sensible error is produced\r\n```none\r\nGet-Content : Unable to access item contents as it is a container. You may be looking for Get-ChildItem instead.\r\nAt line:1 char:1\r\n+ Get-Content c:\\\r\n+ ~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ***: (C:\\:String) [Get-Content], ***\r\n+ FullyQualifiedErrorId : ***,Microsoft.PowerShell.Commands.GetContentCommand\r\n```\r\nOption #2: Route the call through to Get-ChildItem instead.\r\nWhat is the \"content\" of a container if not its child items? It would make at least intuitive sense for Get-Content to simply call Get-ChildItem if passed a path to a container object instead of a leaf object.\r\n```none\r\nDirectory: C:\\\r\n\r\n\r\nMode                LastWriteTime         Length Name\r\n----                -------------         ------ ----\r\nd-----       10/20/2017   2:55 PM                msys64\r\nd-----        4/11/2018   7:38 PM                PerfLogs\r\nd-r---        9/11/2018   2:11 PM                Program Files\r\nd-r---        8/27/2018   6:53 AM                Program Files (x86)\r\nd-----       10/17/2017   2:52 PM                tmp\r\nd-r---        5/16/2018   3:10 AM                Users\r\nd-----        11/6/2017   2:57 PM                usr\r\nd-----         9/3/2018   5:02 AM                Windows\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n(Cmdlet access)\r\n```none\r\nGet-Content : Access to the path 'C:\\' is denied.\r\nAt line:1 char:1\r\n+ Get-Content c:\\\r\n+ ~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : PermissionDenied: (C:\\:String) [Get-Content], UnauthorizedAccessException\r\n+ FullyQualifiedErrorId : GetContentReaderUnauthorizedAccessError,Microsoft.PowerShell.Commands.GetContentCommand\r\n```\r\n(Variable access syntax)\r\n```none\r\nAccess to the path 'C:\\' is denied.\r\nAt line:1 char:1\r\n+ ${C:\\}\r\n+ ~~~~~~\r\n+ CategoryInfo          : PermissionDenied: (C:\\:String) [], UnauthorizedAccessException\r\n+ FullyQualifiedErrorId : GetContentReaderUnauthorizedAccessError\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0-rc.1\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nIn my opinion, given the fact that the variable access syntax is a bit... edge case at the best of times (although undoubtedly also very handy at times) it would seem to make sense that Get-ChildItem would be called in these cases, so that it's possible to explore a provider in this fashion without necessitating use of the cmdlets at all.",
+  "closed_at": "2018-09-28T15:36:14Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It's also worth noting that in the variable access syntax, `{$C:\\File.txt} = \"string\"` will actually overwrite the file contents using `Set-Content`. Whether it makes the slightest lick of sense to allow `Set-Content` to have some kind of effect on container objects also, I don't know. I've a few ideas, but I suspect doing such a thing will just enable a far too simple way to wipe a whole hard drive of files. \ud83d\ude04 ",
+      "created_at": "2018-09-12T20:06:24Z",
+      "updated_at": "2018-09-12T20:06:24Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "A user-mode process can't \"read\" the contents of a directory. We're just returning the underlying OS error message:\r\n```powershell\r\nPSCore (2:9) >  [io.file]::ReadAllBytes('c:\\')\r\nException calling \"ReadAllBytes\" with \"1\" argument(s): \"Access to the path 'c:\\' is denied.\"\r\nAt line:1 char:1\r\n+ [io.file]::ReadAllBytes('c:\\')\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [], MethodInvocationException\r\n+ FullyQualifiedErrorId : UnauthorizedAccessException\r\n```\r\n\r\nWe could probably do something with the error message (e.g. say access is denied because it's a container) but alternate file systems may in fact support reading the contents of the directory (e.g. old Unix file systems) so failing automatically _because_ it's a container is probably not ideal. \r\n\r\n> behaving in a reasonably predictable manner, \r\n\r\nIn what way is it not predictable?  Does it not produce an error in some cases? (I suppose technically it's unpredictable because the underlying file systems may have varying semantics but that's not a common case and would be by design anyway.)\r\n\r\n>  variable access syntax is a bit... edge case at the best of times (although undoubtedly also very handy at times) it would seem to make sense that Get-ChildItem would be called in these cases\r\n\r\nVariable notation simply exposes what the underlying provider does. Since the provider produces an error, so does variable notation.\r\n\r\n> It's also worth noting that in the variable access syntax, {$C:\\File.txt} = \"string\" will actually overwrite the file contents using Set-Content. Whether it makes the slightest lick of sense to allow Set-Content to have some kind of effect on container objects also, I don't know\r\n\r\nAgain, this operation is not supported by the operating system. (I only know a couple of (very old) operating systems that allowed user processes to manipulate directories. In one case it was a bug.)\r\n\r\n",
+      "created_at": "2018-09-12T21:52:31Z",
+      "updated_at": "2018-09-12T21:52:31Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Okay, so there's a disconnect here. What do *you* mean by 'read the contents of a directory'?\n\nIs that a distinct thing from what Get-ChildItem does? It seems sensible (at least on the surface) for 'reading the content' of a directory' to be analogous to 'enumerating the contained objects'",
+      "created_at": "2018-09-13T00:31:52Z",
+      "updated_at": "2018-09-13T00:31:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It would be ~amazing~ surprising to turn `Get-Content` into `dir`.\r\n\r\nThere definitely needs to improve the error message.",
+      "created_at": "2018-09-13T04:46:54Z",
+      "updated_at": "2018-09-13T13:31:04Z"
+    },
+    {
+      "author": "thezim",
+      "author_association": "CONTRIBUTOR",
+      "body": "Caution must be taken as changing the behavior to `Get-ChildItems` could be destructive beyond the intended scope. Imagine the following mistake a beginner might make.\r\n\r\n```powershell\r\nGet-Content -Path \"C:\\$nonexistant-filename-suffix\" | Set-Content -Value \"bar\"\r\n```\r\n\r\nWould actually be.\r\n\r\n```powershell\r\nGet-ChildItem -Path \"C:\\\" | Set-Content -Value \"bar\"\r\n```\r\n\r\nSetting ALL files to `bar`. \r\n\r\nI could see other odd behaviors as well where cmdlet arguments have multiple types accepted from pipeline. This may be an edge case but something to keep in mind.\r\n\r\nAgreed though the error message should be more clear.\r\n\r\n\r\n",
+      "created_at": "2018-09-13T13:22:05Z",
+      "updated_at": "2018-09-13T13:22:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Did you mean _surprising_, @iSazonov, as in _users won't expect it_? _Amazing_ sounds like you're _in favor of_ such a change.\r\n\r\nAgreed re error message (a courtesy that PowerShell would have to extend, because it is just the messenger here, as @BrucePay points out).\r\n\r\n@vexx32: A cmdlet fundamentally changing its behavior situationally sounds like a bad idea to me.\r\n\r\nThere's a clear separation of purpose between the `*-*Item` cmdlets and the `*-Content` cmdlets, and I think we should keep it that way.\r\n\r\n `*-*Item` cmdlets return a provider's items (files, directories, in this case)  _as a whole_, whereas `*-Content` cmdlets target _what's inside_ a _given item_.\r\n\r\nWhile it makes sense _colloquially_ to refer to both the child items of a container and the data inside a file as _content_, it is important to maintain stricter definitions in the context of a shell / programming languages (even if those definitions are sometimes somewhat arbitrary).\r\n\r\n",
+      "created_at": "2018-09-13T13:23:53Z",
+      "updated_at": "2018-09-13T13:23:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Did you mean surprising, @iSazonov, as in users won't expect it? Amazing sounds like you're in favor of such a change.\r\n\r\nYes, surprising :-)",
+      "created_at": "2018-09-13T13:30:46Z",
+      "updated_at": "2018-09-13T13:30:46Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'm not so much in favour of letting users do this with the cmdlets themselves, I think; there the intent can be specified. I'm thinking mostly in terms of the variable syntax itself:\r\n\r\n```\r\n${C:\\Program Files}\r\n```\r\nShould, to me at least, call Get-ChildItem instead of Get-Content, because the targeted item is a container. Or, alternatively, there should be a similar syntax that *can* target Get-ChildItem as opposed to Get-Content.\r\n\r\nI think an error is still sensible for an undefinable use like this:\r\n```\r\n${C:\\Program Files} = \"foo\"\r\n```\r\n\r\nRather than simply having Get-Content automatically call Get-ChildItem when targeting a container, I think it would simply be more sensible for the variable syntax to not be constrained to a single method, and be capable of calling Get-ChildItem when pointed at a container object. (And since there is no Set-ChildItem, nor would having one be very sensible in my opinion, attempting to *set* a container value like this should error.)\r\n\r\nI agree that changing the behaviour of the cmdlets themselves in such a fashion is verging on insanity.",
+      "created_at": "2018-09-13T13:42:48Z",
+      "updated_at": "2018-09-13T13:43:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32:I think that it's equally important for [namespace variable notation](https://github.com/PowerShell/PowerShell/issues/2268#issuecomment-283755725) to exhibit consistency so that:\r\n\r\n```powershell\r\n${<drive>:<path>}\r\n${<drive>:<path>} = 'foo'\r\n```\r\n\r\nis _always_ the equivalent of `Get-Content -Path <drive>:<path>` and `Set-Content -Path <drive>:<path> -Value 'foo'`\r\n\r\n(Note that it is indeed `-Path`, not `-LiteralPath`, but if you use a wildcard that resolves to more than 1 item, you get an error).\r\n\r\n\r\n",
+      "created_at": "2018-09-13T14:22:49Z",
+      "updated_at": "2018-09-13T14:26:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Ultimately I personally think it simply makes sense for it to treat an access to the contents of a container as a call to get-childitem.\r\n\r\nRegardless of whether that is agreed upon or not, I think the error message *definitely* needs a rework (and as much as I might _wish_ for the namespace variable notation to exhibit better discoverability in and of itself, that's the main thing -- if it's going to throw an error, it should be a comprehensible one.)",
+      "created_at": "2018-09-13T14:29:19Z",
+      "updated_at": "2018-09-13T14:29:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think we're all in agreement that the error message should be improved.\r\n\r\n---\r\n\r\nA tangent re namespace notation: \r\n\r\nIt is widely used with _one_ provider, but I suspect most people are unaware of the fact that they're using namespace notation:\r\n\r\n```powershell\r\n$env:PATH  # short for: ${env:PATH} or ${env:\\PATH} and therefore Get-Content Env:\\PATH\r\n```\r\n\r\nMy guess is that it never caught on as a general concept, because it isn't all that useful for any of the other built-in providers (only a subset of which support namespace notation, namely those implementing the `IContentCmdletProvider` interface).\r\n\r\nWith the filesystem provider its usefulness is hampered by:\r\n\r\n* being limited to _literal_ paths - you can't use variables; you can, however, use (literal) paths _relative to the current location_, though only on a literally specified drive.\r\n\r\n* lacking control over encoding (which is  less of a problem in PS Core)\r\n\r\n* In PS Core _on Unix_, it doesn't work, because `/` as a drive name doesn't work; e.g., on Windows you can use `${C:t.txt}` to target file `t.txt` in the current C: location, but on Unix the analogous `${/:t.txt}` doesn't work - `/:t.txt` is actually treated as a _variable name_, as noted in #2268.\r\n\r\n",
+      "created_at": "2018-09-14T03:26:13Z",
+      "updated_at": "2018-09-14T03:26:13Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We have  the dup #2686.",
+      "created_at": "2018-09-19T12:13:08Z",
+      "updated_at": "2018-09-19T12:13:08Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting that the other fellow also stumbled briefly over the thought that `Get-Content ~` should give a directory listing too, haha! Sure, it's out of pattern, but apparently it's somewhat intuitive. Interesting... ",
+      "created_at": "2018-09-19T12:23:40Z",
+      "updated_at": "2018-09-19T12:23:40Z"
+    }
+  ],
+  "created_at": "2018-09-12T19:50:29Z",
+  "number": 7770,
+  "state": "closed",
+  "title": "Get-Content throws confusing error when targeting a container",
+  "updated_at": "2018-09-28T15:36:14Z"
+}

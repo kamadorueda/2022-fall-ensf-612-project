@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13819",
+  "author": "SeeminglyScience",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nAdd-Type -CompilerOptions '-langversion:preview' -TypeDefinition '\r\n    public class Test\r\n    {\r\n        public int MyInitOnlyProperty { get; init; }\r\n    }'\r\n\r\n$test = [Test]@{ MyInitOnlyProperty = 10 }\r\n$test.MyInitOnlyProperty = 30\r\n$test\r\n```\r\n\r\n## Expected behavior\r\n\r\n```powershell\r\n# Expect this to work\r\n$test = [Test]@{ MyInitOnlyProperty = 10 }\r\n\r\n# Expect this to throw\r\n$test.MyInitOnlyProperty = 30\r\nInvalidOperation: 'MyInitOnlyProperty' is a ReadOnly property.\r\n```\r\n\r\n## Actual behavior\r\n\r\n```powershell\r\n$test = [Test]@{ MyInitOnlyProperty = 10 }\r\n$test.MyInitOnlyProperty = 30\r\n$test\r\n# MyInitOnlyProperty\r\n# ------------------\r\n#                 30\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0-rc.1\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n## Other\r\n\r\nThis is implemented as `modreq(System.Runtime.CompilerServices.IsExternalInit)` on the setter's return parameter.\r\n\r\n```powershell\r\n$modNames = [Test].GetProperty('MyInitOnlyProperty').\r\n    SetMethod.\r\n    ReturnParameter.\r\n    GetRequiredCustomModifiers().\r\n    FullName\r\n\r\n# Type can be embedded in the assembly if targeting netstandard, so name must be used instead of type identity.\r\n$modNames -contains\t'System.Runtime.CompilerServices.IsExternalInit'\r\n```\r\n\r\nTechnically the binder should be throwing whenever it sees `modreq`s it doesn't understand, according to EMCA-335.  Not necessarily advocating for that though.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Direct type name comparisons may not be necessary depending on the result of dotnet/runtime#43638",
+      "created_at": "2020-10-20T16:15:19Z",
+      "updated_at": "2020-10-20T16:15:19Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Type can be embedded in the assembly if targeting netstandard, so name must be used instead of type identity.\r\n\r\nA bit more details on matching by full name, from https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/proposals/csharp-9.0/init#metadata-encoding\r\n\r\n> The compiler will match the type by full name. There is no requirement that it appear in the core library. If there are multiple types by this name then the compiler will tie break in the following order:\r\n> 1. The one defined in the project being compiled\r\n> 2. The one defined in corelib\r\n> \r\n> If neither of these exist then a type ambiguity error will be issued.\r\n\r\nWhen using the `init` language feature in a `net461` project with a `System.Runtime.CompilerServices.IsExternalInit` type defined in the project, the produced dll works fine in pwsh, and the returned `IsExternalInit` type from `GetRequiredCustomModifiers()` in this case is from that dll:\r\n\r\n```\r\n> Add-Type -Path C:\\arena\\apps\\init\\bin\\Debug\\net461\\init.dll\r\n> $s = [init.Class1].GetProperty('MyInitOnlyProperty')\r\n> $t = $s.SetMethod.ReturnParameter.GetRequiredCustomModifiers()\r\n> $t[0].Assembly\r\n\r\nGAC    Version        Location\r\n---    -------        --------\r\nFalse  v4.0.30319     C:\\arena\\apps\\init\\bin\\Debug\\net461\\init.dll\r\n```\r\n",
+      "created_at": "2021-07-09T00:01:50Z",
+      "updated_at": "2021-07-09T17:39:08Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "We discussed this in the Engine working group (2021/07/22).\r\n\r\nWe agree that PowerShell should look for and respect the init-only metadata on objects. Without having a deeper look at the code paths involved, we're unsure whether there would need to be special casing applied to usage of hashtable-initialization syntax, which we feel maps closely to C# initialization syntax and should be permitted to set init-only properties (e.g., `[TypeName]@{ Property = 'value' }`)\r\n\r\nIn all other cases where users attempt to set init-only properties directly from PowerShell, we think PowerShell should prevent this, and throw a similar error to existing cases where a property is not publicly settable.",
+      "created_at": "2021-07-23T02:11:56Z",
+      "updated_at": "2021-07-23T02:11:56Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "FYI this is carrying through to records with init properties and readonly record structs in C# 10, which are basically syntactic sugar wrappers around these properties.\r\n",
+      "created_at": "2021-10-20T03:14:55Z",
+      "updated_at": "2021-10-20T03:14:55Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "I had a look at this issue and it appears the best/most appropriate place to handle this might in the type adapter - it _specifically_ affects .NET properties, and all facilities for assignment to properties (which is what we're trying to prevent) rely on adapter metadata anyway. [I tried it](https://github.com/IISResetMe/PowerShell/commit/4c40b89c634f7540b84efc9dc41c44f0bfae0230) and found that it actually appears to work perfectly fine:\r\n - Cast-initialization still works, (type conversion via parameterless constructors doesn't explicitly check whether all target field/properties are settable, it just fails if assignment does)\r\n - Utilities like `Get-Member` automatically reflects the change\r\n - Assignments to `init` properties in any other context is blocked by ETS:\r\n \r\n ```\r\n PS ~> Add-Type 'public class StringShrine { public string Value { get; init; } }'\r\n PS ~> [StringShrine]@{ Value = 'Initial string value' } |Tee-Object -Variable s\r\n\r\nValue\r\n-----\r\nInitial string value\r\n\r\nPS ~> $s.Value = 'Updated string value'\r\nInvalidOperation: 'Value' is a ReadOnly property.\r\nPS ~> $s |Get-Member Value\r\n\r\n   TypeName: StringShrine\r\n\r\nName  MemberType Definition\r\n----  ---------- ----------\r\nValue Property   string Value {get;init;}\r\n ```",
+      "created_at": "2021-10-21T21:32:30Z",
+      "updated_at": "2021-10-21T21:32:30Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "@IISResetMe nice work! Does this just need tests added to be a viable PR to be reviewed?",
+      "created_at": "2021-11-22T23:48:39Z",
+      "updated_at": "2021-11-22T23:48:39Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@JustinGrote It needs tests + I want to refactor it to be a bit simpler (we don't necessarily need to surface a new `InitOnly` trait to the user-facing API, we just need to make sure the \"settability\" of the affected property is correctly reflected). I'll work on rewriting it this week and then we can open a PR :) \r\n",
+      "created_at": "2021-11-23T14:37:05Z",
+      "updated_at": "2021-11-23T14:37:05Z"
+    }
+  ],
+  "created_at": "2020-10-20T15:11:09Z",
+  "number": 13819,
+  "state": "open",
+  "title": "C# 9 init-only properties are writable",
+  "updated_at": "2021-11-23T14:37:05Z"
+}

@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3348",
+  "author": "PetSerAl",
+  "body": "Steps to reproduce\r\n------------------\r\n```powershell\r\nPS> Add-Type -TypeDefinition @'\r\n     using System;\r\n     using System.Management.Automation;\r\n     [Cmdlet(\"Test\", \"Compiled\")]\r\n     public class TestCompiled : PSCmdlet {\r\n         [Parameter(Position = 0)]\r\n         public DateTime DT;\r\n         protected override void EndProcessing() {\r\n             WriteObject(DT);\r\n         }\r\n     }\r\n'@ -PassThru | Select-Object -First 1 -ExpandProperty Assembly | Import-Module\r\nPS> function Test-Script {\r\n     param(\r\n         [DateTime]$DT\r\n     )\r\n     $DT\r\n }\r\nPS> @(\r\n     [CultureInfo]::CurrentCulture = 'ru-RU'\r\n     Test-Compiled 1/11/1111\r\n     Test-Script   1/11/1111\r\n     [CultureInfo]::CurrentCulture = 'en-US'\r\n )\r\n\r\nWednesday, November 1, 1111 12:00:00 AM\r\nWednesday, January 11, 1111 12:00:00 AM\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nSame dates in both cases.\r\n\r\nActual behavior\r\n---------------\r\nStrings get parsed with different culture in mind.\r\n\r\nEnvironment data\r\n----------------\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nGitCommitId                    v6.0.0-alpha.17-18-gedecf7e04d65f7183cd1d278daa5ebed2970813f\r\nPSRemotingProtocolVersion      2.3\r\nPSEdition                      Core\r\nWSManStackVersion              3.0\r\nCLRVersion\r\nBuildVersion                   3.0.0.0\r\nPSVersion                      6.0.0-alpha\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0, 5.0, 5.1.10032.0, 6.0.0}\r\nSerializationVersion           1.1.0.1\r\n```\r\n\r\nMy thoughts about the problem\r\n----------------\r\nI think the problem happens due to PowerShell automatically adds `ArgumentTypeConverterAttribute` to typed parameters for script cmdlets:\r\n```powershell\r\nPS> (Get-Command Test-Script).Parameters.DT.Attributes | % GetType | % FullName\r\nSystem.Management.Automation.ParameterAttribute\r\nSystem.Management.Automation.ArgumentTypeConverterAttribute\r\n```\r\nbut not doing the same for compiled cmdlets:\r\n```powershell\r\nPS> (Get-Command Test-Compiled).Parameters.DT.Attributes | % GetType | % FullName\r\nSystem.Management.Automation.ParameterAttribute\r\n```\r\nThat attribute make conversion use `InvariantCulture`, while compiled cmdlets use `CurrentCulture` for conversion.",
+  "closed_at": "2017-10-19T04:57:02Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT I think we should fix this before RTM.",
+      "created_at": "2017-10-08T11:09:00Z",
+      "updated_at": "2017-10-08T11:09:00Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl Thanks for the analysis!\r\n`ArgumentTypeConverterAttribute` uses `InvariantCulture` when calling [`LanguagePrimitives.ConvertTo`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/ArgumentTypeConverterAttribute.cs#L142), while `ParameterBinderBase.CoerceTypeAsNeeded` uses `CurrentCulture` when calling [`LanguagePrimitives.ConvertTo`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/ParameterBinderBase.cs#L1285).\r\n\r\nI will submit a PR to change `ArgumentTypeConverterAttribute` to use `CurrentCulture` as well.",
+      "created_at": "2017-10-13T04:41:44Z",
+      "updated_at": "2017-10-13T04:41:44Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw\r\n>I will submit a PR to change `ArgumentTypeConverterAttribute` to use `CurrentCulture` as well.\r\n\r\nShould it be other way around? Since PowerShell explicit cast use `InvariantCulture`:\r\n```powershell\r\n@(\r\n     [CultureInfo]::CurrentCulture = 'ru-RU'\r\n     [DateTime] '1/11/1111'\r\n     [String] 1.1\r\n     [CultureInfo]::CurrentCulture = 'en-US'\r\n)\r\n```\r\nI would expect that implicit cast to parameter type should also use `InvariantCulture`.\r\n",
+      "created_at": "2017-10-13T04:51:15Z",
+      "updated_at": "2017-10-13T04:51:15Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl That's a good point. I will change `ParameterBinderBase.CoerceTypeAsNeeded` to use `InvariantCulture`.",
+      "created_at": "2017-10-13T05:26:57Z",
+      "updated_at": "2017-10-13T05:26:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It seems strange that PowerShell ignores Culture.\r\nWe need more discussion - it is breaking change.",
+      "created_at": "2017-10-13T05:43:00Z",
+      "updated_at": "2017-10-13T05:46:51Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I guess it's for the scripts to be more portable. I added the breaking change label.",
+      "created_at": "2017-10-13T06:09:21Z",
+      "updated_at": "2017-10-13T06:09:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think it is not documented. We need good description for this \"portability\" with InvariantCulture in argument convertion and parameter binding. Otherwise we'll have a big misunderstanding and many negative feedbacks. \r\nAlso we need @powershell-committee approvement for a breaking change.\r\nBoth my comment is for your PR.",
+      "created_at": "2017-10-13T06:21:03Z",
+      "updated_at": "2017-10-13T06:21:03Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee has rejected the PR #5106. Quote the decision here:\r\n\r\n> @PowerShell/powershell-committee reviewed this and due to the potential for breaking many existing modules, it's too risky to make this change so that c# and script cmdlets are alike for this case. We should keep the current behavior.\r\n\r\nI will close this issue as 'Won't Fix'.",
+      "created_at": "2017-10-19T04:57:02Z",
+      "updated_at": "2017-10-19T04:57:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Does anyone know how many (module) breaking changes we've already made? It seems so much that talking about these changes is no longer relevant.\r\nAlso if we already is InvariantCulture for arguments and casting in scripts where is entry points where customers can catch problems?",
+      "created_at": "2017-10-19T05:01:56Z",
+      "updated_at": "2017-10-19T05:01:56Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov One example I got from the committee was the C# modules running on, for example, Japanese machines. After this change, it may happen that some cmdlets are broken with the same input arguments because the conversion has changed.\r\nBut I do agree with you that this inconsistency is unpleasant \ud83e\udd15",
+      "created_at": "2017-10-20T00:26:13Z",
+      "updated_at": "2017-10-20T00:26:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I have another example - EMS (Microsoft Exchange server Management Shell).\r\nIf you is not on English culture session it's always a huge mystery for you to make a search request! The situation is even worse if you try to make such a request dynamically in a script. In essence, you cannot create a script that you can trust. :disappointed:\r\n\r\nI think we should consider this Issue more closely.\r\n\r\n",
+      "created_at": "2017-10-20T06:52:34Z",
+      "updated_at": "2017-10-20T06:54:28Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Interesting, I presume the `EMS` example is where the current `CurrentCulture conversion` behavior causes a usability issue, right? So in this case, it's preferable to have `InvariantCulture conversion` so that things can work on non-english culture environment?",
+      "created_at": "2017-10-20T16:09:54Z",
+      "updated_at": "2017-10-20T16:09:54Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Proxies certainly make this issue more complicated - something may work when calling the cmdlet, but a proxy is introduced (e.g. for RBAC) and now it doesn't.",
+      "created_at": "2017-10-20T18:08:44Z",
+      "updated_at": "2017-10-20T18:08:44Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "To unify some of the stuff which I raised in #16767. \r\n\r\nWith non-US, culture selected   `get-date \"9/1/2022\"`  returns \"09 January 2022 00:00:00\" which is  **what most users would expect** and therefore **good**.  If the culture is US it returns \"Thursday, September 1, 2022 12:00:00 AM\", still **what users would expect** However using `Get-Date` makes a **non-portable script** because the output for a given input isn't consistent, and therefore **bad**.  \r\n\r\n\r\nCASTING   with `[datetime]$x` or `[string]$x` or `[double]$x`  **always uses invariant culture.** \r\nIf you are on EN-US  `[string][datetime]::now`  shows the time using 24 hour clock where the EN-US locale uses 12 hour with \"AM/PM\"  If you are in France and use \",\" instead of \".\" for your decimal point [double]\"123,45\"  might give an unexpected result because it uses invariant.  \r\n `[Convert]`,  `.Tostring()` and `Parse()` use local (or specified) culture.  Using these in a script with \"whatever the local culture happens to be\" can also produce non portable scripts. If numbers will be in French format, it is better to state French culture explicitly than assume the script will only ever run with culture set to French.\r\n\r\nStaying with French we can see that **the  `-AS` operator sometimes supports local culture and sometimes invariant.** \r\n\r\n```\r\n> [datetime]::parse(\"19 janvier 2022\")\r\nmercredi 19 janvier 2022 00:00:00\r\n\r\n> \"19 janvier 2022\" -as [datetime]\r\nmercredi 19 janvier 2022 00:00:00\r\n\r\n>  [double]::parse(\"1\u00a0234\u00a0567,89\")\r\n1234567,89\r\n\r\n>  \"1\u00a0234\u00a0567,89\" -as [double]     # Local with spaces does not parse and the result is null\r\n> $null -eq (\"1\u00a0234\u00a0567,89\" -as [double])\r\nTrue\r\n\r\n> \"1,234,567.89\" -as [double]  # Invariant format does parse and the result is displayed in local format\r\n1234567,89\r\n```\r\n\r\nCompiled cmdlet parameters seem to follow `-AS`  so with French selected  `Get-Date \"19 janvier 2022\"`  understands that \"janvier\" is the first month of the year in this culture but   `Select -first \"1 000\" ` fails because a space is not accepted as a separator.  `Select -first \"1,000\" ` works . As a side note, `[int]::parse()` won't process _either_ form \r\n\r\nI'm not sure how `-AS` links to ` CorceTypeAsNeeded` in  what @daxian-dbw  said above : \r\n\r\n> `ArgumentTypeConverterAttribute` uses `InvariantCulture` when calling [`LanguagePrimitives.ConvertTo`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/ArgumentTypeConverterAttribute.cs#L142), while `ParameterBinderBase.CoerceTypeAsNeeded` uses `CurrentCulture` when calling [`LanguagePrimitives.ConvertTo`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/ParameterBinderBase.cs#L1285).\r\n> \r\n\r\nWhen we write `param (   [datetime]$d, ) `  it  looks like a cast, although it is really adding an ArgumentTypeConverterAttribute  that _will do a cast._   If would be odd if  the result were not the same as \r\n```\r\nparam (  $d, ) \r\n$d = [datetime]$d\r\n```\r\n\r\nIt _could_ have been created to do the same as \r\n```\r\nparam (  $d, ) \r\n$d =  $d -as [datetime]\r\n```\r\nbut people wouldn't expect this version. \r\n\r\nThis is the solution for the proxy-function case, not to specify a type in the param block and to the use  convert inside the function. \r\n\r\nThe inconsistency of -As and the different handling of date time parameters in different kinds of commands is annoying, but the problems that would result from making everything consistent are far greater.  It is worth ensuring that help for datetime parameters says whether they accept local format or require invariant. \r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2022-01-19T14:41:37Z",
+      "updated_at": "2022-01-19T14:45:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Staying with French we can see that the -AS operator sometimes supports local culture and sometimes invariant.\r\n\r\nI think the operator uses the _same_ code path in both cases. So I guess it could be PowerShell _parser_ issue. /cc @vexx32 ",
+      "created_at": "2022-01-19T17:48:59Z",
+      "updated_at": "2022-01-19T17:48:59Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Don't think it's necessarily a parsing issue, but it could be a compiler issue. @SeeminglyScience might have more insight here.",
+      "created_at": "2022-01-19T17:52:31Z",
+      "updated_at": "2022-01-19T17:52:31Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Nah it's a compiler issue. Also I think @jhoneill meant to link #16593 which goes into it in more detail.",
+      "created_at": "2022-01-19T18:04:12Z",
+      "updated_at": "2022-01-19T18:04:12Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> > Staying with French we can see that the -AS operator sometimes supports local culture and sometimes invariant.\r\n> \r\n> I think the operator uses the _same_ code path in both cases. So I guess it could be PowerShell _parser_ issue. /cc @vexx32\r\n\r\n`-AS [datetime] `   uses local culture\r\n\r\n`-As [double]`  `-As [int32]`  use invariant \r\n\r\n",
+      "created_at": "2022-01-19T18:23:11Z",
+      "updated_at": "2022-01-19T18:23:11Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "I set  the culture to French. You can see that  a double displays with \",\" as a decimal separator, and the date uses French names. \r\n\r\n`.ToString()` always uses the local culture\r\n`[string]`  always uses invariant\r\n`-As [string]`  converts numbers with invariant, and dates with local.  \r\n\r\n```\r\n> [math]::pi\r\n3,14159265358979\r\n> [datetime]::now\r\n\r\nmercredi 19 janvier 2022 18:33:38\r\n\r\n\r\nps > [datetime]::now.ToString()\r\n19/01/2022 18:39:04\r\n\r\nps > [math]::pi.ToString()\r\n3,141592653589793\r\n\r\n\r\nps > [string][math]::pi\r\n3.14159265358979\r\n\r\nps > [string][datetime]::now\r\n01/19/2022 18:42:33\r\n\r\nps > [datetime]::now -as [string]\r\n19/01/2022 18:34:21\r\n\r\nps >  [math]::pi -as [string]\r\n3.14159265358979\r\n\r\n```\r\n",
+      "created_at": "2022-01-19T18:45:10Z",
+      "updated_at": "2022-01-19T18:45:10Z"
+    }
+  ],
+  "created_at": "2017-03-16T22:12:15Z",
+  "number": 3348,
+  "state": "closed",
+  "title": "PowerShell use different logic, when converting passed value to parameter type, for compiled and script cmdlets",
+  "updated_at": "2022-01-19T18:45:11Z"
+}

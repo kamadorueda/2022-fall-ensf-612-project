@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5244",
+  "author": "hihayak",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\n- Windows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://github.com/PowerShell/PowerShell/blob/master/docs/KNOWNISSUES.md).\r\n- Fill out the following repro template:\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n1. Copy the following PowerShell and edit \"My Password\" and \"My O365 Account\" to your own ones.\r\n\r\n```powershell\r\nparam(\r\n[Parameter(Mandatory=$True)]\r\n[int]$nLoopCount\r\n)\r\n\r\n$secPass = ConvertTo-SecureString -AsPlainText \"My Password\" -Force\r\n$credential = New-Object System.Management.Automation.PSCredential \"My O365 Account\",$secPass\r\n\r\nfor ( $i = 0; $i -lt $nLoopCount; $i++ )\r\n{\r\n    \"# --------------------\"\r\n    \"# $i\"\r\n    \"# --------------------\"\r\n    \"(1) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n    $Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri https://outlook.office365.com/powershell-liveid/ -Credential $credential -Authentication Basic -AllowRedirection\r\n    \"(2) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n    $modInfo = Import-PSSession $Session -AllowClobber\r\n    \"(3) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n    \r\n    Remove-Module -Name $modInfo.Name\r\n    \"(4) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n    \r\n    Remove-PSSession -Session $Session\r\n    \"(5) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n\r\n    $modInfo = $null\r\n    $Session = $null\r\n\r\n    [System.GC]::Collect()\r\n    [System.GC]::WaitForPendingFinalizers()\r\n    [System.GC]::Collect()\r\n} \r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nMemory usage doesn't increase up to infinity.\r\n\r\n\r\nActual behavior\r\n---------------\r\nMemory usage keeps increasing.\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.15063.674\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.15063.674\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PaulHigin has confirmed there's a memory leak",
+      "created_at": "2017-10-27T02:55:27Z",
+      "updated_at": "2017-10-27T02:55:27Z"
+    },
+    {
+      "author": "MaximoTrinidad",
+      "author_association": "NONE",
+      "body": "@hihayak, \r\n\r\nThis is Windows PowerShell issue and not PowerShell Core. \r\n\r\nThis need to be addressed in UserVoice: https://windowsserver.uservoice.com/forums/301869-powershell \r\n\r\n:)",
+      "created_at": "2017-10-31T23:46:17Z",
+      "updated_at": "2017-10-31T23:46:44Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Actually PowerShell Core does support implicit remoting for both WinRM and SSH transports.  And I am able to repro the memory leak.  It appears that the temporary module created by implicit remoting is not getting fully cleaned up with Remove-Module.\r\n\r\nHere is my simpler repro:\r\n```powershell\r\nparam (\r\n    [int] $loopCount = 30\r\n)\r\n\r\n$cred = Get-Credential\r\n\r\nfor ($i=0; $i -lt $loopCount; $i++)\r\n{\r\n    \"# --------------------\"\r\n    \"# $i\"\r\n    \"# --------------------\"\r\n    \"(1) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n    $Session = New-PSSession -Cn localhost -Credential $cred\r\n    \"(2) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n    $modInfo = Import-PSSession $Session -CommandType Cmdlet -AllowClobber \r\n    \"(3) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n\r\n    Microsoft.PowerShell.Core\\Remove-Module $modInfo.Name -Force\r\n    \"(4) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n    \r\n    Microsoft.PowerShell.Core\\Remove-PSSession -Session $Session\r\n    \"(5) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n\r\n    [System.GC]::Collect()\r\n    [System.GC]::WaitForPendingFinalizers()\r\n    [System.GC]::Collect()\r\n\r\n    \"(6) {0:N0} Byte\" -f [System.Diagnostics.Process]::GetCurrentProcess().PrivateMemorySize64\r\n}\r\n```",
+      "created_at": "2017-11-01T17:35:25Z",
+      "updated_at": "2017-11-01T17:39:29Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "30 iterations is insufficient to detect a real leak. There is a cache of script blocks, so in your example, I would expect to see the heap grow. The cache is bounded though, and when the cache is full, we clear it.\r\n\r\nI think the cache has 1024 entries - so you'd see growth until at least that many iterations.\r\n",
+      "created_at": "2017-11-01T17:45:33Z",
+      "updated_at": "2017-11-01T17:45:33Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "But I am importing almost 300 cmdlets, all of which are wrapped in proxy scripts.  Wouldn't that cause the cache to clear?  Or at least flatten the memory use?  I see continuous growth in heap.",
+      "created_at": "2017-11-01T18:01:07Z",
+      "updated_at": "2017-11-01T18:01:07Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If you're not running each of those proxies, then you're just seeing the ScriptBlock for the module.",
+      "created_at": "2017-11-01T18:05:29Z",
+      "updated_at": "2017-11-01T18:05:29Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Ok, I do see a leveling off of memory use when I run 2000 iterations and a smaller module scriptblock (only importing 5 cmdlets). So this does look like the scriptblock cache causing the high memory usage.  The high memory is due to importing a huge amount of cmdlets, making the module script very large.  Maybe the scriptblock cache clear heuristic should include memory size as well as count.",
+      "created_at": "2017-11-02T16:54:19Z",
+      "updated_at": "2017-11-02T16:54:19Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If the import generates the same filename and contents, the cache will do it's job - so it's worth investigating why either the filename or contents change on each iteration.",
+      "created_at": "2017-11-02T17:28:13Z",
+      "updated_at": "2017-11-02T17:28:13Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Import-PSSession creates temporary modules with random filenames.  So each time an import is done of the same endpoint, new scriptblocks are created and cached (keyed by filename).\r\n\r\nI suppose we could:\r\n a. Use a hash to key scriptblocks (possibility of collisions)\r\n b. Be smarter about clearing the cache and remoting temporary module files that are no longer imported into the session.",
+      "created_at": "2017-11-02T19:45:19Z",
+      "updated_at": "2017-11-02T19:45:19Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I would use an algorithm that generates reproducible filenames based on the string content or something else.\r\n\r\nThe filename is an important part of the key to the cache - e.g. error messages use position information encoded in the script block which in turn refer to the file.\r\n",
+      "created_at": "2017-11-02T19:57:33Z",
+      "updated_at": "2017-11-02T19:57:33Z"
+    },
+    {
+      "author": "caoko",
+      "author_association": "NONE",
+      "body": "try this...\r\n\r\n```powershell\r\n[System.Management.Automation.ScriptBlock].GetMethod('ClearScriptBlockCache', [System.Reflection.BindingFlags]'Static,NonPublic').Invoke($null, $null)\r\n```",
+      "created_at": "2022-05-03T03:41:55Z",
+      "updated_at": "2022-05-03T03:41:55Z"
+    }
+  ],
+  "created_at": "2017-10-26T14:11:42Z",
+  "number": 5244,
+  "state": "open",
+  "title": "Memory leak in Import-PSSession and Remove-Module",
+  "updated_at": "2022-05-03T03:41:56Z"
+}

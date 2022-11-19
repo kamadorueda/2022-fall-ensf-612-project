@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6316",
+  "author": "alx9r",
+  "body": "[The documentation for `Cmdlet.StopProcessing()`](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.cmdlet.stopprocessing?view=powershellsdk-1.1.0) includes the following statement:\r\n\r\n>...interrupts currently running code within the command...\r\n\r\nI understand this to mean that, when the PowerShell engine wants to interrupt the command, `StopProcessing()` is invoked.  Accordingly, I expect that `StopProcessing()` is called when certain errors are encountered or when <kbd>CTRL</kbd>-<kbd>C</kbd> are pressed during pipeline processing.  That behavior would be consistent with [this explanation on stackoverflow](https://stackoverflow.com/questions/1628127/difference-between-cmdlet-endprocessing-and-cmdlet-stopprocessing) and [this PluralSight course](https://www.pluralsight.com/courses/powershell-cmdlet-development-csharp).\r\n\r\nI haven't succeeded at getting `StopProcessing()` to run at all.  In what conditions is `Cmdlet.StopProcessing()` invoked?  How can I reproduce those conditions?\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nAdd-Type '\r\n    using System;\r\n    using System.Management.Automation; \r\n    \r\n    [Cmdlet(\"Trace\", \"ProcessMethodOverrides\")]\r\n    public class TraceProcessMethodOverrides : Cmdlet \r\n    {\r\n        [Parameter(Mandatory=true,ValueFromPipeline=true)]\r\n        public object InputObject { get; set; }\r\n\r\n        protected override void BeginProcessing()\r\n        { \r\n            WriteVerbose(\"BeginProcessing\");\r\n        }\r\n\r\n        protected override void ProcessRecord()\r\n        { \r\n            WriteVerbose(\"ProcessRecord\");\r\n            WriteObject(InputObject,true);\r\n        }\r\n\r\n        protected override void EndProcessing()\r\n        {\r\n            WriteVerbose(\"EndProcessing\");\r\n        }\r\n\r\n        protected override void StopProcessing()\r\n        {\r\n            WriteVerbose(\"StopProcessing\");\r\n        }\r\n    }' -PassThru | % Assembly | Import-Module\r\n\r\nfunction TerminateStatement {\r\n    [CmdletBinding()]\r\n    param\r\n    (\r\n        [Parameter(ValueFromPipeline)]$x\r\n    )\r\n    process\r\n    {\r\n        $PSCmdlet.ThrowTerminatingError(\r\n            [System.Management.Automation.ErrorRecord]::new(\r\n                'Statement-Terminating Error',\r\n                'id',\r\n                0,\r\n                $null\r\n            )\r\n        )\r\n    }\r\n}\r\n\r\n$ErrorActionPreference = 'Continue'\r\n$VerbosePreference = 'Continue'\r\nWrite-Host '=== TerminateStatement'\r\n\r\n1 | Trace-ProcessMethodOverrides | TerminateStatement\r\n\r\nWrite-Host '=== throw'\r\ntry\r\n{\r\n    1 | Trace-ProcessMethodOverrides | & {process{throw}}\r\n}\r\ncatch {}\r\n\r\nWrite-Host '===Ctrl-C'\r\n1 | Trace-ProcessMethodOverrides | % { sleep 10 } # press Ctrl-C while sleeping\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none=== TerminateStatement\r\nVERBOSE: BeginProcessing\r\nVERBOSE: ProcessRecord\r\nTerminateStatement : Statement-Terminating Error\r\n...\r\nVERBOSE: StopProcessing\r\n=== throw\r\nVERBOSE: BeginProcessing\r\nVERBOSE: ProcessRecord\r\nVERBOSE: StopProcessing\r\n===Ctrl-C\r\nVERBOSE: BeginProcessing\r\nVERBOSE: ProcessRecord\r\nVERBOSE: StopProcessing\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n=== TerminateStatement\r\nVERBOSE: BeginProcessing\r\nVERBOSE: ProcessRecord\r\nTerminateStatement : Statement-Terminating Error\r\n... \r\n=== throw\r\nVERBOSE: BeginProcessing\r\nVERBOSE: ProcessRecord\r\n===Ctrl-C\r\nVERBOSE: BeginProcessing\r\nVERBOSE: ProcessRecord\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value                                            \r\n----                           -----                                            \r\nPSVersion                      6.0.0                                            \r\nPSEdition                      Core                                             \r\nGitCommitId                    v6.0.0                                           \r\nOS                             Microsoft Windows 6.3.9600                       \r\nPlatform                       Win32NT                                          \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                          \r\nPSRemotingProtocolVersion      2.3                                              \r\nSerializationVersion           1.1.0.1                                          \r\nWSManStackVersion              3.0                                              \r\n```\r\n",
+  "closed_at": "2018-03-06T23:41:00Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "The pipeline is stopped before calling `StopProcessing`, so you won't see any output, but the code is executed.\r\n\r\nYou can verify by calling `Console.WriteLine` instead of writing to the pipeline.\r\n\r\n`StopProcessing` is meant for stopping a pipeline asynchronously, e.g. to unblock a thread waiting on an event or whatever. Ctrl+c is the obvious way to do this, but another common way is to call `PowerShell.Stop` or `PowerShell.BeginStop` on an instance of `PowerShell`, perhaps as a way of supporting a timeout on an operation.",
+      "created_at": "2018-03-05T20:29:48Z",
+      "updated_at": "2018-03-05T20:29:48Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">You can verify by calling Console.WriteLine instead of writing to the pipeline.\r\n\r\nReplacing `WriteVerbose` with `Console.WriteLine` in the repro outputs the following:\r\n\r\n```none\r\n=== TerminateStatement\r\nBeginProcessing\r\nProcessRecord\r\nTerminateStatement : Statement-Terminating Error\r\n...\r\n=== throw\r\nBeginProcessing\r\nProcessRecord\r\n===Ctrl-C\r\nBeginProcessing\r\nProcessRecord\r\nStopProcessing\r\n```\r\n\r\nThis seems to indicate that `StopProcessing` is invoked when PowerShell is stopped using <kbd>CTRL</kbd>-<kbd>C</kbd> but is _not_ invoked when errors are encountered.  Is that correct @lzybkr?\r\n",
+      "created_at": "2018-03-06T17:48:06Z",
+      "updated_at": "2018-03-06T17:48:06Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Correct, errors are synchronous.",
+      "created_at": "2018-03-06T17:49:41Z",
+      "updated_at": "2018-03-06T17:49:41Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Thanks for your help @lzybkr. :)",
+      "created_at": "2018-03-06T23:40:59Z",
+      "updated_at": "2018-03-06T23:40:59Z"
+    }
+  ],
+  "created_at": "2018-03-05T18:41:34Z",
+  "number": 6316,
+  "state": "closed",
+  "title": "In what conditions is `Cmdlet.StopProcessing()` invoked?",
+  "updated_at": "2018-03-06T23:41:00Z"
+}

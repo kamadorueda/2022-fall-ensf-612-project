@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9012",
+  "author": "Bartolomeus-649",
+  "body": "**Suggestion**\r\nThis should be possible:\r\n\"C:\\Path\\\" | Join-Path \"/ChildPath/\";\r\n\r\nWhen there is no ambiguity which parameter the unnamed parameter to a cmdlet should be mapped to, then it should not be required. In the example above, the command has two mandatory parameters, one comes va the pipeline, so only one left.\r\n\r\n**Implementation?**\r\nCould perhaps be achieved as such...\r\nWhen a parameter is piped to a cmdlet, the \"remaining\" parameters should have their position decreased by one (`params.Where(p=>p.Position>pipeParam.Position).ForEach(p=>p.Position--);`)\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This should already work, honestly. This is easily permitted through the default implementations of parameter binding. Let me check out the parameter definitions, it's probably as simple as just adding positional binding to -ChildPath or something.",
+      "created_at": "2019-02-28T16:59:16Z",
+      "updated_at": "2019-02-28T16:59:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "OKay, so the parameters all have positional bindings... I'd say the most likely explanation is that the binder isn't sure what you're trying to do when both piping things in and supplying a first positional param. I could fix it with parameter sets, I think.",
+      "created_at": "2019-02-28T17:27:19Z",
+      "updated_at": "2019-02-28T17:27:19Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm. nope. Can't seem to get it to pick up what's being done there. @lzybkr do you have any insight as to why the parameter binding fails here?",
+      "created_at": "2019-02-28T17:40:08Z",
+      "updated_at": "2019-02-28T17:40:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Note: I'm speculating, so do tell  me if I got things wrong:\r\n\r\n* Before _pipeline_ input is processed - possibly without even being considered in the abstract at that point - all parameters for which _arguments_ were passed are bound. \r\n\r\n* Therefore, `\"/ChildPath/\"` binds to `-Path` as the _first_ positional parameter.\r\n\r\n* Then pipeline input processing starts, and the only possible way to bind the string input object is to `-Path` as well (because it's the only parameter that binds from the pipeline _by value_).\r\n\r\n* Since `-Path` is already bound, you get a  - somewhat misleading - error message:\r\n\r\n```none\r\nThe input object cannot be bound to any parameters for the command \r\neither because the command does not take pipeline input or the input \r\nand its properties do not match any of the parameters that take pipeline input.\r\n```\r\n\r\n* The actual cause is neither; it is that there are no _still-unbound_ parameters that the pipeline input can bind to; in other words: the target parameter is already bound.\r\n\r\n----\r\n\r\nIn the simplest case we could improve the error message.\r\n\r\n~~Based on the above, there is, after all, an ambiguity, and reporting an error is one way to resolve it.~~ (It's not an ambiguity; even though it may be surprising, it's predictable behavior.)\r\n\r\nHowever, I think we agree that @Bartolomeus-649's suggestion to give precedence to pipeline input when binding by-value pipeline-binding parameters makes for a better user experience.\r\n\r\nSpecifically, the following approach may work:\r\n\r\n  * At the time of _argument_ binding, look at whether there is pending pipeline input in the abstract.\r\n  * If there is, take any `ValueFromPipeline` parameter out of the running for _positional_ binding.\r\n  \r\nNote that this won't work for  `ValueFromPipelineByPropertyName` parameters, because knowing whether they would bind would require inspecting all input up front.\r\n\r\n",
+      "created_at": "2019-02-28T18:10:30Z",
+      "updated_at": "2019-02-28T19:44:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What if I want reverse logic? :-)\r\n\"/ChildPath/\" | Join-Path \"C:\\Path\"",
+      "created_at": "2019-02-28T18:22:40Z",
+      "updated_at": "2019-02-28T18:22:40Z"
+    },
+    {
+      "author": "Bartolomeus-649",
+      "author_association": "NONE",
+      "body": "It seem a bit strange that a command don't know if it is executing as part of a pipeline, or if it executing as the first command in a pipeline.\r\nIf the command is part of a pipeline execution (that is, not the first) then shouldn't the corresponding parameter be removed from further possible bindings?",
+      "created_at": "2019-02-28T18:25:03Z",
+      "updated_at": "2019-02-28T18:25:03Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": " @iSazonov Can't be done as -ChildPath only accepts pipeline input `ByPropertyName`. You would have to pass an object with a `ChildPath` property.\r\n\r\nThere is no ambiguity here, but I get the sense from the errors it gives that @mklement0's expectation is accurate. There needs to be logic somewhere in parameter binding to ensure that if a cmdlet is expecting pipeline input that the by-value pipeline parameters are not bound to by explicitly input parameters, excepting the scriptblock-input syntax (e.g., `GCI | Join-Path -Path {$_.Directory} -ChildPath {$_.Extension}`)",
+      "created_at": "2019-02-28T18:29:06Z",
+      "updated_at": "2019-02-28T18:29:06Z"
+    },
+    {
+      "author": "Bartolomeus-649",
+      "author_association": "NONE",
+      "body": "The conceptual model with passing data between command in a pipe is something like:\r\n\r\n\"Here you have some data for you to process\".\r\n\r\nAnd if it is so that some other parameter binds to the data to be processed and making it impossible for the pipe to work, it's almost a bug.",
+      "created_at": "2019-02-28T18:33:24Z",
+      "updated_at": "2019-02-28T18:33:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  Can't be done as\r\n\r\nWhy? I want! :-) It is my use case. Note that it is more \"native\" than use case from initial post.",
+      "created_at": "2019-02-28T19:16:06Z",
+      "updated_at": "2019-02-28T19:17:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It can't be done because only `-Path` is `ValueFromPipeline` -- `-ChildPath` is `ValueFromPipelineByPropertyName`.\r\n\r\nConceivably you could define two separate parameter sets, one that takes input with -ChildPath from pipeline, and one that takes only -Path from pipeline (both ByValue), but then _in both cases_ you would need to specify which of the parameters was being passed as a direct argument.\r\n\r\nSo it would still block this request, unless there can be agreement on which of those two behaviours ought to be \"default\". \ud83d\ude04 \r\n\r\n```powershell\r\n\"\\Child\\Folders\" | Join-Path -Path \"C:\\\" # OK, unambiguous\r\n\"C:\\\" | Join-Path -ChildPath \"\\Child\\Folders\" # OK, unambiguous\r\n\"C:\\\" | Join-Path \"\\Child\\Folders\" # Ambiguous as to which is which; which should be default?\r\n```\r\n\r\nIn either case, the parameter sets would need to be adjusted, and the underlying bug here would still have to be fixed.",
+      "created_at": "2019-02-28T21:26:09Z",
+      "updated_at": "2019-02-28T21:27:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 I say not about implementation details but about user expectations.\r\n`\"C:\\\" | Join-Path \"\\Child\\Folders\"` vs `\"\\Child\\Folders\" | Join-Path \"C:\\\"`\r\nHere \"default\" is ambiguous too. \r\nAnd we can fix only `\"\\Child\\Folders\" | Join-Path -Path \"C:\\\"` as you suggest.",
+      "created_at": "2019-03-01T05:32:23Z",
+      "updated_at": "2019-03-01T05:32:23Z"
+    }
+  ],
+  "created_at": "2019-02-28T16:38:48Z",
+  "number": 9012,
+  "state": "open",
+  "title": "Feature Request: Shouldn't need to specify obvious parameter names when executing a cmdlet",
+  "updated_at": "2019-03-01T05:32:24Z"
+}

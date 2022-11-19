@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2227",
+  "author": "dave-tucker",
+  "body": "<!--\n\nIf it is a bug report:\n- make sure you are able to repro it on the latest released version. \nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\n- Search the existing issues.\n- Refer to the [FAQ](../docs/FAQ.md).\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\n- Fill out the following repro template\n\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\n-->\n## Steps to reproduce\n\nAttempt to download something using `Invoke-RestMethod` that requires an `Authorization` header AND generates a 302 redirect to the final location of that resource.\n\nOne such example is downloading a build artifact from an AppVeyor project.\nE.g from the example [here](https://www.appveyor.com/docs/api/samples/download-artifacts-ps/)\n\n```\nInvoke-RestMethod -Method Get -Uri \"$apiUrl/buildjobs/$jobId/artifacts/$artifactFileName\" `\n-OutFile $localArtifactPath -Headers @{ \"Authorization\" = \"Bearer $token\" }\n```\n## Expected behavior\n\nThe request should succeed like it does on Windows\n## Actual behavior\n\nThe request fails with the following error\n\n```\nInvoke-RestMethod : Response status code does not indicate success: 400 (Authentication information is not given in the correct\nformat. Check the value of Authorization header.).\nAt /Users/dave/Desktop/appveyor.ps1:31 char:1\n+ Invoke-RestMethod -Method Get -Uri \"$apiUrl/buildjobs/$jobId/artifact ...\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : InvalidOperation: (Method: GET, Re...rShell/6.0.0\n}:HttpRequestMessage) [Invoke-RestMethod], HttpRequestException\n    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand\n```\n\nHaving debugged this with AppVeyor support it seems they send a 302 redirect to a location in Azure. On Windows, I've verified with Fiddler that the `Authorization` header is stripped which allows this command to succeed. On Mac it would appear the `Authorization` header is not stripped, causing Azure to generate the error.\n## Environment data\n\n<!-- provide the output of $PSVersionTable -->\n\n``` powershell\n> $PSVersionTable\n\nName                           Value\n----                           -----\nPSVersion                      6.0.0-alpha\nPSEdition                      Core\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\nBuildVersion                   3.0.0.0\nGitCommitId                    v6.0.0-alpha.9\nCLRVersion\nWSManStackVersion              3.0\nPSRemotingProtocolVersion      2.3\nSerializationVersion           1.1.0.1\n\n```\n",
+  "closed_at": "2017-06-15T22:52:08Z",
+  "comments": [
+    {
+      "author": "ScriptAutomate",
+      "author_association": "CONTRIBUTOR",
+      "body": "This may be related, otherwise I can open a separate issue.\n\nOn PowerShell Core, on both Nano Server and Linux:\n\n[Nano - GA Release - PowerShell Core]\n\n``` powershell\nMajor  Minor  Build  Revision\n-----  -----  -----  --------\n5      1      14393  1000    \n```\n\n[Linux - PowerShell Core (alpha.11]\n\n``` powershell\nMajor Minor Patch Label\n----- ----- ----- -----\n    6     0     0 alpha\n```\n\nAuthorization header format should follow:\nhttp://www.ietf.org/rfc/rfc2617.txt\n\nIf my Authorization header includes commas, in specific cases, Invoke-WebRequest / Invoke-RestMethod will give a syntax error but do not get this error when on Windows PowerShell.\n\n``` powershell\n# Fails\n$Headers = @{}\n$Headers.Add('Authorization', \"AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-date, Signature=fe5f80f77d5fa3beca038a248ff0\n27d0445342fe2855ddc963176630326f1024\")\nInvoke-WebRequest -Uri www.google.com -Headers $Headers\n```\n\n``` powershell\n# Success\n$Headers = @{}\n$Headers.Add('Authorization', \"AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request SignedHeaders=host;range;x-amz-date, Signature=fe5f80f77d5fa3beca038a248ff0\n27d0445342fe2855ddc963176630326f1024\")\nInvoke-WebRequest -Uri www.google.com -Headers $Headers\n```\n\nAll I do is remove a single comma after the Credential=VALUE portion, and it passes? Works either way on normal Windows PowerShell.\n\nNote: Example pulled from http://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-auth-using-authorization-header.html\n\nWorkaround:\nIt worked when I removed the comma after the Credential=VALUE portion, on both Core and Windows PowerShell, without issue.\n",
+      "created_at": "2016-11-08T20:10:28Z",
+      "updated_at": "2016-11-08T20:36:30Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@ScriptAutomate you should open that as a separate issue\r\n\r\n@dave-tucker I invested this and it seems to be an issue with AppVeyor's REST API (or potentially libcurl).  In anycase, if you don't specify the Authorization header, it succeeds.  If you specify the Authorization header with curl, it similarly fails.  I created a PR to fix their sample https://github.com/appveyor/website/pull/255",
+      "created_at": "2017-02-11T00:30:12Z",
+      "updated_at": "2017-02-11T00:30:12Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Looks like the problem is with libcurl which .Net Core depends on.  The Auth header is needed by AppVeyor and after auth, they redirect to the Azure Blob Storage which doesn't need it, but because it's there tries to validate and fails.  I'll follow-up with libcurl.",
+      "created_at": "2017-02-11T15:36:25Z",
+      "updated_at": "2017-02-11T15:36:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It doesn't look like libcurl is going to change this behavior.  We can handle the 302 redirect in the cmdlets and remove the Auth header by default (make it consistent with Windows) and add a switch to include it on redirect if desired",
+      "created_at": "2017-02-13T18:23:12Z",
+      "updated_at": "2017-02-13T18:23:12Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Perhaps by default, if the redirect is to same domain, we preserve the headers; if to different domain, we clear them.  Also expose -ClearHeadersOnRedirect switch",
+      "created_at": "2017-05-20T00:02:12Z",
+      "updated_at": "2017-05-20T00:02:12Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "I recommend a less intrusive fix.  Add a -ClearAuthorizationOnRedirect and strip the authorization header on the first redirect.  This means we only handle the first redirect and allow the lower level to handle any subsequent redirects.\r\nAs far as the domain change, I suggest we defer that until we have better use cases. The above will address the appveyor->azure issue which 'should' be the majority of cases.\r\n@joeyaiello and @SteveL-MSFT what do you think?",
+      "created_at": "2017-05-23T18:50:08Z",
+      "updated_at": "2017-05-23T18:50:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee should review:\r\n\r\n1. what is the default behavior?  clear or keep?  (Windows PowerShell appears to clear as this worked previously)\r\n2. do we want a switch specific to the Auth header or perhaps consider `-ClearHeaderOnRedirect` which takes an array of headers?\r\n3. should we have different default behavior depending on if the redirected URL is within the same domain or not?",
+      "created_at": "2017-05-23T21:19:41Z",
+      "updated_at": "2017-05-23T21:19:41Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "Per @PowerShell/powershell-committee conversation:\r\n\r\n* By default, PS Core should do the same thing as Windows PowerShell for all headers\r\n* We should introduce a switch to PS Core that adds the authorization headers back (or we should add a switch that adds all headers back if it turns out that Windows PS behavior is to strip all headers). \r\n* We're not concerned with question 3 right now because it's enough of a edge that customers can handle it in their own scripts right now. ",
+      "created_at": "2017-05-24T23:28:31Z",
+      "updated_at": "2017-05-24T23:28:31Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "Based on the comments from the committee; I'm going to change the current implementation to default to the behavior and also provide a PreserveAuthorizationOnRedirect to handle edge cases. \r\n\r\nThe reason for the change is as follows:\r\nOn FullCLR, WebRequest is used and, under the hood, the Authorization header is automatically stripped when a redirect occurs.  On CoreCLR, HTTPClient is used which doesn't mirror this behavior.  To ensure compatibility, I'll update WebRequestPSCmdlet to disable redirects when it detects an authorization header, handle the first redirect by removing the authorization and resubmitting the request to the redirected location with redirection reenabled.\r\n\r\nThe PreserveAuthorizationOnRedirect will disable this logic for the request for edge cases where the redirected request needs to include the authorization header.\r\n\r\nNOTE: There are various discussions floating around about the reverse problem; the header is stripped and callers must handle redirects manually in code.  The switch is intended to address this use case when the cmdlet is used.\r\n",
+      "created_at": "2017-05-26T22:46:56Z",
+      "updated_at": "2017-05-26T22:56:05Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "I *think* this needs to be merged into the PowerShell master branch before we can close or resolve it. ",
+      "created_at": "2017-05-30T18:28:19Z",
+      "updated_at": "2017-05-30T18:28:19Z"
+    }
+  ],
+  "created_at": "2016-09-10T02:53:29Z",
+  "number": 2227,
+  "state": "closed",
+  "title": "Invoke-RestMethod does not strip Authorization Headers",
+  "updated_at": "2017-06-16T06:00:02Z"
+}

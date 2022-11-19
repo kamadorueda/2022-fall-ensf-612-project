@@ -1,0 +1,195 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13671",
+  "author": "pcgeek86",
+  "body": "## Summary\r\n\r\nI'm trying to specify an AzureAD credential to connect to a PowerShell Remoting session. I can connect locally (loopback) without specifying any credentials successfully. However, when I specify the exact same account information explicitly, it fails.\r\n\r\nhttps://stackoverflow.com/questions/62235382/powershell-throws-access-is-denied-exception-when-using-azure-active-directory\r\nhttps://www.reddit.com/r/sysadmin/comments/drkq67/remote_powershell_session_using_azuread/\r\nhttps://powershell.org/forums/topic/problem-with-remote-session-using-azure-ad-credentials/\r\nhttps://powershell.org/forums/topic/azure-ad-connection-credential/\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nC:\\Users\\TrevorSullivan> etsn localhost -UseSSL -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -Credential azuread\\trevorsullivan\r\n\r\nPowerShell credential request\r\nEnter your credentials.\r\nPassword for user azuread\\trevorsullivan: **********\r\n\r\nEnter-PSSession: Connecting to remote server localhost failed with the following error message : Access is denied. For more information, see the about_Remote_Troubleshooting Help topic.\r\nC:\\Users\\TrevorSullivan> etsn localhost -UseSSL -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck)\r\n[localhost]: PS C:\\Users\\TrevorSullivan\\Documents>\r\n```\r\n\r\n## Expected behavior\r\n\r\nPowerShell uses the Azure AD credential to establish a remoting session.\r\n\r\n## Actual behavior\r\n\r\nAccess is denied.\r\n\r\n## Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.3\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Is the Azure AD user a member of the local `Administrators` group or the `Remote Management Users` group? Can you use something like PSExec to run `psexec.exe -u azuread\\trevorsullivan -p password whoami.exe /all`? Are there any entries in the Security event logs that might indicate why the logon has failed? I'm not 100% sure as to how Azure AD logons actually work with Windows but IIRC it's not the same as a domain joined host using Kerberos.",
+      "created_at": "2020-09-21T22:11:56Z",
+      "updated_at": "2020-09-21T22:13:22Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "Yes, I am the only user of this computer, and I am in the `Administrators` group. \r\n\r\n```\r\nPS C:\\Users\\TrevorSullivan> psexec -u azuread\\trevorsullivan whoami /all\r\n\r\nPsExec v2.2 - Execute processes remotely\r\nCopyright (C) 2001-2016 Mark Russinovich\r\nSysinternals - www.sysinternals.com\r\n\r\nPassword:\r\nPsExec could not start whoami:\r\nThe user name or password is incorrect.\r\n```\r\n\r\nI'm pretty sure this is a bug with Windows and Azure Active Directory authentication, [just like Task Scheduler](https://trevorsullivan.net/2020/09/21/authentication-error-while-configuring-scheduled-task-in-windows-task-scheduler/).",
+      "created_at": "2020-09-21T22:17:04Z",
+      "updated_at": "2020-09-21T22:17:04Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Ah ok I didn't realise your current user was the same as the credentials you specified. It's interesting that the example without an explicit `-Credential` works just fine as that means the implicit token that Windows has stored for your current logon will work against a network logon whereas when you specify it explicitly it does not. I do not fully understand how AzureAD works but I believe Windows uses the CloudAP Negotiate provider to facilitate the logon for those accounts so that might be a place to start looking into.\r\n\r\nI'm also curious, is the connection to localhost just for an example to replicate this problem or are you actually using that for something in particular?",
+      "created_at": "2020-09-21T22:23:03Z",
+      "updated_at": "2020-09-21T22:23:53Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I was very curious at this situation and I'm not able to replicate the problem in my test environment. I'm able to RDP to the Azure VM and auth with my Azure AD account. I'm able to create an run a scheduled task using that same account. I'm also able to connect to over PSRemoting with the implicit and explicit credentials for my Azure AD account. I was able to do so with both the Netlogon (DOMAIN\\username) and UPN form (username@DOMAIN.COM).\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/93958776-97b16e00-fd9a-11ea-9e54-dd70b15f2d2d.png)\r\n\r\nThe PSRemoting tests I tried\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/93958876-d21b0b00-fd9a-11ea-9042-c1e3b42e222d.png)\r\n\r\nI also tried a HTTPS listener with a self signed certificate, even with `CbtHardeningLevel` set to `Strict` and it worked just fine.\r\n\r\nWhen looking through the Wireshark captures I found that it is using Kerberos authentication which is expected. This is a completely vanilla setup of Azure AD that I used https://docs.microsoft.com/en-us/azure/active-directory-domain-services/tutorial-create-instance to complete.\r\n\r\nOne thing I did notice is that the PowerShell instance needs to already be running as an Administrator. Without that the underlying WinRM library is set to always fail with that error based on a [recentish update](https://devblogs.microsoft.com/powershell/windows-security-change-affecting-powershell/). Although that blog post doesn't actually describe this particular scenario, that CVE fix also affected this setup. This check is to stop a limited process from elevating itself to an Administrator without going through a UAC prompt. I can definitely rule out PowerShell adding that check by running\r\n\r\n```\r\nwinrs -r:http://localhost:5985/wsman -u:jborean93\\testazad whoami.exe\r\n```\r\n\r\nOn an elevated shell this works just fine but on a limited shell it will fail due to that new check I mentioned above.\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/azure/active-directory-domain-services/tutorial-create-instance\">Tutorial - Create an Azure Active Directory Domain Services managed domain</a></strong></div><div>In this tutorial, you learn how to create and configure an Azure Active Directory Domain Services managed domain using the Azure portal.</div></blockquote>",
+      "created_at": "2020-09-23T03:08:17Z",
+      "updated_at": "2020-09-23T03:10:59Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "@jborean93 Do you have Multi-Factor Authentication (MFA) configured on your Azure Active Directory (AAD) user account? I do.",
+      "created_at": "2020-09-23T17:09:13Z",
+      "updated_at": "2020-09-23T17:09:13Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I did not but that would indicate why yours fails and mine does not. It also explain how it works when you omit the credentials as it will be using the existing PRT that Windows had received during the logon process compared to getting a new one.\r\n\r\nWhen you RDP into the box, do you just use the normal password? How does the MFA part come into that?\r\n\r\nI'm recreating my environment and will enable MFA to test with.",
+      "created_at": "2020-09-23T19:00:12Z",
+      "updated_at": "2020-09-23T19:13:46Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "I'm not RDP'ing into anything. This is my local development system.\r\n\r\nHere's what I see in the Windows Event Log (Security) when I run the above command.\r\n\r\n```xml\r\n- <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">\r\n- <System>\r\n  <Provider Name=\"Microsoft-Windows-Security-Auditing\" Guid=\"{54849625-5478-4994-a5ba-3e3b0328c30d}\" /> \r\n  <EventID>4625</EventID> \r\n  <Version>0</Version> \r\n  <Level>0</Level> \r\n  <Task>12544</Task> \r\n  <Opcode>0</Opcode> \r\n  <Keywords>0x8010000000000000</Keywords> \r\n  <TimeCreated SystemTime=\"2020-09-23T20:07:16.1450560Z\" /> \r\n  <EventRecordID>680302</EventRecordID> \r\n  <Correlation ActivityID=\"{40d705d0-91e4-0010-0306-d740e491d601}\" /> \r\n  <Execution ProcessID=\"1716\" ThreadID=\"15940\" /> \r\n  <Channel>Security</Channel> \r\n  <Computer>artemis</Computer> \r\n  <Security /> \r\n  </System>\r\n- <EventData>\r\n  <Data Name=\"SubjectUserSid\">S-1-0-0</Data> \r\n  <Data Name=\"SubjectUserName\">-</Data> \r\n  <Data Name=\"SubjectDomainName\">-</Data> \r\n  <Data Name=\"SubjectLogonId\">0x0</Data> \r\n  <Data Name=\"TargetUserSid\">S-1-0-0</Data> \r\n  <Data Name=\"TargetUserName\">trevorsullivan</Data> \r\n  <Data Name=\"TargetDomainName\">azuread</Data> \r\n  <Data Name=\"Status\">0xc000006d</Data> \r\n  <Data Name=\"FailureReason\">%%2313</Data> \r\n  <Data Name=\"SubStatus\">0xc0000064</Data> \r\n  <Data Name=\"LogonType\">3</Data> \r\n  <Data Name=\"LogonProcessName\">NtLmSsp</Data> \r\n  <Data Name=\"AuthenticationPackageName\">NTLM</Data> \r\n  <Data Name=\"WorkstationName\">ARTEMIS</Data> \r\n  <Data Name=\"TransmittedServices\">-</Data> \r\n  <Data Name=\"LmPackageName\">-</Data> \r\n  <Data Name=\"KeyLength\">0</Data> \r\n  <Data Name=\"ProcessId\">0x0</Data> \r\n  <Data Name=\"ProcessName\">-</Data> \r\n  <Data Name=\"IpAddress\">-</Data> \r\n  <Data Name=\"IpPort\">-</Data> \r\n  </EventData>\r\n  </Event>\r\n```",
+      "created_at": "2020-09-23T20:08:58Z",
+      "updated_at": "2020-09-23T20:08:58Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "By the way, I do not need to be running PowerShell as Administrator, in order to establish a loopback PowerShell Remoting session. See screenshot below.\r\n\r\n![image](https://user-images.githubusercontent.com/466713/94064142-76ef1580-fda6-11ea-85f5-48c328c4170b.png)\r\n",
+      "created_at": "2020-09-23T20:10:04Z",
+      "updated_at": "2020-09-23T20:10:04Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "**NOTE**: The substatus code in the Event Log entry indicates \r\n\r\n```\r\n0xC0000064 | User logon with misspelled or bad user account\r\n```\r\n\r\n... according to [this document](https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4625).\r\n\r\nWhen I run `whoami`, I get literally the exact same output. How is it that this could be an invalid username?",
+      "created_at": "2020-09-23T20:14:00Z",
+      "updated_at": "2020-09-23T20:14:35Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "So is your local machine joined to the Azure AD domain?\r\nIs your running running user the Azure AD user?\r\nDoes `whoami` output `azuread\\trevorsullivan`?\r\n\r\n> By the way, I do not need to be running PowerShell as Administrator, in order to establish a loopback PowerShell Remoting session. See screenshot below.\r\n\r\nThat's weird as I definitely have to do so and have had to do so for a while now. Does the `Medium` or `High` mandatory label appear when you run `whoami.exe /groups` in that normal process?",
+      "created_at": "2020-09-23T20:23:14Z",
+      "updated_at": "2020-09-23T20:25:09Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "Here is the output from `whoami /groups`\r\n\r\n![image](https://user-images.githubusercontent.com/466713/94066531-d4389600-fda9-11ea-8bca-71402798ef7e.png)\r\n\r\nAnd yes, `whoami` outputs `azuread\\trevorsullivan`.",
+      "created_at": "2020-09-23T20:34:30Z",
+      "updated_at": "2020-09-23T20:34:30Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Ok so you either have UAC disabled or your account is the builtin admin account (renamed). Because you have the `High Mandatory Label` the process is elevated and running like it would when you right click -> Run as administrator. This explains why you are able to do the loopback connection.\r\n\r\nMy test domain and VM is now online, I've enabled MFA so I'm going to test out a few things right now.",
+      "created_at": "2020-09-23T20:36:27Z",
+      "updated_at": "2020-09-23T20:36:27Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "Sorry, that was from the admin session. This one is from the non-admin session. You can see `Medium Mandatory Level` here.\r\n\r\n![image](https://user-images.githubusercontent.com/466713/94067434-17473900-fdab-11ea-8dac-abde71a9e8d0.png)\r\n\r\n",
+      "created_at": "2020-09-23T20:43:13Z",
+      "updated_at": "2020-09-23T20:43:13Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "Also, I have disabled MFA on my AzureAD user account, and still receive the same error. Clearly, due to the earlier substatus code, there is some kind of account name resolution issue going on. It doesn't think that `azuread\\trevorsullivan` is a valid username, but the operating system is the one telling me that, that's my username. \ud83e\udd37\ud83c\udffb\u200d\u2642\ufe0f",
+      "created_at": "2020-09-23T20:44:04Z",
+      "updated_at": "2020-09-23T20:44:04Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "By the way, I also tried configuring CredSSP on the WinRM service, and enabling credential delegation through local GPO. Using CredSSP didn't get me anywhere. It only introduced more roadblocks with the SPN configuration.",
+      "created_at": "2020-09-23T20:45:18Z",
+      "updated_at": "2020-09-23T20:45:18Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Well then I don't know why the loopback works :(\r\n\r\nYea the error code is clearly Windows saying that the username cannot be resolved. In either case with MFA I'm still able to connect but I didn't have to do anything special so I have no idea if I even set it up properly.\r\n\r\nUltimately the error is happening outside of PowerShell and Windows is unable to process the authentication for that user. It could be that there's enough info cached to allow you to log on interactively using your Azure AD account but subsequent network logons are relying on an active connection to the Azure AD domain itself which isn't there. The fact that it tried to logon using NTLM is suspicious as for me it's using Kerberos.\r\n\r\nYou could also see if Windows is able to lookup the SID based on the name with\r\n\r\n```powershell\r\n[Security.Principal.NTAccount]::new('username@DOMAIN.COM').Translate([Security.Principal.SecurityIdentifier])\r\n[Security.Principal.WindowsIdentity]::GetCurrent().User\r\n```\r\n\r\nSorry I couldn't help anymore, it seems like it is possible but there's something specific with your environment setup that I cannot replicate that is causing an issue with Windows trying to resolve the username. I would potentially try to use the UPN in your credential to see if that works but I have my doubts it will.",
+      "created_at": "2020-09-23T20:53:33Z",
+      "updated_at": "2020-09-23T20:53:33Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "I tried using UPN syntax as well, same issue.\r\n\r\nGood idea to test resolving the account SID. All of these properly resolve my SID.\r\n\r\n```\r\n[Security.Principal.NTAccount]::new('trevor@trevorsullivan.net').Translate([Security.Principal.SecurityIdentifier])\r\n[Security.Principal.NTAccount]::new('azuread\\trevorsullivan').Translate([Security.Principal.SecurityIdentifier])\r\n[Security.Principal.WindowsIdentity]::GetCurrent().User\r\n```\r\n\r\n> The fact that it tried to logon using NTLM is suspicious as for me it's using Kerberos.\r\n\r\nI agree. I noticed that when you posted earlier. ",
+      "created_at": "2020-09-23T21:13:31Z",
+      "updated_at": "2020-09-23T21:13:31Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "I think the next thing I'll try is to create another Azure AD user, and attempt to login with that one. I will avoid putting a space in the name (ie. `azuread\\joe`), and omit the last name.",
+      "created_at": "2020-09-23T21:14:10Z",
+      "updated_at": "2020-09-23T21:14:10Z"
+    },
+    {
+      "author": "ethanfrom",
+      "author_association": "NONE",
+      "body": "Anyone get this working I am experiencing the same thing.",
+      "created_at": "2021-11-22T03:19:49Z",
+      "updated_at": "2021-11-22T03:19:49Z"
+    },
+    {
+      "author": "donfox007",
+      "author_association": "NONE",
+      "body": "facing the same issue , \r\nwin 11  :  \r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.22000.282\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.22000.282\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n\r\n",
+      "created_at": "2021-12-11T19:00:36Z",
+      "updated_at": "2021-12-11T19:00:36Z"
+    },
+    {
+      "author": "najki78",
+      "author_association": "NONE",
+      "body": "This is a response from Microsoft Support on the issue:\r\n\r\nWinRM doesn\u2019t support AAD authentication. It supports only Kerberos, NTLM and certificate authentication.\r\nYou can find more details here: Authentication for Remote Connections - Win32 apps | Microsoft Docs - https://docs.microsoft.com/en-us/windows/win32/winrm/authentication-for-remote-connections\r\n\r\nThe AAD authentication is going to be added with next version of OS.\r\nAs a conclusion you have faced with by design behavior.\r\n\r\nGuys, do you have maybe some workaround of how to run on-demand, scripts remotely in an environment with AAD joined devices please\r\n",
+      "created_at": "2022-02-11T09:55:15Z",
+      "updated_at": "2022-02-11T09:57:02Z"
+    },
+    {
+      "author": "mariuselix",
+      "author_association": "NONE",
+      "body": "Have you tried using a local account? With the local account, the only requirement would be that the machines can talk to each other over the network & you could use Negotiate authentication via HTTPS, for some extra security/encryption.",
+      "created_at": "2022-02-21T15:59:00Z",
+      "updated_at": "2022-02-21T15:59:00Z"
+    },
+    {
+      "author": "nkasco",
+      "author_association": "NONE",
+      "body": "> Have you tried using a local account? With the local account, the only requirement would be that the machines can talk to each other over the network & you could use Negotiate authentication via HTTPS, for some extra security/encryption.\r\n\r\nThis does work but I think it's besides the point, I don't want to rewrite my entire library of scripts to have every command authenticate with lanadmin... Unless you've got a clever way to wrap it in to make things run remotely under that context? ",
+      "created_at": "2022-02-21T16:02:38Z",
+      "updated_at": "2022-02-21T16:02:38Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "> Have you tried using a local account? With the local account, the only requirement would be that the machines can talk to each other over the network & you could use Negotiate authentication via HTTPS, for some extra security/encryption.\n\nWhy would someone want to create a whole bunch of local user accounts and compromise the secure configuration of an enterprise network? That doesn't make any sense.\n",
+      "created_at": "2022-02-21T16:10:26Z",
+      "updated_at": "2022-02-21T16:10:26Z"
+    },
+    {
+      "author": "nkasco",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT SOS. \r\n\r\nThis really is a broader question too as I know some things use RPC, others use WinRM, etc. I've been wracking my brain around this for a while now and have had very limited success, even with Azure Connect Seamless SSO going from hybrid joined domain machine to pure AAD joined that has line-of-sight via VPN.",
+      "created_at": "2022-02-21T16:26:19Z",
+      "updated_at": "2022-02-21T16:26:19Z"
+    },
+    {
+      "author": "KofaxLisa",
+      "author_association": "NONE",
+      "body": "I experienced the same issue. and struggled a lot. Until I found this post https://learn.microsoft.com/en-us/powershell/scripting/learn/remoting/ps-remoting-second-hop?view=powershell-7.2, this issue is caused by the second hop in Powershell remote. the link mentioned a couple of solutions, I tried the one at https://learn.microsoft.com/en-us/archive/blogs/sergey_babkins_blog/another-solution-to-multi-hop-powershell-remoting, it works. Please have a try.\n\n<blockquote><img src=\"https://learn.microsoft.com/media/logos/logo-powershell-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://learn.microsoft.com/en-us/powershell/scripting/learn/remoting/ps-remoting-second-hop\">Making the second hop in PowerShell Remoting - PowerShell</a></strong></div><div>This article explains the various methods for configuring second-hop authentication for PowerShell remoting, including the security implications and recommendations.</div></blockquote>\n<blockquote><img src=\"https://learn.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://learn.microsoft.com/en-us/archive/blogs/sergey_babkins_blog/another-solution-to-multi-hop-powershell-remoting\">Another solution to multi-hop PowerShell remoting</a></strong></div></blockquote>",
+      "created_at": "2022-10-07T19:15:13Z",
+      "updated_at": "2022-10-07T19:15:16Z"
+    }
+  ],
+  "created_at": "2020-09-21T21:49:41Z",
+  "number": 13671,
+  "state": "open",
+  "title": "Remoting using Azure Active Directory (AAD) credentials fails with \"access is denied\"",
+  "updated_at": "2022-10-07T19:15:16Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13699",
+  "author": "jazzdelightsme",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nCurrently `Import-PowershellDataFile` takes a path to a file on disk. But what if I have the .psd1 content in memory? (Such as in a string, as downloaded from AzDO or github or such.)\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nAnother parameter set that accepts a string.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If you have it as a string, you can use `Invoke-Expression` since its just a hash literal.\r\n\r\nIf there were to be another cmdlet for it, I'd imagine it'd follow the CSV pattern and have a ConvertFrom/ConvertTo cmdlet for in-memory conversions.",
+      "created_at": "2020-09-25T17:10:24Z",
+      "updated_at": "2020-09-25T17:10:24Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": ">If you have it as a string, you can use Invoke-Expression\r\n\r\nI thought the point of `Import-PowershellDataFile` is that it lets you import data in a safe way, without executing code in the file.\r\n\r\n(In other words, if what you suggest were an acceptable solution, then we would not need the `Import-PowershellDataFile` in the first place.)",
+      "created_at": "2020-09-25T17:24:11Z",
+      "updated_at": "2020-09-25T17:24:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Aye, just mentioning something that works for some use cases for the time being. You can manually construct a script block and verify no commands are being used in it if you prefer as well, but I agree it would be better handled by a cmdlet.",
+      "created_at": "2020-09-25T17:27:36Z",
+      "updated_at": "2020-09-25T17:27:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As an alternative to a new cmdlet, we could think about generalizing @JamesWTruher's idea proposed in the context of https://github.com/PowerShell/PowerShell/issues/4332#issuecomment-643486358: To allow targeting a variable via a provider path; e.g.:\r\n\r\n```powershell\r\n$dataFileContent = ... # read *.psd1 file into memory\r\n\r\nImport-PowerShellData -LiteralPath variable:dataFileContent\r\n```\r\n\r\nAll file-processing cmdlets could benefit from this, notably `Import-CliXml` / `Export-CliXml`, which would obviate the need to implement #3898 (separate `ConvertTo/From-CliXml` cmdlets).\r\n\r\nI've always felt that the current dichotomy - one cmdlet for in-memory operations, another for file operations - is clumsy, both in terms of UX and implementation.\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-09-25T18:01:38Z",
+      "updated_at": "2020-09-25T18:02:21Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm. If the cmdlet is using provider paths correctly I would imagine they should already support that. Is there a specific reason they don't?",
+      "created_at": "2020-09-25T18:28:54Z",
+      "updated_at": "2020-09-25T18:28:54Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 iirc that command just does something like this:\r\n\r\n```csharp\r\nParser.ParseFile(path, out _, out _).Find(ast => ast is HashtableAst, false).SafeGetValue();\r\n```\r\n\r\nSo it's quite a bit cheaper to use that directly rather than calling the content provider API's.  Side note, you can do something similar to that but with `ParseInput` as a workaround.",
+      "created_at": "2020-09-25T18:40:05Z",
+      "updated_at": "2020-09-25T18:40:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "While `Get-Content` supports it, here's how the file-processing `Import-*` cmdlets fail: all but `Import-Alias` do the same thing as `Import-PowerShellDataFile`, as presumably explained by @SeeminglyScience:\r\n\r\n```powershell\r\n$foo = 'hi there'\r\ngcm import-* | where name -notmatch 'pssession|packageprovider|module|localizeddata' | % {\r\n  $null = try { & $_.Name -LiteralPath variable:foo -ea SilentlyContinue -ev e } catch { $e = $_ }\r\n  [pscustomobject] @{\r\n    Cmdlet = $_.Name\r\n    Error = \"$e\"\r\n  }\r\n}\r\n```\r\n\r\n```none\r\n\r\nCmdlet                    Error\r\n------                    -----\r\nImport-Alias              Cannot import the alias because the specified path 'variable:foo' referred to a 'Microsoft.PowerShell.Core\\Variable' provider path. Change the value of t\u2026\r\nImport-Clixml             Cannot open file because the current provider (Microsoft.PowerShell.Core\\Variable) cannot open a file.\r\nImport-Csv                Cannot open file because the current provider (Microsoft.PowerShell.Core\\Variable) cannot open a file.\r\nImport-PowerShellDataFile Cannot open file because the current provider (Microsoft.PowerShell.Core\\Variable) cannot open a file.\r\n```",
+      "created_at": "2020-09-25T18:47:00Z",
+      "updated_at": "2020-09-25T18:47:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah looks like they explicitly check for other providers and prevent them from being used.\r\n\r\nIMO they should just... not, really. \ud83d\ude02 \r\n\r\n`New-WordCloud` from my PSWordCloud module allows this kind of functionality (writing to arbitrary PSProviders). The only real issue I ran into was that not all providers (the variable provider is one of these) support the `Content.Clear()` operation, so you do have to catch that and (probably) swap it for an `Item.Remove()` operation instead (if the provider supports that) if you want to be able to do `Set-Content` style things which clear data before writing.",
+      "created_at": "2020-09-25T19:13:46Z",
+      "updated_at": "2020-09-25T19:16:06Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Yeah looks like they explicitly check for other providers and prevent them from being used.\r\n> \r\n> IMO they should just... not, really. \ud83d\ude02\r\n\r\nI'd be willing to bet none of these commands are written in a way that make this that simple. Nor should they be really, the content API's are super slow and allocate way too much.  It would be nice to have a fallback of sorts though:\r\n\r\n```csharp\r\n// sort of psuedo code that doesn't account for a lot of things\r\npublic static string ReadProviderItemAsString(this PSCmdlet cmdlet, string path)\r\n{\r\n    string providerPath = cmdlet.SessionState.Path.GetUnresolvedProviderPathFromPSPath(\r\n        path,\r\n        out ProviderInfo provider,\r\n        out _);\r\n\r\n    if (provider.Name is FileSystemProvider.ProviderName)\r\n    {\r\n        return File.ReadAllText(providerPath);\r\n    }\r\n\r\n    using IContentReader reader = cmdlet.SessionState.InvokeProvider.Content.GetReader(\r\n        new[] { path },\r\n        force: true,\r\n        literalPath: true)[0];\r\n\r\n    var text = new StringBuilder();\r\n    bool first = true;\r\n    for (IList items = reader.Read(1); items is { Count: > 0 }; items = reader.Read(1))\r\n    {\r\n        foreach (object item in items)\r\n        {\r\n            if (first)\r\n            {\r\n                first = false;\r\n            }\r\n            else\r\n            {\r\n                text.AppendLine();\r\n            }\r\n\r\n            if (item is null)\r\n            {\r\n                continue;\r\n            }\r\n\r\n            text.Append(item);\r\n        }\r\n    }\r\n\r\n    return text.ToString();\r\n}\r\n```\r\n\r\nThat said, there are theoretically providers that don't necessarily deal with string content.  So that might end up being a bunch of default `Object.ToString()` calls.\r\n\r\nThat also doesn't account for commands whose implementation might be able to work directly with a `FileStream`, or might call a native API that takes a file system path.",
+      "created_at": "2020-09-25T19:32:48Z",
+      "updated_at": "2020-09-25T19:33:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sounds like we need a provider `Content` API that doesn't just unilaterally assume strings, but that's a different conversation. ^^",
+      "created_at": "2020-09-25T19:36:43Z",
+      "updated_at": "2020-09-25T19:36:43Z"
+    }
+  ],
+  "created_at": "2020-09-25T16:13:45Z",
+  "number": 13699,
+  "state": "open",
+  "title": "Feature Request: Import-PowershellDataFile should accept string input",
+  "updated_at": "2020-09-29T12:29:52Z"
+}

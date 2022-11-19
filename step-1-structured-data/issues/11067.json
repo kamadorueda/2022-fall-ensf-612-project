@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11067",
+  "author": "SteveL-MSFT",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nIt's becoming more common for scripts to have a secret as a secure string, but needs to use it as a plain text string (like making a REST call).  Anyone can search the web to find the APIs needed to convert the SecureString to plain text.  It seems we should just make this a part of PowerShell so people aren't blindly copying and pasting script samples from websites.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nProposal is to add `-AsPlainText` to `ConvertFrom-SecureString` cmdlet.  ",
+  "closed_at": "2019-12-11T23:40:41Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "In the Engine if we do the convert we clear memory right after using. How do we do this in scripts?",
+      "created_at": "2019-11-14T09:00:27Z",
+      "updated_at": "2019-11-14T09:00:27Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov that's a good point, but I think we should see what comes out of https://github.com/dotnet/corefx/issues/40393.  Ideally, I think there should be a SensitiveString type that clears memory when out of scope but is just plain text.",
+      "created_at": "2019-11-15T00:04:43Z",
+      "updated_at": "2019-11-15T00:04:43Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "A secure solution would not keep the plain text password in memory for very long. It really should only be exposed for the immediate need and be securely erased from memory after use.\r\n\r\nFor example, using a password with a 3rd party tool\r\n```PowerShell\r\ngpg --passphrase ( $securePass | ConvertFrom-SecureString -AsPlainText )\r\n```\r\n\r\nThis doesn't save the password so it shouldn't stay in memory from Powershell but it's too wordy. If we add a method to `[SecureString]`, it can be simplified:\r\n```PowerShell\r\ngpg --passphrase ( $securepass.ToPlainText() )`\r\n```\r\n\r\nThis is similar to how you get the password with `[PSCredential].GetNetworkCredential().Password` with the difference it returns only a string and not an object that you have to then select.\r\n\r\nEither way, it doesn't prevent someone from saving to a variable\r\n```PowerShell\r\n$nonsecurePass = $securePass | ConvertFrom-SecureString -AsPlainText\r\ngpg --passphrase $nonsecurePass\r\n\r\nStart-Sleep -Seconds 300\r\n$nonsecurePass\r\n```\r\n\r\nNow, we have saved the password in memory until we replace it, manually delete it, or close powershell. Since authentication usually happens at the beginning, that password will live for the entire duration of the script.\r\n\r\nYou also tend to set variables in an interactive session and keep them open for long time to incrementally work on a script or problem. \r\n\r\n### Proposal\r\nAdd a new string type, `[TemporaryString]`, that is use-once and/or time-limited. When the condition is met, the contents are erased from memory. Have the new `-AsPlainText` option return this new type instead of a regular string.\r\n\r\nThis will allow the last example to work without having the password live for a long time.\r\n\r\nIf a user tries to reuse the `[TemporaryString]`, throw an error indicating it was securely erased and needs to be retrieved again. \r\n\r\n```PowerShell\r\n# Convert the [SecureString] to [TemporaryString]\r\n$nonsecurePass = $securePass | ConvertFrom-SecureString -AsPlainText\r\n\r\n# Pass the [TemporaryString] to tool\r\ngpg --passphrase $nonsecurePass\r\n\r\n# Throws Error because password was already used. \r\ngpg --passphrase $nonsecurePass\r\n\r\n# If reuse for several commands are needed\r\ngpg --passphrase ( $securePass.ToPlainText() )\r\ngpg --passphrase ( $securePass.ToPlainText() )\r\ngpg --passphrase (  $securePass | ConvertFrom-SecureString -AsPlainText )\r\n```\r\n\r\n`-AsPlainText` may be better named more closely to the type if this proposal is accepted. `AsTemporaryString` or `AsTempString`",
+      "created_at": "2019-11-15T00:18:53Z",
+      "updated_at": "2019-11-15T00:18:53Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "#10847 is related to this.  It is another way of getting a secret entered into PowerShell so that it can be used with external commands & REST websites that don't work with SecureString.  ",
+      "created_at": "2019-11-15T15:51:27Z",
+      "updated_at": "2019-11-15T15:51:27Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> If we add a method to [SecureString]\r\n\r\nThat type comes from .NET, so we'd need to do trickery to surface the method. If that trickery is in script, it might have implications for how we handle the value.\r\n\r\nOne difficulty with strings is that they may be interned. This is unlikely with a value generated by a securestring reversal call, but (1) once the string comes out, the caller can do what they wish with it (including call `[string]::Intern($secret)`) and (2) .NET could intern a string any time it likes (although I don't think it does for anything other than C# string literals currently). And once a string is interned, it's unlikely to be GC'd. Even without this, trying to make guarantees about the lifetime of string values with the GC is something I'm not sure we can do.\r\n\r\nFor passing string values into APIs requiring strings, there's not much we can do in terms of protecting the lifetime of the string value; those APIs ultimately get a string and can do whatever they like with them, so you must trust them.\r\n\r\nI think the real place to pick up slack is with usability, particularly:\r\n\r\n- Masking input so it can't be read off the screen or in logs\r\n- Preventing formatting output to the screen/logs unless deliberate\r\n- @dragonwolf83's affine-typed string is a nice idea too\r\n\r\nIdeally we have one way to do this and it reuses the `securestring` type, since that's what everyone is familiar with and expects to work.",
+      "created_at": "2019-11-19T06:10:19Z",
+      "updated_at": "2019-11-19T06:10:19Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and accepts the `-AsPlainText` switch for `ConvertFrom-SecureString`",
+      "created_at": "2019-11-20T23:27:34Z",
+      "updated_at": "2019-11-20T23:27:34Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "A point of feedback is whether `-AsPlainText` should require `-Force` like how `ConvertTo-SecureString -AsPlainText` does require it.  My personal opinion is that adding more `-Force` to cmdlets just forces people to set `Force = $true` in their `$PSDefaultParameterValues` and dilutes the meaning of `-Force`.  If such a thing is needed, I would prefer to have it confirm and have users override that.  Since the cmdlet already conveys this is working with SecureString, it seems unnecessary to put up an artificial barrier to get it working.  I don't believe it needs to have symmetry with `ConvertTo-SecureString` in this case.  Thoughts?",
+      "created_at": "2019-11-21T21:10:40Z",
+      "updated_at": "2019-11-21T21:10:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Since in .NET Core I don't think we really have a way to guarantee the input is actually secure in any case... I don't see the need for `-Force` in either cmdlet at present. \ud83e\udd37\u200d\u2642 ",
+      "created_at": "2019-11-21T21:13:56Z",
+      "updated_at": "2019-11-21T21:13:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I'd remove \"force\" from ConvertTo-SecureString for symmetry.",
+      "created_at": "2019-11-22T03:55:39Z",
+      "updated_at": "2019-11-22T03:55:39Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "`ConvertTo-SecureString` probably needs to keep `-Force` for compatibility (at least in 7), but we should make it a no-op",
+      "created_at": "2019-11-22T04:58:04Z",
+      "updated_at": "2019-11-22T04:58:04Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, we agreed that `-Force` is not to be added to `ConvertFrom-SecureString` and make `-Force` on `ConvertTo-SecureString` a no-op for compatibility",
+      "created_at": "2019-12-04T23:28:33Z",
+      "updated_at": "2019-12-04T23:28:33Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11142, which has now been successfully released as `v7.0.0-rc.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-rc.1)\n",
+      "created_at": "2019-12-16T21:37:47Z",
+      "updated_at": "2019-12-16T21:37:47Z"
+    }
+  ],
+  "created_at": "2019-11-14T01:43:07Z",
+  "number": 11067,
+  "state": "closed",
+  "title": "Feature Request: Convert SecureString to string",
+  "updated_at": "2019-12-16T21:37:48Z"
+}

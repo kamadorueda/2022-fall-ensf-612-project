@@ -1,0 +1,188 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3178",
+  "author": "0x4c6565",
+  "body": "I have noticed that there currently appears to be no support for requesting a compressed response (gzip/deflate) with the Invoke-[RestMethod|WebRequest] cmdlets. It would be useful to have support for this (curl implements this via the --compressed flag).\r\n\r\nConditional support can be added via the AutomaticDecompression property of the WebRequest class for FullCLR, and using a new HttpClientHandler with HttpClient for CoreCLR. Support would be added with a new cmdlet parameter (suggest -Compressed ?)\r\n\r\nI'm happy to put a pull request in for this - however just making sure this functionality is desirable before adding.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "The web cmdlets should support gzip compressed requests. \r\n\r\nFollowing commands work in PS5/6 on Windows:\r\n```powershell\r\nInvoke-RestMethod httpbin.org/gzip\r\n```\r\n```powershell\r\ngzipped headers\r\n------- -------\r\n   True @{Host=httpbin.org; User-Agent=Mozilla/5.0 (Windows NT; Windows NT 10.0; en-US) WindowsPowerShell/5.1.14393....\r\n```\r\n```powershell\r\n(Invoke-WebRequest httpbin.org/gzip).Content\r\n```\r\n```json\r\n{\r\n  \"gzipped\": true,\r\n  \"headers\": {\r\n    \"Host\": \"httpbin.org\",\r\n    \"User-Agent\": \"Mozilla/5.0 (Windows NT; Windows NT 10.0; en-US) WindowsPowerShell/5.1.14393.693\"\r\n  },\r\n  \"method\": \"GET\",\r\n  \"origin\": \"REDACTED\"\r\n}\r\n```\r\n\r\nHowever deflate is not supported:\r\n```powershell\r\nInvoke-RestMethod httpbin.org/deflate\r\nInvoke-WebRequest httpbin.org/deflate\r\n```\r\nPS5 errors\r\n```powershell\r\nInvoke-RestMethod : Block length does not match with its complement.\r\nAt line:1 char:1\r\n+ Invoke-RestMethod httpbin.org/deflate\r\n+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Invoke-RestMethod], InvalidDataException\r\n    + FullyQualifiedErrorId : System.IO.InvalidDataException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand\r\n```\r\n```powershell\r\nInvoke-WebRequest : Block length does not match with its complement.\r\nAt line:1 char:1\r\n+ Invoke-WebRequest httpbin.org/deflate\r\n+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Invoke-WebRequest], InvalidDataException\r\n    + FullyQualifiedErrorId : System.IO.InvalidDataException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand\r\n```\r\nPS6 errors\r\n```powershell\r\nInvoke-RestMethod : The read operation failed, see inner exception.\r\nAt line:1 char:1\r\n+ Invoke-RestMethod httpbin.org/deflate\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Invoke-RestMethod], IOExcepti\r\n   on\r\n    + FullyQualifiedErrorId : System.IO.IOException,Microsoft.PowerShell.Comma\r\n   nds.InvokeRestMethodCommand\r\n```\r\n```powershell\r\nInvoke-WebRequest : The read operation failed, see inner exception.\r\nAt line:1 char:1\r\n+ Invoke-WebRequest httpbin.org/deflate\r\n+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Invoke-WebRequest], IOExcepti\r\n   on\r\n    + FullyQualifiedErrorId : System.IO.IOException,Microsoft.PowerShell.Comma\r\n   nds.InvokeWebRequestCommand\r\n```",
+      "created_at": "2017-02-21T22:49:32Z",
+      "updated_at": "2017-02-21T22:49:32Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "I just verified, that PS5/6 indeed doesn't send `Accept-Encoding` header. My initial test with Requestb.in was stating wrong that `Accept-Encoding: gzip` is included in the header. Seems to be a bug on Requestb.in side.\r\nAnother test with http://xhaus.com/headers and http://www.reliply.org/tools/requestheaders.php showed that `Accept-Encoding` is missing.\r\nFurthermore http://httpbin.org/gzip always delivers gzip compressed data, regardless if the header is included or not. Another strange behavior in my opinion.\r\n\r\nAnyway, what seems to work is:\r\n```powershell\r\nInvoke-WebRequest www.google.com -Headers @{\"Accept-Encoding\"=\"gzip\"}\r\n```\r\nThis returns a gzip compressed version of the website.\r\n\r\nI would simply suggest to always include the `Accept-Encoding` header for all supported formats without the need of a specific parameter. If the client (PowerShell) and the server both support the compression they should use it transparently. ",
+      "created_at": "2017-02-21T23:20:04Z",
+      "updated_at": "2017-02-21T23:20:04Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "So to clarify, you verified that we *do* already decompress gzip'd content? You just want to default to requesting compressed content in the header? \r\n\r\nSounds right to me, but I don't know enough to know if there's a downside to that default. Only thing I can think of is a little extra server-side compute, but it's probably worth the bandwidth tradeoff. And certainly none of that should affect the client, right? ",
+      "created_at": "2017-02-22T01:33:45Z",
+      "updated_at": "2017-02-22T01:33:45Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, gzip and even deflate response streams are supported! \r\n\r\n[Streamhelper.cs Line 472](https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/StreamHelper.cs#L472)\r\n\r\n```C#\r\n\r\n#if CORECLR\r\n\r\n        internal static Stream GetResponseStream(HttpResponseMessage response)\r\n\r\n        {\r\n\r\n            Stream responseStream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();\r\n\r\n            var contentEncoding = response.Content.Headers.ContentEncoding;\r\n\r\n\r\n\r\n            // HttpClient by default will automatically decompress GZip and Deflate content.\r\n\r\n            // We keep this decompression logic here just in case.\r\n\r\n            if (contentEncoding != null && contentEncoding.Count > 0)\r\n\r\n            {\r\n\r\n                if (contentEncoding.Contains(\"gzip\"))\r\n\r\n                {\r\n\r\n                    responseStream = new GZipStream(responseStream, CompressionMode.Decompress);\r\n\r\n                }\r\n\r\n                else if (contentEncoding.Contains(\"deflate\"))\r\n\r\n                {\r\n\r\n                    responseStream = new DeflateStream(responseStream, CompressionMode.Decompress);\r\n\r\n                }\r\n\r\n            }\r\n\r\n\r\n\r\n            return responseStream;\r\n\r\n        }\r\n\r\n#else\r\n\r\n        internal static Stream GetResponseStream(WebResponse response)\r\n\r\n        {\r\n\r\n            Stream responseStream = response.GetResponseStream();\r\n\r\n\r\n\r\n            // See if it had a content-encoding, wrap in a decoding stream if so.\r\n\r\n            string contentEncoding = response.Headers[\"Content-Encoding\"];\r\n\r\n            if (contentEncoding != null)\r\n\r\n            {\r\n\r\n                if (contentEncoding.IndexOf(\"gzip\", StringComparison.OrdinalIgnoreCase) >= 0)\r\n\r\n                {\r\n\r\n                    responseStream = new GZipStream(responseStream, CompressionMode.Decompress);\r\n\r\n                }\r\n\r\n                else if (contentEncoding.IndexOf(\"deflate\", StringComparison.OrdinalIgnoreCase) >= 0)\r\n\r\n                {\r\n\r\n                    responseStream = new DeflateStream(responseStream, CompressionMode.Decompress);\r\n\r\n                }\r\n\r\n            }\r\n\r\n\r\n\r\n            return responseStream;\r\n\r\n        }\r\n\r\n#endif\r\n```\r\nHonestly I have no idea, why the deflate decompression doesn't work, since I don't have a Debug setup here on my laptop.\r\n\r\nRegarding the default headers: Here is the [W3 RFC](http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html)\r\n\r\n```\r\n14.3 Accept-Encoding\r\nThe Accept-Encoding request-header field is similar to Accept, but restricts the content-codings (section 3.5) that are acceptable in the response. \r\n       Accept-Encoding  = \"Accept-Encoding\" \":\"\r\n                          1#( codings [ \";\" \"q\" \"=\" qvalue ] )\r\n       codings          = ( content-coding | \"*\" )\r\nExamples of its use are: \r\n       Accept-Encoding: compress, gzip\r\n       Accept-Encoding:\r\n       Accept-Encoding: *\r\n       Accept-Encoding: compress;q=0.5, gzip;q=1.0\r\n       Accept-Encoding: gzip;q=1.0, identity; q=0.5, *;q=0\r\nA server tests whether a content-coding is acceptable, according to an Accept-Encoding field, using these rules: \r\n      1. If the content-coding is one of the content-codings listed in\r\n         the Accept-Encoding field, then it is acceptable, unless it is\r\n         accompanied by a qvalue of 0. (As defined in section 3.9, a\r\n         qvalue of 0 means \"not acceptable.\")\r\n      2. The special \"*\" symbol in an Accept-Encoding field matches any\r\n         available content-coding not explicitly listed in the header\r\n         field.\r\n      3. If multiple content-codings are acceptable, then the acceptable\r\n         content-coding with the highest non-zero qvalue is preferred.\r\n      4. The \"identity\" content-coding is always acceptable, unless\r\n         specifically refused because the Accept-Encoding field includes\r\n         \"identity;q=0\", or because the field includes \"*;q=0\" and does\r\n         not explicitly include the \"identity\" content-coding. If the\r\n         Accept-Encoding field-value is empty, then only the \"identity\"\r\n         encoding is acceptable.\r\nIf an Accept-Encoding field is present in a request, and if the server cannot send a response which is acceptable according to the Accept-Encoding header, then the server SHOULD send an error response with the 406 (Not Acceptable) status code. \r\nIf no Accept-Encoding field is present in a request, the server MAY assume that the client will accept any content coding. In this case, if \"identity\" is one of the available content-codings, then the server SHOULD use the \"identity\" content-coding, unless it has additional information that a different content-coding is meaningful to the client. \r\n      Note: If the request does not include an Accept-Encoding field,\r\n      and if the \"identity\" content-coding is unavailable, then\r\n      content-codings commonly understood by HTTP/1.0 clients (i.e.,\r\n      \"gzip\" and \"compress\") are preferred; some older clients\r\n      improperly display messages sent with other content-codings.  The\r\n      server might also make this decision based on information about\r\n      the particular user-agent or client.\r\n      Note: Most HTTP/1.0 applications do not recognize or obey qvalues\r\n      associated with content-codings. This means that qvalues will not\r\n      work and are not permitted with x-gzip or x-compress.\r\n```\r\n\r\nMaybe we should open an issue fixing the deflate decompression bug and another issue for the default headers?\r\n",
+      "created_at": "2017-02-22T07:14:41Z",
+      "updated_at": "2017-02-22T07:14:41Z"
+    },
+    {
+      "author": "0x4c6565",
+      "author_association": "CONTRIBUTOR",
+      "body": "I wrongly presumed this to not support automatic decompression (was looking at reference source) - thanks for clarifying @ThreeFive-O \r\n\r\nI will take a look at the deflate issue later, think it's definitely worth a new git issue",
+      "created_at": "2017-02-22T09:10:29Z",
+      "updated_at": "2017-02-22T09:10:29Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've been able to set up a Debug environment to search for the deflate decompression problem.\r\n\r\n**Fun fact:** The above StreamHelper class I referenced is totally unnecessary and always gets skipped by the code, since the contentEncoding variable doesn't contain gzip or deflate.\r\n\r\nFound this instead in [WebRequestPSCmdlet.CoreClr.cs](https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/CoreCLR/c.CoreClr.cs#L70) for CoreCLR:\r\n```C#\r\n        internal virtual HttpClient GetHttpClient()\r\n        {\r\n            // By default the HttpClientHandler will automatically decompress GZip and Deflate content\r\n```\r\n\r\nHence, there is no need for the StreamHelper class to check for gzip or deflate, since the HttpClient for CoreCLR should do it automatically. On FullCLR the WebRequest or HttpWebRequest class probably does the same thing (not verified).\r\nI guess the problem with deflate decompression is on those .NET classes.\r\n\r\nAny ideas how to tackle the problem?\r\n\r\nAccording to #3046 there are many bug fixes planned for the web cmdlets. Maybe some cleanup of the code would be good, if all those problems are getting fixed.\r\n\r\nUPDATE: One more hint about the implementation. HttpWebRequest (which seems to be preferable over HttpClient) is supported by .NET CoreFX. The CoreCLR part of WebRequestPSCmdlet should probably share as much code as possible with FullCLR (Less code maintenance and better testability). Just in case someone needs it for bug-fixing.",
+      "created_at": "2017-02-22T10:07:38Z",
+      "updated_at": "2017-02-22T10:15:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@ThreeFive-O HttpWebRequest is still not in CoreCLR.\r\n",
+      "created_at": "2017-02-22T11:13:42Z",
+      "updated_at": "2017-02-22T11:13:42Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well, I couldn't find any information on the .NET Standard where it is supported. I only checked the master branch of CoreFX: https://github.com/dotnet/corefx/blob/master/src/System.Net.Requests/src/System/Net/HttpWebRequest.cs\r\n\r\nMaybe as part of .NET Standard 2.0? I guess PS is on 1.6?",
+      "created_at": "2017-02-22T11:45:33Z",
+      "updated_at": "2017-02-22T11:45:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Our plan is to move  to .NET Core vNext that supports .NET Standard 2.0 #3046\r\n.Net Core RoadMap https://github.com/dotnet/core/blob/master/roadmap.md\r\n\r\nYes, .Net Core 1.0 = .Net Standart 1.6\r\nFull version table https://docs.microsoft.com/en-us/dotnet/articles/standard/library",
+      "created_at": "2017-02-22T12:32:34Z",
+      "updated_at": "2017-02-22T12:36:05Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov Thank you for clarification. Should I open an issue for moving from HttpClient to HttpWebRequest? Or should I wait until PS moved to .NET vNext?\r\n\r\n@Lee303 Would you please submit a PR which fixes the `Accept-Encoding` problem with the solution you initially stated (AutomaticDecompression and HttpClientHandler)? I'm glad to assist you debug the problem, why HttpClientHanlder doesn't send the correct header by default as stated in the source comment. Do you also want to open a separate issue for the deflate decompression problem or do you want to fix it under this issue?",
+      "created_at": "2017-02-22T17:08:29Z",
+      "updated_at": "2017-02-22T17:08:29Z"
+    },
+    {
+      "author": "ThreeFive-O",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just found that deflate problem is already known for Invoke-WebRequest #1753",
+      "created_at": "2017-02-22T19:04:54Z",
+      "updated_at": "2017-02-22T19:04:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ".Net Core new version release date is very optimistic. I believe that we should wait. \r\nIt would be useful to know the opinion of Powershell team.\r\n/cc @SteveL-MSFT ",
+      "created_at": "2017-02-22T20:00:21Z",
+      "updated_at": "2017-02-22T20:00:21Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I don't think this capability blocks any scenarios related to cloud management that I'm aware of, so this isn't something that would block the 6.0.0 release, hence we wait.",
+      "created_at": "2017-02-22T20:52:36Z",
+      "updated_at": "2017-02-22T20:52:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Maybe we should mark such Issues by special tag `Net20-Waiting` ?",
+      "created_at": "2017-02-23T16:11:23Z",
+      "updated_at": "2017-02-23T16:11:23Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee tagged this to discuss whether we want to have a new label since our current plan is to align with .Net Standard 2.0",
+      "created_at": "2017-02-23T23:42:06Z",
+      "updated_at": "2017-02-23T23:42:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Candidates for the new label #3194 #3172 ",
+      "created_at": "2017-02-24T18:14:05Z",
+      "updated_at": "2017-02-24T18:14:05Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this and we will create a label called `Waiting - NetStandard20`",
+      "created_at": "2017-03-02T00:23:10Z",
+      "updated_at": "2017-03-02T00:23:10Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "From #1753: TFS:7976639",
+      "created_at": "2017-05-23T22:51:43Z",
+      "updated_at": "2017-05-23T22:51:43Z"
+    },
+    {
+      "author": "burkasaurusrex",
+      "author_association": "NONE",
+      "body": "It looks like there's been some movement here. When issuing this command in PS6:\r\n```powershell\r\nInvoke-RestMethod https://httpbin.org/deflate\r\n```\r\nYou get this error now:\r\n```powershell\r\nInvoke-RestMethod : The archive entry was compressed using an unsupported compression method.\r\nAt line:1 char:1\r\n+ Invoke-RestMethod https://httpbin.org/deflate -Headers @{'accept-encoding' =  ...\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [Invoke-RestMethod], InvalidDataException\r\n+ FullyQualifiedErrorId : System.IO.InvalidDataException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand\r\n```\r\nInterestingly enough, if you try Brotli:\r\n```powershell\r\nInvoke-RestMethod https://httpbin.org/brotli\r\n```\r\nIRM doesn't throw an error, but returns the raw Brotli-encoded response:\r\n```\r\n\u2551\ufffd\ufffdmF\u255a\ufffd\ufffd>\ufffd&\ufffd\ufffd\ufffd\ufffd0\ufffd\ufffd ~Q,\ufffd\ufffd\ufffd\ufffd<\ufffd\ufffd\ufffd\ufffd\ufffd\u0333\ufffd\ufffd\ufffdt\ufffdd\r\n                                      L\ufffdw5\ufffd\u2554|\ufffd=\ufffd~38\ufffdB\ufffd\ufffdO\ufffd\ufffdX6\ufffd\ufffdI\ufffdD\ufffd<\ufffd{!\ufffd)\ufffd\ufffdr\ufffdUI\ufffd       +D\u255a>\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdH*$\ufffd\ufffd'\r\n                                                                                                      8\r\n```\r\nSeems like a decent workaround in the meantime is to manually send a `Accept-Encoding` header with gzip and identity in every request and hope that the server responds accordingly.",
+      "created_at": "2019-03-13T11:39:06Z",
+      "updated_at": "2019-03-13T17:30:37Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Brotli is not yet supported in HttpClient and thus not in the web cmdlets.\r\n\r\nDeflate, however, is supported... but only per RFC. the reality is many sites (httpbin.org included) use a non-rfc compression for deflate.. and there isn't much we can do about that. If `DeflateStream` could support automatic detection and deflation that would solve our problems, but there's not much we can do at the higher level abstraction where the web cmdlets sit. ",
+      "created_at": "2019-05-05T03:45:53Z",
+      "updated_at": "2019-05-05T03:45:53Z"
+    },
+    {
+      "author": "burkasaurusrex",
+      "author_association": "NONE",
+      "body": "Would it make sense to have any response that is brotli encoded throw the same `System.IO.InvalidDataException` that deflate throws? At least until brotli is natively supported in `HttpClient`?",
+      "created_at": "2019-06-07T00:24:50Z",
+      "updated_at": "2019-06-07T00:24:50Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "Can someone explain the difference between `-Headers @{\"Accept-Encoding\"=\"gzip\"}` (that works with our server) and `-TransferEncoding GZip` (that doesn't, yielding `400 Bad Request`)?",
+      "created_at": "2020-07-10T07:42:35Z",
+      "updated_at": "2020-07-10T07:42:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think the compression is supported by new HttpClient from .Net 3+.",
+      "created_at": "2020-07-16T11:53:19Z",
+      "updated_at": "2020-07-16T11:53:19Z"
+    },
+    {
+      "author": "ImportTaste",
+      "author_association": "NONE",
+      "body": "> @sba923 commented on Jul 10, 2020\r\n>> Can someone explain the difference between `-Headers @{\"Accept-Encoding\"=\"gzip\"}` (that works with our server) and `-TransferEncoding GZip` (that doesn't, yielding `400 Bad Request`)?\r\n\r\nAccept-Encoding and Transfer-Encoding are two different headers:\r\n\r\n> https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Encoding\r\n>> The `Accept-Encoding` request HTTP header indicates the content encoding (usually a compression algorithm) that the client can understand. The server uses [content negotiation](https://developer.mozilla.org/en-US/docs/Web/HTTP/Content_negotiation) to select one of the proposal and informs the client of that choice with the [Content-Encoding](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding) response header.\r\n\r\n> https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Transfer-Encoding\r\n>> `Transfer-Encoding` is a [hop-by-hop header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers#hbh), that is applied to a message between two nodes, not to a resource itself. Each segment of a multi-node connection can use different `Transfer-Encoding` values. If you want to compress data over the whole connection, use the end-to-end [Content-Encoding](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding) header instead.\r\n\r\n[This answer on StackOverflow](https://stackoverflow.com/a/24425286/11777065) goes into the differences between Content-Encoding (which is related to Accept-Encoding) and Transfer-Encoding a bit more.",
+      "created_at": "2021-11-29T20:43:42Z",
+      "updated_at": "2021-11-29T20:45:04Z"
+    },
+    {
+      "author": "CarloToso",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think this issue was fixed by #17955",
+      "created_at": "2022-11-08T14:42:45Z",
+      "updated_at": "2022-11-08T14:42:45Z"
+    }
+  ],
+  "created_at": "2017-02-21T21:22:31Z",
+  "number": 3178,
+  "state": "open",
+  "title": "Web cmdlets: support compression",
+  "updated_at": "2022-11-08T14:42:45Z"
+}

@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3428",
+  "author": "antiufo",
+  "body": "When `cd` is used, the actual current directory of the process is not changed. This means that plain BCL methods still see the old current directory.\r\n\r\nThis creates an inconsistency with other ways of executing commands:\r\n* PowerShell cmdlets: `$pwd` is honored\r\n* External commands: `$pwd` is honored\r\n* .NET methods: `$pwd` is _not_ honored\r\n\r\nSteps to reproduce\r\n------------------\r\n```powershell\r\nPS C:\\Users\\Andrea> cd C:\\temp\r\nPS C:\\temp> echo example1 > example1.txt\r\nPS C:\\temp> [IO.File]::WriteAllText('example2.txt', 'example2')\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n`C:\\temp` contains `example1.txt` and `example2.txt`.\r\n\r\nActual behavior\r\n---------------\r\n`C:\\temp` only contains `example1.txt`. `example2.txt` is created in `C:\\Users\\Andrea`.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.15063.0\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.15063.0\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```\r\nBtw the same happens with PowerShell v6.0.0-alpha.17.",
+  "closed_at": "2017-03-31T05:59:45Z",
+  "comments": [
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "If I have process with multiple `Runspace`s and each one have different current location. Which one `$pwd` should be honored by .NET methods?",
+      "created_at": "2017-03-26T12:46:33Z",
+      "updated_at": "2017-03-26T12:46:33Z"
+    },
+    {
+      "author": "antiufo",
+      "author_association": "NONE",
+      "body": "Possible solutions I can think of:\r\n* Leave the behavior as it is\r\n* Take a process-wide lock when BCL methods are directly invoked (except for cmdlets), if multiple runspaces exist (I don't know to what extent it would impact the performance)\r\n* Switch the current directory to a dummy, default directory whenever the number of runspaces > 1 (to make the mistake clear)\r\n* Only honor the `$pwd` of the main runspace\r\n* Provide something like `using-current-directory{ [IO.File]::WriteAllText() }` that acts as a process-wide lock that sets the real current directory.",
+      "created_at": "2017-03-26T13:18:48Z",
+      "updated_at": "2017-03-26T13:28:38Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@antiufo Process-wide lock will not going to work, unless everyone agreed to use it and performance implication are not very good. Also, not every process host PowerShell just for sake of hosting PowerShell. Process may have its own work to do and unlikely be happy if you just change its working directory to dummy one. And as `Runspace`s can come and gone at process wish, it may be hard to say which one is main.\r\nBesides, IMHO, there is good enough solution for this already:\r\n```powershell\r\nPS C:\\Users\\PetSerAl> function ConvertTo-FileSystemPath {\r\n>>     param($PSPath)\r\n>>     $PSProvider = $null\r\n>>     $Result = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PSPath, [ref]$PSProvider, [ref]$null)\r\n>>     if($PSProvider.ImplementingType -eq [Microsoft.PowerShell.Commands.FileSystemProvider]) {\r\n>>         $Result\r\n>>     } else {\r\n>>         Write-Error 'Not filesystem provider'\r\n>>     }\r\n>> }\r\nPS C:\\Users\\PetSerAl> New-PSDrive Win FileSystem C:\\Windows | Out-Null\r\nPS C:\\Users\\PetSerAl> ConvertTo-FileSystemPath qwe\r\nC:\\Users\\PetSerAl\\qwe\r\nPS C:\\Users\\PetSerAl> cd \\\r\nPS C:\\> ConvertTo-FileSystemPath asd\r\nC:\\asd\r\nPS C:\\> ConvertTo-FileSystemPath Win:\\zxc\r\nC:\\Windows\\zxc\r\nPS C:\\> ConvertTo-FileSystemPath HKLM:\\SOFTWARE\r\nConvertTo-FileSystemPath : Not filesystem provider\r\nAt line:1 char:1\r\n+ ConvertTo-FileSystemPath HKLM:\\SOFTWARE\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,ConvertTo-FileSystemPath\r\n```",
+      "created_at": "2017-03-26T14:44:51Z",
+      "updated_at": "2017-03-26T14:44:51Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "This behavior is by design and it's been this way since version 1.0. We considered options like those proposed above but none of them were viewed as satisfactory for various reasons. Acquiring a global lock, then setting the process pwd, then calling a method is a lot of overhead when the majority of .NET APIs don't depend on pwd. Doing this also greatly complicates a host application's (e.g. exchange UI, VMM console, etc.) use of the current working directory since it can't depend on PWD anymore. The workaround for .NET APIs that take paths is to, as mentioned in another comment, resolve the path before passing It to the API which need not be onerous e.g. `WriteAllText(\"$pwd\\fileincurrentdir.txt\")` ",
+      "created_at": "2017-03-28T00:01:12Z",
+      "updated_at": "2017-03-28T00:01:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Too bad that there's no good solution, because the behavior is a perennial pain point.\r\n\r\nThe `\"$pwd\\fileincurrentdir.txt\"` shortcut is alluring, but - aside from assuming that the current location is a _filesystem_ location (an assumption that will often, but not always hold) - it fails with current filesystem locations based on _PS_ drives.\r\n\r\nRemedying that doesn't take much extra effort, fortunately:\r\n\r\n```powershell\r\n[io.file]::WriteAllText($PWD.ProviderPath + '/fileInCurrentDir.txt', 'foo')\r\n```\r\n\r\nIf you also want to guard against the current location being on a different provider's drive:\r\n\r\n```powershell\r\n[io.file]::WriteAllText((Get-Location -PSProvider FileSystem).ProviderPath + '/fileInCurrentDir.txt', 'foo')\r\n```\r\n\r\n@PetSerAl's `ConvertTo-FileSystemPath` helper function is the most robust and flexible approach, but anything that doesn't ship with PowerShell is unlikely to see widespread adoption.\r\n\r\nHowever, what this function does could be folded into the standard `Convert-Path` cmdlet - see #7197\r\n\r\n",
+      "created_at": "2018-06-27T22:07:44Z",
+      "updated_at": "2018-07-28T16:10:00Z"
+    }
+  ],
+  "created_at": "2017-03-26T12:35:29Z",
+  "number": 3428,
+  "state": "closed",
+  "title": "\"Actual\" current directory and PowerShell current directory mismatch when using .NET BCL methods",
+  "updated_at": "2018-07-28T16:10:00Z"
+}

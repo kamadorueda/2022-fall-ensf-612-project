@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5356",
+  "author": "PaulHigin",
+  "body": "This change addresses the issue #5205\r\n\r\nRepro steps are:\r\n```powershell\r\n$rs = [runspacefactory]::CreateRunspacePool(1,5)\r\n$rs.Open()\r\n\r\n$ps1 = [powershell]::Create()\r\n$ps1.RunspacePool = $rs\r\n$null = $ps1.AddScript({sleep 31; 1+1})\r\n$ps1.BeginInvoke()\r\n\r\n$ps2 = [powershell]::Create()\r\n$ps2.RunspacePool = $rs\r\n$null = $ps2.AddScript({sleep 32; 1+1})\r\n$ps2.BeginInvoke()\r\n\r\n$ps3 = [powershell]::Create()\r\n$ps3.RunspacePool = $rs\r\n$null = $ps3.AddScript({sleep 33; 1+1})\r\n$ps3.BeginInvoke()\r\n\r\nexit #hangs\r\n```\r\nThe problem is that the latest version of CoreCLR doesn't seem to be calling finalizers (or the finalizer thread dies for some reason and finalizers are not getting called).  \r\n\r\nPowerShell relies on the CLR finalizer to clean up state on exit.  In this case a runspace pool was not closed or disposed and any pipeline worker threads created to run concurrent scripts won't end, causing the hang.  The same thing can happen if any individual runspace is created to run concurrent script and is not closed.\r\n\r\nPowerShell really needs to rely on CLR finalizer to clean up because it can be hosted in many ways and it cannot know when a session is being intentionally ended or some helper session is being closed.\r\n\r\nI'll contact the DotNet CoreCLR team to see if this is a known issue.\r\n\r\nBut in the mean time I have a work around to prevent the hang.  The workaround uses existing code that tries to determine when a session is ending and stop transcription.  This code has a bug and I have rewritten it to use a new Runspace.IsInteractiveHost property.  When this is set to true in indicates to the runspace clean up code that the entire PowerShell session is ending and that any remaining active runspaces should be closed (along with pipeline threads).  This way any application hosting PowerShell can use the property to ensure full runspace cleanup on exit.\r\n",
+  "closed_at": "2017-11-14T22:01:11Z",
+  "comments": [
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "FYI  I have created an Issue about finalizers not being called for the CLR team(https://github.com/dotnet/coreclr/issues/14889).",
+      "created_at": "2017-11-06T22:45:02Z",
+      "updated_at": "2017-11-06T22:45:02Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "It turns out that this \"CLR no longer calling finalizer on shutdown\" is by design.  Making it work across multiple platforms is probably much harder than making it work just on Windows.\r\n\r\nI am going to think about this some more so don't bother reviewing this just yet.  I will look into using the AppDomain.DomainUnload.Unload event.  I suspect it is no more reliable than the finalizer thread, since it is just another thread for clean up, after all.  But we can use it as notification for process shut down.",
+      "created_at": "2017-11-07T00:00:36Z",
+      "updated_at": "2017-11-07T00:00:36Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I have removed the \"On Hold\" and \"Workaround\" designations from the title.  After talking with the CLR team, we can no longer rely on CLR events or finalizer calls on exit.  The AppDomain.DomainUnload is not supported.  The AppDomain.ProcessExit event is not helpful since it is only called during application exit which means threads already have to be cleaned up, plus there is a time limit.\r\n\r\nSo we will need to do our own clean up in this change.  \r\nI have introduced a new Runspace property (*IsInteractiveHost*) to indicate that runspace clean up must be performed when the interactive host runspace closes.  I made this public so that other hosts can use it as needed.  ",
+      "created_at": "2017-11-13T18:46:07Z",
+      "updated_at": "2017-11-13T18:46:07Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Per offline discussion with Dongbo I will make some changes.  We should not use the term \"Default Runspace\" because it has a current meaning for a runspace per thread that is available to use for running scriptblocks.  This clean up code is meant to be used only once per process session and is intended to prevent process hang on exit due to dangling threads (because runspaces are not cleaned up).\r\n\r\nTherefore this property should be called \"PrimaryRunspace\" and should be static.  When the PrimaryRunspace is closing it means that the PowerShell session is ending and on exit clean should be performed.  I will make it internal for now but feel it should eventually be public so that other hosters of PowerShell can use it.  The purpose of the property is to do on exit clean up.\r\n\r\nI'll submit a new commit with these changes.",
+      "created_at": "2017-11-14T16:08:29Z",
+      "updated_at": "2017-11-14T16:08:29Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Merging this PR. I will add the test to this fix soon.",
+      "created_at": "2017-11-14T21:52:33Z",
+      "updated_at": "2017-11-14T21:52:33Z"
+    }
+  ],
+  "created_at": "2017-11-06T19:36:10Z",
+  "number": 5356,
+  "state": "closed",
+  "title": "Fix for PowerShell hang on exit",
+  "updated_at": "2018-01-23T16:46:19Z"
+}

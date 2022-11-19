@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3217",
+  "author": "mklement0",
+  "body": "This is a primarily a design rationale question:\r\n\r\nThe issue is that the rules are hard to remember, and perhaps knowing _why_ they are the way they are helps with that.\r\n\r\nIf these work:\r\n\r\n    $a = 4\r\n    Write-Output $a/H         # -> '4/H'\r\n    Write-Output H/$a         # -> 'H/4'\r\n    Write-Output H/$(2 + 2)   # -> 'H/4'\r\n\r\nwhy shouldn't `Write-Output $(2 + 2)/H` expand to `'4/H'` too, instead of being treated as _2_ arguments, `4` and `'/H'`?\r\n\r\nWhy is a subexpression at the start treated differently than a variable reference?\r\n\r\nAlso, why is `Write-Output .$HOME` treated as _2_ arguments (only happens if the `.` is directly followed by a `$`)?\r\n\r\nFor a full discussion, please see [this Stack Overflow question](http://stackoverflow.com/q/42100211/45375).\r\n",
+  "closed_at": "2017-10-25T00:58:59Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@BrucePay or @JamesWTruher can best answer this.",
+      "created_at": "2017-02-27T20:00:38Z",
+      "updated_at": "2017-02-27T20:01:02Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "\r\nif we look at what the parameter binder believes it's arguments are we can understand the output better:\r\n```\r\nPS> trace-command *param* { write-output $(2+2)/H } -pshost                                                                                                                                                             \r\nDEBUG: ParameterBinderController Information: 0 :  WriteLine   Argument count: 2\r\n<snip>\r\n4\r\n/H\r\n```\r\nvs\r\n```\r\nPS> trace-command *param* { write-output H/$(2+2) } -pshost                                                                                                                                                             \r\nDEBUG: ParameterBinderController Information: 0 :  WriteLine   Argument count: 1\r\n<snip>\r\nH/4\r\n```\r\nSo, by the time the arguments get to the parameter binder it's already either broken up (or not) the tokens. There's definitely a difference between a variable reference `$a` and a subexpression `$(2+2)` so i would expect a difference in the behavior between `write-output $(2+2)/H` and `write-output $a/H`.\r\n\r\nI _suspect_ that it's the location of the obvious `string` element which causes the behavioral change which changes it from two arguments to one. I haven't tracked that down though. \r\n`write-output H/...` is an obvious string (since that's how it starts), pretty much anything that follows it which isn't a token separator (`space` for example) is just going to be tacked on the end.\r\n\r\nAs for `write-output .$HOME` - remember that the `.` serves two functions, one as a invocation operator and another as a property reference operator, depending on context. In this case, we've definitely got 2 tokens `.` (the invocation operator) and `$HOME`, so we emit two lines. \r\nFWIW, `Write-Host` sees these two tokens as well:\r\n```\r\nWrite-Host .$HOME\r\n. /Users/james\r\n```\r\nnote the space. Why the difference? The difference between `write-host` and `write-object` is the parameter type for the input object. in `write-host` the type is `object` and in `write-output` the parameter type is `PSObject[]`.\r\n",
+      "created_at": "2017-05-24T00:28:18Z",
+      "updated_at": "2017-05-24T00:28:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for that, @JamesWTruher.\r\n\r\nTo provide more motivation for my question, which is primarily about the _user experience_, not the technical underpinnings:\r\n\r\n* It is obscure to have behavior depend on the order of tokens in this case, especially since variable references and subexpressions are _not_ treated differently when explicitly embedded inside `\"...\"`\r\n\r\n  * `Write-Output \"$(2 + 2)/H\"` yields only 1 argument.\r\n  * In POSIX-like shells, a command/arithmetic substitution (the equivalent of a subexpression in PS) _does_ work as the first token:  \r\n`echo $(( 2 + 2 ))/H` yields 1 argument, `4/H`\r\n  * That said, (the expanded results of) unquoted tokens in POSIX-like shells are subject to shell expansions that are often unwanted, leading to the annoyance that double quotes _must_ be used everywhere (and beginners forgetting them is a constant source of bugs).\r\n  * PowerShell generally frees us from that annoyance, so it's unfortunate that it doesn't do so in this case (because it results in multiple arguments).  \r\n \r\n  * Generally, _remembering_ when it works and when it doesn't, in the absence of an intuitive reason, is a challenge and, I suspect, will be an ongoing source of confusion.\r\n\r\n* The same obscure  behavior applies to juxtaposing differently quoted substrings (which are commonly used in POSIX-like shells):\r\n\r\n   * `Write-Output bare\"I'm quoted\"` -> _1_ argument, because the 1st token is _unquoted_:  \r\n`bareI'm quoted`\r\n   * `Write-Output \"I'm quoted\"bare` -> _2_ arguments, because the 1st token is _quoted_:  \r\n`I'm quoted` and `bare`\r\n\r\n* As for the `.$HOME` case: Given that the token is a _non-initial_ token parsed in _argument mode_, it _shouldn't_ be interpreted as the invocation operator.  \r\nIf unquoted tokens are to be treated like _expandable strings_ (i.e., as if the token were explicitly enclosed in `\"...\"`, \"_unless it begins with one of the following special characters: dollar sign (`$`), at sign (`@`), single quotation mark (`'`), double quotation mark (`\"`), or an opening parenthesis (`(`)_\", according to `Get-Help about_Parsing`), then `.$HOME` should work the same way as, say, `x$HOME`.\r\n\r\nI suspect the answer is that changing the behaviors described is way too late and risky, but perhaps the pitfalls of the existing behavior can be _documented_ somewhere.\r\n\r\n",
+      "created_at": "2017-05-24T13:28:22Z",
+      "updated_at": "2017-05-24T13:28:22Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "I came across this issue as I created a similar [Unquoted Strings](https://github.com/PoshCode/PowerShellPracticeAndStyle/issues/146) request at the [The PowerShell Best Practices and Style Guide](https://github.com/PoshCode/PowerShellPracticeAndStyle) a few weeks ago without any activity. I have also created a similar statckoverflow question: [Unquoted key rules / best practice](https://stackoverflow.com/q/62754771/1701026), as I got lost in the (open and close) cascaded issues and whether this is already covered or even answered. And if not, to which issue I should add my findings (or create a new one?).",
+      "created_at": "2020-07-06T11:09:54Z",
+      "updated_at": "2020-07-06T16:37:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7, #6467 is more comprehensive and there's a related docs issue now: https://github.com/MicrosoftDocs/PowerShell-Docs/issues/3440\r\n\r\n\r\n",
+      "created_at": "2020-07-06T16:15:53Z",
+      "updated_at": "2020-07-06T16:15:53Z"
+    }
+  ],
+  "created_at": "2017-02-27T18:33:40Z",
+  "number": 3217,
+  "state": "closed",
+  "title": "Argument-mode parsing: Why is a subexpression at the start of an unquoted token treated differently than a variable reference?",
+  "updated_at": "2020-07-06T16:37:52Z"
+}

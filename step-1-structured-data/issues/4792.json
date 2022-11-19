@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4792",
+  "author": "daxian-dbw",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```powershell\r\nfunction ProxyTest {\r\n    [CmdletBinding(DefaultParameterSetName='Name')]\r\n    param (\r\n        [Parameter(ParameterSetName=\"Name\", Mandatory=$true)]\r\n        [ValidateSet(\"Orange\", \"Apple\")]\r\n        [string] $Name,\r\n\r\n        [Parameter(ParameterSetName=\"Id\", Mandatory=$true)]\r\n        [ValidateRange(1,5)]\r\n        [int] $Id,\r\n\r\n        [Parameter(ValueFromPipeline)]\r\n        [string] $Message\r\n    )\r\n\r\n    DynamicParam {\r\n        $ParamAttrib  = [parameter]::new()\r\n        $ParamAttrib.Mandatory  = $true\r\n\r\n        $AttribColl = [System.Collections.ObjectModel.Collection[System.Attribute]]::new()\r\n        $AttribColl.Add($ParamAttrib)\r\n\r\n        $RuntimeParam  = [System.Management.Automation.RuntimeDefinedParameter]::new('LastName', [string], $AttribColl)\r\n        $RuntimeParamDic  = [System.Management.Automation.RuntimeDefinedParameterDictionary]::new()\r\n        $RuntimeParamDic.Add('LastName',  $RuntimeParam)\r\n        return  $RuntimeParamDic\r\n    }\r\n\r\n    Begin {\r\n        $AllMessages = @()\r\n        if ($PSCmdlet.ParameterSetName -eq \"Name\") {\r\n            $MyString = $Name, $PSBoundParameters['LastName'] -join \",\"\r\n        } else {\r\n            $MyString = $Id, $PSBoundParameters['LastName'] -join \",\"\r\n        }\r\n    }\r\n\r\n    Process {\r\n        if ($Message) {\r\n            $AllMessages += $Message\r\n        }\r\n    }\r\n\r\n    End {\r\n        $MyString + \" - \" + ($AllMessages -join \";\")\r\n    }\r\n}\r\n\r\n$cmdinfo = Get-Command ProxyTest\r\n$cmdMetadata = [System.Management.Automation.CommandMetadata]::new($cmdinfo)\r\n[System.Management.Automation.ProxyCommand]::Create($cmdMetadata, \"HelpContent\", $true)\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nThere is dynamic parameters defined in the function `ProxyTest`:\r\n```\r\nPS> $cmdinfo.Parameters.GetEnumerator() | ? { $_.Value.IsDynamic }\r\n\r\nKey      Value\r\n---      -----\r\nLastName System.Management.Automation.ParameterMetadata\r\n```\r\nAnd when calling `[ProxyCommand]::Create`, the `$true` is the value for parameter `bool generateDynamicParameters`, so it should generate the dynamic param block in the proxy script.\r\nHowever, the returned script has `DynamicParam` block in it.\r\n\r\nActual behavior\r\n---------------\r\n\r\nNo `DynamicParam` block generated.\r\nBut if it's a binary cmdlet instead of a function, then the `dynamicparam` block is correctly generated.\r\n\r\nEnvironment data\r\n----------------\r\n\r\nThis happens in powershell core and windows powershell.\r\nThe cause might be that the constructor [`public CommandMetadata(CommandInfo commandInfo)`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/CommandMetadata.cs#L91) never check if dynamic parameters are defined for `CommandInfo` arguments that are other than `CmdletInfo`. This [code](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/CommandMetadata.cs#L458) in `internal CommandMetadata(ScriptBlock scriptblock ..` probably should be moved to [`Init(ScriptBlock scriptBlock, string name, bool shouldGenerateCommonParameters)`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/CommandMetadata.cs#L261).\r\n",
+  "closed_at": "2022-06-08T04:00:52Z",
+  "comments": [
+    {
+      "author": "thomasmktong",
+      "author_association": "NONE",
+      "body": "Any suggested way to workaround this issue? Thanks.",
+      "created_at": "2018-04-29T10:55:57Z",
+      "updated_at": "2018-04-29T10:55:57Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Many [years ago](https://blogs.msdn.microsoft.com/powershell/2009/03/13/dir-ad/) I used the following code in a proxy for `Get-ChildItem`:\r\n\r\n```powershell\r\n    dynamicparam\r\n    {\r\n        $argList = @($psboundparameters.getenumerator() | % { \"-$($_.Key)\"; $_.Value })\r\n        \r\n        $wrappedCmd = Get-Command Get-ChildItem -Type Cmdlet -ArgumentList $argList\r\n        $providerParams = @($wrappedCmd.Parameters.GetEnumerator() | Where-Object { $_.Value.IsDynamic })\r\n        if ($providerParams.Length -gt 0)\r\n        {\r\n            $paramDictionary = new-object System.Management.Automation.RuntimeDefinedParameterDictionary\r\n            foreach ($param in $providerParams)\r\n            {\r\n                $param = $param.Value\r\n                $dynParam1 = new-object System.Management.Automation.RuntimeDefinedParameter $param.Name, $param.ParameterType, $param.Attributes\r\n                $paramDictionary.Add($param.Name, $dynParam1)            \r\n            }\r\n            \r\n            return $paramDictionary\r\n        }\r\n    }\r\n```\r\n\r\nWorth noting - this takes the current arguments and passes them to `Get-Command` which would otherwise return possibly incorrect dynamic parameters, e.g. if the current directory was in the file system, but the command was passed a certificate path.\r\n\r\nThere are problems with how `Get-Command` does parameter binding, so this approach isn't quite perfect, but it's the most general approach I'm aware of.",
+      "created_at": "2018-04-30T04:27:00Z",
+      "updated_at": "2018-04-30T04:27:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Worth adding that including dynamic parameters is the _default_ behavior for compiled cmdlets, and therefore also should be for (advanced) functions and scripts (which are equally affected).\r\n\r\n@IISResetMe has found a workaround via [`System.Management.Automation.ProxyCommand.GetDynamicParam`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.ProxyCommand.GetDynamicParam), demonstrated  in this [Stack Overflow answer](https://stackoverflow.com/a/65628204/45375).\r\n\r\nThis method automatically generates code similar to @lzybkr's above; running\r\n`[System.Management.Automation.ProxyCommand]::GetDynamicParam((Get-Command ProxyTest))` yields:\r\n\r\n```powershell\r\n\r\n    try {\r\n        $targetCmd = $ExecutionContext.InvokeCommand.GetCommand('ProxyTest', [System.Management.Automation.CommandTypes]::Function, $PSBoundParameters)\r\n        $dynamicParams = @($targetCmd.Parameters.GetEnumerator() | Microsoft.PowerShell.Core\\Where-Object { $_.Value.IsDynamic })\r\n        if ($dynamicParams.Length -gt 0)\r\n        {\r\n            $paramDictionary = [Management.Automation.RuntimeDefinedParameterDictionary]::new()\r\n            foreach ($param in $dynamicParams)\r\n            {\r\n                $param = $param.Value\r\n\r\n                if(-not $MyInvocation.MyCommand.Parameters.ContainsKey($param.Name))\r\n                {\r\n                    $dynParam = [Management.Automation.RuntimeDefinedParameter]::new($param.Name, $param.ParameterType, $param.Attributes)\r\n                    $paramDictionary.Add($param.Name, $dynParam)\r\n                }\r\n            }\r\n\r\n            return $paramDictionary\r\n        }\r\n    } catch {\r\n        throw\r\n    }\r\n```",
+      "created_at": "2021-01-08T15:08:47Z",
+      "updated_at": "2021-01-08T15:08:47Z"
+    },
+    {
+      "author": "StevenBucher98",
+      "author_association": "COLLABORATOR",
+      "body": "I am getting the expected output on PS 7.2+, marking as resolved. ",
+      "created_at": "2022-06-06T17:46:33Z",
+      "updated_at": "2022-06-06T17:46:33Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as fixed and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-06-08T04:00:51Z",
+      "updated_at": "2022-06-08T04:00:51Z"
+    }
+  ],
+  "created_at": "2017-09-09T00:06:42Z",
+  "number": 4792,
+  "state": "closed",
+  "title": "[ProxyCommand]::Create doesn't generate dynamic param block for function that has dynamic parameters",
+  "updated_at": "2022-06-08T04:00:52Z"
+}

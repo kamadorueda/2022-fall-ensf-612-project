@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7921",
+  "author": "jborean93",
+  "body": "Hi, sorry if this is the wrong place to ask this question, feel free to close if it is.\r\n\r\nI'm currently trying to implement PSRP over SSH in a third party Python library and unfortunately [MS-PSRP](https://msdn.microsoft.com/en-us/library/dd357801.aspx) is somewhat out of date and only has info for WSMan and pre 2.3 protocol changes.\r\n\r\nUsually I would just run up Wireshark and inspect the packets of the native command but SSH makes that quite problematic. So far I've been able to create a Runspace Pool by sending the SessionCapability and RunspacepoolInitData messages in a data packet like so;\r\n\r\n```\r\n<Data Stream='Default' PSGuid='00000000-0000-0000-0000-000000000000'>base64 encoding of fragments for SessionCapability and RunspacepoolInitData</Data>\\n\r\n```\r\n\r\nFrom there I get 3 `Data` payloads back that contains\r\n\r\n* SessionCapability\r\n* ApplicationPrivateData\r\n* RunspacepoolState\r\n\r\nI also get a `DataAck` payload back but I assume that's just the acknowledgement of my initial payload.\r\n\r\nFrom here, I would send a WSMan:Receive message but as there does not seem to be an equivalent one at https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/remoting/fanin/OutOfProcTransportManager.cs#L75-L139 I assume that's not needed.\r\n\r\nThe next step is to send a `CreatePipeline` and when looking at the debug/analytic logs for PowerShell Core it seems like normally it would send\r\n\r\n```\r\n<Command PSGuid='pipeline id as guid' />\\n\r\n<Data Stream='Default' PSGuid='same guid as above'>base64 encoding of CreatePipeline fragments</Data>\\n\r\n```\r\n\r\n_Note: I've tried other permutations of this but haven't been able to get it working_\r\n\r\nOn the next receive I would get back a `<CommandAck PSGuid='from above' />\\r\\n` and `<DataAck PSGuid='from above' />\\r\\n` but nothing else is sent from the server. It seems like the script doesn't run and I get the following entry in the event log once I close the pool;\r\n\r\n```\r\nRunspace Id: 00000000-0000-0000-0000-000000000000 Pipeline Id: 00000000-0000-0000-0000-000000000000. WSMan reported an error with error code: \u0fa0. \r\n Error message: An unknown element \"\" was received. This can happen if the remote process closed or ended abnormally. \r\n StackTrace:    at System.Management.Automation.Remoting.Server.OutOfProcessMediatorBase.Start(String initialCommand, PSRemotingCryptoHelperServer cryptoHelper, String configurationName)\r\n```\r\n\r\nThe code that throws this error seems to indicate this is what happens when the command is null or empty but I could be reading that incorrectly https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/remoting/server/OutOfProcServerMediator.cs#L338.\r\n\r\nPreceding it I do have some Debug entries for\r\n\r\n```\r\nTrace Information: \r\n OutOfProcessUtils.ProcessElement : PS_OUT_OF_PROC_COMMAND received, psGuid : e052f501-870a-416e-9513-2d46d474fc94\r\n\r\nTrace Information: \r\n OutOfProcessMediator.OnCommandCreationPacketReceived, in progress command count : 1 psGuid : e052f501-870a-416e-9513-2d46d474fc94\r\n\r\nTrace Information: \r\n OutOfProcessUtils.ProcessElement : PS_OUT_OF_PROC_DATA received, psGuid : e052f501-870a-416e-9513-2d46d474fc94\r\n```\r\n\r\nThis seems to align with the entries when running `Invoke-Command` through an actual PowerShell client but I'm obviously missing something here. I'm using the same code to generate the PSRP messages as the one that works for running over WSMan so I don't believe the messages are malformed.\r\n\r\nI'm hoping you could either answer these questions or point me in the right direction;\r\n\r\n* What's the standard workflow and purpose for these messages, I assume it's\r\n    * Data - used to send any PSRP messages to the server\r\n    * Command - used to indicate to the server that a new command is about to be sent in a Data packet\r\n    * Signal - send a signal to the pipeline or session (0'd guid), similar to WSMan:Signal message?\r\n    * Close - close the pipeline or session (0'd guid)\r\n* Does the client have any need for the *Ack packets\r\n* Is there an equivalent to the `Receive` message in WSMan that I should be using\r\n* Any way to debug the client code using something like Visual Studio so I could step through each action and see the messages being sent\r\n* I'm assuming the max fragment size for SSH is 32 KiB which is the buffer size of the named pipe that is created, this is a lot smaller than 150KiB (PSv2) and 500KiB (v3+) for WSMan\r\n\r\nI'm sure there's other questions I have but my main goal is to get the basics working and I can move on from there.\r\n\r\nThanks",
+  "closed_at": "2018-10-05T21:29:39Z",
+  "comments": [
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "Cc: @BrucePay ",
+      "created_at": "2018-10-02T08:05:11Z",
+      "updated_at": "2018-10-02T08:05:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> ... to implement PSRP over SSH in a third party Python library \r\n\r\n> ... unfortunately MS-PSRP is somewhat out of date and only has info for WSMan and pre 2.3 protocol changes\r\n\r\nPerhaps @dantraMSFT and @PaulHigin can make some helpful comments.",
+      "created_at": "2018-10-02T09:31:25Z",
+      "updated_at": "2018-10-02T09:31:25Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "MS-PSRP document only describes the remoting protocol and is transport agnostic.  I believe the document includes examples using WSMan transport but the protocol is not dependent on WSMan.\r\n\r\nThe protocol is at version 2.3 so the document is up to date.  PSCore6 currently has an SSH based transport implementation and you can take a look at that as an example.  The PSRP protocol did not have to change to support the SSH transport.  \r\n\r\nImplementing PSRP is pretty involving, as you are experiencing.  The OutOfProc transport is a good way to see how a transport supports PSRP and what messages are sent/received.  But you also need to look at runspace, command, and protocol state machine implementations (client and server) to get all of the details.  I am not sure how you want to implement PSRP for Python, or whether it really makes sense.  Maybe you can provide more details in what you hope to do.  ",
+      "created_at": "2018-10-02T21:59:00Z",
+      "updated_at": "2018-10-02T21:59:00Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Hey Paul\r\n\r\nThanks for the reply, here are some more details\r\n\r\n> MS-PSRP document only describes the remoting protocol and is transport agnostic. I believe the document includes examples using WSMan transport but the protocol is not dependent on WSMan.\r\n\r\nThat is true to an extent but it doesn't have any details around the types of payloads that are sent when using SSH or other OutOfProc transport options. Using https://msdn.microsoft.com/en-us/library/ee175932.aspx as an example, all the steps revolve around what WSMan messages encapsulate the PSRP message fragments which don't really relate to other transports.\r\n\r\nAdding to this, the MS-PSRP docs has dedicated sections around rules for WSMan messages https://msdn.microsoft.com/en-us/library/dd356495.aspx but no equivalent for the OutOfProc payloads.\r\n\r\n> The protocol is at version 2.3 so the document is up to date\r\n\r\nThis isn't really a big issue but there are definitely sections of the docs that do no indicate that 2.3 is a valid protocol number, or even when it was added and what changes it contains. For example, the rules for sending a SessionCapability message say that protocolversion MUST be 2.1 or 2.2 which we know to be false https://msdn.microsoft.com/en-us/library/ee441993.aspx.\r\n\r\n> Implementing PSRP is pretty involving, as you are experiencing\r\n\r\nI've got a working Python implementation for running over WSMan https://github.com/jborean93/pypsrp. This is just trying to take it to the next step and look at supporting SSH as a transport option and also as a mere curiosity for me to see how the underlying protocol actually works.\r\n\r\n> But you also need to look at runspace, command, and protocol state machine implementations (client and server) to get all of the details\r\n\r\nI don't have a desire to implement a server side implementation, I'm really just interested in a client side implementation.\r\n\r\n> I am not sure how you want to implement PSRP for Python, or whether it really makes sense. Maybe you can provide more details in what you hope to do.\r\n\r\nI work on the Ansible project and it uses Python so having a Python library to call is a lot easier than trying to marshal the objects from Python to pwsh and get that to make the calls. The other issue with using native pwsh right now is that the WinRM support is quite limited, IIRC it still doesn't support things like CredSSP and the last time I looked at OMI it was a bit of a handful to actually install.\r\n\r\nTraditionally we just use the base WinRM layer but PSRP offers a few extra features that we are interested in looking at like JEA, Configuration Endpoints, persisting the connection, secure string serialization, and maybe SSH through PSRP (if I can get this working :)). I'm sure there are current bugs in the current pypsrp library but it so far has worked for what I need and I wanted to take it to the next level and support SSH with PowerShell Core.\r\n\r\nMy confusion really revolves around when to use what OutOfProc payload and the general workflow.",
+      "created_at": "2018-10-02T22:17:47Z",
+      "updated_at": "2018-10-02T22:17:47Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I believe I figured out my issue and have been able to move on. The default byte representation of a uuid/guid between Python and .NET is different, Python represents the bytes of a UUID in big endianess while .NET seems to be little endian. For example, here's how we can convert a uuid string to bytes for the PSRP message packet;\r\n\r\n```\r\nimport binascii\r\nimport uuid\r\n\r\ntest = uuid.UUID(\"fa960460-60ca-4ed0-a710-2b000b0df684\")\r\nprint(binascii.hexlify(test.bytes).upper())\r\n# FA96046060CA4ED0A7102B000B0DF684\r\n\r\n# we need to use bytes_le instead to get the little endian byte format\r\nprint(binascii.hexlify(test.bytes_le).upper())\r\n# 600496FACA60D04EA7102B000B0DF684\r\n```\r\n\r\nWhen comparing against .NET, `ToByteArray()` uses little endian for the int and short parts\r\n\r\n```\r\n$test = [Guid]\"fa960460-60ca-4ed0-a710-2b000b0df684\"\r\n[System.BitConverter]::ToString($test.ToByteArray()).Replace(\"-\", \"\")\r\n# 600496FACA60D04EA7102B000B0DF684\r\n```\r\n\r\nThe reason why this was an issue is that when sending the `<Command PSGuid='...' />` payload, the PSGuid element is a string and the service will create the command manager with that ID. When sending the `<Data Stream='Default' PSGuid='...'>CreatePipeline fragment</Data>` fragment, the Pipeline id that's part of the PSRP message header is in bytes form. The Python side packed it using the default `bytes` endianess which is big but when .NET goes to unpack the bytes it expects the little form causing the GUID to be invalid.\r\n\r\nOnce changing my code to use `bytes_le`, I am able to start the pipeline and receive the output like expected. I'm curious as to why I never saw this issue with WSMan but it could just be a difference of how the WSMan handler get's the GUIDs compared to the OutOfProc payloads.\r\n\r\nFeel free to close this issue @PaulHigin unless you want to investigate this further. I should be able to achieve what I want now I'm able to execute commands.",
+      "created_at": "2018-10-03T23:55:20Z",
+      "updated_at": "2018-10-03T23:55:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The default byte representation of a uuid/guid between Python and .NET is different,\r\n\r\n@jborean93 You can look how CoreFX or PowerShell resolve such problems. \r\nhttps://github.com/PowerShell/PowerShell-Native/blob/master/src/libpsl-native/src/setdate.cpp#L42\r\n",
+      "created_at": "2018-10-04T05:00:38Z",
+      "updated_at": "2018-10-04T05:01:23Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@jborean93 glad you were able to resolve this!  I would be interested in knowing once you have a working solution for Python for PSRP over SSH! :)",
+      "created_at": "2018-10-05T21:29:39Z",
+      "updated_at": "2018-10-05T21:29:39Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT no worries, will send through some details here once I have a proper solution. Right now it's just some mess put on top of my existing code and needs some cleanup before I'm ready to release it.",
+      "created_at": "2018-10-05T21:34:14Z",
+      "updated_at": "2018-10-05T21:34:14Z"
+    }
+  ],
+  "created_at": "2018-10-02T06:49:57Z",
+  "number": 7921,
+  "state": "closed",
+  "title": "Documentation/Help on PSRP over SSH",
+  "updated_at": "2018-10-05T21:34:14Z"
+}

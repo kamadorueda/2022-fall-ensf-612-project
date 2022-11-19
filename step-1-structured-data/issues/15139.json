@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15139",
+  "author": "lededev",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\nFirst we use windows 10 original PowerShell make file and it's hard link.\r\n```powershell\r\nPS Z:\\pd> echo \"test\" > h1.txt\r\nPS Z:\\pd> cmd.exe /C mklink /H hardlink_h1.txt .\\h1.txt\r\n\u4e3a hardlink_h1.txt <<===>> .\\h1.txt \u521b\u5efa\u4e86\u786c\u94fe\u63a5\r\nPS Z:\\pd> ls\r\n\r\n\r\n    \u76ee\u5f55: Z:\\pd\r\n\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a----          2021/4/2      4:39             14 h1.txt\r\n-a----          2021/4/2      4:39             14 hardlink_h1.txt\r\n\r\n\r\nPS Z:\\pd> (Get-Item .\\hardlink_h1.txt).Target\r\nZ:\\pd\\h1.txt\r\nPS Z:\\pd>\r\n```\r\nIt's work fine.\r\nAnd we use Powershell v7.2.0-preview.4 reproduce this bug\r\n```powershell\r\nPS Z:\\pd> ls\r\n\r\n    Directory: Z:\\pd\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a---            2021/4/2     4:39             14 h1.txt\r\n-a---            2021/4/2     4:39             14 hardlink_h1.txt\r\n\r\nPS Z:\\pd> (Get-Item .\\hardlink_h1.txt).Target\r\nPS Z:\\pd>\r\n```\r\nYou can see .Target get nothing.\r\n## Expected behavior\r\n\r\n```none\r\nPS Z:\\pd> (Get-Item .\\hardlink_h1.txt).Target\r\nZ:\\pd\\h1.txt\r\nPS Z:\\pd>\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nPS Z:\\pd> (Get-Item .\\hardlink_h1.txt).Target\r\nPS Z:\\pd>\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nPS Z:\\pd> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0-preview.4\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0-preview.4\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nPS Z:\\pd>\r\n```\r\n\r\n![image](https://user-images.githubusercontent.com/30518126/113352231-8c08ba80-936e-11eb-8f72-fdee30373b16.png)\r\n![image](https://user-images.githubusercontent.com/30518126/113352533-f6b9f600-936e-11eb-9f89-e82dfe634d96.png)\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Unfortunately, hard-link support was never implemented in PowerShell Core - see #11562.\r\n",
+      "created_at": "2021-04-01T22:45:55Z",
+      "updated_at": "2021-04-01T22:45:55Z"
+    },
+    {
+      "author": "lededev",
+      "author_association": "NONE",
+      "body": "Thank you, I am looking for a windows powershell which have new-item relative symbolic links bug fix and hard links .Target feature, any suggestion?",
+      "created_at": "2021-04-02T02:24:37Z",
+      "updated_at": "2021-04-02T02:27:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The following adds a `.HardLinks` ETS property to `System.IO.FileInfo` instances (only for _files_, given that directories don't support hardlinks), but note that Unix isn't supported.\r\n\r\n* It incurs once-per-session compilation overhead due to use of `Add-Type` with C# code that uses P/Invoke declarations to call the Windows API, when you first access the property.\r\n\r\n* If you'd rather not update type definitions, you can use the `Add-Type` call in isolation, and then call the static `GetHardLinks` method as follows, for instance:\r\n\r\n  * `[WinUtil.NTFS]::GetHardLinks('C:\\WINDOWS\\explorer.exe')`\r\n\r\n* If you'd rather override the existing `.Target` ETS property to integrate this functionality, for emulation of Windows PowerShell behavior, see the bottom section.\r\n\r\n```powershell\r\nUpdate-TypeData -Force -TypeName System.IO.FileInfo -MemberName HardLinks -MemberType ScriptProperty -Value {\r\n  if ($env:OS -ne 'Windows_NT') { \r\n    # Note: throw and Write-Error are quietly ignored in a ScriptProperty script block.\r\n    Write-Warning \"The .HardLinks property is only supported on Windows.\" \r\n    return , [string[]] @()\r\n  }\r\n  Add-Type -Name NTFS -Namespace WinUtil -UsingNamespace System.Text, System.Collections.Generic, System.IO -MemberDefinition @'\r\n\r\n    #region WinAPI P/Invoke declarations\r\n    [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)]\r\n    static extern IntPtr FindFirstFileNameW(string lpFileName, uint dwFlags, ref uint StringLength, StringBuilder LinkName);\r\n\r\n    [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)]\r\n    static extern bool FindNextFileNameW(IntPtr hFindStream, ref uint StringLength, StringBuilder LinkName);\r\n\r\n    [DllImport(\"kernel32.dll\", SetLastError = true)]\r\n    static extern bool FindClose(IntPtr hFindFile);\r\n\r\n    [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)]\r\n    static extern bool GetVolumePathName(string lpszFileName, [Out] StringBuilder lpszVolumePathName, uint cchBufferLength);\r\n\r\n    public static readonly IntPtr INVALID_HANDLE_VALUE = (IntPtr)(-1); // 0xffffffff;\r\n    public const int MAX_PATH = 65535; // Max. NTFS path length.\r\n    #endregion\r\n\r\n    /// <summary>\r\n    //// Returns the enumeration of hardlinks for the given *file* as full file paths, if any,\r\n    //// excluding the input file itself.\r\n    /// </summary>\r\n    /// <remarks>\r\n    /// If the file has only one hardlink (itself) or the target volume doesn't support enumerating hardlinks,\r\n    /// an emtpty sting array is returned.\r\n    /// An exception occurs if you specify a non-existent path or a path to a\r\n    /// directory (directories don't support hardlinks)\r\n    /// </remarks>\r\n    public static string[] GetHardLinks(string filePath)\r\n    {\r\n      string fullFilePath = Path.GetFullPath(filePath);\r\n      if (Directory.Exists(fullFilePath))\r\n      {\r\n        throw new ArgumentException(\"Only files support hardlinks, \\\"\" + filePath + \"\\\" is a directory.\");\r\n      }\r\n      StringBuilder sbPath = new StringBuilder(MAX_PATH);\r\n      uint charCount = (uint)sbPath.Capacity; // in/out character-count variable for the WinAPI calls.\r\n      // Get the volume (drive) part of the target file's full path (e.g., @\"C:\\\")\r\n      GetVolumePathName(fullFilePath, sbPath, (uint)sbPath.Capacity);\r\n      string volume = sbPath.ToString();\r\n      // Trim the trailing \"\\\" from the volume path, to enable simple concatenation\r\n      // with the volume-relative paths returned by the FindFirstFileNameW() and FindFirstFileNameW() functions,\r\n      // which have a leading \"\\\"\r\n      volume = volume.Substring(0, volume.Length > 0 ? volume.Length - 1 : 0);\r\n      // Loop over and collect all hard links as their full paths.\r\n      IntPtr findHandle;\r\n      if (INVALID_HANDLE_VALUE == (findHandle = FindFirstFileNameW(fullFilePath, 0, ref charCount, sbPath)))\r\n      {\r\n        if (! File.Exists(fullFilePath))\r\n        {\r\n          throw new FileNotFoundException(\"File not found: \" + filePath);\r\n        }\r\n        // Otherwise: the target volume doesn't support enumerating hardlinks.\r\n        return Array.Empty<string>();\r\n      }\r\n      List<string> links = new List<string>();\r\n      do\r\n      {\r\n        string fullHardlinkPath = volume + sbPath.ToString();\r\n        if (! fullHardlinkPath.Equals(fullFilePath, StringComparison.OrdinalIgnoreCase)) \r\n        {\r\n          links.Add(fullHardlinkPath); // Add the full path to the result list.\r\n        }\r\n        charCount = (uint)sbPath.Capacity; // Prepare for the next FindNextFileNameW() call.\r\n      } while (FindNextFileNameW(findHandle, ref charCount, sbPath));\r\n      FindClose(findHandle);\r\n      return links.ToArray();\r\n    }\r\n\r\n'@\r\n  , [WinUtil.NTFS]::GetHardLinks($this.FullName)  \r\n}\r\n```\r\n\r\n**Sample call**:\r\n\r\n```powershell\r\nPS> (Get-Item 'C:\\WINDOWS\\explorer.exe').HardLinks\r\nC:\\Windows\\WinSxS\\amd64_microsoft-windows-explorer_31bf3856ad364e35_10.0.19041.844_none_2fabf330d88d7dfd\\explorer.exe\r\n```\r\n\r\n---\r\n\r\nOverriding the `.Target` property with integrated hardlink support on Windows, which emulates what Windows PowerShell does:\r\n\r\n```powershell\r\nUpdate-TypeData -Force -TypeName System.IO.FileInfo -MemberName Target -MemberType ScriptProperty -Value {\r\n\r\n  # NOTE: Paste the Add-Type command from above here.\r\n  #       Alternatively, run the Add-Type command separately, beforehand.\r\n\r\n  # Output the target, if the file at hand is a symbolic link (reparse point).\r\n  , [string[]] @($target = [Microsoft.PowerShell.Commands.InternalSymbolicLinkLinkCodeMethods]::GetTarget($this))\r\n  # If it isn't, and we're on Windows, look for and output hardlinks, if any.\r\n  if ($env:OS -eq 'Windows_NT' -and -not $target) {\r\n    , [WinUtil.NTFS]::GetHardLinks($this.FullName)\r\n  }\r\n}\r\n```\r\n\r\n**Sample call**:\r\n\r\n```powershell\r\nPS> (Get-Item 'C:\\WINDOWS\\explorer.exe').Target\r\nC:\\Windows\\WinSxS\\amd64_microsoft-windows-explorer_31bf3856ad364e35_10.0.19041.844_none_2fabf330d88d7dfd\\explorer.exe\r\n```\r\n",
+      "created_at": "2021-04-02T15:01:26Z",
+      "updated_at": "2022-10-18T16:09:05Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The PowerShell Engine WG reviewed this issue and agreed that this is a bug that should be addressed -- on Windows, `Target` should be able to resolve a hard link just like in Windows PowerShell 5.1; on Unix platforms, investigation should be done to see if it's possible to retain the same behavior as on Windows.\r\n",
+      "created_at": "2022-10-17T22:47:18Z",
+      "updated_at": "2022-10-17T22:47:18Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "If pwsh resolves the hard link what constitutes the target? You could potentially have multiple files that are the same hard link and there isn\u2019t really a single target as they are all essentially the same. Would the Target property return it as a list or have some mechanism to select one of them?",
+      "created_at": "2022-10-18T00:28:37Z",
+      "updated_at": "2022-10-18T00:28:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If I remember correctly we removed this for performance reasons years ago.\r\n\r\nWindows API allows to get all hard link targets by mean of enumerating API and it is slow.\r\nOn Unix API allows to get inode, then we have to enumerate all volume to find all elements with the same inode. It is very slow too. (Notice, we use this (inode tracking) to stop enumerating on cycles)\r\n\r\nIf we really want the feature I suggest to develop new cmdlet.",
+      "created_at": "2022-10-18T03:04:08Z",
+      "updated_at": "2022-10-18T03:05:18Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The code that resolves hard link was never enabled for PowerShell Core. That was because when initially porting Windows PowerShell to CoreCLR, the target was NanoServer and CoreSystem, where the needed Win32 APIs `FindFirstFileName`, `FindNextFileName`, and `FindClose` were not available. So, the code was disabled for CoreCLR at the time, and then I guess it was removed later after open source by some cleanup efforts. Below is the original code:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/source-depot/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L7885-L7949\r\n\r\n> If pwsh resolves the hard link what constitutes the target?\r\n\r\nThe behavior in Windows PowerShell 5.1 is returning the list of files other than the file you try to resolve from:\r\n\r\n![image](https://user-images.githubusercontent.com/127450/196570826-28fefa65-9525-4a4d-92c6-f8e6b43dcb52.png)\r\n\r\n> If we really want the feature I suggest to develop new cmdlet.\r\n\r\nI personally agree that using `Target` for hard link is a little off -- it's not a target, but files that share the same inode.\r\nI like the idea of having new cmdlets for this functionality.\r\n",
+      "created_at": "2022-10-19T00:44:24Z",
+      "updated_at": "2022-10-19T00:45:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think that there's agreement that reporting hard-links via `.Target` is problematic, both conceptually and in terms of performance (and in terms of PS Core-specific backward compatibility, given that `.Target` is a _single_, `[string]`-typed value, as @jborean93 points out).\r\n\r\nAn alternative to providing a separate cmdlet - which seems like overkill for such a specific feature - is to provide an ETS _method_ (`CodeMethod`) , say, `.GetHardLinks()` (which would need to be documented along with its performance implications, especially on Unix-like platforms, as noted by @iSazonov, if implemented there as well).\r\n\r\n\r\n\r\n",
+      "created_at": "2022-10-19T02:53:03Z",
+      "updated_at": "2022-10-19T02:53:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The code that resolves hard link was never enabled for PowerShell Core. That was because when initially porting Windows PowerShell to CoreCLR, the target was NanoServer and CoreSystem, where the needed Win32 APIs `FindFirstFileName`, `FindNextFileName`, and `FindClose` were not available. So, the code was disabled for CoreCLR at the time, and then I guess it was removed later after open source by some cleanup efforts. Below is the original code:\r\n> \r\n> https://github.com/PowerShell/PowerShell/blob/source-depot/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L7885-L7949\r\n\r\nRemoved in #8789.\r\n\r\n> I like the idea of having new cmdlets for this functionality.\r\n\r\nYou forget to add \"in new community module\" \ud83d\ude3a \r\n",
+      "created_at": "2022-10-19T03:38:52Z",
+      "updated_at": "2022-10-19T16:23:34Z"
+    }
+  ],
+  "created_at": "2021-04-01T20:48:05Z",
+  "number": 15139,
+  "state": "open",
+  "title": "Powershell v7.2.0-preview.4 file Hard Link .Target get nothing",
+  "updated_at": "2022-10-19T16:23:34Z"
+}

@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2449",
+  "author": "wimbor",
+  "body": "<!--\n\nIf it is a bug report:\n- make sure you are able to repro it on the latest released version. \nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\n- Search the existing issues.\n- Refer to the [FAQ](../docs/FAQ.md).\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\n- Fill out the following repro template\n\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\n-->\n\nWhen you create a binary PowerShell module, just by compiling a simple, barebones C# class DLL and adding it to the module path (even without manifest), the class objects inside the DLL will be immediately available for that session after the command 'import-module'.\n\nWhen you create a 'classic script based' PowerShell module (using .psm1/.psd1) the classes inside the module are only available to that module internally, but not to the PS session by default, unless you run the 'using module ...' command in the PowerShell session.\n\nThat by itself is already inconsistent. It gets more confusing when you create a new object using New-WebserviceProxy. The associated classes from the online web service are from then on also available in the current session, without any extra loading.\n\nSo, classes in 'foreign' modules are autoloaded and available, while 'PowerShell native' classes are not.  This seems to be bug or at least inconsistent behaviour.\n\nIt would be great if the 'Export-ModuleMember' command was expanded to support classes as well.\n\n(I have a feeling this is an oversight. I spoke to someone at the PowerShell booth at Microsoft Ignite 2016 and the person was surprised classes inside text based .psm1 files are not available outside the module by default)\n\nSee also related comments on: https://windowsserver.uservoice.com/forums/301869-powershell/suggestions/16504684-package-powershell-classes-in-a-module\n## Steps to reproduce\n\nCreate new PowerShell module with classes inside. Classes not available by default when importing module.\n## Expected behavior\n\nClasses from binary PowerShell modules as well as classic, script based module should load in the same way.\n## Actual behavior\n\nYou need to explicitly call 'Using module ...' in the running PowerShell session in order to get access to the classes inside a script based PowerShell module.\n## Environment data\n\n<!-- provide the output of $PSVersionTable -->\n\n``` powershell\n> $PSVersionTable\nName                           Value                                                                       \n----                           -----                                                                       \nPSVersion                      5.1.14393.206                                                               \nPSEdition                      Desktop                                                                     \nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                                                     \nBuildVersion                   10.0.14393.206                                                              \nCLRVersion                     4.0.30319.42000                                                             \nWSManStackVersion              3.0                                                                         \nPSRemotingProtocolVersion      2.3                                                                         \nSerializationVersion           1.1.0.1                                                                     \n```\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rumbawls",
+      "author_association": "NONE",
+      "body": "To add to what Steve's reported here, 'using' directives need to be placed at the top of a script, but this doesn't seem to stop you from placing them at the top of a secondary script and then invoking that script from the middle of your first one.\n\n**`Main.ps1`**\n`Write-Host \"This is the first line\"`\n`& LoaderScript.ps1`\n`[SomeClass]::new()`\n\n**`LoaderScript.ps1`**\n`using \".\\SomeModule.psm1\"`\n\n**`SomeModule.psm1`**\n`Class SomeClass {`\n  `[string]$SomeProperty`\n`}`\n\nI get what they're going for with 'using' - it does some much-needed things for IntelliSense when you get into class management, but wimbor's point remains that there is still a demand to load them dynamically.\nI, too, expected there to be some form of `Export-ModuleMember -Class`\n",
+      "created_at": "2016-10-19T15:27:29Z",
+      "updated_at": "2016-10-19T15:28:29Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "Thank you, great discussion!\n\n### Why there is a need in `using module`?\n\nUsing module looks like a duplicated facility with `Import-Module`.\nLet's take a look.\n- PowerShell is a dynamic language.\n- Classes provide some **parse-time** checks. I.e. if you have a class that has a return value `[string]` but doesn't return anything from anywhere,  you will get an error on the module load (actually, during the module parsing, which happens, when you are trying to load it). It gives developers ability to find problems earlier.\n- Mixing parse time checks into dynamic language is not a picnic.\n- `using module` separated from `Import-Module` because is in this parse-time vs runtime difference. `Import-Module` could take a variable value and load it in runtime, but `using module` can take only constant expressions. Also, because `using` statement is allowed only at the beginning of the file, it greatly simplifies things: now you don't need to try to figure out (dynamic) scopes and visibility rules and can just use whole files as scopes.\n- If you want to use one class in the context of another class, i.e.\n\n``` powershell\n# A.psm1\nclass A{}\n\n# B.psm1\nImport-Module ./A.psm1\nclass B {\n    [A]getA() { return [A]::new() }\n}\n```\n\nThe type definition of `[A]` should be available at parse time to `[B]`, so this code could not work reliable. That's why we need `using module` and that's why it's always at the top of the script: to simplify scoping rules for class names visibility.\n\n### Export-ModuleMember\n\nThe classes **are** exported out of the module. To see them as available types use `using module`. Should we also make it available as types for `Import-Module`? Yes, I think that's a good idea.\nNote that it may still be confusing and inconsistent because after this change you would be able to write code:\n\n``` powershell\n# A.psm1\nclass A{\n   $foo = 'bar'\n}\n\n# B.psm1\nImport-Module ./A.psm1\nclass B {\n    [A]getA() { return [A]::new() } # error, this is compile-time dispatching\n}\n\n[A]::foo # no error, this is runtime dispatching\n```\n\nThese are the fundamental incompatibility between two approaches, but I think we can collaboratively improve the experience.\n",
+      "created_at": "2016-10-22T04:28:34Z",
+      "updated_at": "2016-10-22T04:28:34Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "One question about _using module_.\nI have a simple module that declare a 'Computer' class.\n\n``` Powershell\n@'\nclass Computer {\n    [string] $Name\n    [string] $OS\n}\n'@ >C:\\Temp\\Computer\\1.0\\Computer.psm1\n```\n\nI can write this into a script :\n\n``` Powershell\n@'\nusing module C:\\Temp\\Computer\\1.0\\Computer.psm1\n[Computer]::new()\n'@ > c:\\temp\\using.ps1\n```\n\nBut not this :\n\n``` Powershell\n@'\n  using module C:\\Temp\\Computer\\1.0\\Computer.psm1\n  [Computer]::new()\n\n  $Object=Start-job { \n     using module C:\\Temp\\Computer\\1.0\\Computer.psm1\n     [Computer]::New()\n  } | \n   Wait-Job|\n   Receive-job -AutoRemoveJob -Wait\n'@ > c:\\temp\\using.ps1\n```\n\nI get an exception :\n\n``` Powershell\n  At C:\\temp\\using.ps1:5 char:4\n  +    using module C:\\Temp\\Computer\\1.0\\Computer.psm1\n  +    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n  A 'using' statement must appear before any other statements in a script.\n      + CategoryInfo          : ParserError: (:) [], ParseException\n      + FullyQualifiedErrorId : UsingMustBeAtStartOfScript\n```\n\nThis code is not possible, I get the same exception :\n\n``` Powershell\n@'\n  $Object=Start-job { \n     using module C:\\Temp\\Computer\\1.0\\Computer.psm1\n     [Computer]::New()\n  } | \n   Wait-Job|\n   Receive-job -AutoRemoveJob -Wait\n'@ > c:\\temp\\Test.ps1\n\n.\\test.ps1\n```\n\nIt is by design ?\n\nThis code is possible :\n\n``` Powershell\n@'\n  $Object=Start-job { \n     Invoke-Expression  \"using module C:\\Temp\\Computer\\1.0\\Computer.psm1\"\n     [Computer]::New()\n  } | \n   Wait-Job|\n   Receive-job -AutoRemoveJob -Wait\n   $object\n'@ > c:\\temp\\Test2.ps1\n\n.\\test2.ps1\n```\n\nThe use of _Invoke-Expression_ can it be a workaround ?\n\nPSversion  5.0.10586.117, Seven x64\n",
+      "created_at": "2016-10-23T09:52:59Z",
+      "updated_at": "2016-10-23T09:52:59Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "@LaurentDardenne that's an excellent example, thank you for sharing it. UX indeed feels a little bit broken.\nOne way to see it is  \"how to defer parse time check to runtime\". I would not recommend use a temp file or invoke-expression. A little bit cleaner workaround would be creating scriptblock for Start-Job argument dynamically from string. Use [scriptblock]::create().\n\nOne design problem with allowing using module to be at beginning of any arbitrary scriptblock is that it would be significant complicate lookups and resolution.\n",
+      "created_at": "2016-10-23T19:44:53Z",
+      "updated_at": "2016-10-23T19:45:41Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "You could use `Start-Job -FilePath` instead of `Invoke-Expression`.\n",
+      "created_at": "2016-10-25T13:38:57Z",
+      "updated_at": "2016-10-25T13:39:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "`using module` confuse us because it is _directive_ at parse time but looks like runtime term.\nIt would be reasoned to use **#using module**\n",
+      "created_at": "2016-10-25T14:29:49Z",
+      "updated_at": "2016-10-25T14:29:49Z"
+    }
+  ],
+  "created_at": "2016-10-10T19:03:48Z",
+  "number": 2449,
+  "state": "open",
+  "title": "PowerShell classes behaviour inconsistent",
+  "updated_at": "2016-11-04T21:21:42Z"
+}

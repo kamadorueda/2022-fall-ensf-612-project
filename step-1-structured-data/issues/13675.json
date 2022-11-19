@@ -1,0 +1,216 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13675",
+  "author": "rjmholt",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nSomething that would be really useful in PowerShell is a *readable*, *safe*, *hygienic* way to format a template string given a set of key/value pairs.\r\n\r\nToday in PowerShell, there are many ways to achieve string formatting, such as:\r\n\r\n- `\"Hello my name is {0}\" -f \"Henry\"`\r\n- `\"Hello my name is $Name\"`\r\n- `[string]::Format(\"Hello my name is {0}\", $Name)`\r\n- Even `\"Hello my name is \" + $Name`\r\n\r\nHowever, a scenario I see crop up from time to time is needing to read a template string from some file and wanting to insert values into it in a parameter-like way.\r\n\r\nToday this can be done in a few ways, but none is quite ideal:\r\n\r\n1. Use positional format templates. For example:\r\n    ```powershell\r\n    $str = '{0} likes the colour {1}'\r\n    $str -f 'Molly','red'\r\n    ```\r\n    This is both safe (there's no risk that the template string will have a side-effect) and hygienic (there's no risk the formatting will replace something not intended to be a parameter), but is not readable; it's not clear what the author has in mind in the template from `{0}` and `{1}`, and when the template is instantiated, the values `\"Molly\"`, and `\"red\"` are again decontextualised -- we have no idea how they're being used. So the greater the distance/abstraction between the template and its parameters, the harder the script is to reason about. Two more points detract here:\r\n    - Multiple uses of `{0}` are unclear from both the template and instantiation perspective (hard to keep track of parameters)\r\n    - Heterogeneous templates, for example where some use all parameters and others don't, are hard to manage like this\r\n\r\n2. Use string replacement. For example:\r\n    ```powershell\r\n    $str = 'VAR_NAME likes the colour VAR_COLOR'\r\n    ($str -replace 'VAR_NAME','Molly') -replace 'VAR_COLOR','red'\r\n    ```\r\n    This is more readable, and still safe, but:\r\n    - It's not hygienic, consider if the variable was just called `COLOUR` or if `VAR_NAME` were replaced with `VAR_COLOR`. In general there's no system of syntax at work to ensure that parts of the string aren't intentionally replaced.\r\n    - It's not ergonomic; for each variable we must use a new `-replace` expression\r\n    - It's inefficient; each variable causes a new string to be allocated, when we could really do all of this in one pass\r\n\r\n3. Use PowerShell variables. For example:\r\n    ```powershell\r\n    $str = '$name likes the colour $color'\r\n    & { $name = 'Molly'; $color = 'red'; Invoke-Expression $str }\r\n    ```\r\n    This is both hygienic and readable, since it reuses PowerShell's own variable-driven string expansion concepts to drive the template, but:\r\n    - It's not at all safe, since it executes the template string as given. This may cause arbitrary code execution (from within a `$(...)` subexpression). So if the template is not trusted, then this cannot be used.\r\n    - It's not efficient; we must execute a PowerShell pipeline to do a simple string template instantiation\r\n    - It's not ergonomic to do in a clean way; we are forced to instantiate variables in the calling scope, which is why I invoke it in a new scriptblock in my example, so our parameters don't leak into the wider context\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nInstead of these options, I think [Python sets an excellent example for string formatting](https://docs.python.org/3/library/string.html). In particular:\r\n\r\n```python\r\nparams = {\r\n    'purpose': 'find the Holy Grail!'\r\n}\r\n\r\n\"My quest is to {purpose}\".format(**params)\r\n```\r\n\r\nHere the template string can be specified in a way that makes it easily understood in the absence of concrete parameters, while the parameters can listed in a convenient and readable order. There's also a simple correspondence here between the general concept of splatting and named parameters in template strings.\r\n\r\nIn PowerShell today, we support template strings with positional parameters supplied as an array:\r\n\r\n```powershell\r\n\"My quest is to {0}\" -f \"find the Holy Grail!\"\r\n```\r\n\r\nI think it's a logical extension for `-f` to accept a hashtable:\r\n\r\n```powershell\r\n\"My quest is to {purpose}\" -f @{\r\n    purpose = \"find the Holy Grail!\"\r\n}\r\n```\r\n\r\nJust to motivate this a bit further, the reason I opened this issue is that I was confronted with a heterogeneous list of templates stored in JSON, of which some accept different parameters to others, or accept the same parameters in different order. Moreover I could imagine new entries being added that need a different format, which would make things less convenient again with positional parameters:\r\n\r\n```jsonc\r\n[\r\n    {\r\n        // Other fields...\r\n        \"template\": \"{packageName}_{release}-1.debian.9_amd64.deb\"\r\n    },\r\n    {\r\n        \"template\": \"{packageName}_lts_{release}_{sku}...\"\r\n    }\r\n]\r\n```\r\n\r\nIn such a scenario, I would love to simply parameterise the strings as above so I can do something like:\r\n\r\n```powershell\r\nGet-Content -Raw ./packages.json |\r\n    ConvertFrom-Json |\r\n    ForEach-Object { $_.template -f @{ packageName = \"powershell\"; release = \"7.2\"; sku = \"normal\"; ... } }\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah this is something that gets asked about *pretty frequently* in support channels.  There's probably a few issues for it already that could be closed in favor of this one.\r\n\r\nLike #12374, #11693, #11412",
+      "created_at": "2020-09-22T23:01:15Z",
+      "updated_at": "2020-09-22T23:01:15Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Ah I wondered if there was already an issue, but couldn't find one...\r\n\r\nI'll leave this one here for now, and hopefully we can decide on a canonical issue down the track. I notice that @mklement0's issue has the most \ud83d\udc4ds, but that's not quite what I'd be looking for. That API is not safe either:\r\n\r\n```\r\n> $ExecutionContext.InvokeCommand.ExpandString('Banana $(Write-Host \"Hello\")')\r\nHello\r\nBanana\r\n```",
+      "created_at": "2020-09-22T23:06:08Z",
+      "updated_at": "2020-09-22T23:06:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rjmholt,  #11693 isn't about surfacing `$ExecutionContext.InvokeCommand.ExpandString()` _as-is_ - it's just a _starting point_ - the \"Security considerations\" paragraph in #11693 addresses your security concern.",
+      "created_at": "2020-09-22T23:11:02Z",
+      "updated_at": "2020-09-23T15:30:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I'd prefer we implement #11693 before we consider the new language enhancement because it seems we would complicate Parser without needs and I don't think we would get a perf win.",
+      "created_at": "2020-09-23T04:50:07Z",
+      "updated_at": "2020-09-23T04:50:07Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "A couple of observations. \r\n1.  `-f` is AIUI a wrapper for `[string]::format` so the idea of allowing it to take a hash table, while a good one, is probably better done with a new operator. \r\n2.  `{placeholder}`  already comes unstuck if you are trying to insert things into, say, JSON text  `\r\n```\r\n@\"\r\n{\r\n   \"what\": \"Some Json\",\r\n    \"why\": {0}\r\n}\r\n\"@ -f $reason \r\n```\r\nWill fail with `input-string was not in the correct format`. \r\n```\r\n@\"\r\n{\r\n   \"what\": \"Some Json\",\r\n    \"why\": $reason\r\n}\r\n\"@\r\n```\r\nIs better in code, but it can't be saved to a file and read at run time - either `$reason` was evaluated when the file was written or it is literal text.  And invoking the literal text is bad/unsafe. \r\n\r\nEven limited invoke-expression where only $ expressions in the string are evaluated still gives a file a chance to contain  `\"$(Invoke-Evil)\"`  so the hygiene rule says the code reading the string must specify what goes into placeholders.    \r\n\r\nAnd so one comes back round to saying today   `'{0} likes the colour {1}'` is using array indices and later  `$str -f '@(Molly','red')`  doesn't link nicely.    If also gets nasty when the code evolves. `'{0} {2} likes the colour {1}'`  / `$str -f '@(Molly','red','really')` feels wrong. But if we don't want switch parameters round everywhere we can't change the meaning. \r\nA hash table would be nicer. \r\n\r\n\r\n",
+      "created_at": "2020-09-23T10:22:31Z",
+      "updated_at": "2020-09-23T10:23:22Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "Does .NET have an issue open adding support for named placeholders?",
+      "created_at": "2020-09-23T13:39:04Z",
+      "updated_at": "2020-09-23T13:39:04Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@jhoneill yeah, if you want to use a string that contains `{` / `}` characters you have to escape them by doubling up any of them that aren't intended to be format tokens.\r\n\r\nIMO there's nothing inherently wrong with adding this to `-f`, it follows that pattern reasonably well.",
+      "created_at": "2020-09-23T15:24:28Z",
+      "updated_at": "2020-09-23T15:24:28Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@jhoneill good summary.\r\n\r\n> -f is AIUI a wrapper for [string]::format so the idea of allowing it to take a hash table, while a good one, is probably better done with a new operator.\r\n\r\nIn an ideal world, I don't think anyone using PowerShell should care about the implementation details for an operator, and I think a hashtable does map nicely, conceptually speaking. With that said, it probably introduces an opportunity for us to break something or otherwise clobber an underlying .NET functionality, which I think PowerShell has done somewhat badly in the past.\r\n\r\n> `{placeholder}` already comes unstuck if you are trying to insert things into, say, JSON text\r\n\r\nYeah, any templating scheme is going to have some kind of input that collides with its syntax, which is why it must have an escaping mechanism. The nice thing about the existing `-f` positional template syntax is that it already covers both the template syntax and how to escape it, so it's only one extra step to introduce naming, rather than teaching people a new operator and possibly a new syntax/mini-language underneath it.",
+      "created_at": "2020-09-23T16:01:45Z",
+      "updated_at": "2020-09-23T16:01:45Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@ThomasNieto I was able to find some discussion in https://github.com/dotnet/runtime/issues/20317, but I believe it's been closed. It would be nice to reuse something already well tested and understood, but I'm not sure that's on offer here.",
+      "created_at": "2020-09-23T16:11:39Z",
+      "updated_at": "2020-09-23T16:11:39Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@vexx32 / @rjmholt    I was thinking it was better to be which has a .NET equivalent and which is PowerShell specific . The more I turn this over the more I think I was wrong - off the top of my head I can't think of two operators which do the same operation but on different types which is what this would be (`string -f array` . `string -g hashtable` ) . It would be better done in .NET and then the question doesn't arise. \r\n\r\nis the doubling of {} documented ? For more than a decade I've written those as \"[[ should be braced ]]\" and then replaced [[ and ]] with { and  } afterwards.  But it seems to have always been there (powershell -version 2 seems to support it)\r\n\r\n",
+      "created_at": "2020-09-23T16:39:03Z",
+      "updated_at": "2020-09-23T16:39:03Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@jhoneill it's in the docs for [`string.Format`](https://docs.microsoft.com/en-us/dotnet/api/system.string.format?view=netcore-3.1#how-do-i-include-literal-braces--and--in-the-result-string).",
+      "created_at": "2020-09-23T16:51:52Z",
+      "updated_at": "2020-09-23T16:51:52Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "But yes, would be good to either link or directly mention the doubling of curly braces in the docs for `-f` if it's not already there.\r\n\r\nC# _natively_ supports things like `$\"Expand token {name}\"` which will find an object with the identifier `name` accessible from the current scope and insert it into the string. So while it's not exposed as an API in .NET directly, the compiler supports it.",
+      "created_at": "2020-09-23T17:16:21Z",
+      "updated_at": "2020-09-23T17:17:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, there is a link to the .NET API documentation in  the [`-f` documentation](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_Operators#format-operator--f), but I agree that mentioning the escaping in-topic for the `-f` operator would be helpful - see https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6667#issue-707565138",
+      "created_at": "2020-09-23T17:58:05Z",
+      "updated_at": "2020-09-23T17:59:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The C# 6+ [interpolated strings](https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/tokens/interpolated) (e.g, `$\"Expand token {name}\"`) are the direct equivalent of PowerShell's _expandable strings_, only with different syntax.\r\n\r\nThe proposal in https://github.com/dotnet/runtime/issues/20317, which was rejected (\"`String.Format` is already a huge source of bugs and performance issues and adding more layers is not something we really want to do. I like the general idea of a basic templating system but I think it would be better served as a higher level concept not directly on string.\") would have been the equivalent of _what we already have_, namely in `$ExecutionContext.InvokeCommand.ExpandString()`, which #11693 proposes surfacing in a friendlier - and safer - manner _as a cmdlet_: that is, you craft a _verbatim_ string as you normally would an _expandable_ one, and later expand it on demand, with the then-current values of the variables referenced and / or output from the embedded expressions.\r\n\r\nOf course, just like `-f` and expandable strings happily coexist currently, with different syntax forms, there's no reason not to implement _both_ #11693 and the hashtable extension to `-f` proposed here.\r\n\r\nGiven that the proposed `-f` extension would be a strict _superset_ of the .NET `String.Format()` method,  I think it is conceptually unproblematic, as long as the relationship is clearly documented.\r\n\r\n",
+      "created_at": "2020-09-23T18:55:29Z",
+      "updated_at": "2020-09-23T18:55:29Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 that seems less like a template and more like slightly different string interpolation.  The actual tokens that get replaced are less parameters to the template and more bits of state it pulls out?\r\n\r\nSo for example, I have a template in `email_message.txt` that looks like this:\r\n\r\n```raw\r\nHello $to,\r\n\r\nI'm here to sell you car insurance at `$$price!\r\n```\r\n\r\nIn order to use that as a template you'd have to do this?\r\n\r\n```powershell\r\n$to = 'Person'\r\n$price =  '10.00'\r\nExpand-String $myTemplate\r\n```",
+      "created_at": "2020-09-26T13:55:28Z",
+      "updated_at": "2020-09-26T13:55:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Correct, @SeeminglyScience. \r\nIt is string interpolation _on demand_ that isn't tied to _instantly_ interpolated string _literals_.\r\nI think it's fair to call a non-literal string that contains placeholders to be expanded via the caller's state a _template_ - the only difference to this proposal is the _source_ of the expansion (implicit interpolation, via the caller's state vs. explicit interpolation, via a hash table of placeholder replacement values). Note that @BrucePay even favors the name `Expand-Template` over `Expand-String`.\r\n\r\nHowever, as my previous comment hopefully made clear: _both_ approaches are valuable and worth implementing.\r\n",
+      "created_at": "2020-09-26T14:18:18Z",
+      "updated_at": "2020-09-26T14:19:43Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I guess the problem I have with that is that it reminds me of when someone is just starting PowerShell they use variables instead of parameters, like:\r\n\r\n```powershell\r\nfunction DoThing {\r\n    Get-ChildItem | Export-Csv $global:OutputPath\r\n}\r\n\r\n$global:OutputPath = 'C:\\'\r\nDoThing\r\n```\r\n\r\nIn every scenario I can think of it either ends up looking like that or expandable strings would just be a better fit.   That very well might be my lack of imagination though.\r\n\r\n> However, as my previous comment hopefully made clear: _both_ approaches are valuable and worth implementing.\r\n\r\nFair enough, but realistically this thread is most likely about which of these get implemented.  If the consensus ends up being that both are good so do both, we're *probably* not getting either of them.",
+      "created_at": "2020-09-26T14:35:50Z",
+      "updated_at": "2020-09-26T23:46:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It may remind you of that, but there's no inherent connection. The OP in #11693 shows a better example, and https://stackoverflow.com/search?q=%5Bpowershell%5D+%24ExecutionContext.InvokeCommand.ExpandString should give you a sense that there's a demand for this feature and that the use cases are legitimate.\r\nJust like expandable strings and the current `-f` operator  are  complementary, so would `Expand-String` and `-f` with named placeholders be, for conceptually related but distinct use cases.\r\n\r\nMy intent was to compare and contrast the two approaches to show how they differ and relate to C#, so we have conceptual clarity, and to make the case that both are useful. If you think that #11693 isn't a good idea in and of itself, please discuss there.\r\n\r\n> Fair enough, but realistically this thread is about which of these get implemented.\r\n\r\nPlease don't prejudice the discussion this way.\r\n\r\nIf you think this is a question of not having the time/resources to do both, I'd say that #11693 is fairly easy to implement - but, to be clear: I don't think we should have to choose.\r\n\r\n\r\n\r\n\r\n\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/Img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/nocaptcha?s=c34080d0-48d9-4dbe-9e6d-6a02f67b5687\">Human verification</a></strong></div><div>Stack Overflow | The World\u2019s Largest Online Community for Developers</div></blockquote>",
+      "created_at": "2020-09-26T15:48:10Z",
+      "updated_at": "2020-09-26T15:48:12Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> The OP in #11693 shows a better example,\r\n\r\nI guess that's part of my confusion, all of those examples could be made more clear by using expandable strings:\r\n\r\n```powershell\r\n# Define the template string, with *single quotes*, to avoid instant expansion.\r\n$template = 'Variable `$foo contains ''$foo'' and contains $($foo.Length) character(s).'\r\n# Give $foo different values in sequence, and expand the template with each.\r\nforeach ($foo in 'bar', 'none') {\r\n  $ExecutionContext.InvokeCommand.ExpandString($template) \r\n} \r\n\r\n# vs\r\n\r\n# Give $foo different values in sequence, and expand the template with each.\r\nforeach ($foo in 'bar', 'none') {\r\n  \"Variable `$foo contains '$foo' and contains $($foo.Length) character(s).\"\r\n} \r\n```\r\n\r\n```powershell\r\n'bar', 'none' | Expand-String 'Variable `$_ contains ''$_'' and contains $($_.Length) character(s).'\r\n\r\n# vs\r\n\r\n'bar', 'none' | ForEach-Object { \"Variable `$_ contains '$_' and contains $($_.Length) character(s).\" }\r\n```\r\n\r\n> and https://stackoverflow.com/search?q=%5Bpowershell%5D+%24ExecutionContext.InvokeCommand.ExpandString should give you a sense that there's a demand for this feature and that the use cases are legitimate.\r\n\r\nThere's definitely a demand for template functionality, and the `ExpandString` method is definitely what some folks have often tried to use in lieu of proper template support.\r\n\r\n> > Fair enough, but realistically this thread is about which of these get implemented.\r\n> \r\n> Please don't prejudice the discussion this way.\r\n\r\nIt's unlikely that multiple proposals for string templating will be accepted and imo that's a good thing.  I would argue against having separate competing ways to solve this particular problem.\r\n\r\n> If you think this is a question of not having the time/resources to do both, I'd say that #11693 is fairly easy to implement\r\n\r\nAnything security sensitive like arbitrary code execution would likely take same time to verify that it's secure.  Even if the implementation ended up being fairly simple.\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/Img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/nocaptcha?s=75df1a18-b71c-48d4-ba53-1919995173dd\">Human verification</a></strong></div><div>Stack Overflow | The World\u2019s Largest Online Community for Developers</div></blockquote>",
+      "created_at": "2020-09-26T17:13:14Z",
+      "updated_at": "2020-09-26T17:13:16Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience  I think the difference between expandable strings and what @mklement0  is talking about was your mailshot example. \r\nI write a script\r\n```\r\nFunction new-output {\r\nParam ($to, $price)\r\n@\"\r\nHello $to,\r\n\r\nI'm here to sell you car insurance at `$$price!\r\n\"\r\n}\r\n```\r\nAnd its works just fine. \r\n\r\nNow someone comes along and says \"OK but we want to be able to send different forms of the mail shot with different text, can you read it from a file\" \r\n\r\nAnd that works today IF marketing understand they have to write \r\n```\r\nHello {0},\r\n\r\nI'm here to tell you we are offering everyone in {1} {2} insurance at a {3}% discount on normal premiums. \r\n``` \r\nBut do they know numbers start at zero and the type of insurance is 2 etc. Would it be easier if they could put something else in the braced numbers ?   They could ,and we could use `invoke-expression` so \r\n```\r\nHello $to\r\n```\r\nworks -  but so does \r\n```\r\nI'm here to $(invoke-malware)\r\n```\r\nSo how does one get a file where place holders are easy without a risk of getting things one should not be able to get ? \r\n\r\n\r\n",
+      "created_at": "2020-09-26T17:24:51Z",
+      "updated_at": "2020-09-26T17:26:34Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@jhoneill Yeah I definitely understand the value of string templates. In fact, one of the first modules I put out was [PSStringTemplate](https://github.com/SeeminglyScience/PSStringTemplate).\r\n\r\nWhat I'm getting at is defining arbitrary bits of state like variables as template parameters isn't good UX.\r\n\r\ne.g.\r\n\r\n```powershell\r\n$template = 'Hello $to'\r\n$to = 'Person'\r\nExpand-String $template\r\n\r\n# vs\r\n\r\n$template = 'Hello {to}'\r\n$template -f @{ to = 'Person' }\r\n\r\n# or even\r\n\r\n$template = 'Hello $To'\r\nExpand-String $template -To Person\r\n```",
+      "created_at": "2020-09-26T17:59:58Z",
+      "updated_at": "2020-09-26T17:59:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @jhoneill - that is indeed why `Expand-String` would be useful: it works when you're _given_ a string (template) _from the outside_ - such as having read it from a file - which is therefore impossible to express as an expandable string _literal_ - I've clarified the OP of #11693 accordingly.\r\n\r\n@SeeminglyScience:\r\n\r\n> It's unlikely that multiple proposals for string templating will be accepted and imo that's a good thing\r\n\r\nBy that logic you should oppose that PowerShell supports both expandable strings and the `-f` operator - two features that ultimately do the same thing. The two approaches we're discussing here are _natural extensions_ to both.\r\n\r\n> Anything security sensitive like arbitrary code execution would likely take same time to verify that it's secure\r\n\r\nI don't think so:\r\nIf the processing is AST-based, it should be easy to rule out non-variables or to limit command use to a predefined safe subset, as @rkeithhill [suggests](https://github.com/PowerShell/PowerShell/issues/11693#issuecomment-616214594).\r\n\r\nFor someone who wants to roll their own, variables-only stopgap version (just to show a simplistic, but effective approach to ruling out commands):\r\n\r\n```powershell\r\nfunction Expand-String {\r\n  param(\r\n    [Parameter(Mandatory, ValueFromPipeline)] [string] $Template\r\n  )\r\n  process {\r\n    $sanitized = $Template -replace '\\$\\(', \"`0\"\r\n    $ExecutionContext.InvokeCommand.ExpandString($sanitized) -replace \"`0\", '$$('\r\n  }\r\n}\r\n'$HOME is where the heart is. $(Write-Host \"Oh noes!\")' | Expand-String\r\n# -> '/Users/jdoe is where the heart is. $(Write-Host \"Oh noes!\")'\r\n```\r\n\r\n> arbitrary bits of state like variables as template parameters isn't good UX.\r\n\r\nWith _both_ approaches there's a tight coupling between the template placeholder and the calling code that instantiates it, and it's actually tighter in the `-f` case - and whether that's preferable depends on the use case.\r\n\r\nIt's a tradeoff between being the convenience between direct use of elements of the caller's state you can rely on - e.g., automatic variables such as `$HOME` in an `Expand-String` call - and having to always explicitly pass _all_ replacement values in an `-f` expression.\r\n\r\nWith _both_ approaches you can make the operation fail if a bit of caller state is missing / if a replacement value isn't passed (analogous to ` '{0}{1}' -f 'one'` failing).\r\n\r\n\r\n\r\n",
+      "created_at": "2020-09-26T18:11:30Z",
+      "updated_at": "2020-09-26T21:27:54Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> By that logic you should oppose that PowerShell supports both expandable strings and the `-f` operator - two features that ultimately do the same thing. The two approaches we're discussing here are _natural extensions_ to both.\r\n\r\nIn the next sentence I say: \"I would argue against having separate competing ways to solve **this particular problem**.\"\r\n\r\nPlus I dunno man, I wasn't there when they decided to add it.  Maybe I would have argued against it but that bell can't be unrung.\r\n\r\n> If the processing is AST-based, it should be easy to rule out non-variables or to limit command use to a predefined safe subset, as @rkeithhill [suggests](https://github.com/PowerShell/PowerShell/issues/11693#issuecomment-616214594).\r\n\r\nLike I said, even if the implementation was simple that doesn't mean it wouldn't take some time to verify.\r\n\r\n> With _both_ approaches there's a tight coupling between the template placeholder and the calling code that instantiates it, and it's actually tighter in the `-f` case - and whether that's preferable depends on the use case.\r\n\r\nWhat I'm saying is that we don't recommend that folks do this:\r\n\r\n```powershell\r\nfunction DoThing {\r\n    \"Hello $global:To!\"\r\n}\r\n\r\n$global:To = 'Person'\r\nDoThing\r\n```\r\n\r\nand instead we recommend:\r\n\r\n```powershell\r\nfunction DoThing {\r\n    param($To)\r\n    \"Hello $To!\"\r\n}\r\n\r\nDoThing -To 'Person'\r\n```\r\n\r\nSo for the same reasons we recommend the latter, we shouldn't introduce a feature that *requires* the former.",
+      "created_at": "2020-09-26T19:18:27Z",
+      "updated_at": "2020-09-26T19:18:27Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": ">\r\n> What I'm getting at is defining arbitrary bits of state like variables as template parameters isn't good UX.\r\n\r\nI agree.  But how is this  \r\n```\r\n$template = 'Hello {to}'\r\n $template -f @{ to = 'Person' }\r\n```\r\nWorse than  \r\n```\r\n$template = 'Hello {0}'\r\n$template -f @{ 0 = 'Person' }\r\n```\r\n\r\nOK we don't create collections with  keys of 0,1,2,3... as hash tables we use arrays but that's what -f has today, a collection where we assign things by numeric index within the collection. \r\n \r\nAt some point if you use a template the person using it has to know what the place holders are.  Text is easier than numbers for both parties. \r\n\r\nWhen you see this away from the template, you need to go somewhere else to see what it means.      \r\n`$template -f  $datarow.colx ,  $datarow.coly ,  $datarow.colz` \r\n \r\nbut this tells you where each is going into the template   \r\n `$template -f  @{to=$datarow.colx ; place=  $datarow.coly ; discount= $datarow.colz` \r\n\r\nAs a general principle supporting parameters-by-name is good, and only allowing parameters-by-position not-so good from a UX point of view.   \r\n",
+      "created_at": "2020-09-26T20:06:32Z",
+      "updated_at": "2020-09-26T20:07:02Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@jhoneill Yeah that's the syntax I'm advocating for.",
+      "created_at": "2020-09-26T20:11:52Z",
+      "updated_at": "2020-09-26T20:11:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience:\r\n\r\n> \"I would argue against having separate competing ways to solve this particular problem.\"\r\n> but that bell can't be unrung.\r\n\r\nThe particular problem being solved is simply a generalization of existing, well-established functionality in two existing incarnations, both of which users have embraced.\r\n\r\n> it wouldn't take some time to verify.\r\n\r\nWhy? It seems like a straightforward problem to solve, verifiable with straightforward tests.\r\n\r\nThe advantage of the `Expand-String` approach is that a template may be (mostly) _self-contained_, if it references only automatic variables and commands declared as safe (or even unsafe ones with a `-Force` override).\r\nAlso, if in a given scenario the replacement values are already stored in variables (e.g., passed as arguments to a function that encapsulates expansion of a template), you're spared the awkwardness of `'This is {us}' -f @{ us = $us }` (vs.\r\n`Expand-String 'This is $us'`)\r\n\r\n",
+      "created_at": "2020-09-26T20:28:50Z",
+      "updated_at": "2020-09-26T21:30:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "On a meta note, @SeeminglyScience, quoting in chronological order:\r\n\r\n(a)\r\n> realistically this thread is about which of these get implemented.\r\n\r\n(b)\r\n> I would argue against having separate competing ways to solve this particular problem.\r\n\r\nNotwithstanding the fact that both statements, in context, are couched in _conjecture_ about the _likelihood_ of an associated outcome, I ask you not to conflate (b), an expression of _personal preference_, with (a), an assertion of _objective reality_.\r\n\r\n",
+      "created_at": "2020-09-26T23:38:26Z",
+      "updated_at": "2020-09-26T23:38:26Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Notwithstanding the fact that both statements, in context, are couched in _conjecture_ about the _likelihood_ of an associated outcome, I ask you not to conflate (b), an expression of _personal preference_, with (a), an assertion of _objective reality_.\r\n\r\nFair enough, the language is too definitive.  I've changed it to:\r\n\r\n> realistically this thread is most likely about which of these get implemented.",
+      "created_at": "2020-09-26T23:47:31Z",
+      "updated_at": "2020-09-26T23:47:31Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I wonder if a potential middle ground would be to take a page from other languages and allow some syntatic sugar like this:\r\n\r\n```powershell\r\n$template = 'Hello {name}, the time is {time}!'\r\n$template -f @{ $name; time = (Get-Date) }\r\n```\r\n\r\nWhere `$name` is sugar for `name = $name`.",
+      "created_at": "2021-08-20T13:02:34Z",
+      "updated_at": "2021-08-20T13:02:34Z"
+    }
+  ],
+  "created_at": "2020-09-22T22:34:30Z",
+  "number": 13675,
+  "state": "open",
+  "title": "Named format template parameters",
+  "updated_at": "2021-08-20T13:02:34Z"
+}

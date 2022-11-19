@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9139",
+  "author": "iSazonov",
+  "body": "From https://github.com/dotnet/corefx/blob/master/Documentation/coding-guidelines/interop-pinvokes.md#strings\r\n> StringBuilder marshalling always re-allocate/re-copy buffers. Make sense review our code to reduce such allocations.\r\n\r\nFrom @daxian-dbw https://github.com/PowerShell/PowerShell/pull/9066#issuecomment-472975185\r\n> it seems StringBuilder should never be used for P/Invoke as it incurs 4 allocations. I think it make sense to review our uses of it and replace with ArrayPool<char> when appropriate, because we will copy the existing pattern when writing new code.\r\n\r\nFrom above docs:\r\n> [USE] Char arrays from ArrayPool or StringBuffer.",
+  "closed_at": "2019-06-01T00:01:03Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "We are using `StringBuilder` for the `[out] string` parameter in P/Invoke almost everywhere.",
+      "created_at": "2019-03-15T01:51:01Z",
+      "updated_at": "2019-03-15T01:51:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Is everything so bad? :-)",
+      "created_at": "2019-03-15T03:00:06Z",
+      "updated_at": "2019-03-15T03:00:06Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "I could only find 3:\r\n```\r\n[Microsoft.PowerShell.Commands.Native]::LCIDToLocaleName()\r\n[Microsoft.PowerShell.Commands.ProcessNativeMethods]::CreateProcess()\r\n[Microsoft.Windows.Appx.PackageManager.Commands.NativeMethods]::PackageFamilyNameFromFullName()\r\n```",
+      "created_at": "2019-03-15T03:20:09Z",
+      "updated_at": "2019-03-15T03:20:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "In CoreFX repo I found 25 files with StringBuilder and name `*interop*.cs`.\r\nInteresting most of them has [out] attribute!  \r\n@jazzdelightsme Have you any thoughts about this?\r\n\r\nIt seems we need to invertigate it more deeply. Where (repo) is the StringBuilder marshalling implemented?",
+      "created_at": "2019-03-15T03:31:19Z",
+      "updated_at": "2019-03-15T03:32:43Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Well, some may not be a `out` parameter in the underlying Win32 API. I found the following by a quick search in the files @iSazonov touched in #8847\r\n```\r\n[Process.cs] CreateProcessWithLogonW, CreateProcess\r\n[ConsolControl.cs] GetConsoleTitle, ReadConsole\r\n[Native.cs] LookupAccountSid, LookupAccountNam, FormatMessage\r\n[FileSystemProvider.cs] QueryDosDevice ...\r\n```",
+      "created_at": "2019-03-15T03:34:28Z",
+      "updated_at": "2019-03-15T03:34:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Sample from CoreFX for GetWindowTextW - they use pointer instead of StringBuilder.\r\n\r\nhttps://github.com/dotnet/corefx/blob/81bd671efda5db20fae1eb381aeff2cf8ea727ac/src/System.Diagnostics.Process/src/System/Diagnostics/Process.Win32.cs#L227-L234\r\n\r\nhttps://github.com/dotnet/corefx/blob/8c5260061b11323dfd97fbab614d54402405513f/src/Common/src/Interop/Windows/User32/Interop.GetWindowTextW.cs#L14\r\n\r\nSignature doesn't have [out] https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-getwindowtextw",
+      "created_at": "2019-03-15T03:41:24Z",
+      "updated_at": "2019-03-15T03:43:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "One reference to DllImport marhalling https://github.com/dotnet/coreclr/blob/78cbd968cabc2bd6c84bfe6a0a240658e564a6d5/src/vm/ilmarshalers.cpp#L810\r\nNot clear how it works.",
+      "created_at": "2019-03-15T04:00:14Z",
+      "updated_at": "2019-03-15T04:00:14Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "Important: `[Out]` (`OutAttribute`) is very different from `out` (keyword). The attribute `[Out]` is trying to express that information needs to flow back to the caller (so if a copy had to be made during marshaling, when the call completes, the CLR needs to copy data back into the managed object). For blittable things that just get pinned and modified directly in place, it does not matter if you forget `[Out]`, because the memory was modified in-place.\r\n\r\nThe `out` keyword, though, also indicates the level of indirection. I.e. if you are passing a `Foo` to native code via PInvoke, and `Foo` is a class, and the PInvoke signature says \"`Foo f`\", that basically turns into \"`Foo* f`\". But if the signature says \"`out Foo f`\", then the equivalent native signature is \"`Foo** f`\". Big difference!\r\n\r\n(The `ref` keyword is similar in terms of indicating another level of indirection; but also implies `[In]` and `[Out]`, which sometimes the marshaler may need to know if it needs to do something to marshal a pointer in as well as out, such as a COM interface.)\r\n\r\n(Maybe you folks already know this stuff, but if so, there may have been some typos in this thread that made me think it might need clearing up (it's very easy to mix `[Out]` and `out`; I did it while typing this), so I wanted to spell it out to make sure we're on the same page about stuff. Sorry to re-explain if you were already aware.)\r\n\r\nIt may be the case for `StringBuilder` that it is special-cased and magically works with or without `out`, but I would not have guessed that (which is why I got involved in the first place when I saw the `out` added to that PR).\r\n\r\nI have always believed that the marshaler had special knowledge of `StringBuilder` and would just pin the buffer. And those comments I found on the internet (from that long-gone MSDN article) seems to indicate that perhaps it did indeed work that way once. But the [doc](https://github.com/dotnet/corefx/blob/master/Documentation/coding-guidelines/interop-pinvokes.md#strings) linked by iSazonov at the top seems clear, and I would trust current documentation from CoreFX people way more than my old memory.\r\n\r\nAnd in fact, I bet these are the issues that inspired that (current) documentation:\r\n* https://github.com/dotnet/coreclr/issues/1842\r\n* https://github.com/dotnet/coreclr/pull/21785\r\n* https://github.com/dotnet/coreclr/pull/21800\r\n\r\nSounds like there was a fly in the ointment regarding null terminators; perhaps in ancient history it did work as I thought, but then had to be pessimized to be correct for certain required cases.\r\n\r\nOn the bright side, at least there is a good recommendation for alternatives that are better.",
+      "created_at": "2019-03-15T11:14:45Z",
+      "updated_at": "2019-03-15T11:14:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@jazzdelightsme Thanks for clarify and confirmation!\r\n\r\nI added \"[USE] Char arrays from ArrayPool or StringBuffer.\" in the issue description.\r\nWe need to look our P/Invokes on hot paths.",
+      "created_at": "2019-03-15T14:19:12Z",
+      "updated_at": "2019-03-15T14:19:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I hope it is full list:\r\n\r\n- [Won't fix] - src\\Microsoft.PowerShell.Commands.Management\\commands\\management\\GetComputerInfoCommand.cs\r\n    LCIDToLocaleName - it is an edge case. Won't fix\r\n- [x] - src\\Microsoft.PowerShell.Commands.Management\\commands\\management\\Process.cs\r\n    #9195 (Merged) - style fixes\r\n    #9197 (Merged) - LookupAccountSid\r\n    CreateProcessWithLogonW, CreateProcess - it is an edge case. Won't fix\r\n- [x] - #9165 (merged) src\\Microsoft.PowerShell.ConsoleHost\\host\\msh\\ConsoleControl.cs\r\n- [Won't fix] - src\\Microsoft.PowerShell.CoreCLR.Eventing\\DotNetCode\\Eventing\\UnsafeNativeMethods.cs\r\n    StringBuilder is used to create a result string, using Span<> cause the same one coping a buffer to new result string - make no sense to fix.\r\n- [Postpone] - src\\Microsoft.PowerShell.LocalAccounts\\LocalAccounts\\Native.cs\r\n    It is not compiled - see #4305 \r\n- [x] - src\\System.Management.Automation\\engine\\hostifaces\\HostUtilities.cs\r\n    #9220 (merged) - remove the unused code\r\n- [x] - src\\System.Management.Automation\\engine\\hostifaces\\NativeCultureResolver.cs\r\n- [Won't fix] - src\\System.Management.Automation\\engine\\NativeCommandProcessor.cs\r\n    FindExecutableW - it is an edge case.\r\n- [Won't fix] - src\\System.Management.Automation\\namespaces\\FileSystemProvider.cs\r\n    WNetGetConnection (NewDrive, RemoveDrive) - it is an edge case.\r\n    QueryDosDevice (fallback to search file assoc) - it is an edge case.\r\n- [x] - #9197 (dup - see above) src\\System.Management.Automation\\namespaces\\Win32Native.cs\r\n",
+      "created_at": "2019-03-22T08:56:45Z",
+      "updated_at": "2019-04-10T12:28:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw @SteveL-MSFT I finished (I hope) reviewing the case. Two PR is waiting a code review. Please look the list above and confirm that I do not skipped something.",
+      "created_at": "2019-03-25T09:12:55Z",
+      "updated_at": "2019-03-25T09:13:40Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as fixed and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2019-06-01T00:01:02Z",
+      "updated_at": "2019-06-01T00:01:02Z"
+    }
+  ],
+  "created_at": "2019-03-14T17:31:46Z",
+  "number": 9139,
+  "state": "closed",
+  "title": "Review using StringBuilder in pinvokes",
+  "updated_at": "2019-06-01T00:01:03Z"
+}

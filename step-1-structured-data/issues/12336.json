@@ -1,0 +1,174 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12336",
+  "author": "aakash-shah",
+  "body": "# Summary of the new feature/enhancement\r\n\r\n### Background\r\nCurrently the PowerShell policies assume that if there is a \".\" (period) in a PowerShell script's path, that it is in the internet zone.  This presents the user with a warning when running PowerShell scripts are from a FQDN path (like \\\\\\server.domain.com).\r\n\r\nIn PowerShell versions up to v5.1, Windows Domain Administrators could define specific domains to be added to the Local Intranet Zone.  Once added, PowerShell would then \"trust\" these paths when the ExecutionPolicy=Unrestricted and not present the user a security warning for each script that is run from these trusted paths.\r\n\r\n#7458 revealed that PowerShell Core (v6 and v7) intentionally removed the legacy IE API that was previously used to check the Local Intranet zones, and was replaced to check for just \".\" (periods).  As per @TravisEz13 in #7458 I am creating this new feature request to discuss and address this problem.\r\n\r\n### Impact Of Changes Made In PowerShell Core\r\nMany Windows environments use a feature called Folder Redirection such that the user's \"Documents\" folder is \"redirected\" to a server (so it appears to the user that their Documents folder is on their computer, but it really lives on the server).  Many environments that use folder redirection redirect to a FQDN UNC path like \\\\\\server.domain.com\\Users\\username\\Documents.  Since these paths contain \".\" (periods), any script run from the user's Documents folder is presented with the PowerShell Security warning.  This warning message also appears if the user has a PowerShell profile and starts PSv7, which presents this message each time:\r\n\r\n> Security warning\r\nRun only scripts that you trust. While scripts from the internet can be useful, this script can potentially harm your\r\ncomputer. If you trust this script, use the Unblock-File cmdlet to allow the script to run without this warning\r\nmessage. Do you want to run \\\\\\server.domain.com\\Users\\username\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1?\r\n[D] Do not run  [R] Run once  [S] Suspend  [?] Help (default is \"D\"):\r\n\r\nSo in any environment where either Folder Redirection is being used to a FQDN UNC path, or if the environment presents users their User/Department folders on a FQDN UNC path, this will trigger security warnings and will present problems to the end user if they try to run scripts from these locations.  (At this time, we cannot deploy PowerShell v7 in our environment due to this problem).\r\n\r\nAdditional details about the problem and the discussion are available in #7458. \r\n\r\n### Goal\r\nAllow Windows Domain Administrators to configure what FQDN hosts are safe and not trigger a warning when using the Unrestricted execution policy.  This would allow Windows Domain Administrators to set up PowerShell v7 so that users are still presented the security warning when running scripts from untrusted paths, but do not trigger this security warning when scripts are run from trusted paths when the ExecutionPolicy is set to Unrestricted.\r\n\r\nWindows Domain Administrators will also need the ability to add trusted/safe hosts via the PowerShell Core Group Policies to help deploy these trusted hosts to all domain computers.\r\n\r\nWhile the ability to trust FQDN hosts would solve the immediate problem and is the main problem I am hoping to have addressed, it would also be helpful if PowerShell administrators had the flexibility to not just add FQDN hosts (and all shares/files on it), but also specify paths with subfolders and wildcards.  So for instance PowerShell Administrators could either choose to trust a FQDN host like **server.domain.com**, but also have the flexibility to trust a path like **\\\\\\server.domain.com\\Users\\\\*\\Documents\\PowerShell\\***.\r\n\r\n\r\n# Proposed technical implementation details\r\n@SteveL-MSFT and @TravisEz13 suggested the following proposal to help address this problem in #7458:\r\n\r\n> A list of allowed host filters, that allow PowerShell Wildcards in the powershell.config.json.\r\n\r\n\r\nAnd thank you for your time with this!",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could expand this on Unix too - we can detect that a path is on remote system.",
+      "created_at": "2020-04-16T13:59:20Z",
+      "updated_at": "2020-04-16T17:12:29Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@iSazonov There are no Execution policies on Unix.  Let's not add scope creep to this.",
+      "created_at": "2020-04-16T17:12:20Z",
+      "updated_at": "2020-04-16T17:12:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What would be right design?\r\n\r\n1. All files are untrusted by default\r\n2. Auto detect trusted files\r\n3. Get trusted patterns from config file/GPO\r\n\r\n#### Auto detect trusted files\r\n\r\nCurently it is only \"not have dot in folder path\".\r\n\r\n_Proposal_:\r\n- digitally signed file\r\n    - all certificates\r\n    - only explicitly specified\r\n- files only current user accessible by permissions. It is folder redirection scenario. If untrusted user has an write access to a file we can not trust the file.\r\n- files without Unlock flag.\r\n- files without dot in folder path\r\n\r\n",
+      "created_at": "2020-04-17T05:46:45Z",
+      "updated_at": "2020-04-17T18:08:33Z"
+    },
+    {
+      "author": "aakash-shah",
+      "author_association": "NONE",
+      "body": "> files only current user accessible by permissions. It is folder redirection scenario. If untrusted user has an write access to a file we can not trust the file.\r\n\r\nTo provide some context, in our environment our user folder permissions are set up as follows:\r\n\r\n- User has Modify permissions to their entire user folder at \\\\\\server.domain.com\\Users\\Username and all subfolders.\r\n\r\n- Delegated file server administrators have Modify and Full permissions via security groups to all files and folders in the Users share (these permissions are inherited from higher folder levels).\r\n\r\nI mention this to clarify that while in practical terms only the end user has access to the user's folder, and no other regular users have access to the user's folder, technically, the file server administrators are visible in the ACLs of the folder in case your proposal is querying the ACLs of the file.\r\n\r\nIn our scenario, we would still need to trust folders that may exist outside of redirected folders too, so we will likely use option 3 from above (Get trusted patterns from config file/GPO) and hence may not need this, but another way to address redirected folders is to consider trusting the locations of the known SpecialFolders Documents and Desktop.  There is also the issue though when querying \"[Environment]::GetFolderPath(\"MyDocuments\")\" on a system that has AppLocker since PowerShell runs in Constrained Language Mode and hence is unable to run this code to identify the path Documents folder path.  But if PS can still query that somehow and trust it, that could be an option too.",
+      "created_at": "2020-04-17T07:28:03Z",
+      "updated_at": "2020-04-18T00:13:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We can have trusted defaults for ACL. The same is for well-know folders.\r\n",
+      "created_at": "2020-04-17T10:34:43Z",
+      "updated_at": "2020-04-17T15:59:43Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@iSazonov This feature is scoped to discovering host names zones.  Please stay on topic.  There is no change requested to how files work.  Execution Policy has never considered ACLs.  We are not expanding execution policy functionality.  We are only restoring functionality that was lost in the port to PowerShell Core.",
+      "created_at": "2020-04-17T15:56:19Z",
+      "updated_at": "2020-04-17T16:09:55Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "MyDocuments can be modified by the user (assuming it is not controlled by group policy) and would defeat the purpose of this feature.  It would also be a much more limited feature and querying this does not work on all editions of windows.",
+      "created_at": "2020-04-17T16:00:32Z",
+      "updated_at": "2020-04-17T16:06:43Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "If we don't trust the server, we cannot trust the ACLs on the server so they would be an unreliable way of verifying the server.",
+      "created_at": "2020-04-17T16:02:43Z",
+      "updated_at": "2020-04-17T16:02:43Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@TravisEz13 I wonder why you ask to limit the feature to the outdated behavior.\r\n\r\n- some Unix APIs/apps check ACLs on their config files and ignore/alert them if discovers that untrusted user has a write access.\r\nI guess some applications on Windows (like SCCM client) could benefit from such feature.\r\n- Scenario: redirect Desktop on terminal server to share and try to open some files in latest Adobe Reader by double click. You will can able open only first file but not next. This is because AR detects that files is placed on network share and open first file in sandbox. If we open a properties of the file we can explicitly see that a path to the file is network. If we do not redirect Desktop AR works as expected and we can open all files by double click. If AR checked the rights to files, then I would not spend time on this case to allow users to open files on the desktop as they do usual.\r\n\r\n> If we don't trust the server, we cannot trust the ACLs on the server so they would be an unreliable way of verifying the server.\r\n\r\nWe do not do a security feature like RDP NLA or TLS. Path wild cards do not allow this too. We have no need to identify a server. We can do only \"measure a trust level\".\r\n\r\n",
+      "created_at": "2020-04-17T18:07:22Z",
+      "updated_at": "2020-04-17T21:03:04Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@iSazonov This is a different feature than requested and out of scope.  Please file a new issue if this is what your would like to discuss as this is a much longer discussion.  I will keep marking this like of discussion as off topic as it will **only** delay **this** request simple request.",
+      "created_at": "2020-04-17T21:02:58Z",
+      "updated_at": "2020-04-17T21:06:59Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Broad implementation plan:\r\n\r\n1. add a new configuration array with a list of servers to `ScriptExecution` :\r\n   https://github.com/PowerShell/PowerShell/blob/0c695376b748bf91447e8baf0016f0d5875e23e2/src/System.Management.Automation/engine/PSConfiguration.cs#L670 \r\n\r\n1. Implement the logic to read it and return true if it is in the list here: \r\n   https://github.com/PowerShell/PowerShell/blob/b0daa1e724cbba5e00f118001f1105bb44d91952/src/System.Management.Automation/utils/ClrFacade.cs#L204\r\n\r\n\r\nReference:\r\n\r\n* Here is an example of how to read the policy:\r\n  * https://github.com/PowerShell/PowerShell/blob/b1e998046e12ebe5da9dee479f20d479aa2256d7/src/System.Management.Automation/security/SecuritySupport.cs#L449",
+      "created_at": "2020-05-13T22:52:37Z",
+      "updated_at": "2020-05-13T22:58:44Z"
+    },
+    {
+      "author": "aakash-shah",
+      "author_association": "NONE",
+      "body": "Hello! Is there by any chance an ETA on when this is planned to be implemented?\r\n\r\nThanks!",
+      "created_at": "2021-03-03T16:16:25Z",
+      "updated_at": "2021-03-03T16:16:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@aakash-shah this is not something we're planning on implementing in the near term.  We would accept a community contribution that implements this, however.  Travis has already provided pointers to where the code should exist.",
+      "created_at": "2021-03-05T01:35:44Z",
+      "updated_at": "2021-03-05T01:35:44Z"
+    },
+    {
+      "author": "aakash-shah",
+      "author_association": "NONE",
+      "body": "Thank you for the reply. I'm unfortunately not familiar enough to know how to implement and contribute this.\r\n\r\nWe are interested in deploying PowerShell 7 to our environment but unfortunately this problem is preventing us from doing so.\r\n\r\nIf I may ask: if you had to guess (and I understand this is just a guess), do you think this is likely to be implemented in the next 12 months, or do you think it will be longer based on the other items your team is working on?\r\n\r\nThanks for your time!",
+      "created_at": "2021-03-05T03:17:19Z",
+      "updated_at": "2021-03-05T03:17:19Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "This issue is current in the `future` milestone which means we believe it's important enough for us to fix eventually.  However, I can't say when we'll get around to this.  ",
+      "created_at": "2021-03-05T04:36:59Z",
+      "updated_at": "2021-03-05T04:36:59Z"
+    },
+    {
+      "author": "CastyMcBoozer",
+      "author_association": "NONE",
+      "body": "This is a pretty bad usability issue, it is definitely preventing us from implementing PowerShell 7 in our environment.",
+      "created_at": "2022-01-28T17:34:08Z",
+      "updated_at": "2022-01-28T17:34:08Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@CastyMcBoozer,  how is this preventing you from implementing PowerShell 7?   ",
+      "created_at": "2022-05-12T20:07:34Z",
+      "updated_at": "2022-05-12T20:07:34Z"
+    },
+    {
+      "author": "MisterSausage",
+      "author_association": "NONE",
+      "body": "@TravisEz13 This is also blocking our deployment of PowerShell 7. Unfortunately, being unable to run scripts from trusted network shares (specified by a UNC path with a FQDN) is a deal-breaker. I don't think this is an unusual scenario in enterprise networks, which have a tendency to become a morass of interconnected networks and remote connections over time, despite everyone's best intentions.\r\n\r\n### Proposal to fix this issue\r\nIn my opinion, the only reasonable way to restore expected behaviour is to revert to using urlmon ([`IInternetSecurityManager::MapUrlToZone`](https://docs.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/ms537133(v=vs.85)) or [`IInternetSecurityManager::ProcessUrlAction`](https://docs.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/ms537136(v=vs.85))), like Windows PowerShell and early versions of PowerShell 6 do. This has been described here as a 'legacy IE API', but in practice it isn't - it's part of the operating system<sup>1</sup>.\r\n\r\nExplorer (as in the shell, not IE) uses it, and [Chromium uses it](https://chromium.googlesource.com/chromium/src.git/+/refs/heads/main/net/http/url_security_manager_win.cc) (and therefore, presumably, both Microsoft Edge and Google Chrome), to name just two prominent examples.\r\n\r\nI've just double-checked to be certain, and the API continues to be available in both Windows 11 and core installations of Windows Server 2022, _including when IE is removed_.\r\n\r\nI'm happy to put my time where my mouth is and submit a PR to fix this myself, but to be blunt I'm seeing hints of this being a religious issue to some contributors. If I did the work, would it be dismissed out of hand?\r\n\r\n---\r\n\r\n[1] : I think this comes from the API's provenance and location in the Microsoft Docs tree. I believe it first appeared in one of those platform-update-by-the-back-door releases of Internet Explorer in the late 90s / early 2000s.",
+      "created_at": "2022-06-06T00:37:19Z",
+      "updated_at": "2022-06-06T00:37:19Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "How is this preventing you from running scripts from trusted shares?\r\n\r\nEither sign them, or if this is automation, disable Execution Policy.",
+      "created_at": "2022-06-06T17:01:03Z",
+      "updated_at": "2022-06-06T17:01:03Z"
+    },
+    {
+      "author": "MisterSausage",
+      "author_association": "NONE",
+      "body": "@TravisEz13 The rationale is discussed in the first message in this issue, in the other issues referenced in that message, and elsewhere.\r\n\r\nGiven that:\r\n1. This issue is Windows-only.\r\n2. The solution proposed earlier in this issue involves a fair amount of work and new configuration options (that may be troublesome for enterprises to deploy universally).\r\n3. It's been marked as `Up-for-Grabs` for over a year, this particular issue was created over two years ago, and it's been discussed elsewhere for over four years, without any movement towards implementing a practical solution.\r\n\r\nMy point is that the best way to resolve this and restore expected behaviour is to use the existing API, since it's _not_ actually going away with IE as previously assumed.\r\n\r\nThis will have multiple benefits:\r\n1. It won't require a lot of effort to implement.\r\n2. It'll prevent the need for new options, code and complexity for users that only serve to reproduce documented functionality the OS already makes available.\r\n3. PowerShell 7's behaviour will instantly be in accordance with Windows PowerShell, including taking account of Group Policy set up by admins for just this scenario.\r\n\r\nI also offered to do the work myself so that this problem can be resolved once and for all.\r\n\r\n(Sorry for the delay in response - for some reason I didn't receive a notification.)",
+      "created_at": "2022-06-15T04:48:59Z",
+      "updated_at": "2022-06-15T04:48:59Z"
+    },
+    {
+      "author": "kilasuit",
+      "author_association": "COLLABORATOR",
+      "body": "@MisterSausage This repo is very accepting of PR's so if you are willing to do the work then please do go ahead and raise a PR for this to be reviewed and eventually accepted and as one of the many Working Group members as well as long time users & trainers of PowerShell I would be more than willing to support a PR if one were to be made \ud83d\ude42 & if you are willing to do the work I can look to assign this issue to you too!",
+      "created_at": "2022-06-15T06:10:40Z",
+      "updated_at": "2022-06-15T06:11:38Z"
+    },
+    {
+      "author": "MisterSausage",
+      "author_association": "NONE",
+      "body": "@kilasuit Thanks Ryan. Yes, please assign it to me if you can, and I'll get it sorted in the next week or so.",
+      "created_at": "2022-06-15T06:21:40Z",
+      "updated_at": "2022-06-15T06:21:40Z"
+    },
+    {
+      "author": "kilasuit",
+      "author_association": "COLLABORATOR",
+      "body": "Brilliant, I have assigned this to you and will look forward to seeing the resulting PR when it comes around!",
+      "created_at": "2022-06-15T07:05:34Z",
+      "updated_at": "2022-06-15T07:05:34Z"
+    }
+  ],
+  "created_at": "2020-04-16T09:16:01Z",
+  "number": 12336,
+  "state": "open",
+  "title": "Add ability to configure internet zone server names for execution policy in PS v7",
+  "updated_at": "2022-06-15T07:05:34Z"
+}

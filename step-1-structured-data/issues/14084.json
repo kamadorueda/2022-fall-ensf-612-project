@@ -1,0 +1,139 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14084",
+  "author": "cveld",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nThe current version of PowerShell is actually a very runtime driven framework. Function calls are only checked runtime whether the function is present and the parameters are met.\r\nImport-Module instructions only execute runtime and there is no guidance design time which functions will be pulled into the current scope.\r\n\r\nWhat we like to see is a more design time driven experience such as frameworks as TypeScript Nodejs.\r\nThe benefit of the EcmaScript module system is that you know design time which functions you are pulling into scope. Additionally, the import process of Nodejs is much faster than PowerShell.\r\nThe benefit of TypeScript is that function calls are validated design time. When a parameter or return type is not met, the file simply does not get compiled.\r\nPowerShell should block any function use that is not coming from an import statement. TypeScript nodejs files simply don't compile when unknown functions are being called.\r\n\r\nE.g.\r\n```PowerShell\r\n# Import specific functions / cmdlets\r\nImport Get-AzResourceGroup, Get-AzKeyVault from Az\r\nGet-AzResourceGroup -Name xyz\r\n\r\n# Import the whole set of exported functions / cmdlets to a variable\r\nImport * as $Az from Az\r\n$Az.Get-AzResourceGroup -Name xyz\r\n\r\n# This should not compile / execute and should throw a parameter mismatch error\r\nGet-AzResourceGroup -RandomParameter\r\n```\r\n\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Can't you get what you want already by using [$PSModuleAutoloadingPreference](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-7.1#psmoduleautoloadingpreference)?",
+      "created_at": "2021-01-11T03:37:47Z",
+      "updated_at": "2021-01-11T03:39:19Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "Well we are already always explicitly importing.\r\n\r\nSo to be clear we have mentioned two requirements:\r\n\r\n1. Strict function signatures\r\n\r\nSetting `$PSModuleAutoloadingPreference` to something else than `All` still does not guarantee if the function signature is called correctly \"compile-time\". Am I missing something?\r\n\r\n2. Strict cmdlet importing\r\n\r\nSo here are a few paths to pursue:\r\na) `ModuleQualified`\r\nb) Importing only a selected set of cmdlets \r\nc) Faster PowerShell semantics of explicitly importing cmdlets\r\nd) How to deal with module dependencies\r\n\r\n2a) \r\nInteresting to learn the `ModuleQualified` setting, have not seen it before. Obviously if we would adopt this prefixing, it will have quite some impact on our codebase.  \r\n\r\nI just tried out `powershellget\\Get-InstalledModule` but this results in the error `powershellget\\Get-InstalledModule : The module 'powershellget' could not be loaded. For more information, run 'Import-Module powershellget'.`.\r\n\r\nAnd after I have run `import-module powershellget` I get the error `PackageManagement\\Get-Package : The term 'PackageManagement\\Get-Package' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.`\r\n\r\nI checked the contents of `$env:PSModulePath`; the module `PackageManagement` should be discoverable.\r\n\r\nWhat am I doing wrong?\r\n\r\n2b) \r\nTrying out the the importing of a limited list of cmdlets. Findings:\r\n* You are required to leave `$PSModuleAutoloadingPreference` to `All` or else many cmdlets cannot be found which are required inside the modules being imported;\r\n* Running `Import-Module Az -Cmdlet Get-AzResource` still gets all Az modules are imported;\r\n* Running `Import-Module Az.Resources -CmdLet Get-AzResource' still gets all cmdlets imported, on top you get the Az.Accounts module in your scope.\r\n\r\nWhat can I do to prevent all those cmdlets to become available in the current scope?\r\n\r\n2c)\r\nObviously the importing is still a runtime thing, so it takes time before completion, and upfront you cannot know which cmdlets become available.\r\n\r\n2d) \r\nWe have a custom module that is depending on the Az modules and AzureAD module having been imported:\r\n```PowerShell\r\nRequiredModules        = @(\r\n        @{\r\n            ModuleName    = 'Az'\r\n            ModuleVersion = '2.6.0'\r\n            Guid          = 'd48d710e-85cb-46a1-990f-22dae76f6b5f'\r\n        }\r\n        @{\r\n            ModuleName    = 'AzureAD'\r\n            ModuleVersion = '2.0.2.31'\r\n            Guid          = 'd60c0004-962d-4dfb-8d28-5707572ffd00'\r\n        }\r\n    )\r\n```\r\n\r\nIdeally we should move the requirement for imported cmdlets from module level to file level, as is the case with EcmaScript module semantics.",
+      "created_at": "2021-01-11T08:27:06Z",
+      "updated_at": "2021-01-11T09:09:47Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I think if you want strict validation of function signatures, that might be better suited as a PSScriptAnalyzer rule cc @rjmholt @JamesWTruher \r\n\r\nPowerShellGet v2 depends on PackageManagement module.  Since the call to PackageManagement cmdlet is fully qualified, I would have expected that to work...\r\n\r\n`Az` module is just a meta-module that loads all the other actual Az modules, so that behavior is currently expected.  I believe individual Az modules end up importing `Az` due to cross dependencies across Az modules.  If you're goal is to restrict the cmdlets/functions that can be called within a script, you should look at [constrained runspaces](https://docs.microsoft.com/en-us/powershell/scripting/developer/hosting/creating-a-constrained-runspace?view=powershell-7.1).  The easiest way to do this via script is [Just Enough Administration](https://docs.microsoft.com/en-us/powershell/scripting/learn/remoting/jea/overview?view=powershell-7.1).",
+      "created_at": "2021-01-11T15:07:49Z",
+      "updated_at": "2021-01-11T15:07:49Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "> I think if you want strict validation of function signatures, that might be better suited as a PSScriptAnalyzer rule cc @rjmholt @JamesWTruher\r\n\r\nMakes sense! I would like to learn how I could establish this.\r\n\r\n> If you're goal is to restrict the cmdlets/functions that can be called within a script, you should look at constrained runspaces. The easiest way to do this via script is Just Enough Administration.\r\n\r\nNo this is too much for us. We just want to have proper \"compile-time\" support. Additionally, as a nice to have we would like to see better semantics on the `Import-Module` side, not cluttering the current scope so much, and much faster processing. Maybe we are spoiled too much by the EcmaScript module way of working \ud83d\ude09",
+      "created_at": "2021-01-11T15:59:30Z",
+      "updated_at": "2021-01-11T21:12:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I've been interested in the idea of a more strict, more maintainable style of import for awhile as well.\r\n\r\nI'm not sure it can be within PowerShell itself though. Languages with multiple dialects are pretty difficult to maintain.  Some good evidence of this within PowerShell itself is how neglected `Set-StrictMode` has become over time. I think for something like this to happen, it would really need to be a transpiler (like typescript) and probably would need to be developed and maintained by a different org.\r\n\r\nThere's definitely some potential there, but it's really difficult to recommend anyone take on that work when you could just as easily make a C# binary module instead.",
+      "created_at": "2021-01-11T17:17:19Z",
+      "updated_at": "2021-01-11T19:13:33Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Classes provide you with a more structured, early checked model. Have you tried using these? Also quite a bit faster if you don't require all the features of the parameter binder.",
+      "created_at": "2021-01-13T15:42:36Z",
+      "updated_at": "2021-01-13T15:42:36Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "We are using the Az modules heavily. So we really would like to see the strictness applied to the Az modules as well.\r\n\r\n@powercode It seems PowerShell is lacking named parameters with class methods. So readability is impacted if we move away from regular functions.\r\n\r\n@SeeminglyScience I guess c# would be an option if we were able to just ship the c# as a script.  There was already csx, and now with c# there is this top-level program feature.\r\n\r\nWe are also considering moving to nodejs which gives a perfect solution for all of this. Unfortunately the Az modules nodejs equivalent last time we checked (August 2020) were not very mature and incomplete (https://azure.github.io/azure-sdk-for-js/). Nodejs brings us:\r\n1. Compatibility with Azure Pipelines; it is providing a nodejs task runner;\r\n2. Perfect module import semantics;\r\n3. Strict function signature checking.\r\nI guess we need to revisit this area. It looks like the past few months they didn't stand still!\r\n\r\nIf we would be able to mix our PowerShell with dotnet code, I guess that we then would hit the dotnet Azure sdk also lagging behind the az cli and az PowerShell modules surfaces.\n\n<blockquote><img src=\"https://c.s-microsoft.com/favicon.ico?v2\" width=\"48\" align=\"right\"><div><strong><a href=\"https://azure.github.io/azure-sdk-for-js/\">Azure SDK for JavaScript | Azure SDK for JavaScript</a></strong></div></blockquote>",
+      "created_at": "2021-01-19T08:14:46Z",
+      "updated_at": "2021-01-19T08:14:48Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Much of the readability issues can be countered with good naming of variables. But in general, there is a tension between being a good shell and a good language. There are areas where the late binding and type conversion of PowerShell is more of a bug than a feature.\r\nWhen I find myself in that situation, I write the code in C# and use PowerShell where it really shines, to glue different pieces together.",
+      "created_at": "2021-01-19T10:49:20Z",
+      "updated_at": "2021-01-19T10:49:20Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "Would there be an opportunity for me to connect with a developer of the PowerShell vscode extension? I am eager to explore the changes required myself.\r\n\r\nIt would make perfect sense to me at least to have an optional switch in the PowerShell strictness mode to enable both of the features mentioned in the original post, being:\r\n1. Strict import semantics\r\n2. Strict function signature linting\r\n\r\nAd 2. Currently you already get very nice intellisense when writing a cmdlet invocation, i.e. vscode knows perfectly which parameters are allowed. Would be a small adjustment to falsify unexpected parameters.\r\n\r\nAd 1. Maybe there is some intermediary easy solution? For example, we could first go for some comment driven metadata to steer the linting engine to the right file or module for the specific cmdlet and block the linting process to freely peek in every file available in the workspace and psmodule path.\r\n\r\n@powercode do you have an example repo where you lay out your way of working where you mix and match PowerShell and c#? And what is your assessment of the maturity of the Azure .NET SDK? To what extent is it lagging behind the latest REST APIs. \r\n\r\n\r\n",
+      "created_at": "2021-01-21T08:20:50Z",
+      "updated_at": "2021-01-21T08:20:50Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Would there be an opportunity for me to connect with a developer of the PowerShell vscode extension? I am eager to explore the changes required myself.\r\n\r\nYou'd want to check out PSScriptAnalyzer.  There isn't much related logic in the VSCode extension nor even the language server (PowerShellEditorServices).\r\n\r\n> Ad 2. Currently you already get very nice intellisense when writing a cmdlet invocation, i.e. vscode knows perfectly which parameters are allowed. Would be a small adjustment to falsify unexpected parameters.\r\n\r\nVSCode only knows because the PowerShell itself tells it though (through the `SMA.CommandCompletion` API), and only on demand based on cursor location.  That kind of analysis for an entire document would be very expensive, especially once you get into type inference (assuming you want to check input signature). That's not to say that that type of analysis can't be done incrementally, but there is currently no tooling for that.\r\n\r\n> Ad 1. Maybe there is some intermediary easy solution? For example, we could first go for some comment driven metadata to steer the linting engine to the right file or module for the specific cmdlet and block the linting process to freely peek in every file available in the workspace and psmodule path.\r\n\r\nVSCode uses the same runspace that the PowerShell Integrated Console uses. So you can somewhat control state by changing module autoloading preference and/or manually importing modules. There is no static analysis way to do that though with the exception of fully module qualified commands.\r\n\r\n",
+      "created_at": "2021-01-28T18:02:01Z",
+      "updated_at": "2021-01-28T18:02:01Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience albeit unrelated to my OP, if the runspace is shared, then there are two things not clear to me:\r\n1. Why is the completion support on the cmdlets so different in the editor and on the prompt? On the prompt is so much better, so much faster.\r\n2. Where is the pesky delay coming from when I press F8 from the editor? Sometimes it takes many seconds before the selected text get passed to the prompt.",
+      "created_at": "2021-02-18T16:26:35Z",
+      "updated_at": "2021-02-18T16:26:35Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> 1. Why is the completion support on the cmdlets so different in the editor and on the prompt? On the prompt is so much better, so much faster.\r\n> 2. Where is the pesky delay coming from when I press F8 from the editor? Sometimes it takes many seconds before the selected text get passed to the prompt.\r\n\r\nBugs.  PowerShell/PowerShellEditorServices#1295 is probably the thread to follow.",
+      "created_at": "2021-02-19T01:11:40Z",
+      "updated_at": "2021-02-19T01:11:40Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I think if you want strict validation of function signatures, that might be better suited as a PSScriptAnalyzer rule cc @rjmholt @JamesWTruher\r\n\r\nI've done some work toward this. Requires investment in a static parameter binding approximation algorithm. Which PSScriptAnalyzer has general need of. But this plus more performant profiles would be the silver bullet for static analysis.",
+      "created_at": "2021-02-25T18:31:04Z",
+      "updated_at": "2021-02-25T18:31:04Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "@rjmholt Has there been any recent development? Many of our bugs are caused by insufficient static analysis. Would it be easy to start with some manual decoration language so that you can help the language service? If we were able to adopt something like the TypeScript module import semantics, then the language service can limit its analysis to the particular file.",
+      "created_at": "2021-06-18T08:17:05Z",
+      "updated_at": "2021-06-18T08:17:05Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "No new developments here.\r\n\r\n> Would it be easy to start with some manual decoration language so that you can help the language service? If we were able to adopt something like the TypeScript module import semantics, then the language service can limit its analysis to the particular file.\r\n\r\nUnfortunately adopting new syntax or semantics is hard, and writing the analysis around it is also hard.\r\n\r\n> Many of our bugs are caused by insufficient static analysis\r\n\r\nTraditionally, static analysis will find bugs, but lack of it won't cause them.",
+      "created_at": "2021-06-18T16:57:03Z",
+      "updated_at": "2021-06-18T16:57:03Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "@rjmholt you were mentioning in the August 2021 community call that some internal projects that have been building extra analysis rules for static analysis? Not suitable for general purpose, but maybe the various bits can be shared to build upon further? We are not using the dynamic nature of PowerShell to great extent. For us it is just a dotnet dialect and I guess the suggested `Use-StrictMode -Ultra` would be helpful to us \ud83d\ude42\r\n\r\nIn the meanwhile if I find further time I will try to continue working on a simple custom analyzer that takes import statements inside comment conventions, combined with scraping the abstract syntax tree for function definitions. I started this exploration during past summer break.\r\n\r\n\r\n",
+      "created_at": "2021-08-19T17:43:31Z",
+      "updated_at": "2021-08-19T17:43:31Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": ">  that some internal projects that have been building extra analysis rules for static analysis? Not suitable for general purpose, but maybe the various bits can be shared to build upon further?\r\n\r\nYeah, I don't control that code but I've seen it and it's very very old and different. There's interest from the owning team to perform a gradual migration, at least of the easier parts. As a first example, see https://github.com/PowerShell/PSScriptAnalyzer/pull/1705.\r\n\r\n> In the meanwhile if I find further time I will try to continue working on a simple custom analyzer that takes import statements inside comment conventions, combined with scraping the abstract syntax tree for function definitions. I started this exploration during past summer break.\r\n\r\nSo on this front, I've seen other examples of custom `#include` pragmas in scripts. `using module` and `using assembly` were meant to be the actual versions of this. But for the most part, my intuition is that analyzers should simply forbid things like:\r\n\r\n- Using variables with `Import-Module` or `Export-ModuleMember`\r\n- Using `*-Variable` cmdlets\r\n- `*-*Item` cmdlets with variable/function providers\r\n- Anything involving dynamic scope (variables not defined in the immediate scope)\r\n- Probably a few other things I haven't thought of that allow you to dynamically create variables/functions\r\n\r\nOnce those become errors, you can statically reason about a lot more things.\r\n\r\nAt that point, you want constant folding (to propagate variable values, splatting, etc) and type inference:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/176303d172bcb0726e097ac5139de9f724ecec6b/src/System.Management.Automation/engine/parser/TypeInferenceVisitor.cs#L42-L50\r\n\r\nYou also need some concept of the modules available at runtime and the whole [command metadata](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.commandmetadata) for each exported command. That's needed to work out types and parameter binding, which can be done today like this:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/77054ff586d2c723114862347b798bd89f8e0c56/src/System.Management.Automation/engine/CommandCompletion/PseudoParameterBinder.cs#L251-L360\r\n\r\nHowever, doing it for an arbitrary target runtime essentially requires a manifest of well-known commands on each platform. I've done a fair amount of the work required for that as part of PSSA's [UseCompatibleCommands rule](https://github.com/PowerShell/PSScriptAnalyzer/blob/6222e409059664fa02097af5a79d332c4a26fecd/Rules/CompatibilityRules/UseCompatibleCommands.cs#L101-L152). However, there are plenty of improvements to make there.\r\n\r\nI've also seen things that try to follow through a script's dependencies and dot-sources as well, and those basically require static inference of the filesystem layout in a script/module's deployment environment.\r\n\r\nAnyway, I don't see a huge reason to build a fresh analyzer from scratch here. PSSA is perfectly capable of providing the platform for a lot of this. But if you are interested, I [started some work to reform PSSA as a platform some time ago](https://github.com/PowerShell/PSScriptAnalyzer/tree/pssa2) but had to drop it to work on other things.",
+      "created_at": "2021-08-19T20:08:35Z",
+      "updated_at": "2021-08-19T20:11:27Z"
+    },
+    {
+      "author": "cveld",
+      "author_association": "NONE",
+      "body": "Are `InferTypeOf` and `StaticParameterBinder` readily available from the context of a PSSA rule?\r\n\r\nChris Dent provides the following PSSA rule in PowerShell which can be used as an example: https://github.com/indented-automation/Indented.ScriptAnalyzerRules/blob/main/Indented.ScriptAnalyzerRules/public/rules/UseSyntacticallyCorrectExamples.ps1\r\n\r\nI have been put on two tracks here because I find it easier to explore this all within Visual Studio where everything is c#. The core PSSA rules are written with c# whereas PSSA provides custom rules through PowerShell. At least I am more familiar with the debugging experience inside Visual Studio compared to Visual Studio Code. I guess I should explore the debugging experience for PSSA rules in PowerShell a bit more.\n\n<blockquote><img src=\"https://opengraph.githubassets.com/f252c72599ffeb7a8a30c6803c415a00fd7fb41cbe65681c51944bda192c1c4a/indented-automation/Indented.ScriptAnalyzerRules\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/indented-automation/Indented.ScriptAnalyzerRules\">Indented.ScriptAnalyzerRules/UseSyntacticallyCorrectExamples.ps1 at main \u00b7 indented-automation/Indented.ScriptAnalyzerRules</a></strong></div><div>Contribute to indented-automation/Indented.ScriptAnalyzerRules development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2021-08-21T11:23:28Z",
+      "updated_at": "2021-08-21T11:23:30Z"
+    }
+  ],
+  "created_at": "2020-11-13T08:06:15Z",
+  "number": 14084,
+  "state": "open",
+  "title": "Feature Request: Strict import scope and function signature semantics",
+  "updated_at": "2021-08-21T11:23:30Z"
+}

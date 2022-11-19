@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9207",
+  "author": "gir960",
+  "body": "[bigint]1|ConvertTo-Json\r\n\r\nresults in \r\n\r\n{\r\n    \"IsPowerOfTwo\":  true,\r\n    \"IsZero\":  false,\r\n    \"IsOne\":  true,\r\n    \"IsEven\":  false,\r\n    \"Sign\":  1\r\n}\r\n\r\ninstead of 1\r\ntested on 6.2.0 on linux and 5.1 on windows",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "HumanEquivalentUnit",
+      "author_association": "CONTRIBUTOR",
+      "body": "JavaScript implementations cannot read large integers >53 bytes precision, without loss of precision, so it looks like there's no clearly correct answer here, and the main choices are:\r\n\r\n - Pick what another system does and do that; Newtonsoft Json.Net encodes larger integers than JavaScript can read safely and risks compatibility problems, Twitter encodes large numbers as strings and cautions developers to expect that, Google V8 refuses to serialize BigInts saying it isn't supported.\r\n - Encode small values, but error for BigIntegers representing larger values. (Might be unpredictable)\r\n - Do what it does now, with that object encoding, which isn't useful, but is consistent - doesn't promise anything which it can't deliver.\r\n - Defer until such time as ECMAScript / Google have agreed ways of serialising BigInts to JSON, and do what they do.\r\n\r\n----\r\n\r\nBackground links:\r\n\r\n[ECMA-404 JSON standard](https://www.ecma-international.org/publications/standards/Ecma-404.htm)  doesn't put a limit on how large a value can be serialized as an integer in JSON, but JavaScript is limited to reading 53 bytes precision so it can't read integers larger than that, and returns truncated values. Twitter works around this by [using strings to encode its 64-bit numeric identifiers](https://developer.twitter.com/en/docs/basics/twitter-ids) and cautions developers to expect that.\r\n\r\nChrome's JavaScript engine V8 [gained support for BigInt as a data type in 2018](https://developers.google.com/web/updates/2018/05/bigint) but cannot serialize them to JSON, with `VM134:1 Uncaught TypeError: Do not know how to serialize a BigInt`.\r\n\r\nECMAScript [has an open issue](https://github.com/tc39/proposal-bigint/issues/24) for what to do about JSON serialization of BigInts, appears inconclusive, with lots of discussion about compatibility.\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-03-22T23:14:01Z",
+      "updated_at": "2019-03-22T23:14:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @markekraus Have you thoughts?",
+      "created_at": "2019-03-23T08:00:29Z",
+      "updated_at": "2019-03-23T08:01:01Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think JavaScript is one of thousands of use-cases for JSON and probably a much small minority among those employed in PowerShell. The primary use cases for JSON in PowerShell are serializing and desalinizing data for interaction with REST APIs or for consumption or storage as settings. I see no reason to deny serializing BigInt. There are possibly REST APIs that would depend on such things.\r\n\r\nBut, I'd be more interested in what the .NET Core 3.0 JSON implementation does with them. If we still plan to move from NewtonSoft to the .NET Core native implementation, it probably behooves us to do as they do.",
+      "created_at": "2019-03-23T15:33:36Z",
+      "updated_at": "2019-03-23T15:33:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  If we still plan to move from NewtonSoft to the .NET Core native implementation\r\n\r\n@markekraus If we don't still have an issue tracking this please open new issue. Thanks!",
+      "created_at": "2019-03-23T16:46:49Z",
+      "updated_at": "2019-03-23T16:46:58Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Oracle java is the standard\r\n\r\nI disagree. RFC-8259 is the the standard. How any language implements JSON should be based on that standard.\r\n\r\nThe relevant part of the RFC is here https://tools.ietf.org/html/rfc8259#section-6 \r\n\r\n> Note that when such software is used, numbers that are integers and\r\n   are in the range [-(2^53)+1, (2^53)-1] are interoperable in the\r\n   sense that implementations will agree exactly on their numeric\r\n   values.\r\n\r\nWe already support Int64 conversion which is out of range for general interoperability. Int64.MaxValue `9223372036854775807` is greater than Number.MAX_SAFE_INTEGER `9007199254740991`. There is no strict limit on this per the RFC, just a warning with regards to interoperability.\r\n\r\nIf PowerShell was written in Java, then interoperability with jdk12 would be critical. However, we are based on .NET Core so we are bound by their support and limitations. Thus, it is far more important for us to consider .NET Core 3+'s implementation than any other language for any area not explicitly  restricted by RFC-8259.",
+      "created_at": "2019-03-24T17:56:55Z",
+      "updated_at": "2019-03-24T17:56:55Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I would like to note that if we do end up converting BigInt to a JSON Number by, it will be a breaking change. It _could_ be implemented in a non-breaking manner as a configurable option. However, I suspect what most users would consider the default behavior would be to convert BigInt to JSON Number. Whether we wish to not make it option or what is the default behavior needs to be considered carefully.",
+      "created_at": "2019-03-24T22:40:38Z",
+      "updated_at": "2019-03-24T22:40:38Z"
+    },
+    {
+      "author": "zackste",
+      "author_association": "NONE",
+      "body": "This issue creates inconsistent behavior with desktop PowerShell 5 though.  Since ConvertFrom-Json prioritizes BigInteger over Decimal in PSCore, you can't go from JSON back to JSON without breaking the result so long as BigInteger isn't serialized correctly.  This doesn't repro in Windows PowerShell.\r\n\r\nWindows PowerShell 5.1.18362.145:\r\n```powershell\r\nPS C:\\> \"9223372036854775808\" | ConvertFrom-Json | ConvertTo-Json\r\n9223372036854775808\r\n```\r\nThe intermediate type is interpreted as Decimal.\r\n\r\nPSCore 7.0.0-rc.1\r\n```powershell\r\nPS C:\\> \"9223372036854775808\" | ConvertFrom-Json | ConvertTo-Json\r\n{\r\n  \"IsPowerOfTwo\": true,\r\n  \"IsZero\": false,\r\n  \"IsOne\": false,\r\n  \"IsEven\": true,\r\n  \"Sign\": 1\r\n}\r\n```\r\nThe intermediate type is interpreted as BigInteger.",
+      "created_at": "2020-01-14T04:18:50Z",
+      "updated_at": "2020-01-14T04:22:06Z"
+    }
+  ],
+  "created_at": "2019-03-22T21:51:27Z",
+  "number": 9207,
+  "state": "open",
+  "title": "convertto-json bigint is not properly serialized",
+  "updated_at": "2020-01-14T04:22:06Z"
+}

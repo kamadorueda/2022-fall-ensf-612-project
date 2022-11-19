@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12147",
+  "author": "chvol",
+  "body": "`Test-Connection -Quiet -Count 1 Hostname` \r\ngives output\r\n\r\n`Test-Connection: Testing connection to computer 'Hostname' failed: Cannot resolve the target name.`\r\n\r\nExpected behaviour would be\r\n\r\n`False`\r\n\r\nIn a code block like \r\n` $comps | ForEach-Object -Process { if (Test-Connection $_.Name -Quiet -Count 1) {Write-Output \"$($_.Name) on\"} else {Write-Output \"$($_.Name) off\"} }`\r\nthis gives output\r\n`Test-Connection: Testing connection to computer 'Hostname' failed: Cannot resolve the target name.\r\nHostname off`\r\n\r\nAgain, the extra output is unwanted, given the Quiet flag.",
+  "closed_at": "2020-03-28T10:50:33Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83e\udd14 This is kinda weird. We shouldn't be surfacing any hostname resolution errors...\r\n\r\nThis code path handles the hostname resolution:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/43e0e1a1c54144ae351e1541dd0965b7792d338b/src/Microsoft.PowerShell.Commands.Management/commands/management/TestConnectionCommand.cs#L640-L733\r\n\r\nAs you can see, we're catching everything in there. Not sure why you'd be getting hostname resolution errors here, unless you're using a different Test-Connection command. There are only two cases you should be getting errors from this cmdlet -- when you provide a `$null` hostname, or when you provide an IP address that doesn't match the requested switch (i.e., providing an IPv6 address and specifying `-IPv4` or vice versa).\r\n\r\nJust to be sure, can you grab the output from `Get-Command Test-Connection` so we can see what it's calling?\r\n\r\n",
+      "created_at": "2020-03-18T14:32:55Z",
+      "updated_at": "2020-03-18T14:32:55Z"
+    },
+    {
+      "author": "chvol",
+      "author_association": "NONE",
+      "body": "` Get-Command Test-Connection`\r\n\r\n```\r\nCommandType     Name                                               Version    Source\r\n-----------     ----                                               -------    ------\r\nCmdlet          Test-Connection                                    7.0.0.0    Microsoft.PowerShell.Management\r\n```",
+      "created_at": "2020-03-18T15:05:48Z",
+      "updated_at": "2020-03-18T15:05:48Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Can you post the result from `$PSVersionTable` as well, please, so we have any necessary OS / other info? Thanks! \ud83d\ude0a ",
+      "created_at": "2020-03-18T15:41:43Z",
+      "updated_at": "2020-03-18T15:41:43Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Oh, I see it.\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/43e0e1a1c54144ae351e1541dd0965b7792d338b/src/Microsoft.PowerShell.Commands.Management/commands/management/TestConnectionCommand.cs#L680-L704\r\n\r\nWe should definitely be just returning false here.",
+      "created_at": "2020-03-18T17:17:07Z",
+      "updated_at": "2020-03-18T17:17:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Issue is here\r\nhttps://github.com/PowerShell/PowerShell/blob/43e0e1a1c54144ae351e1541dd0965b7792d338b/src/Microsoft.PowerShell.Commands.Management/commands/management/TestConnectionCommand.cs#L575-L577",
+      "created_at": "2020-03-18T17:23:34Z",
+      "updated_at": "2020-03-18T17:23:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "We catch the hostname resolution error in the method and call WriteError() -- there's nothing that can be done outside the method call itself other than writing `false` to output. The issue here is that the error still shows in `-Quiet` mode, so we'd need to handle that in the method.",
+      "created_at": "2020-03-18T17:39:05Z",
+      "updated_at": "2020-03-18T17:39:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Quiet parameter can be used in interactive session too. If user don't want to get error SilentlyContinue exists.",
+      "created_at": "2020-03-19T03:32:05Z",
+      "updated_at": "2020-03-19T03:32:05Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`-Quiet` should do what it says on the tin, in my opinion. \ud83e\udd37\u200d\u2642 \r\n\r\nIf it's erroring, it's not quiet. A user shouldn't have to ask for quiet twice in one command call. That just leads to frustration, at best. If they want the error, they can simply not use `-Quiet`.",
+      "created_at": "2020-03-19T04:36:59Z",
+      "updated_at": "2020-03-19T04:38:19Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 btw the get host entry call is part of why the command sometimes doesn't respond to stop processing requests.",
+      "created_at": "2020-03-19T13:02:35Z",
+      "updated_at": "2020-03-19T13:02:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That's a very good point... Is there an async/cancellable method for that one you know of?\r\n\r\nEDIT: Nevermind, found one! https://docs.microsoft.com/en-us/dotnet/api/system.net.dns.gethostentryasync?view=netcore-3.1\r\n\r\nI _think_ we can incorporate that one...  Not sure exactly how, but seems like it should be doable to add some code to make it respect cancellation requests.",
+      "created_at": "2020-03-19T14:20:01Z",
+      "updated_at": "2020-03-19T14:22:46Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Since there's no cancel, all you can really do is something like:\r\n\r\n```csharp\r\nprivate CancellationTokenSource _cancel;\r\n\r\n// ...\r\n\r\nprivate IPHostEntry GetHostEntryWithCancel(string hostNameOrAddress)\r\n{\r\n    var task = Dns.GetHostEntryAsync(hostNameOrAddress);\r\n    var waitHandles = new[] { ((IAsyncResult)task).AsyncWaitHandle, _cancel.Token.WaitHandle };\r\n    if (WaitHandle.WaitAny(waitHandles) == 1)\r\n    {\r\n        throw new OperationCanceledException();\r\n    }\r\n\r\n    return task.GetAwaiter().GetResult();\r\n}\r\n```\r\n",
+      "created_at": "2020-03-19T14:38:18Z",
+      "updated_at": "2020-03-19T14:38:18Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #12204, which has now been successfully released as `v7.1.0-preview.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.2)\n",
+      "created_at": "2020-04-23T18:02:20Z",
+      "updated_at": "2020-04-23T18:02:20Z"
+    }
+  ],
+  "created_at": "2020-03-18T12:51:41Z",
+  "number": 12147,
+  "state": "closed",
+  "title": "Test-Connection shows unwanted output when DNS not resolved on Powershell 7.0.0",
+  "updated_at": "2020-04-23T18:02:20Z"
+}

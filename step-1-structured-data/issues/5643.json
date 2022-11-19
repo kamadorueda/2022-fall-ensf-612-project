@@ -1,0 +1,461 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5643",
+  "author": "TravisEz13",
+  "body": "Powershell supports creating arrays with `$array = 'a', 1, '3'` .  Then you can add an element to the array with `$array += 4`, but this creates a new array which is not performant.\r\n\r\nPowershell should have a syntax which allows creating lists.\r\nAssuming the operator is `@[...]`,  you could create a list with `$list = @['a', 1, '3']` and then you could add an element to the existing list with `$list += 4` without PowerShell having to create a new list.\r\nNote: this new operator might function more like `@(...)`\r\n\r\nThis design assumes that changing `,` would be a breaking change.  I'm open to discussing changing `,` as well.\r\n\r\nI filed this based on an offline discussion about this comment on a PR:  https://github.com/PowerShell/PowerShell/pull/5625#discussion_r155106230 ",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "I like the idea but to truly impact performance you'd need to be operating on **large** lists.  For a convenient way to create large lists, I would expect something like this to work `@[Get-ChildItem C:\\Windows -r -file *.dll -ea 0]`.  While the list literal form is nice, I don't see folks creating lists large enough to gain much of a perf benefit over using an array.  Well, unless the list literal is created inside a busy (large n) loop.",
+      "created_at": "2017-12-06T23:23:05Z",
+      "updated_at": "2017-12-06T23:23:05Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Two points:\r\n\r\n* `@()` says - make sure the thing inside is an array. It's not necessary if you use `,` because the comma operator always creates an array.\r\n* I've often wondered if the comma operator could create a list instead of an array. I have a feeling most scripts would never notice a difference because of how freely things are converted to an object array.",
+      "created_at": "2017-12-06T23:39:18Z",
+      "updated_at": "2017-12-06T23:39:18Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@lzybkr I updated my description based on @lzybkr 's comments",
+      "created_at": "2017-12-06T23:56:12Z",
+      "updated_at": "2017-12-06T23:56:12Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I like the idea of having a list literal in powershell. I think it could have a syntax like `@[1, 2, 3]` to directly create a list with elements 1, 2 and 3 without first create an array literal from `1,2,3` and then make it a list using `@[]`.",
+      "created_at": "2017-12-07T00:37:18Z",
+      "updated_at": "2017-12-07T00:37:18Z"
+    },
+    {
+      "author": "cchiu1979",
+      "author_association": "NONE",
+      "body": "@lzybkr is it something like this?\r\n1,2,3\r\n(1,2,3).length\r\n( , (1,2,3) ).length\r\n( @(1,2,3) ).length",
+      "created_at": "2017-12-07T01:48:31Z",
+      "updated_at": "2017-12-07T15:45:03Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Sure, alias properties would be needed to make lists work just like arrays.",
+      "created_at": "2017-12-07T04:16:46Z",
+      "updated_at": "2017-12-07T04:16:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I've often wondered if the comma operator could create a list instead of an array.\r\n\r\nIf that's not considered too much of a breaking change, it would certainly be the best solution.\r\n\r\nOtherwise:\r\n\r\n@rkeithhill: \r\n\r\nI get what you're saying about large lists, but that's where `+=` comes in as a convenient syntax for appending to the list (calling `::Add()` or `::AddRange()` on the `[System.Collections.ArrayList]` or `[System.Collections.Generic.List[object]]` instance  behind the scenes - unlike today's behavior of `+=`, which either silently recreates the variable content as an _array_ or, if the variable was type-constrained, as a _new instance_).\r\n\r\nIn other words: something like the following would make sense:\r\n\r\n```powershell\r\n$al = @[] # simpler than: [System.Collections.ArrayList]::new()\r\n\r\nfor ($i = 0; $i -lt 1000; ++$i) {\r\n  $al += $i # simpler than: $null = $al.Add($i)\r\n}\r\n```\r\n\r\n\r\n\r\n",
+      "created_at": "2017-12-15T00:39:54Z",
+      "updated_at": "2017-12-15T00:39:54Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I submitted two PRs (WIP) with different designs for the List support in PowerShell:\r\n1. #5762 -- Support `@[]`, similar to `@()`\r\n2. #5761 -- Support `ListLiteralExpression '[]'`, similar to `ArrayLiteralExpression`\r\n\r\n`@[]` is my first design. However, I ran into a blocking issue regarding the closing bracket character `']'`. Quoted from #5762:\r\n> `@[]` has a `SubExpression` like `'@()'` and `'$()'`. However, unlike the closing parenthesis character `')'`, the closing bracket character `']'` doesn't always force to start a new token, and it can be included in a generic token, meaning that `']'` can appear in a command name, argument, or function name. This makes it impossible for `@[dir]` to determine the ending of the list expression because `dir]` will be treated as a single generic token.\r\n>\r\n> This PR adds the property `InListSubExpression` to `Tokenizer`, and makes `']'` a force-to-start-new-token character when `_tokenizer.InListSubExpression` is set. This approach solves the most common UX problem but is by no way perfect, for example, comparing to `@(funcHas[]inName)` or `@(dir has[]inpath)`, `@[funcHas[]inName]` and `@[dir has[]inpath]` won't work because the first `']'` will force the command name to end.\r\n\r\nWithout breaking change, I think the best we can do is probably to make `']'` a force-to-start-new-token character when parsing a command invocation pipeline in `@[]` but not when parsing any nested expression or statement within the `@[]`.\r\n\r\nAt the same time, I started to think an alternative -- add `ListLiteralExpression` like the `ArrayLiteralExpression`. In that case, a list can only contain `Expression` elements and hence command name, arguments, and function names won't be a problem for the ending bracket. PR #5761 is for that design, where we use `'[]'` (same token pair as `TypeConstraint` and `Attribute`).\r\n\r\nI hope the those 2 PRs can draw more discussion on the design.\r\n",
+      "created_at": "2017-12-29T23:02:37Z",
+      "updated_at": "2017-12-29T23:02:37Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw since this code is beyond my understanding, does it attempt to create a strongly typed list, or is always `List<Object>`? ",
+      "created_at": "2017-12-29T23:47:05Z",
+      "updated_at": "2017-12-29T23:47:05Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@markekraus It attempts to always create `List<object>`, like `@()` ways create an `object[]`.",
+      "created_at": "2017-12-29T23:59:27Z",
+      "updated_at": "2017-12-29T23:59:27Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@lzybkr proposed to use new token pairs instead of `@[]` to represent a `ListExpression` in https://github.com/PowerShell/PowerShell/pull/5762#issuecomment-354512131:\r\n> You could consider 2 character tokens.\r\n> For example, F# uses this syntax for an array literal:\r\n> \r\n> ```f#\r\n> [| 1; 2 |]\r\n> ```\r\n> There are other possibilities that probably aren't breaking changes, e.g. `[< 1, 2 >]`.\r\n> The key here is to use a second character that can't be in a command name.\r\n\r\nIt would be great to have `@[]` to represent `ListExpression`, but I'm fine with new token pairs. ~I will prototype with `[<>]`~. `[<>]` won't work because `'>]'` is allowed in a generic token. `[| .. |]` may work. If new token pairs are acceptable, I definitely prefer `ListExpression` over `ListLiteral`.",
+      "created_at": "2017-12-30T00:15:24Z",
+      "updated_at": "2018-01-01T23:33:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw: I'm really glad to see you take this on, but before we go any further with the syntax debate: \r\n\r\nIs the consensus that we _cannot_ just simply switch `,`, the array construction operator, to an array-list/generic-list implementation behind the scenes, as @lzybkr hinted at - for reasons of backward compatibility?\r\n\r\nThe answer may well be  that yes, it's too risky to make that change (I personally cannot tell), but if it happens to be no, after all, there's no need for a syntax debate.\r\n",
+      "created_at": "2017-12-30T00:36:43Z",
+      "updated_at": "2017-12-30T00:36:43Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@mklement0 IMHO, there would be 3 problems if we simply change the comma operator `','` to return a list:\r\n1. The AST type name `ArrayLiteralAst` would be inconsistent, but changing it would be a huge breaking change. There would be other breaking changes like the returned value of `StaticType` property, but the AST type name would be the most problematic one I guess.\r\n2. With the comma operator, we wouldn't be able to create an empty list.\r\n3. The comma operator only takes `Expression` elements, not arbitrary statements like `@()` does, for example, comparing to `@(dir)`, you would have to use `,(dir)`. Besides, the comma operator doesn't unwrap the `Expression` value because it's literal (`ArrayLiteralAst`). So `,(dir)` would return a one-element list that contains an object array.\r\n\r\nI prefer a `ListExpressionAst '@[]'` over a `ListLiteralAst '[]'` because of the 3rd one above.",
+      "created_at": "2017-12-31T07:32:46Z",
+      "updated_at": "2017-12-31T07:32:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Thanks for great prototypes!\r\nI'd prefer `@[]` if it would possible to implement. I very wonder to see something like`[| ... |]` - if we haven't another way I'd rather see simple `List( ... )` or [List]1,2,3.\r\n\r\n- If we have problem with last `]` in`@[]` could we use `@[ 1, 2, 3 ]@` like multiline string literals?\r\n- `@@[]` don't resolve the problem.\r\n- We could reuse parentheses with other prefix - if `@()` array, `$()` singletion then `%()` or `&()` or `*()` - list.\r\n\r\nI personally like `*()`.",
+      "created_at": "2018-01-01T13:05:41Z",
+      "updated_at": "2018-01-01T13:05:41Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "`*()` would be somewhat ambiguous. Should `5*(Get-Random)` throw a ~RuntimeException for missing `op_Multiply` on `List`~ a CommandNotFoundException or should it multiply a random number by 5?",
+      "created_at": "2018-01-01T18:23:23Z",
+      "updated_at": "2018-01-02T00:50:23Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "`'%(1)'` is parsed into a `CommandAst` today, where `'%'` is the command name (foreach-object), and the argument is `(1)`.\r\n`'&(1)'` is parsed into a `CommandAst` today, where `'&'` is the invocation operator and the command name is `(1)`.\r\n`'*()'` is also ambiguous, as @markekraus pointed out.",
+      "created_at": "2018-01-01T23:34:38Z",
+      "updated_at": "2018-01-01T23:34:38Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Minor correction: `%{}` would be the foreach-obejct. `%()` is ambiguous with modulo. e.g `5%(Get-Random -Minimum 1 -Maximum 5)`\r\n\r\nAlso, `@@[]` would possibly be problematic for extended splat literals (if they ever make their way out of RFC).\r\n\r\noutside of the literals.. I like the idea of Lists getting an accelerator, but only if it works similar to `using namespace System.Collections.Generic` making `$MyList = [List[MyClass]]::New()` easier. I would *not* like a `[List]` accelerator without the ability to set the type unless if could play nice and create `List<Object>` by default but still allow creating lists of a desired type.",
+      "created_at": "2018-01-02T00:52:28Z",
+      "updated_at": "2018-01-02T00:52:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I have only one question - where I can buy Unicode keyboard with 32000 buttons to replace my 102 keyboard? \ud83d\ude04 \r\n\r\nWe could combine the accelerator idea and list literals:\r\n```powershell\r\n@[int](1,2,3)\r\n@[string](dir C:\\)\r\n@[](1,2,3) as short cut of @[object](1,2,3)\r\n```",
+      "created_at": "2018-01-02T12:11:28Z",
+      "updated_at": "2018-01-02T12:11:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw: Thanks for the detailed feedback.\r\n\r\nI can't speak to 1. (AST names), but perhaps the answer is to _special-case_ `@()` for the `@(<empty-or-scalar-or-array-literal>)` cases, such as `@()`, `@(3)`, or `@(1, 2, 3)` (note that `@(<array-literal>)` already _is_ special-cased - see #4280), while leaving any `@()` that involves a  _command_ and/or _multiple statements_ to work as it does now.\r\n\r\nThe alternative is to simply make `@()` _always_ return a list. This has the advantage of allowing the definition of lists as a series of individual expression statements (defining an element each), obviating the need for `,` in _multiline_ definitions (in which case the line breaks take the place of the _statement_-separating `;`). The down-side is that lists would be created in many situations where an array will do; while `@(Get-ChildItem)` is more convenient than `@((Get-ChildItem))`, creating a list in such a case strikes me as less important.\r\n\r\nAgain, it might be too risky, but it would solve the syntax problem.\r\n\r\nThat said, that alone wouldn't address the desire for explicit typing.\r\n\r\nPerhaps the special casing could be tweaked to translate something like\r\n`@([string[]] (...))` into a `List<string>` instance.\r\n\r\nThe need for the inner `(...)` - due to operator precedence - makes this slightly awkward, however, and forgetting them can easily go unnoticed, because you quietly get `[object[]]`.\r\n\r\nOn the other hand, explicit typing is a more advanced use case, and optimizing for the typical case is arguably more important.\r\n",
+      "created_at": "2018-01-05T00:22:02Z",
+      "updated_at": "2018-01-05T00:22:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> The alternative is to simply make @() always return a list.\r\n\r\nI talked to @jpsnover about this today and he also brought up changing the semantic of `@()` to return a list. The down-side is:\r\n1. the AST type name `ArrayExpressionAst` being inconsistent with the semantic and `StaticType` property.\r\n2. list is created in some situation you need an array, but powershell can convert `List<object>` to `object[]` implicitly, so this might not be an issue.\r\n\r\nFor (1), could it be OK to have this inconsistency?",
+      "created_at": "2018-01-05T01:51:18Z",
+      "updated_at": "2018-01-05T01:51:18Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "The Ast type name doesn't matter that much.\r\n\r\nThere are many examples outside of PowerShell where the name can be misleading - `ArrayList` is a good one.\r\n\r\nLua is another good example - quoting from [here](https://www.lua.org/pil/11.html).\r\n\r\n> Tables in Lua are not a data structure; they are the data structure. All structures that other languages offer---arrays, records, lists, queues, sets---are represented with tables in Lua. More to the point, tables implement all these structures efficiently. ",
+      "created_at": "2018-01-05T02:14:30Z",
+      "updated_at": "2018-01-05T02:14:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">but powershell can convert List<object> to object[] implicitly, so this might not be an issue.\r\n\r\nIf `$a = @(1, 2, 3)` define `List` then I'd expect that `$a = $a + 4` or `$a += 4` don't convert `List` to `Array`. We could `$a.ToArray()`. In the case we should add magic `ToArray()` to arrays too as we add magic `Count`, `Length`, `Where()` and `ForEach()`.\r\nAlso I expect many customers will ask about typed lists like `[int]@(1, 2, 3)` or `@[int](1, 2, 3)`.",
+      "created_at": "2018-01-05T09:15:42Z",
+      "updated_at": "2018-01-05T09:15:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\n> If $a = @(1, 2, 3) define List then I'd expect that $a = $a + 4 or $a += 4 don't convert List to Array.\r\n\r\nActually, I would expect that to work with instances of _any type that implements the [`IList` interface](https://msdn.microsoft.com/en-us/library/system.collections.ilist(v=vs.110).aspx)_ and therefore has an `.Add(Object)` method - irrespective of this specific issue; see #5805\r\n\r\n> Also I expect many customers will ask about typed lists like [int]@(1, 2, 3) or @[int](1, 2, 3)\r\n\r\nWhile slightly awkward, as discussed, `@([int[]] (1,2,3))` has the advantage of not introducing new syntax (only new semantics).\r\n\r\n\r\n\r\n\r\n\r\n  ",
+      "created_at": "2018-01-06T01:38:50Z",
+      "updated_at": "2018-01-06T01:40:05Z"
+    },
+    {
+      "author": "stknohg",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hi.\r\n\r\nIt is a very big breaking change to not only addition of `ListLiteralExpression`(`[]`) but also change the behavior of `@()`.  \r\nI think we should issue [RFC](https://github.com/PowerShell/PowerShell-RFC), need more open discussion, need documentation of the specification.",
+      "created_at": "2018-01-11T07:25:43Z",
+      "updated_at": "2018-01-11T07:25:43Z"
+    },
+    {
+      "author": "stknohg",
+      "author_association": "CONTRIBUTOR",
+      "body": "I found related RFC(Rejected).\r\n* [RFC0014-Language enhancements for collections](https://github.com/PowerShell/PowerShell-RFC/blob/master/X-Rejected/RFC0014-Language%20enhancements%20for%20collections.md)",
+      "created_at": "2018-01-11T09:10:08Z",
+      "updated_at": "2018-01-11T09:10:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  Based on the feedback, we will accept RFC0014 for [list] accelerator to be system.collections.generics.list of [object].  Concern for adopting @() for list is breaking change impact due to nuances between arrays and arraylist/list.  We can always revisit this in the future based on additional user feedback.",
+      "created_at": "2018-01-17T23:48:03Z",
+      "updated_at": "2018-01-17T23:48:03Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "A new type accelerator might not be a good idea. Consider:\r\n\r\n```powershell\r\nusing namespace System.Collections.Generic\r\n[list]$x = $null\r\n[list[string]] = $null\r\n```\r\n\r\nThis is confusing. E.g., The following won't work, but some people might expect it to:\r\n\r\n```powershell\r\nparam([type]$t)\r\n[list].MakeGenericType($t) # Create generic types like [list[string]]\r\n```\r\n\r\nYou would also want to better specify how type lookup works. I *think* it will just work if you add the accelerator, but it will be confusing as to why - because type accelerators take precedence over everything else. The magic that makes it work is if there are generic arguments, we ignore a type found that has no generic arguments and instead look for another type with `` `1 `` or the number of generic arguments appended, so we'd ignore `List[object]` that would be found and continue looking for `` List`1``.",
+      "created_at": "2018-01-18T02:55:51Z",
+      "updated_at": "2018-01-18T02:55:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr Given that there's no advantage to using generics with `object`-element collections (or am I missing something?), `[list]` could refer to `[System.Collections.ArrayList]` (arguably, `ArrayList` should have been `List` all along, following the example of other non-generic/generic type pairs).\r\n",
+      "created_at": "2018-01-19T22:47:01Z",
+      "updated_at": "2018-01-19T22:47:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It is regrettable that v6 has shipped already - given the numerous breaking changes in v6, switching `@()` to creating variable-sized collections would have been but another - but one with presumably manageable real-world impact while providing great automatic benefits - assuming that `+=` is also changed to update in place.\r\n",
+      "created_at": "2018-01-19T22:52:38Z",
+      "updated_at": "2018-01-19T22:52:38Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@mklement0 - Strongly typed collections do provide roughly the same value in PowerShell as they do in any other .Net language.\r\n\r\nI say roughly because PowerShell does many more conversions than other languages, so for example, adding to a `List[string]` will work for almost any object because PowerShell would call `ToString()` if there isn't a better conversion available. But a `List[ProcessInfo]` collection will most likely throw an error if you try to add something other than a `ProcessInfo`.\r\n\r\nAnd of course consumers of the collection can be certain about the type of every item in the generic collection.\r\n\r\nIt seems somewhat safe to assume enhancements to `List<T>` happen before `ArrayList`, so that is one argument against `ArrayList`. Another is the annoying non-void return from `ArrayList.Add`.",
+      "created_at": "2018-01-19T23:10:12Z",
+      "updated_at": "2018-01-19T23:10:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr: \r\n\r\n> Strongly typed collections do provide roughly the same value in PowerShell as they do in any other .Net language.\r\n\r\nYes, but my point was that specifically when using generics with `System.Object` elements - the root of the object hierarchy - the advantages of generics are a moot point - save for the potential future enhancements to the types you mention.\r\n\r\nCouldn't we make `[List]` refer to `[System.Collections.ArrayList]` while also providing accelerators such as `[List[int]]` for `[System.Collections.Generic.List[int]]`?\r\n\r\n> Another is the annoying non-void return from `ArrayList.Add`.\r\n\r\nThat is indeed annoying, but by making  `+=` call `.Add()` behind the scenes (and not emitting the return value) the problem mostly goes away.",
+      "created_at": "2018-01-19T23:17:03Z",
+      "updated_at": "2018-01-19T23:18:07Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Sure, `[list]` could mean `[ArrayList]`, but I'm not seeing a benefit compared to `List[object]` - only drawbacks. \r\n\r\nAnd I do think folks will still use `.Add`. Intellisense will suggest it and many folks won't use `+=` because:\r\n* lack of awareness\r\n* habit\r\n* being conservative (carryover from being told to not use += on arrays)\r\n\r\nI also think it would be weird that some references to `list` are `ArrayList` and others `List<T>` - another drawback in my book.",
+      "created_at": "2018-01-19T23:48:03Z",
+      "updated_at": "2018-01-19T23:48:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The reason I'm suggesting `ArrayList` is to avoid the awkwardness of having a type literal - `[list]` - that _looks_ like it's non-generic while actually being generic.\r\n\r\nThat said, perhaps that's not really a problem in practice: I don't think that anyone will truly expect something like `[list].MakeGenericType($t)` to work, ~~given that PowerShell has no literal representation for _uninstantiated_ generic types~~.\r\n",
+      "created_at": "2018-01-20T00:10:16Z",
+      "updated_at": "2018-02-20T15:34:54Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "One can specify a generic type without type arguments by using it's real name, e.g.: ``[System.Collections.Generic.List`1]`` or ``[System.Collections.Generic.Dictionary`2]``",
+      "created_at": "2018-01-20T00:19:14Z",
+      "updated_at": "2018-01-20T00:19:14Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr: That's good to know, thanks - I had no idea.\r\n\r\nIn light of that, it's even less likely that someone would expect `[list].MakeGenericType($t)` to work:\r\n\r\n* If they know that `[list]` is an _instantiated_ generic type, they'll know that an intervening `.GetGenericTypeDefinition()` call is required\r\n\r\n* If they mistakenly believe that `[list]` is non-generic, they shouldn't expect `.MakeGenericType()` to work at all.",
+      "created_at": "2018-01-20T00:39:04Z",
+      "updated_at": "2018-01-20T00:39:04Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Please note that `List[T]` provides a `Foreach` method, so our magic method `Foreach` will not work without some additional work. This may break scripts that work with array, but break with `List<T>`.",
+      "created_at": "2018-01-22T10:22:28Z",
+      "updated_at": "2019-01-24T20:43:06Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Changing the semantics of any of the existing operators would be an unacceptable breaking change as described in bucket 1 in the [Breaking Change Contract](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md). New infix operators in expression mode would be fine. Prefix operators might fall into the acceptable breaking change buckets.\r\n\r\n@lzybkr In fact I always thought of `1, 2, 3` as `(cons 1 2 3)` . Changing ',' would be breaking but we could use a new ','-like operator such as `::` to build lists e.g. `1 :: 2 :: 3`.  That said, for creating new kinds of list-like objects, we could simply use commands\r\n```\r\n$list = New-List 1 2 3 4\r\n$complexList = New-List 1 (New-List 2 3) 4\r\n```\r\nAnyway, having a REAL list (car/cdr) type would probably have significant perf advantages since the most common scenario for collections seems to be streaming/enumerating the collection. And it would be nice to make\r\n```\r\n$head, $list = $list\r\n```\r\nefficient.\r\n\r\nFor the \"core\" PowerShell types (\"numbers\", strings, arrays and hashtables) the `+ - * \\' operators are magical. For other types, we look for `op_Addition()`, `op_Subtraction(), etc.  This is why `[datetime]` addition works:\r\n```\r\nPS[1] (31) > [datetime]::now + 1gb\r\n\r\nThursday, March 29, 2018 4:23:58 PM\r\n```\r\nThe .NET framework designers chose not to implement these methods, favoring `Add()` instead of an operator. We (or others) could add our own collection type that implemented the op_* methods and then the operators would just work.\r\n\r\n@mklement0 `ArrayList` is a horrible, horrible type. It's methods uselessly return values which lead to all sorts of bugs in PowerShell scripts:\r\n```\r\nPS[1] (32) > $al = [System.Collections.ArrayList]::new()\r\nPS[1] (33) > $al.Add(1)\r\n0 \r\nPS[1] (34) > $al.Add(2)\r\n1\r\nPS[1] (35) > foreach ($i in 1..5) { $al.Add($i) } # would reasonably expect this to return nothing but!\r\n2\r\n3\r\n4\r\n5\r\n6\r\n```\r\n\r\n@powercode \r\n> Please not that List[T] provides a Foreach method, so our magic method\r\n\r\nYeah. That's a problem. Especially since it looks like it kinda works.\r\n\r\n@TravisEz13 @rkeithhill @lzybkr @daxian-dbw @powercode @mklement0 This discussion goes well beyond the scope of an issue (so not just a bug). I propose closing the issue in favour of the existing RFC and possibly resurrecting it from the rejected bucket. Thought?\r\n",
+      "created_at": "2018-03-29T23:50:08Z",
+      "updated_at": "2018-03-29T23:50:08Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Agreed, there should be a concrete RFC to discuss, though I'd rather see performance improved in many other areas **before** introducing some new syntax to *possibly* improve performance of some scripts.",
+      "created_at": "2018-03-30T00:35:18Z",
+      "updated_at": "2018-03-30T00:35:18Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Yeah - most of this is just syntactic sugar for stuff you can already do. Do you have a list of where you think the effort should go?",
+      "created_at": "2018-03-30T00:46:29Z",
+      "updated_at": "2018-03-30T00:46:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\n> The .NET framework designers chose not to implement these methods, favoring Add() instead of an operator. We (or others) could add our own collection type that implemented the op_* methods and then the operators would just work.\r\n\r\nPlease see my suggestion [here](https://github.com/PowerShell/PowerShell/issues/5805#issuecomment-370939470), which proposes combining @PetSerAl's efficiently extensible collection type with `op_*()` methods to preserve familiar `+=` semantics, for instance.\r\n\r\n> ArrayList is a horrible, horrible type\r\n\r\nWell, that's a fair point. [Let's get rid it of it](https://github.com/PowerShell/PowerShell-RFC/pull/120), then :)\r\n\r\nOverall, I think what's worth considering is to _replace arrays `[object[]]` as the fundamental PowerShell collection type with an efficiently extensible collection type_, so that no one has to think about collection types, their constructors and methods in the vast majority of scenarios, while still getting automatic performance improvements (efficient use of `+=`, PowerShell-internally no need to convert to a different collection type on output).\r\n\r\nWhile that may not be as breaking as one might think, it certainly is a change so fundamental that it exceeds even the scope of a regular RFC, so what I'm wondering is: where is the place, if any, to discuss such PowerShell \"vNext\" proposals? A special class of RFCs?\r\n\r\n",
+      "created_at": "2018-04-04T03:20:54Z",
+      "updated_at": "2018-04-04T03:20:54Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "I agree with @mklement0 that more efficient Collections need a path to becoming the default especially when you are calling REST APIs that return a lot of data. Maybe after the Experimental Flag RFC is done, the work can be moved under the Flag so that breaking changes can be found and worked around.",
+      "created_at": "2018-04-05T07:27:37Z",
+      "updated_at": "2018-04-05T07:27:37Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "At the very least I think the pipeline should by default emit an ArrayList or List<object> rather than wasting time converting to object[].",
+      "created_at": "2018-08-16T15:16:40Z",
+      "updated_at": "2018-08-16T15:16:40Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Since we now support Experimental Feature flags, someone could do this work without breaking existing users and we can discuss when/if it goes from Experimental to a stable feature.",
+      "created_at": "2018-08-16T16:16:58Z",
+      "updated_at": "2018-08-16T16:16:58Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "Low hanging fruit here but I'd be happy with an easier way to create list objects i.e. it would be nice to have a type accelerator for List<T> e.g. `[list]` (defaults to` List<PSObject>`) and `[list[typename]]`.  Wanted to capture that here since my issue #9853 requesting this was closed as a duplicate of this issue (not sure it's exactly the same but close enough I suppose).",
+      "created_at": "2019-06-07T21:02:18Z",
+      "updated_at": "2019-06-08T18:37:44Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm late to this conversation, but so far in PowerShell, square brackets are always used for indices. For that reason I personally don't like `@[]` as an enclosure.\r\n\r\nWhy not add a character to the enclosure prefix to make it a list? For example, this is visually representative of a (bulleted) list:\r\n\r\n`$x = :@(2,3,4)`\r\n\r\nI suppose we could nickname it the angry list as well, because of the relation to the angry emoji. Makes the syntax easy to remember. If you're angry because arrays are slow to add values to, change your enclosure prefix to the angry emoji and you'll get a nice performance increase. \ud83d\ude1d \r\n\r\nIn terms of that being a breaking change (because `:@` could be a command name), isn't that only breaking when both of the following are true?\r\n\r\n* someone has a command named ':@'\r\n* someone invokes that command using parentheses with values inside\r\n\r\nI'm asking because that seems to dramatically reduce the likelihood of that causing an issue, given the obscurity of the command name and the fact that most people invoke commands in PowerShell without round brackets.\r\n\r\nAlso, while you can pass parameter values in following a colon, such as `Get-Process -Id:$PID`, that syntax is primarily used to pass in `$false` to switch parameters, and if you did do something like `Get-Process -Id:@(1,2,3)`, that would unambiguously evaluate to passing in an array with values 1, 2, and 3 into the `-Id` parameter of `Get-Process`, would it not? That's my understanding, in which case I think this isn't an issue either. Note that `Get-Process -Id@(1,2,3)` does not parse because PowerShell treats `@` as if it is part of an `-Id@` parameter name, so the difference between using `:` before a parameter and using `:@(...)` as a value seems pretty clear.\r\n\r\nOn a related note, I submitted [this RFC](https://github.com/PowerShell/PowerShell-RFC/pull/204) yesterday for new enclosures for easy concurrent collections so that thread-safe collections could be used with some of recent and future multithreaded additions to PowerShell.",
+      "created_at": "2019-06-27T13:49:18Z",
+      "updated_at": "2019-06-27T15:29:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This is a most intriguing error:\r\n```powershell\r\nPS>  :@(1,2,3,4)\r\n:@ : Cannot find drive. A drive with the name 'get-' does not exist.\r\nAt line:1 char:1\r\n+ :@(1,2,3,4)\r\n+ ~~\r\n+ CategoryInfo          : ObjectNotFound: (get-:String) [], DriveNotFoundException\r\n+ FullyQualifiedErrorId : DriveNotFound\r\n```\r\n\r\nAn alternative which I feel would much further reduce ambiguity with passing parameters that way might be `@:(1, 2, 3)` which also currently results in a parse error (actually several):\r\n\r\n```powershell\r\nPS>  @:(1,2,3,4)\r\nAt line:1 char:1\r\n+ @:(1,2,3,4)\r\n+ ~~\r\nVariable reference is not valid. '$' was not followed by a valid variable name character. Consider using ${} to delimit the name.\r\nAt line:1 char:3\r\n+ @:(1,2,3,4)\r\n+   ~\r\nUnexpected token '(' in expression or statement.\r\nAt line:1 char:1\r\n+ @:(1,2,3,4)\r\n+ ~~\r\nThe splatting operator '@' cannot be used to reference variables in an expression. '@:' can be used only as an argument to a command. To reference variables in an expression use '$:'.\r\n+ CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\r\n+ FullyQualifiedErrorId : InvalidVariableReference\r\n```",
+      "created_at": "2019-06-27T14:00:05Z",
+      "updated_at": "2019-06-27T14:00:05Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I don't get the drive error you get. Are you testing that in a session that defines a `CommandNotFoundAction` handler?\r\n\r\nI suppose `@:` could work too. That mucks up the reference to the angry emoji though. \ud83d\ude20 \ud83e\udd23 \r\n\r\nI really like the notion that you can add a character to an enclosure prefix in your scripts and voil\u00e0, they'll use a more efficient data structure. That would be a very low cost performance enhancement for some scripts if the data structure was implemented properly with operator support for things like `+=`, etc.",
+      "created_at": "2019-06-27T14:35:29Z",
+      "updated_at": "2019-06-27T14:35:29Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just to put another alternative on the table:\r\n\r\n`:(1,2,3,4)`\r\n\r\nThat's shorter, but `:` could be a command (still, it would only be a breaking change if someone had that as a command _and_ they invoked that command by passing arguments in using round brackets).",
+      "created_at": "2019-06-27T14:41:18Z",
+      "updated_at": "2019-06-27T14:41:18Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Nope, fresh PS7-preview1 session. \ud83e\udd37\u200d\u2642 \r\n\r\nYeah, could do, but then you lose the callback to `@()` a bit and the meaning is a little less clear, I feel?",
+      "created_at": "2019-06-27T15:08:55Z",
+      "updated_at": "2019-06-27T15:08:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "As Jason meantioned above lists is probably edge case for scripts - so no need to have a syntax suger for creating lists. Perhaps we could only enhance '+' (+=) operator to support lists and concurrent collections (other types?). \r\nWe could start with this and add syntax sugers later if we find compromise.\r\n",
+      "created_at": "2019-06-27T15:24:10Z",
+      "updated_at": "2019-06-27T15:30:18Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That's definitely a no-brainer; we need the `+` / `+=` support for lists and similar.\r\n\r\nThe syntactic sugar would really be nice as well though \ud83d\ude0a ",
+      "created_at": "2019-06-27T15:51:31Z",
+      "updated_at": "2019-06-27T15:51:31Z"
+    },
+    {
+      "author": "ili101",
+      "author_association": "NONE",
+      "body": "Please consider adding support for `+` / `+=`.\r\nEven if you ignore the performance benefit this is more natural to use, for example I just did something like this and was surprised by the error:\r\n``` powershell\r\n$MyArrayList = [System.Collections.ArrayList]@(0, 1, 3, 4)\r\n$MyArrayList += 5\r\n$MyArrayList.Insert(2, 2) # Exception calling \"Insert\" with \"2\" argument(s): \"Collection was of a fixed size.\"\r\n```\r\n",
+      "created_at": "2020-08-31T15:52:16Z",
+      "updated_at": "2020-08-31T15:52:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think we have an existing issue for that specifically: https://github.com/PowerShell/PowerShell/issues/5805\r\n\r\nIt came up again recently as a duplicate, but my comment there still stands: https://github.com/PowerShell/PowerShell/issues/13152#issuecomment-656790079",
+      "created_at": "2020-08-31T16:18:00Z",
+      "updated_at": "2020-08-31T16:18:14Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@daxian-dbw perhaps we can turn your `@[]` implementation w/ addition operator support as an experimental feature?  As part of this, we can make the breaking change so that `]` forces a new token as it seems like a bucket 3 breaking change and we can get real world feedback via experimental feature.",
+      "created_at": "2020-10-10T16:10:15Z",
+      "updated_at": "2020-10-10T16:10:15Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT clarification point on that -- would `@[]` become another subexpression operator in that case to match `@()` and `$()` or would it be more akin to `()` in that line breaks within it aren't permitted?",
+      "created_at": "2020-10-10T20:03:50Z",
+      "updated_at": "2020-10-10T20:03:50Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 good question, I suppose it should probably match `@()` so that hypothetically people could just search and replace in many cases as a replacement and get the benefits",
+      "created_at": "2020-10-16T17:58:15Z",
+      "updated_at": "2020-10-16T17:58:15Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "Has anyone mentioned exposing a $pscollectionprefererence variable where would could override what collection type is used natively, for all array operators and pipeline output?",
+      "created_at": "2020-11-30T23:19:32Z",
+      "updated_at": "2020-11-30T23:19:32Z"
+    },
+    {
+      "author": "ghost",
+      "author_association": "NONE",
+      "body": "@KirkMunro \r\n> I'm late to this conversation, but so far in PowerShell, square brackets are always used for indices. For that reason I personally don't like `@[]` as an enclosure.\r\n\r\nI'm late to but in PowerShell square brackets are also used for types: `[Math]::Round(2.2)`. The same applies to `(` and `)` - they not only used for defining array via `@()`. I don't see any reason why square brackets should not use for the proposed feature.\r\n\r\nI'm all for `@[]` implementation which matches @().",
+      "created_at": "2020-12-25T16:47:52Z",
+      "updated_at": "2020-12-25T16:47:52Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Reviving this.  Rather than introduce a new language syntax, I think it would be simpler to just introduce the proposed `[list]` type accelerator which produces a `[system.collections.generic.list[object]]`.",
+      "created_at": "2022-10-15T16:03:58Z",
+      "updated_at": "2022-10-15T16:03:58Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "... If only that the implication of this syntactic sugar proposal will likely also support [Constrained Language Mode](https://devblogs.microsoft.com/powershell/powershell-constrained-language-mode/).  \r\nSee also: [Mutual lists in Constrained Language Mode](https://stackoverflow.com/questions/74125063/mutual-lists-in-constrained-language-mode)",
+      "created_at": "2022-10-19T12:08:17Z",
+      "updated_at": "2022-10-19T12:08:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The type accelerator doesn't change behavior of related _operators_.",
+      "created_at": "2022-10-19T12:16:08Z",
+      "updated_at": "2022-10-19T12:16:08Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I meant to comment on this thread but apparently never did. Specifically, regarding making `+=` work that would be the first instance of `+=` actually mutating the object on the LHS rather than returning something new.\r\n\r\nWith regards to `List<>` specifically, I think we'd be adding another common pitfall if it sees widespread use. The mutability of `List<>` is partially why you don't see it a lot in public API surfaces. It's so easy to slip up in this regard there's even an instance of mutating the caller's list in *one of our public APIs* (#12928).\r\n\r\nThat said, I did prototype (two years ago apparently) a [`List<>`-y implementation](https://gist.github.com/SeeminglyScience/12bceddd9280165dae79523c3d6f2eff) with comparable `Add` performance, but with some extra guards against mutation. Definitely not ready to be added as is, but it's an approach with considering.\r\n\r\n---\r\n\r\nAs a side note on the topic of lists and their place in PowerShell, they aren't actually very frequently better than simply using `$myCollection = foreach ($a in $b) { }`. The engine handling it for you is almost always better, so the amount of use cases for `List<>` specifically aren't actually as high as they appear. Granted not always an option, I'm not saying scenarios like adding across named blocks don't exist, just that they are not as frequent.",
+      "created_at": "2022-10-19T16:57:56Z",
+      "updated_at": "2022-10-19T16:57:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point that using list types is often not needed, @SeeminglyScience.\r\n@iRon7 created a \"canonical\" [answer on Stack Overflow](https://stackoverflow.com/a/60708579/45375) that advises against `+=` and preaches the gospel of statements and pipelines as expressions (where the engine automatically collects multiple outputs in an `[object[]]` array for you).\r\n\r\nAs for your \"List<>-y\" implementation. At least at first glance it sounds similar to what @PetSerAl - who agrees that `+=` shouldn't mutate the LHS (as do I now) attempted in the context of [Assigning the result of an addition (+ operator) with an IList LHS back to that LHS should preserve the list (collection) type (#5805)](#5805), specifically [here](https://github.com/PowerShell/PowerShell/issues/5805#issuecomment-367866807).\r\n\r\nImplementing our own list type that plays nicely with `+=` without sacrificing (lots of) performance would provide two additional benefits:\r\n\r\n* Potentially providing syntactic sugar for construction, as previously discussed (`@[...]` or ....) - though finding a consensus on the syntax may be challenging.\r\n* Being able to avoid the pitfall mentioned by @powercode, namely the `List<T>`'s native's `.ForEach()` method shadowing its intrinsic (engine-provided) counterpart.\r\n\r\nThe least-effort alternative, perhaps acceptable in light of the need for lists not being as pressing as it may seem, would be:\r\n * Simply provide _type accelerators_ for existing list types, say `[arraylist]` and `[list[object]]` - though I'm not sure if the latter, with its generic parameter, fits into the current type-accelerator mechanism.\r\n * Consider their use an advanced use case and expect users to know how those types work and their pitfalls:\r\n     * the need to use `.Add()`, and additionally for `[arraylist]`, to suppress the usually unwanted return value.\r\n     * that for `[list[T]]` `.ForEach()` isn't _PowerShell's_ `.ForEach()` method\r\n * By contrast, `[list]`, while easier to type, wouldn't readily reveal its relationship with the `List<Object>` type it represents, and potentially increase  the risk of falling into the `.ForEach()` pitfall.\r\n * An unpleasant pitfall that applies to _any_ type-literal / cast-based solution is that an array on the RHS must be `(...)`-enclosed, though using a _type constraint_ avoids the problem:\r\n\r\n```powershell\r\nusing namespace System.Collections.Generic\r\n\r\n$list = [List[int]] 1..10 # !! WRONG\r\n\r\n$list = [List[int]] (1..10) # OK\r\n[List[int]] $list = 1..10 # OK\r\n```\r\n\r\n\r\n\r\n",
+      "created_at": "2022-10-21T16:55:20Z",
+      "updated_at": "2022-10-21T16:55:20Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> As for your \"List<>-y\" implementation. At least at first glance it sounds similar to what @PetSerAl - who agrees that `+=` shouldn't mutate the LHS (as do I now) attempted in the context of [Assigning the result of an addition (+ operator) with an IList LHS back to that LHS should preserve the list (collection) type (#5805)](#5805), specifically [here](https://github.com/PowerShell/PowerShell/issues/5805#issuecomment-367866807).\r\n\r\nHah! They beat me to it by two years, that's amazing. Thanks for the link \u2764\ufe0f ",
+      "created_at": "2022-10-21T18:35:21Z",
+      "updated_at": "2022-10-21T18:35:21Z"
+    }
+  ],
+  "created_at": "2017-12-06T23:10:17Z",
+  "number": 5643,
+  "state": "open",
+  "title": "PowerShell should support creating an List similar to how it supports arrays",
+  "updated_at": "2022-10-21T18:35:21Z"
+}

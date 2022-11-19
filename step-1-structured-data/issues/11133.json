@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11133",
+  "author": "mklement0",
+  "body": "Closely related: #4002; see also: #4332\r\n\r\nBy design, stderr output from external programs is _not_ recorded in `$Error` by default.\r\n\r\nParadoxically, when you use `2>$null` in order to explicitly _suppress_ stderr output, it then _is_ recorded in `$Error`, which is obviously not the intent.\r\n\r\nNote: It also happens when you redirect to an actual file.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n$Error.Clear()\r\n# Call `whoami` with an invalid argument, which produces stderr output (all platforms)\r\nwhoami badarg 2>$null\r\n$Error.Count | Should -Be 0\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe test should succeed.\r\n\r\n# Actual behavior\r\n\r\nThe test fails with something like:\r\n\r\n```none\r\nExpected 0, but got 1\r\n```\r\n\r\nThat is, stderr output was unexpectedly recorded in `$Error`.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.5\r\n```\r\n",
+  "closed_at": "2020-08-02T15:53:38Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think it is expected as -ErrorAction SilentlyContinue behavior.",
+      "created_at": "2019-11-20T17:12:36Z",
+      "updated_at": "2019-11-20T17:12:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\n* Stderr output doesn't belong in PowerShell's error stream, because it cannot be assumed to represent _errors_ - that's why it prints straight to the host by default.\r\n\r\n* Using `2>$null` should mean: _discard_ stderr output. That it would _then_ show up in `$Error` is certainly not the intent.\r\n\r\n* That stderr output goes through the error stream with redirection `2>`  is also highly problematic with respect to suddenly being subject to `$ErrorActionPreference = 'Stop'` - see #4002.\r\n\r\nProviding an easy way to collect stderr lines is the subject of #4332.\r\n\r\n\r\n",
+      "created_at": "2019-11-20T17:25:01Z",
+      "updated_at": "2019-11-20T17:25:01Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Logically standard error output belongs in PowerShell's output stream because because that's where executables write their errors. Unfortunately over the years more and more *NIX binaries use stderr for a bunch of things that have nothing to do with errors. This is annoying and unfortunate. PowerShell's output stream is strongly typed so whatever gets written into it has to get wrapped in an `ErrorRecord` unlike the subprocess pipe which is just an undifferentiated stream of bytes so you get very different behavior. (Wrapping the output into an error object is also important because that's how `Out-Default` demultiples the merged output stream.)\r\n\r\n> That it would then show up in $Error is certainly not the intent.\r\n\r\nIt most certainly *is* the intent, specifically $error is intended to be an in-memory log of *all* the errors that occur during execution, suppressed or not. It's purpose, like any error log, is to allow forensic analysis of the execution.\r\n\r\n> That stderr output goes through the error stream with redirection 2> is also highly problematic\r\n\r\nI didn't understand this statement. WRT the linked issue, errors are either exceptions (terminating errors) or something written to the error stream (non-terminating errors.) `-ErrorAction Stop` changes a non-terminating error into a terminating error. Thus error action only applies to things being written to the error stream.. Consequently, if you redirect the error stream to the output stream, the error action preference no longer has any effect.",
+      "created_at": "2019-11-21T03:59:35Z",
+      "updated_at": "2019-11-21T03:59:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\n> Unfortunately over the years more and more *NIX binaries use stderr for a bunch of things that have nothing to do with errors. This is annoying and unfortunate.\r\n\r\nThe root problem is that native programs only have _2_ output streams at their disposal: stdout and stderr.\r\nThis is an unfortunate limitation, which PowerShell - commendably - has overcome _in its own realm_.\r\n\r\nGiven this limitation, native programs have no choice but to write anything that isn't _data_ to stderr, lest they pollute the data output stream (stdout).\r\nIt is a longstanding practice that is the best approach within the confines of the stated limitation.\r\n\r\nBecause the presence of stderr output can therefore _not_ be assumed to represent error conditions, PowerShell's console host's default behavior is the right approach:\r\n\r\n* print stderr lines to the host\r\n* do not record stderr lines in `$Error`\r\n\r\n_If needed_, stderr output can be targeted selectively with a `2>` redirection; currently, aside from `2>$null` discussed below, you can only redirect to a _file_; it would be nice to have an analog to `-ErrorVariable` for capturing stderr lines in a _variable_, which is what #4332 proposes.\r\n\r\n----\r\n\r\n> It most certainly _is_ the intent, specifically `$error` is intended to be an in-memory log of all the errors that occur during execution, suppressed or not.\r\n\r\nAs explained above, for good reasons that doesn't apply to _stderr_ output, which is passed through to the host.\r\n\r\nThat it would suddenly apply when you use `2>$null` to explicitly signal the intent to _discard_ stderr can't be anyone's intent, least of all the user's.\r\n\r\n---\r\n\r\n> Thus error action only applies to things being written to the error stream.. \r\n\r\nNot only should `2>$null` not touch the error stream at all, that a redirection designed to _discard_ the stream's output, would  - situationally, based on `$ErrorActionPreference` - trigger aborting execution as if it were _writing_ to the error stream is obviously the opposite of the user's intent.\r\n\r\nEven with true error stream output from PowerShell commands `2>$null` is currently broken:\r\n\r\n* Like `-ErrorAction SilentlyContinue` it still records the error in `$Error` (which I think is problematic - see below).\r\n\r\n* Unlike `-ErrorAction SilentlyContinue` (or `-ErrorAction Ignore`), it unexpectedly throws a runspace-terminating error when `$ErrorActionPreference = 'Stop'` happens to be in effect:\r\n\r\n```powershell\r\n$ErrorActionPreference = 'Stop'\r\n\r\n# OK: No error output, but $Error is still populated.\r\nGet-Item /NoSuch -ErrorAction SilentlyContinue\r\n\r\n# Kaboom! A runspace-terminating error occurs.\r\nGet-Item /NoSuch 2>$null\r\n```\r\n\r\nEven if `2>$null` were made fully equivalent to `-ErrorAction SilentlyContinue`, it seems like the wrong way to go.\r\n\r\nThe syntax `2>$null` clearly suggests the intent to _discard_ the error stream's output (as its native cousins `2>/dev/null` and `2>NUL` do), and should therefore be the equivalent of `-ErrorAction Ignore`.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-11-22T16:31:42Z",
+      "updated_at": "2019-11-22T16:31:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Closed in favor of https://github.com/PowerShell/PowerShell/issues/3996#issuecomment-666495478",
+      "created_at": "2020-08-02T15:53:38Z",
+      "updated_at": "2020-08-02T15:53:38Z"
+    }
+  ],
+  "created_at": "2019-11-20T10:20:55Z",
+  "number": 11133,
+  "state": "closed",
+  "title": "Suppressing stderr output with 2>$null or redirecting it to a file causes stderr lines to be recorded in $Error",
+  "updated_at": "2020-08-02T15:53:38Z"
+}

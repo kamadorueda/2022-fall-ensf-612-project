@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10006",
+  "author": "msftrncs",
+  "body": "Similar to #9881, while attempting to tab complete a variable reference, at least curly quotes (I've also determined en-dash/em-dash too) do not cause an escape to the `${ }` notation.\r\n\r\n# Steps to reproduce\r\n\r\n```PowerShell\r\n${test`u{2018}var} = 'Hello World'\r\n\r\n$t # press tab for completion until `test\u2018var` appears\r\n```\r\n\r\n# Expected behavior\r\n\r\n```PowerShell\r\n${test\u2018var}\r\n\r\n```\r\n\r\n# Actual behavior\r\n\r\n```PowerShell\r\n$test\u2018var\r\n```\r\n\r\nI believe this is part of the issue:\r\nhttps://github.com/PowerShell/PowerShell/blob/981c990d747ae97f56a6c7474e5d2ef04bf237c5/src/System.Management.Automation/engine/CommandCompletion/CompletionCompleters.cs#L4565-L4566\r\n\r\n\r\nI think this is inadequate to catch the conditions that require when the `${ }` notation is needed, but the above constant appears to be used for more than just that.  The list of characters that require the `${ }` notation is much larger and more complicated.  If regex could be used, the following might be more accurate for when to require the `${ }` : `^(?:[^$^\\w?:]|[$^?].)|.(?:::|[^\\w?:])` This would return a MATCH when `${ }` is required.  Examples:\r\n\r\n`$`  false\r\n`$$` true\r\n`^` false\r\n`^^` true\r\n`?` false\r\n`??` true\r\n`_?` false\r\n`::` false\r\n`a::` true\r\n`test\u2018var` true\r\n\r\n# Environment data\r\n\r\nThis particular example was captured with 6.2.0 on Win 10 Pro 18922 (Insiders)\r\n\r\n__Edit: improved performance of the regex example.__\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also, slightly related,\r\n\r\n```PowerShell\r\n${test`{`}} = 'Hello World'\r\n\r\n$t # press tab for completion until `{test{}}` appears\r\n```\r\n\r\n# Expected\r\n\r\n```PowerShell\r\n${test`{`}}\r\n```\r\n\r\n# Actual\r\n```PowerShell\r\n${test{}}\r\n```\r\nThis will cause an error stating that you must use ``` `{ ``` instead of  ``` { ``` in variable names.\r\n",
+      "created_at": "2019-06-26T03:33:14Z",
+      "updated_at": "2019-06-26T03:33:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This is actually further complicated, because the variables `$$`, `$^`, `$!` etc are all special. They _should_ require braces, but the tokenizer explicitly allows them as special variables.",
+      "created_at": "2019-06-26T03:56:12Z",
+      "updated_at": "2019-06-26T03:56:12Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Never heard of `$!`.  The regex above was set to handle the fact that the tokenizer accepts those special conditions.",
+      "created_at": "2019-06-26T03:59:31Z",
+      "updated_at": "2019-06-26T03:59:31Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think I might have missed `$?` \u2026   EDIT: I corrected the above regex for the special condition of `$?`",
+      "created_at": "2019-06-26T04:01:16Z",
+      "updated_at": "2019-06-26T04:06:15Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also adding that `$??` fails to be completed correctly as `${??}`, as I noticed `?` was not in the constant list of characters in the code referenced.\r\n\r\nEdit:  `$:??` is also acceptable.",
+      "created_at": "2019-06-26T04:10:37Z",
+      "updated_at": "2019-07-22T22:13:04Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sample PowerShell filter code for testing:\r\n\r\n```PowerShell\r\nfilter variablenotate {\r\n    if ($_ -match '^(?:[^$^\\w?:]|[$^?].)|.(?:::|[^\\w?:])') {\r\n        \"{$($_ -replace '[{}`]', '`$0')}\"\r\n    } else {\r\n        $_\r\n    }\r\n}\r\n```\r\n\r\nNote that a more complete filter might escape all control characters, such that \\<TAB\\> (^I) would become ``` `t ``` and so on.\r\n\r\n__Edit: missed ``` ` ``` in the list of characters that need escaped in the `-replace` operation.__\r\n\r\n__Edit: improved performance of the `-match` regex__",
+      "created_at": "2019-06-26T04:29:24Z",
+      "updated_at": "2019-07-20T03:58:16Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also adding that variables with backticks in their name will properly wrap with `${ }` when completed but fail to escape the backtick in that notation.",
+      "created_at": "2019-07-01T19:28:28Z",
+      "updated_at": "2019-07-01T19:28:28Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've also found that there are some issues around variables that contain `:` (I know there are some opinions there), but demonstrating a more complete escaper:\r\n\r\n```PowerShell\r\nfilter variableNotate {\r\n    param(\r\n        [string]$ScopeOrProviderPrefix = '' # specify either scope or provider prefix\r\n    )\r\n    # return a result object similar to the System.Management.Automation.CompletionResult class\r\n    [pscustomobject]@{ \r\n        ListItemText   = $_\r\n        CompletionText = \"$($(\r\n            if ($ScopeOrProviderPrefix -eq '') {\r\n                # no scope/drive prefix, detect reasons to force a blank prefix\r\n                if ($_.Contains([char]':') -or $_ -match '^\\?[\\w?:]+$') {\r\n                    # force `:` prefix for names containing `:` or beginning with `?` but not needing `{}`\r\n                    \":$_\"\r\n                } else {\r\n                    #no prefixing needed\r\n                    $_\r\n                }\r\n            } else {\r\n                # assemble the prefixed completion\r\n                \"${ScopeOrProviderPrefix}:$_\"\r\n            }\r\n        ).foreach{\r\n            # detect if final completion requires `{}`\r\n            if ($_ -match '^(?:[^$^\\w?:]|[$^?].)|.(?:::|[^\\w?:])') {\r\n                # `{}` required, escape where needed\r\n                \"{$($_ -replace '[{}`]', '`$0')}\"\r\n            } else {\r\n                # no wrapping or escaping needed\r\n                $_\r\n            }\r\n        })\"\r\n    }\r\n}\r\n\r\n```\r\n\r\nThis filter now produces an output similar to the CompletionResult class.\r\n\r\nExample usages: (uses aliases)\r\n```PowerShell\r\n(dir env:*).name | variableNotate 'env'\r\n\r\n(dir variable:*).name | variableNotate\r\n```\r\nBoth above should demonstrate the correct escaped completion to use with the `$` sigil.\r\n\r\n(Partial Output from `env:*`)\r\n```None\r\nListItemText                    CompletionText\r\n------------                    --------------\r\nOS                              env:OS\r\nCommonProgramFiles(x86)         {env:CommonProgramFiles(x86)}\r\nHOMEPATH                        env:HOMEPATH\r\nProgramFiles(x86)               {env:ProgramFiles(x86)}\r\nProgramData                     env:ProgramData\r\nTMP                             env:TMP\r\n```\r\n(Partial Output from `variable:*`)\r\n```None\r\nListItemText                CompletionText\r\n------------                --------------\r\n$                           $\r\n^                           ^\r\n?                           ?\r\n*hello                      {*hello}\r\nhello                       hello\r\n@hello                      {@hello}\r\na                           a\r\n`                           {``}\r\n::                          {:::}\r\n:                           ::\r\n??                          :??\r\n```\r\n\r\nWhile writing this up, I also found that the `*Hello` variable doesn't complete correctly, `*` is also missing from the list of characters that require escape, but you can see this filter suggests the correct completion.\r\n\r\n__Edit: Revised filter a few times to optimize the regex, and better capture condition of variables starting with '?',  Reference the `??` variable in the sample output.__",
+      "created_at": "2019-07-20T01:42:30Z",
+      "updated_at": "2019-07-21T04:49:39Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I have an intention to post a PR regarding at least parts of this issue, implementing the escapers already found in the `CodeGeneration` class, and we'll see how far I can go from there.",
+      "created_at": "2019-07-21T23:37:19Z",
+      "updated_at": "2019-07-21T23:37:19Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "I was able to implement a C# version of my PowerShell filter,\r\n\r\nhttps://github.com/msftrncs/PowerShell/blob/0af1d06de68391d04f77c3efd3db58a8bd23a036/src/System.Management.Automation/engine/CommandCompletion/CompletionCompleters.cs#L4804-L4843\r\n\r\nWhere does this best belong?",
+      "created_at": "2019-07-22T07:06:36Z",
+      "updated_at": "2019-07-22T07:06:36Z"
+    }
+  ],
+  "created_at": "2019-06-26T03:22:32Z",
+  "number": 10006,
+  "state": "open",
+  "title": "variable tab completion does not escape curly quotes, potentially others",
+  "updated_at": "2019-10-02T11:03:48Z"
+}

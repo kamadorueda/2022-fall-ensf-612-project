@@ -1,0 +1,412 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7557",
+  "author": "vexx32",
+  "body": "I will attempt to summarise here the primary points of discussion that have ensued in #7993 as it has spiraled into many threads, and I suspect a bullet-point summary of questions to be answered will be significantly easier on the committee. \r\n\r\n## Regarding Binary & Hex Parsing\r\n\r\nAs part of the refactor & introduction of binary parsing, methodology of hex parsing has also been altered a bit. Parsing currently _results_ in the same as it currently works, with the caveat that literals with values above `Int64.MaxValue` are also now acceptable.\r\n\r\n### Parse as C# Literals\r\n\r\nWith that in mind, @mklement brought up the point that we may want to simply _change_ how hex and binary parsing work. That is, mimic C#'s behaviour of these literals in source, which would mean parsing _all_ hexadecimal literals as strictly positive (no more `0xFFFFFFFF -eq -1` &mdash; instead, `0xFFFFFFFF -eq UInt32.MaxValue`) **and** having such literals smoothly convert up to `UInt` values. \r\n\r\nWith that in mind, the code patterns for hex or binary literals would seek out the lowest available parsed value type (when no type is specified) in the following order: `Int32`, `UInt32`, `Int64`, `UInt64`, `Decimal`, and possibly finally `BigInteger`.\r\n\r\n### Other Options\r\n\r\n#### Hex & BigInteger\r\n\r\nIf we elect to _keep_ current hex behaviour, we need to consider how it would behave in ranges higher than `Decimal`. `BigInteger`'s default parser for hex numerals will simply assume the highest bit of a byte is indicative of the sign. As a result any numeral treated as signed that begins with `0x8` or higher will be considered the negative two's complement representation when we enter ranges that can only be parsed as `BigInteger`. This could be overridden easily, if this behaviour is considered to be undesirable.\r\n\r\n#### Binary Parsing with Sign Bits\r\n\r\nThen we face the issue of what to do about binary parsing. I doubt most folks working with binary directly will be working in ranges above 32-bit numbers, but I could be very wrong on that. They are, however, easier to work with in the `byte`, `short`, and `int` value ranges (8, 16, 32-length literals), and behaviour of a sign bit in this case is _also_ entirely up to the parser here due to the custom implementation of binary parsing for speed concerns.\r\n\r\nShould binary sign bits only be accepted at 32-bit lengths and up for consistency with hex parsing? Or should they be accepted at similar _lengths_ of literal (8 binary bits, 8 hex char literal) to match up visually with hex literals? This would place a sign bit at _all_ of the 8, 16, and 32-char lengths of a binary literal, so `0b11111111 -eq -1` and so forth, which looks similar in behaviour to hex's `0xFFFFFFFF -eq -1`, despite the obvious difference in actual bit length of the literals.\r\n\r\n## Parse Numeric Literals with Underscores\r\n\r\nE.g., `1_000_000`, `0b0101_1010`, `0xF_FFF_F_FFF` and so forth. Should this be allowed? C# already does this with literals in source code. Are there culture-sensitive concerns around this? This is a relatively simple addition.\r\n\r\n## Experimental Feature Possibilities\r\n\r\nIf this is the best option, I am not at all against hiding alternate parse methods behind experimental flags if need be. But for that to be possible, I need a \"standard\" acceptable behaviour to be defined clearly so that I can lay it out for the hex and binary parse methods.\r\n\r\n---\r\n\r\nOriginal post is below. PR #7901 added byte literals (suffix `y` or `uy`), so that portion of this issue is completed.\r\n\r\n---\r\nSee the discussion in #7509.\r\n\r\nEmerging from the interesting dust of modifying the tokenizer are two further points:\r\n\r\n1. The tokenizer should be able to parse binary literals.\r\n2. The tokenizer should support `byte` type literals.\r\n\r\nThe *trouble* here is that both of these suggestions could arguably use a `b` suffix for numeric literals.\r\n\r\nMy opinion is that the `b` *suffix* should be used for `byte` literals, in keeping with the current convention that suffixes alter the numeric *data* type rather than simply base representation.\r\n\r\nSo what about binary? Well, **jcotton** in the PowerShell Slack channel / irc / discord #bridge channel mentioned that just like common hex representations use `0xAAFF057`, we could also follow the common convention of binary being similar: `0b01001011`\r\n\r\nFrom my brief poking about, it *looks* like we may have to alter `System.Globalization.NumberStyles` in order to add `Binary` as a flag value -- *if* we follow the current implementation of hexadecimal numerals. We don't necessarily have to. \r\n\r\n`TryGetNumberValue` in the `tokenizer.cs` file would also have to be modified to accept possibly some kind of `enum` for number formats as well; currently it only accepts a `bool` for `hex` specification. `ScanNumberHelper` would also have to be modified for this.\r\n\r\nThe suffix approach is simpler, especially with the changes already in #7509 which make adding suffixes a good deal easier. However, given that we may want to reserve the `b` suffix for `123b` *byte* literals, we may need to consider adding a case for `0b0010101` syntax.\r\n\r\nWhat do you guys think?\r\n\r\nOther suggested suffixes for byte literals:\r\n\r\n* `ub` ( `sb` or `b` for signed bytes)\r\n* `uy` ( F# style) with `y` for signed bytes\r\n",
+  "closed_at": "2019-04-03T22:10:03Z",
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "+1 on:\r\n- `b` suffix is for bytes\r\n- `0b` prefix is for binary\r\n\r\nMy only problem is that the most convenient way to specify a byte will be in hex, and `0xffb` can't specify a byte because its a valid ordinary hex literal.\r\n\r\nIt might not be possible to accomplish nicely, but my ideal would be able to specify a byte literal with hex.",
+      "created_at": "2018-08-17T03:39:26Z",
+      "updated_at": "2018-08-17T03:39:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "We could adopt the `uy` suffix like F# for bytes, in that case?",
+      "created_at": "2018-08-17T04:03:47Z",
+      "updated_at": "2018-08-17T04:03:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Could we use 'ub' for bytes and 'b' for binaries.\r\nThe use of the '0b' prefix does not seem to be consistent.",
+      "created_at": "2018-08-17T04:18:03Z",
+      "updated_at": "2018-08-17T04:25:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "we could use anything we want, in fact. Just gotta code for it in the tokenizer... and I've had *plenty* of experience doing that recently :)",
+      "created_at": "2018-08-17T04:25:33Z",
+      "updated_at": "2018-08-17T04:25:33Z"
+    },
+    {
+      "author": "jcotton42",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov every language I've run across uses an `0b` prefix for binary numbers. Plus using a prefix to change the base is consistent with `0x` for hex.",
+      "created_at": "2018-08-17T04:39:11Z",
+      "updated_at": "2018-08-17T04:39:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If we take the F# route they also have `y` for `sbyte` which... I don't really know how *useful* it is, but it's a possibility.\r\n\r\nWith this sort of syntax your literals would look like:\r\n\r\n```powershell\r\n255uy\r\n0b1001uy # decimal 9; byte\r\n0xAAuy # decimal 160; byte\r\n\r\n12y # sbyte\r\n0b11y  # decimal 3; sbyte\r\n0x50y # decimal 80; sbyte\r\n```",
+      "created_at": "2018-08-17T12:15:39Z",
+      "updated_at": "2018-08-17T12:27:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We usually consider C# syntax first. In C# 7 we get '0b' for binary literals but there is still not exist a suffix for byte. I think we should try to find a discussion in .Net repos about the suffix - I guess they already have it. If the discussion is still not finished we have to postpone the decision on the suffix to keep a consistency with C# in future.\r\nFor binary we could support a format\r\n`var b = 0b1010_1011_1100_1101_1110_1111; `",
+      "created_at": "2018-08-17T13:31:09Z",
+      "updated_at": "2018-08-17T13:31:09Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The link to Roslyn here seems to be defunct as they shifted to Github, but nonetheless the quote seems to indicate: \r\n\r\nhttps://stackoverflow.com/questions/5378036/literal-suffix-for-byte-in-net\r\n\r\nThey went for zero ambiguity and decided `sb` for signed and `ub` for unsigned (since .NET bytes are default unsigned, but everything else is usually signed as standard).",
+      "created_at": "2018-08-17T13:55:03Z",
+      "updated_at": "2018-08-17T13:55:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think it is here https://github.com/dotnet/csharplang/issues/1058 without any progress.",
+      "created_at": "2018-08-17T14:28:07Z",
+      "updated_at": "2018-08-17T14:28:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "For me, the suffix `b` in general might be a bit lacklustre for `byte` simply because to a new user it could easily be read as `bit`, or `binary` instead and be confused. At least with `y` if they don't know they're probably more likely to actually look it up rather than guessing and being burned by it.\r\n\r\nBut I guess if we want to stick with parity we might want to stick with the most likely candidates for inclusion in C#.\r\n\r\nIt's also a non-zero possibility that implementing this in PS may affect the discussion of inclusion in C# as it remains open after almost a year.",
+      "created_at": "2018-08-17T14:38:56Z",
+      "updated_at": "2018-08-17T14:38:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I commented in csharplang repo.",
+      "created_at": "2018-08-17T16:58:30Z",
+      "updated_at": "2018-08-17T16:58:30Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Also want to note that underscore syntax you used there @iSazonov. I was thinking about the same thing the other night. I think it would be worth implementing underscore ignoring in numeric literals too (separate issue I know, but thought I'd raise it here first in case other people think it's stupid). It looks like C# 7, Java 7 and OCaml have this already, and it would certainly make sense alongside a binary literal syntax.",
+      "created_at": "2018-08-17T17:34:11Z",
+      "updated_at": "2018-08-17T17:34:11Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah I think that:\r\n- `0b` is a pretty standard and unambiguous syntax for a binary literal (supported by [C# 7](https://stackoverflow.com/questions/594720/c-sharp-binary-literals), [Java 7](https://www.journaldev.com/603/binary-literals-in-java-java-7-feature), [Python 2.6 and 3.0](https://stackoverflow.com/questions/1476/how-do-you-express-binary-literals-in-python) and [C++ 14](https://en.cppreference.com/w/cpp/language/integer_literal))\r\n- `ub` and `sb` are the best proposals so far for byte literal suffixes\r\n- There's actually a pretty good use case for all of these for network scripting amongst other things\r\n- If we're going this far, we might also want to include an octal syntax (`0o705`). That might come in handy especially on UNIX",
+      "created_at": "2018-08-17T17:35:56Z",
+      "updated_at": "2018-08-17T17:40:44Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I am completely in support of these ideas. Supporting the underscore syntax is a but weird for regular numbers, but I think implementing it at the general level is more sensible than trying to special case it for binary or hex, even if the use might be specifically handy there.\r\n\r\nI think I can figure out the majority of these changes. Hex is already a supported way to go, so it'd basically be adding additional cases there. There's a Boolean `hex` value passed around in the tokenizer that would have to be removed and replaced with perhaps a NumberFormat enum or some such little thing.",
+      "created_at": "2018-08-17T19:10:17Z",
+      "updated_at": "2018-08-17T19:10:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt I gave implementing underscore syntax a brief attempt because I'm already digging around the tokenizer like crazy anyway, and uh... it's *literally* just 4 lines of code to add that part in:\r\n\r\n![image](https://user-images.githubusercontent.com/32407840/44304574-a57ba600-a32d-11e8-9132-dca3f6c816cc.png)\r\n\r\nBinary and octal will be more (need dedicated helper functions to scan those digit types, but nothing terribly serious and both can basically follow the same pattern as hex scanning). Not sure how a `TryParse` will treat them, however, so it might prove challenging and may need a custom parsing solution there. Other than that, it's all straightforward.",
+      "created_at": "2018-08-19T01:28:32Z",
+      "updated_at": "2018-08-19T01:28:32Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "I think `0b1101001` is the right way to go for binary literals. Literals in general use prefix notation. My initial reaction to 'y' for byte was ?? but it's grown on me (and fsharp uses it.) We've talked about allowing `_` in numeric literals before and decided against it due to concerns with how it would fit into the ecosystem. Values move between strings and numbers in a lot of places in PowerShell and we were concerned that introducing `_` might result in an inconsistent experience, especially for decimal numbers. (We also do things like hold on to the string representation of a numeric literal passed as an argument to a parameter of type object in case the user really meant a string.) It would be irritating if `123_456_789'` worked but `[int] \"123_456_789\"` did not.  Likewise with `[int]::Parse(\"123_456_789\")`. However, for binary literals, `_` is much more important and binary literals are not supported by the ecosystem anyway, so yeah - at least for binary literals we should support `_`. (Hmm - maybe we can do a PR into CoreFX to get the parse methods to support `_` , especially now that C# supports it.) And should we be strict with `_` placement or just allow any number of `_` characters? `0b__________________1` looks weird to me but it is it \"bad\"?",
+      "created_at": "2018-08-19T17:15:37Z",
+      "updated_at": "2018-08-19T17:15:37Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think there's any particular reason to be overly restrictive about the syntax. Currently with hex notation in my test implementation, it *does* require that you start a hex sequence with `0x<digit>` before using an underscore (so `0x_1` isn't valid but `0x10___01` is fine), but changing that would not be insanely difficult.\r\n\r\nI can certainly see reasons to avoid implementing it in standard digit parsing, but as you say -- C# already supports it; I don't see a reason not to allow it. As for parsing strings manually, it would be nice to have that consistent from CoreFX's end, though even presently in C# `Int32.TryParse()` doesn't seem able to handle digit strings with underscores. It seems more implemented as a utility for the programmers rather than users in any fashion.\r\n\r\nHowever, with PS bringing scripters and users much closer, not requiring source to be compiled... it would make a decent amount of sense to just tweak the parsers to ignore those characters in a similar fashion.\r\n\r\nI also would tend to cast my vote for `y` and `sy` for byte; and bytes *are* unsigned by default in C#. It mightn't be consistent with other type names, but it is how C# operates with byte types.",
+      "created_at": "2018-08-19T17:27:43Z",
+      "updated_at": "2018-08-19T17:30:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see from @BrucePay's comment that using numerics with `_` in arguments can be a problem and breaking change. The trade-off may be to always require a prefix or suffix in a numeric string with `_`.\r\n\r\nAlso we should discuss [Number\u200bFormat\u200bInfo.\u200bNumber\u200bGroup\u200bSeparator](https://docs.microsoft.com/en-us/dotnet/api/system.globalization.numberformatinfo.numbergroupseparator?view=netframework-4.7.2#System_Globalization_NumberFormatInfo_NumberGroupSeparator)\r\n```c#\r\n[System.Globalization.NumberFormatInfo]::CurrentInfo.NumberGroupSeparator\r\n```",
+      "created_at": "2018-08-20T07:20:50Z",
+      "updated_at": "2018-09-27T20:31:06Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "One thing about `NumberGroupSeparator` is that in the English locales it's going to be `,`, which won't work in actual PowerShell literals.\r\n\r\nIf we want to reuse `NumberGroupSeparator` for number literal parsing, we may run into locale issues, and it may be more trouble that it's worth.",
+      "created_at": "2018-08-20T16:13:28Z",
+      "updated_at": "2018-08-20T16:13:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, I don't think that's going to work well there...",
+      "created_at": "2018-08-20T16:21:54Z",
+      "updated_at": "2018-08-20T16:22:01Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "When considering being more permissive, do keep in mind that tokens that today are number like, but not exactly - might be a valid command name. Consider the following (all valid today):\r\n\r\n```powershell\r\nfunction 0xbadf00d { \"I might be feeling sick\" }\r\n& 0xbadf00d    # Calls the function\r\n0xbadf00d      # The number 195948557 \r\n\r\nfunction 0xbad_f00d { \"I might be feeling sick\" }\r\n& 0xbad_f00d    # Calls the function\r\n0xbad_f00d      # Also calls the function\r\n```\r\n\r\nNote that command name could be an external command, it doesn't need to be PowerShell.\r\n\r\nIt's certainly possible there aren't any real commands this proposal will affect, but it's worth calling out as the proposal expands in scope.",
+      "created_at": "2018-08-20T20:54:56Z",
+      "updated_at": "2018-08-20T20:54:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sure, you can have an external command or a function that looks like a number and might be read as a number. Those are pretty few and far between, though; it generally doesn't lend itself to being memorable or useful.\r\n\r\nGranted, being *too* permissive with underscores could end up being undesirable (not to mention lead to code obfuscation techniques utilising them as well), but if we wanted to limit it to no more than one consecutive underscore, I don't think it would be overly complex.",
+      "created_at": "2018-08-20T23:36:25Z",
+      "updated_at": "2018-08-20T23:36:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Sometimes PowerShell is too flexible. I believe we should avoid numeric like command names. Of cause we can have `123` executable - in the case best practice should be to use `&` or `Invoke-Command`.\r\nIt is clear that the enhancement is a breaking change ([Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area)).",
+      "created_at": "2018-08-21T13:14:49Z",
+      "updated_at": "2018-08-21T13:14:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'm in agreeance there. Numeric executables can be invoked with `&` or just from the directory with `.\\0xdead.exe` sort of idea.\r\n\r\nSure, it might break something, but (in my humble opinion) if you are using something named that nondescriptively... you probably have bigger fish to fry. \ud83d\ude04 ",
+      "created_at": "2018-08-21T13:17:25Z",
+      "updated_at": "2018-08-21T13:17:44Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "In generated code, all bets are off, one might use seemingly random names to avoid potential conflicts.\r\n\r\nMinimizing potential breakage is not difficult, so I see no reason to be overly permissive.",
+      "created_at": "2018-08-21T17:14:20Z",
+      "updated_at": "2018-08-21T17:14:20Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I see powershell generating powershell and envision only a headache, ahaha. But yes, you have a point.",
+      "created_at": "2018-08-21T17:22:51Z",
+      "updated_at": "2018-08-21T17:22:51Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Worth pointing out that if we're sticking to native C#-implemented binary conversion operations, we are inherently restricted to `Int64` binary strings at the absolute maximum. \r\n\r\nI've a basic implementation (which isn't perfect) that I've been working on [here](https://github.com/vexx32/PowerShell/tree/Tokenizer/Refactor) with all of this issue's items present (plus the stuff I've already been working on from #7575).\r\n\r\nIt seems functional, but the necessary logic has become a bit... weird... because binary conversions aren't supported in the same fashion as hex ones are. They're not available via `TryParse` and must instead be accessed via `Convert.To([S]Byte|[U]Int16|[U]Int32|[U]Int64)`. There are no `Decimal` or higher conversions available, but it seems to be a relatively safe method of conversion, provided we can ensure the digits provided are indeed binary -- which is currently handled well with a similar function as `ScanHexDigits()`\r\n\r\nSo... it works. Whether it's quite what we're after, I'm not so sure. Do we want binary literals to automatically parse as `byte` if they're 8 characters long, etc., or do we just leave that to suffixes and otherwise parse normally?\r\n\r\n(Doing so would end up being a bit complex, I think, maybe unnecessary logic for the parser to put up with? Especially considering multiplier values... hm.)",
+      "created_at": "2018-08-27T19:22:15Z",
+      "updated_at": "2018-08-27T19:22:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe your question is for PowerShell Committee too.\r\nI think we should keep the same logic:\r\n- if we have suffix then convert to the explicit type\r\n- otherwise convert to type with minimal size. Although Powershell works by default with int, this default conversion can also be to int.",
+      "created_at": "2018-08-28T04:02:17Z",
+      "updated_at": "2018-08-28T04:02:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Gotcha~\r\n\r\n@iSazonov Been working on it a bit, looking at implementation details... Got it working quite well at the moment. Been talking it over with the folks in the PS Slack, and I'm thinking it probably makes the most sense for *binary* conversions to follow the bit length of the string. 8 binary bits (or less) and we work with `sbyte`s and `byte`s and such.\r\n\r\nBasically... I have it following this pattern (currently):\r\n\r\n* Hex literals are either `int`, `long`, `decimal`, or `BigInteger` depending on the length of the string (and will `uint`/`ulong` with `u` suffix).\r\n  * Parsing hex string suffixed `u` at large values fails (because no type higher than `UInt64` *is* unsigned)\r\n  * `u` suffix will change the value if the high bit is a sign bit (8, or 16-length strings matching Int32 or Int64)\r\n* Binary literals are either `sbyte`, `short`, `int`, or `long`. Any longer binary string (>64 chars) cannot be parsed with the baked in .NET conversions available and will fail.\r\n  * A `u` suffix will push the conversion to `byte`, `ushort`, etc.; these conversions *will* differ from their unsigned counterparts due to how .NET treats the signing bits: `0b1111_1111` is `[sbyte]-1` but `0b1111_1111u` is `[byte]255`.\r\n  * Sign bits at 8,16, 32, and 64 length binary strings are respected, *if* an unsigned suffix is not supplied.\r\n* All hex and binary literals have underscore support\r\n  * `0b0000_0001` and `0x0000_0001` are valid, but consecutive underscores are not parsed as numerics: `0b00__001` is treated as a command name instead.\r\n    * `0b01_` is also treated as a command name (trailing underscore not permitted)\r\n* All suffixes and multipliers can be used against hex or binary strings\r\n  * Should the multiplier overflow the MaxValue normally assigned to that length of string (i.e., an 8-digit binary would normally parse as `byte`) it will fail to parse. \r\n  * Should the suffix box the type into a 'too-small' type, it *will* correctly cast if the value of the string is within the requested type's value range: `0b1111_1111_1111_1111` registers as `short` with value `-1`. But appending `y` to the string *will* yield an `sbyte` value of `-1`.\r\n\r\nI'm still a little on the fence with some of these points. It seems to be pretty consistent with what I'd think is expected for a binary parser, but ultimately I will of course defer to your guys' judgement. Frankly, it's *less* trouble to just parse to `int32` and respect sign bits of small values appropriately regardless, but... yeah.",
+      "created_at": "2018-08-29T14:24:36Z",
+      "updated_at": "2018-08-29T14:35:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Thanks for great investigations! \r\n\r\nI have big concerns about underscore support. Cultures define numeric delimiters and applications like Excel use them. If we add numeric delimiter like underscore this can confuse users which will expect culture delimiter. This happens now with the datetime formats. \r\nSecond concern is that supporting underscore only in hex and binary again can confuse users which will expect that we support the delimiter in all numerics.\r\n\r\nI'd suggest _to postpone the underscore support_ until we collect many community feedbacks.\r\n\r\nAs for parsing. I am sure that we must follow the _current logic_. \r\nIt means:\r\n1. If suffix define target type we should fail if overflow.\r\n2. Without type suffix we shouldn't limit and should convert up to BigInteger even for binary, hex and unsigned (we can always add leading zero to get unsigned numeric (BigInteger too)).\r\n\r\n",
+      "created_at": "2018-08-30T13:09:17Z",
+      "updated_at": "2018-08-30T13:09:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I hear you @iSazonov, underscores are a bit odd, and I don't think any culture-format representations of numbers use them. But I think that's sort of why C# went to that direction; it'll be more or less a constant in the code, and is effectively just a readability helper for longer numerals, not being bound to culture constraints and just being an 'ignored' character in numerals. \r\n\r\nThe tricky part with binary going higher than (U)Int64 is that... there are no available conversion methods for a binary numeral that high. Decimal, Double, and BigInt simply don't have the conversion methods available.\r\n\r\nI'm sure I could roll a parser for such a thing, but in trying to do so I ran into a bit of a stumbling block: the existing conversion methods use the two's complement method of dealing with the sign bit, and frankly I don't really understand how they do it. Every example I've found (so far) of two's complement conversions seems to give me differing results to how the .NET methods handle it.\r\n\r\nThis is primarily going to be input in console or scripts that this will be handling, so I would be very surprised if anyone was going to go the sheer effort to put together a binary literal over 64 characters in length. Given that C# has no support for extremely large binary literals, should we?\r\n\r\nI suppose it's a matter of does the parity matter here; I doubt anyone's going to be handling giant hex literals either, but in that case it's significantly easier to do, and the numeric TryParse methods have an easily available conversion method that works for BigInteger without much tweaking.",
+      "created_at": "2018-08-30T13:28:47Z",
+      "updated_at": "2018-08-30T13:29:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> why C# went to that direction\r\n\r\nC# is only program language. PowerShell is program laguage, applications and interactive console. If we add new input format (underscope? culture delimiter?) users will ask why we don't add output format (underscope? culture delimiter?). _Initially we only consider underscope for script constants but we is still interactive_.\r\n\r\n>The tricky part with binary going higher than (U)Int64 is that... there are no available conversion methods for a binary numeral that high. Decimal, Double, and BigInt simply don't have the conversion methods available.\r\n\r\nIt is not big problem to implement this. We could look Roslyn code.\r\n\r\n>Given that C# has no support for extremely large binary literals, should we?\r\n\r\nC# is strong typed. It must limit/overflow.\r\nAs I said we should follow the same logic for all numerics to avoid confusing users. I would be very surprised if I wrote a number of one hundred '1' then added a prefix '0b' and got an error although the number would be less then first one!\r\n(Sometimes users do amazing things like games on Excel or PowerShell and we should not artificially limit them)\r\nIf we want limits we should remove BigInteger at all - I do not think that someone is studying astronomy on PowerShell :-)\r\n",
+      "created_at": "2018-08-30T14:41:17Z",
+      "updated_at": "2018-08-30T14:41:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sure, we *could*, but wouldn't it be better to leave that side of things to the .NET Core team to implement? Currently, BigInteger isn't implemented in *any* part of the `Convert` class, having mostly its own methods (it even has its own `Pow` method, because `Math.Pow` doesn't support it).\r\n\r\nHey, if you build it, they will come! I'm sure if we *supported* it, astronomers would become an *integral* part of the PS community! \ud83d\ude09 \r\n\r\nI guess it makes some sense that it should be pretty even across the board in terms of how it handles the bases here, but short of implementing things that really might be better implemented in CoreCLR itself, I don't know that there's a better solution.",
+      "created_at": "2018-08-30T15:10:43Z",
+      "updated_at": "2018-08-30T15:10:43Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We can open the feature request in CoreFX but I think we will wait very long - Roslyn internal implementation is an example. Also we speak more about _PowerShell feature_ - do PowerShell users want have this or not? I would simply say that we need to cover _all the numerics_. \r\nAgain if we already have BigInteger as edge case for some numerics why haven't it for binary? \r\n\r\nOn the other hand, we do not get a super feature if we implement this. I agree with Uint64 limit too.\r\n",
+      "created_at": "2018-08-30T15:27:48Z",
+      "updated_at": "2018-08-30T15:27:48Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I would *like* to cover it for all the numerics, absolutely. But as mentioned... I need to figure out how they're doing it. I went hunting for the CoreCLR Convert.cs implementations, but the `ToInt64(string, int)` is... not there. I can't find where they're defined. And I'm sure I'm just not familiar with Roslyn's site yet, but I can't seem to find it anywhere there either.",
+      "created_at": "2018-08-30T15:43:39Z",
+      "updated_at": "2018-08-30T15:43:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could convert by UInt64 chunks and then do BigInteger multiple() and add() in cycle.",
+      "created_at": "2018-08-30T17:49:47Z",
+      "updated_at": "2018-08-30T17:49:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm. Interesting thought. Currently I'm working with this sort of framework as the 'fallback' (when the lower-order, probably more efficient parse methods fail):\r\n\r\n```csharp\r\nprivate static bool TryParseBigBinary(ReadOnlySpan<char> digits, bool unsigned, out BigInteger result)\r\n        {\r\n            BigInteger value = 0;\r\n            unsigned = unsigned || (digits[0] == '0');\r\n\r\n            for (int i = 0; i < digits.Length; i++)\r\n            {\r\n                if (digits[i] == '1')\r\n                {\r\n                    value += BigInteger.Pow(2, digits.Length - i - 1);\r\n                }\r\n                else if (digits[i] != '0')\r\n                {\r\n                    result = 0;\r\n                    return false;\r\n                }\r\n            }\r\n\r\n            result = unsigned ? value : (value - BigInteger.Pow(2, digits.Length));\r\n            return true;\r\n        }\r\n```\r\n\r\nIt seems to work fairly well. I'm not sure whether there's a more efficient method to get the two's complement. I can imagine that that `Pow()` operation on `BigInteger` is probably not incredibly efficient, but I don't really see a way to avoid that one.",
+      "created_at": "2018-08-30T18:02:01Z",
+      "updated_at": "2018-08-30T18:02:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Let's wait PowerShell Committee conclusion about that we should implement.",
+      "created_at": "2018-08-30T18:12:10Z",
+      "updated_at": "2018-08-30T18:12:10Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and would accept the proposal for a `0b` prefix for binary literals and `y` suffix for bytes (required to disambiguate from the valid `b` hex digit).",
+      "created_at": "2018-09-19T22:45:17Z",
+      "updated_at": "2018-09-19T22:45:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "*taking notes*\r\n\r\nAlright, awesome. Soon as #7813 is merged I have the code for this ready for review as well. \ud83d\ude01 ",
+      "created_at": "2018-09-19T23:20:04Z",
+      "updated_at": "2018-09-19T23:20:04Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "As I polish up the remainder of this code for the follow up PR, I just want to make a note that I did *attempt* to look at octal syntax (a la `0o722` as @rjmholt suggested) but ultimately found that the overall parsing support is about as poor as binary.\r\n\r\nI briefly attempted to construct a workable solution, but found it was littered with strange edge cases when attempting to determine the intended numeric data type from `MaxValue`s -- `1777777` and `3777777` are patterns that crop up quite a bit, and I frankly *do not understand* how the sign bit is being represented or parsed in the .NET `Convert.ToInt32` or similar functions when parsing octal strings.\r\n\r\nI will leave that floor open for anyone else who wishes to take a stab at it, but for the time being I have and will submit after this weekend:\r\n\r\n* Binary support - `0b101011011` which respects signing bits as much as seems feasible\r\n  * BigInteger-size binary values (which are impractical at best, but supported) always treat the high bit as sign bit regardless of numeric literal length.\r\n* Support for underscore syntax in all numeric literals. Underscores are permitted *between* two numeric characters only.\r\n  * Works: `0x0_1` `0b110_001` `1_99_0_0` `1_2e1_2`\r\n  * Parsed as generic token: `25__01` `_0x2` `0_x2` `1_` `0b1_` `0x_1`\r\n* Byte suffix `y` for signed byte, can be added to `u` as `uy` for standard byte.\r\n* BigInteger suffix `I` (yes capital I only) to designate any numeric literal to be handed back as BigInteger.\r\n  * Yes, it's a bonus. Parser already uses it for non-`real` numerics anyway, so we may as well make it useful, and it has a short type accelerator already.\r\n\r\nAnd I refactored a *bunch* of the numeric parsing to cut down the number of `TryParse` calls to *three* (one for decimal, double, and bigint) and then use helper functions to safely just cast into lower types as needed.\r\n\r\n(You bet I'm reusing this comment for the PR description in large part, ha!)",
+      "created_at": "2018-09-29T02:34:17Z",
+      "updated_at": "2018-09-29T02:34:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 We need to get PowerShell Committee approval for underscore syntax, octal syntax and `I` suffix.\r\n\r\nAs I commented above I'd postpone underscore syntax. Also I'd postpone octal syntax and `I` suffix until we get feature request for a real business scenario.",
+      "created_at": "2018-09-29T18:06:40Z",
+      "updated_at": "2018-09-29T18:06:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I suppose that's fair enough. Those aren't hard to take out if I must. \ud83d\ude04 \r\n\r\nWas mainly aiming for completeness, really. But yes, I suppose we'd need approval for the underscore thing and the bigint. \r\n\r\nAnd octal... man. I've discovered trying to code for octal is thoroughly difficult, because the types are bounded in powers of 2, not powers of 8; base 16 lines up very neatly, thankfully, but base 8 is not nearly so lucky!",
+      "created_at": "2018-09-29T18:13:09Z",
+      "updated_at": "2018-09-29T18:13:09Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT did the committee discuss underscore / BigInt support at all? Should I open an additional issue for that specifically?",
+      "created_at": "2018-09-29T19:05:11Z",
+      "updated_at": "2018-09-29T19:05:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think the issue is enough.\r\n\r\nAnd please keep follow PR(s) as small as possible. We could add `0b` and `y` without any optimizations. Then improve performance in follow PR. ",
+      "created_at": "2018-09-29T21:04:42Z",
+      "updated_at": "2018-09-29T21:04:42Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I suppose that does make some sense. I'll look at adding the functionality with minimal modification... \r\n\r\nThanks for the suggestion! \ud83d\ude04 ",
+      "created_at": "2018-09-29T23:06:02Z",
+      "updated_at": "2018-09-29T23:06:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "*some hours later*\r\n\r\nAnd once again I run into the same issue doing so that caused me to refactor things more thoroughly in the first place. Namely, that `TryParse` methods *can't* be used with binary. \r\n\r\nSo there's no real way to do that without either refactoring things or almost completely duplicating an entire code branch in the tokenizer, which... I'd really rather *not*, heh. It's just far more messy and error-prone than I think anyone would want a binary parsing method to be.\r\n\r\nWell, the code is written as well as it can be to my eyes, so I'll strip it down to the approved specifications and we'll go from there. I don't see a better way to do it and still keep the binary parsing functional. ",
+      "created_at": "2018-09-29T23:34:44Z",
+      "updated_at": "2018-09-29T23:34:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 Let's pull PR with `y` only. After that we'll be thinking about `0b` and optimizations.",
+      "created_at": "2018-09-30T17:02:07Z",
+      "updated_at": "2018-09-30T17:02:07Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sounds good to me! ",
+      "created_at": "2018-09-30T17:07:25Z",
+      "updated_at": "2018-09-30T17:07:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 @PowerShell/powershell-committee did not discuss underscore/bigint.  I'll remark this for review.",
+      "created_at": "2018-10-04T23:56:20Z",
+      "updated_at": "2018-10-04T23:56:20Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks Steve!\r\n\r\n@HumanEquivalentUnit and I have discovered a new `BigInteger` constructor introduced in .NET Core 2.0 and have been toying with parsing binary using it:\r\n```csharp\r\npublic BigInteger(ReadOnlySpan<byte> value, bool isUnsigned = false, bool isBigEndian = false)\r\n```\r\nBenchmarks of a bunch of different methods are looking very good indeed. Some of the slower possible methods we've come up with (he's been doing a lot of the tinkering here) are still about twice as fast as `Convert.ToIntX()` methods, even with smaller numbers. \ud83d\ude04 \r\n\r\nBeyond that, we're subdividing nanoseconds finding quicker methods, so I think I can call that \"good enough\" for the forseeable future!",
+      "created_at": "2018-10-07T18:58:37Z",
+      "updated_at": "2018-10-07T19:05:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT We need PowerShell Committee conclusion to continue, please.",
+      "created_at": "2018-10-12T09:35:43Z",
+      "updated_at": "2018-10-12T09:35:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Re use of _only_ uppercase `I` for `[bigint]`, quoting https://github.com/PowerShell/PowerShell/pull/7993#issue-222151965\r\n\r\n> Adds support for natively returning a biginteger with no rounding using the I (capital i) suffix. I elected to use \"big i\" and exclude \"little i\" as that is generally reserved in mathematics for imaginary numerals and could be confusing to some.\r\n\r\nWhile lowercase `i` can indeed get confusing, I suggest not introducing an inconsistency by making the `I` suffix the lone exception in terms of case-sensitivity.\r\n\r\nWhile it makes sense to _document and recommend_ the use of uppercase `I`, and to use it in _examples_, I suggest _accepting_ `i` too, for symmetry with all other type-suffix characters.\r\n\r\nAlternatively, we could pick a different character - has `n` been considered? (It is pretty much the only other letter left that doesn't cause outright confusion; any letter we choose is technically a breaking change in argument mode).\r\n\r\n",
+      "created_at": "2018-10-22T16:24:52Z",
+      "updated_at": "2018-10-22T16:24:52Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`n` is a pretty decent alternative... I'd rather not cause confusion for those more mathematically inclined, I think. Worth considering also, definitely.\r\n\r\n(And since it's trivially easy to implement complex numeral parsing, I'd rather not completely block that out as a possibility by taking `i` as a suffix here, although in our target userbase I doubt there's a lot of use for it.)",
+      "created_at": "2018-10-22T16:35:25Z",
+      "updated_at": "2018-10-22T16:35:25Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT @mklement0 @iSazonov \r\n\r\nI have attempted to summarize in the original issue description the main discussion points from #7993 as best I can to assist with committee review of the primary sticking points on that PR. \ud83d\ude04 ",
+      "created_at": "2018-11-15T21:18:50Z",
+      "updated_at": "2018-11-15T21:19:03Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 Thanks for the summary, this will help the review and come to a conclusion more quickly!",
+      "created_at": "2018-11-15T21:26:09Z",
+      "updated_at": "2018-11-15T21:26:09Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, regarding the underscore, we do not accept adding that as it can cause issues with existing usage as @lzybkr pointed out.  Also, we do not want auto coercion from long to bigint as not only is this a breaking change, but may cause surprising effects to users.",
+      "created_at": "2018-11-28T23:52:07Z",
+      "updated_at": "2018-11-28T23:52:07Z"
+    }
+  ],
+  "created_at": "2018-08-17T01:13:35Z",
+  "number": 7557,
+  "state": "closed",
+  "title": "Allow binary numbers, byte literals, and BigInteger?",
+  "updated_at": "2019-04-04T03:15:18Z"
+}

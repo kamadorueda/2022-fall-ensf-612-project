@@ -1,0 +1,300 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13071",
+  "author": "SteveL-MSFT",
+  "body": "## User scenario\r\n\r\nSince we've added more ANSI escape sequences for coloring in PS7, if you pipe or redirect that text output, the embedded ANSI escape sequences are sent down the pipeline.  This can make log files harder to read.  Also, for those wanting to leverage ANSI escape sequences, they are difficult to create/read for scripters and also harder to use formatting presets rather than hardcoding specific colors.\r\n\r\n## Fundamental philosophy\r\n\r\nOn Linux, if you use `ls --color` then different file types use ANSI escape sequences as color indicators.  If you pipe this output to `less`, then you get paging while retaining the color information.  If you redirect this output to a file, that file contains the ANSI escape sequences.  If you then use the `cat` command on the file, you see the coloring as the ANSI escape sequences are rendered by the terminal.\r\n\r\nOn macOS, the similar command is `ls -G`, however, piping this output to `less` or redirecting to a file you lose the ANSI escape sequences so it is just plain text.  I believe `ls` on macOS is detecting if output is redirected and turning off coloring automatically.\r\n\r\nSo for PowerShell, we should have a consistent experience regardless if Windows, Linux, or macOS and interop with native commands that may output ANSI escape sequences in addition to cmdlets/formatting.\r\n\r\nSince ANSI escape sequences are de facto standardized, we should not introduce a new intermediate format and should just embed ANSI escape sequences within strings.  This will ensure compatibility with other tools that emit or handle ANSI escape sequences.\r\n\r\n## Proposed technical implementation details\r\n\r\nA new automatic variable `$PSStyle` will be added:\r\n\r\n```powershell-console\r\n   TypeName: System.Management.Automation.PSStyle\r\n\r\nName            MemberType Definition\r\n----            ---------- ----------\r\nReset           Property   string AttributesOff {get;set;}\r\nBackground      Property   System.Management.Automation.PSStyle+BackgroundColor Background {get;set;}\r\nBlink           Property   string Blink {get;set;}\r\nBlinkOff        Property   string BlinkOff {get;set;}\r\nBold            Property   string Bold {get;set;}\r\nBoldOff         Property   string BoldOff {get;set;}\r\nForeground      Property   System.Management.Automation.PSStyle+ForegroundColor Foreground {get;set;}\r\nFormatting      Property   System.Management.Automation.PSStyle+FormattingData Formatting {get;set;}\r\nHidden          Property   string Hidden {get;set;}\r\nHiddenOff       Property   string HiddenOff {get;set;}\r\nOutputRendering Property   System.Management.Automation.OutputRendering OutputRendering {get;set;}\r\nReverse         Property   string Reverse {get;set;}\r\nReverseOff      Property   string ReverseOff {get;set;}\r\nStandout        Property   string Standout {get;set;}\r\nStandoutOff     Property   string StandoutOff {get;set;}\r\nUnderline       Property   string Underlined {get;set;}\r\nUnderlineOff    Property   string UnderlinedOff {get;set;}\r\n```\r\n\r\n### $PSStyle\r\n\r\nThe base members return ANSI escape sequences mapped to their names.  These are also settable so the user can change bold to underlined, for example.  This makes it easier for scripters to author decorated strings with tab completion:\r\n\r\n```powershell\r\n\"$($PSStyle.Background.LightCyan)Power$($PSStyle.Underlined)$($PSStyle.Bold)Shell$($PSStyle.Reset)\"\r\n```\r\n\r\n### $PSStyle.OutputRendering\r\n\r\nThis is of type `System.Management.Automation.OutputRendering` which is an enum with the values:\r\n\r\n- **Automatic** This is the default. If the host supports VirtualTerminal, then ANSI is always passed as-is, otherwise plaintext \r\n- **ANSI** ANSI is always passed through as-is\r\n- **PlainText** ANSI escape sequences are always stripped so that it is only plain text\r\n- **HostOnly** This would be the macOS behavior where redirected or piped output the ANSI escape sequences are removed\r\n\r\n### $PSStyle.Formatting\r\n\r\nThis effectively replaces `$Host.PrivateData` as the way to read or configure colors for formatting rendering.  `$Host.PrivateData` will continue to exist for backwards compatibility, but is not connected to `$PSStyle.Formatting`.\r\n\r\n```powershell-console\r\n   TypeName: System.Management.Automation.PSStyle+FormattingData\r\n\r\nName         MemberType Definition\r\n----         ---------- ----------\r\nDebug        Property   string Debug {get;set;}\r\nError        Property   string Error {get;set;}\r\nErrorAccent  Property   string ErrorAccent {get;set;}\r\nFormatAccent Property   string FormatAccent {get;set;}\r\nVerbose      Property   string Verbose {get;set;}\r\nWarning      Property   string Warning {get;set;}\r\n```\r\n\r\nOne difference here is that instead of being of type `ConsoleColor`, these are all strings and doesn't separate foreground and background colors.  This means that a single member can have foreground and background colors defined as well as other attributes like bold, underlined, etc...\r\n\r\nScripters can easily leverage this:\r\n\r\n```powershell\r\n\"$($PSStyle.Formatting.ErrorAccent)Power$($PSStyle.Formatting.Verbose)Shell$($PSStyle.AttributesOff)\"\r\n```\r\n\r\n### $PSStyle.Foreground and $PSStyle.Background\r\n\r\nThese members contain the standard 16 console colors as well as a RGB() methods to specify 24-bit color.  For the colors, the values are settable and because they are strings can be any string content and any number of ANSI escape sequences.\r\n\r\n```powershell-console\r\n\r\n   TypeName: System.Management.Automation.PSStyle+ForegroundColor\r\n\r\nName         MemberType Definition\r\n----         ---------- ----------\r\nRgb          Method     string Rgb(byte red, byte green, byte blue), string Rgb(int rgb)\r\nBlack        Property   string Black {get;set;}\r\nBlue         Property   string Blue {get;set;}\r\nCyan         Property   string Cyan {get;set;}\r\nDarkGray     Property   string DarkGray {get;set;}\r\nGreen        Property   string Green {get;set;}\r\nLightBlue    Property   string LightBlue {get;set;}\r\nLightCyan    Property   string LightCyan {get;set;}\r\nLightGray    Property   string LightGray {get;set;}\r\nLightGreen   Property   string LightGreen {get;set;}\r\nLightMagenta Property   string LightMagenta {get;set;}\r\nLightRed     Property   string LightRed {get;set;}\r\nLightYellow  Property   string LightYellow {get;set;}\r\nMagenta      Property   string Magenta {get;set;}\r\nRed          Property   string Red {get;set;}\r\nWhite        Property   string White {get;set;}\r\nYellow       Property   string Yellow {get;set;}\r\n```\r\n\r\n## PowerShell engine changes\r\n\r\nThe formatting system, pipelining, and redirection will be updated to respect the value of `$PSStyle.OutputRendering`.\r\n\r\n### StringDecorated type\r\n\r\nThis is an internal type to handle ANSI escaped strings.\r\n\r\n### Constructor\r\n\r\nSingle constructor taking a string as input.\r\n\r\n### `bool IsDecorated` property\r\n\r\nReturns if the string contains ANSI escape sequences based on if the string contains ESC or C1 CSI.\r\n\r\n### `int Length` property\r\n\r\nReturns the length of just the text content of the string sans ANSI escape sequences.\r\n\r\n### `StringDecorated Substring(int contentLength)` method\r\n\r\nReturns a substring starting at index 0 up to the contentLength for content that is not part of an ANSI escape sequence.  This is needed for table formatting to truncate strings preserving ANSI escape sequences that don't take up printable character space.\r\n\r\n### `string ToString()` method\r\n\r\nReturns the plaintext version of the string.\r\n\r\n### `string ToString(bool Ansi)` method\r\n\r\nReturns the raw ANSI embedded string if `Ansi` parameter is true, otherwise returns plain text with ANSI escape sequences removed.\r\n\r\n## `Out-String` update\r\n\r\nTo enable scripts to easily allow plain text redirection, `Out-String` will have a `-RemoveAnsi` switch.\r\n\r\n## `Select-String` update\r\n\r\nBy default, it would make sense for `Select-String` to ignore ANSI escape sequences, perhaps a `-IncludeAnsi` switch should be added.\r\n\r\n## $Host.PrivateData\r\n\r\nThis will be available for legacy scripts/modules that read from it.  However, the engine changes (and console host changes) would mean these settings will no longer be observed and instead use the settings from `$PSStyle`.\r\n\r\n## Alternate considerations\r\n\r\nOriginal prototype was built on top of `System.CommandLine.Rendering`, however, that is still a work in progress and is not targeted to be 1.0 in time for 7.1.  It is also geared towards C# developers and the user experience is not great for scripts.\r\n\r\n## Related Issues\r\n\r\nhttps://github.com/PowerShell/PowerShell/issues/10811\r\nhttps://github.com/PowerShell/PowerShell/issues/7744\r\nhttps://github.com/powershell/powershell/issues/3611",
+  "closed_at": "2020-12-11T18:33:59Z",
+  "comments": [
+    {
+      "author": "adamskt",
+      "author_association": "NONE",
+      "body": "Possibly stupid question here:  Will I be able to use `Export-Clixml` on the `$PSSyle` automatic variable to \"round-trip\" my thoroughly tricked-out and gorgeous settings to a file that I could use to move them to another environment?  Will the ANSI escape codes in the string members get serialized in such a way as to not trip up version control systems?  In any case, this seems like a fabulous idea!",
+      "created_at": "2020-07-01T01:44:19Z",
+      "updated_at": "2020-07-01T01:44:19Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@adamskt good question.  I don't see any reason why you couldn't serialize `$PSStyle` to Clixml and deserialize it to overwrite `$PSStyle` as a way to have the same settings across systems.",
+      "created_at": "2020-07-01T01:47:55Z",
+      "updated_at": "2020-07-01T01:47:55Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "So in summary. \r\n(1) A standard, fairly readable way for scripts to do formatting \r\n(2) A simple way to turn off ANSI formatting whether the author used (1) or did it their own way \r\nThat solves what I see as the two main problems with ansi codes (wanting to turn it off - sometimes - and ugly scripts) . \r\n\r\nI liked the early draft of this idea, and I like this even more. A simple thumbs up wasn't enough :-) \r\n\r\nSince common parameters set the preference variables for the local scope, what would your view be on adding a common parameter  which sets output-rendering for a single command ?  Among other things that would mean if one really hates the authors choice of colors a simple entry in $PSDefaultParamterValues gets rid of it. \r\n\r\nI also wonder if more choices should be available so that a user can set their own warning, error, emphasis styles and the author then says \"format this as a warning\" not \"use orange text\" \r\n \r\n\r\n",
+      "created_at": "2020-07-01T09:46:46Z",
+      "updated_at": "2020-07-01T09:51:51Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "If PowerShell is going to tackle theming I'd really *really* like to see some extra settings that a TUI might be able to tap into.  Taking bootstrap as an example, I'd like to see the styles be under names like:\r\n\r\n- Primary\r\n- Secondary\r\n- Success\r\n- Danger\r\n- Warning\r\n- Info\r\n- Light\r\n- Dark\r\n- Muted\r\n\r\nEvery time I've started making a TUI of any sort, trying to make something that looks nice and also keeps to the spirit of the user's color choices is very challenging.",
+      "created_at": "2020-07-01T11:40:35Z",
+      "updated_at": "2020-07-01T11:40:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Re **terminology**: I wonder if we should use [\"Virtual Terminal (VT) [Escape] Sequences\"](https://docs.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences) rather than [\"ANSI escape codes\"](https://en.wikipedia.org/wiki/ANSI_escape_code) in order to avoid confusion with the \"ANSI\" _character encoding_ - though, arguably, that confusion is more likely for Windows users and, conversely, Unix users may be less familiar with the term \"Virtual Terminal\".\r\n\r\nFWIW, looking at a few `man` pages for the various Unix utilities capable of producing colored output suggests that they rarely mention the coloring _mechanism_ and often just talk about \"color\", and less frequently \"escape sequences\".\r\n\r\nAvoiding \"ANSI\" would also mean: `string ToString(bool Ansi)` -> `string ToString(bool decorated)`\r\n\r\n---\r\n\r\nRe **output modes** (controlling when to use the sequences, `$PSStyle.OutputRendering`):\r\n\r\nNote that GNU `ls` (and implicitly also macOS/BSD `ls`) has _3_ modes (as do both GNU and macOS/BSD `grep`):\r\n\r\n* `auto` (the default): if stdout is connected to a (VT-enabled) _terminal_, use color; otherwise (redirected output (pipe, file)) don't.\r\n* `never`: never use color\r\n* `always`: always use color, irrespective of where the output goes.\r\n\r\nGNU `ls` _without a color option_ defaults to `auto`; using `--color` is the same as `--color=always` (the other options obviously being `--color=never` and `--color=auto`); note that this default is an unfortunate choice; GNU and macOS/BSD `grep` more sensibly interpret `--color` as `--color=auto`.\r\n\r\nmacOS/BSD `ls`, via _arguments_, offers `auto` behavior (only) via `-G` (default is `never`); environment variable `CLICOLOR_FORCE` can be set to achieve `always` behavior.\r\n\r\nIn short: I think these modes are sufficient and I think they're worth adopting - including the terminology.\r\n\r\n---\r\n\r\nUse of **environment variables**, **new CLI parameter**, **new common parameter** to control coloring:\r\n\r\nWe should consider exposing setting `$PSStyle.OutputRendering` and the potential theming proposed by @SeeminglyScience via environment variables as well, so that there's an easy way for automation environments that call the PowerShell CLI to preset unconditional (`always`) coloring (e.g., from a POSIX-like shell; name negotiable, but it should be reasonably short: `PSSTYLE_MODE=always pwsh -NoProfile -File ...`)\r\n\r\n_Update_: https://github.com/PowerShell/PowerShell/issues/10811#issuecomment-546126662 mentions @lzybkr proposing a new _CLI_ parameter:\r\n\r\n> @lzybkr had a good suggestion to have a param on `pwsh` like `-color` with `always`, `auto`, `never` values. \r\n\r\n@jhoneill [above](https://github.com/PowerShell/PowerShell/issues/13071#issuecomment-652315169) suggested a new _common parameter_  for _cmdlet-individual_ control (caveat is that unless this parameter is opt-in, conflicts with existing user-defined parameters are possible).",
+      "created_at": "2020-07-01T13:39:02Z",
+      "updated_at": "2020-07-01T18:05:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT, this issue mistakenly links to itself under \"Related Issues\"; I think you meant to link to #10811.\r\n",
+      "created_at": "2020-07-01T14:36:01Z",
+      "updated_at": "2020-07-01T16:03:50Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This already seems kind of similar to what @jaykul has done with PANSIES, only less flexible and harder to work with. In that module, a PSProvider is added that is capable of generating escape codes for common (named) colors as well as arbitrary hex color values. That can then be used mid-string to insert values in a flexible way.\r\n\r\nIf users are still going to have to look up the escape sequences for these settings / download a third party module to handle that anyway, I'm not sure this really adds much. Having a base theming framework is a good start, but without some more user-friendly features (VT escapes are _not_ user friendly, period) I don't see it getting a ton of use.",
+      "created_at": "2020-07-01T14:44:04Z",
+      "updated_at": "2020-07-01T14:44:04Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 you're right, had the wrong URL in my clipboard at the time.  Fixed.",
+      "created_at": "2020-07-01T15:45:54Z",
+      "updated_at": "2020-07-01T15:45:54Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 the `$PSStyle` variable is explicitly to handle not knowing ESC sequences and allowing for tab-completion in strings.  It also has the RGB method for arbitrary 24-bit color.",
+      "created_at": "2020-07-01T15:47:01Z",
+      "updated_at": "2020-07-01T15:47:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience I think those are interesting style names and can see how they may be more future proof.  Were you thinking those would replace the ones I have under the `Formatting` member or in addition?  How would you map yours to the existing ones (some are obvious, others not as much like ErrorAccent).",
+      "created_at": "2020-07-01T15:56:10Z",
+      "updated_at": "2020-07-01T15:56:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, as implied by @SteveL-MSFT's comment, unless you want to redefine the default colors (which probably isn't a good idea) or redefine the `$PSStyle.Formatting` properties, you won't have to deal with escape sequences.\r\n\r\nHowever, in order to better support these - advanced - use cases, perhaps we could extend `Write-Host` to support all the styles supported by `$PSStyle` and add an `-AsDecorated` switch that outputs the result as a string with escape sequences.\r\n",
+      "created_at": "2020-07-01T16:43:36Z",
+      "updated_at": "2020-07-01T16:43:36Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience I think those are interesting style names and can see how they may be more future proof. Were you thinking those would replace the ones I have under the `Formatting` member or in addition? How would you map yours to the existing ones (some are obvious, others not as much like ErrorAccent).\r\n\r\nThe way I have it in my head is something like this:\r\n\r\n```csharp\r\nclass Theme\r\n{\r\n    public Style Default { get; set; }\r\n    public Style Primary { get; set; }\r\n    public Style Secondary { get; set; }\r\n    public Style Success { get; set; }\r\n    public Style Danger { get; set; }\r\n    public Style Warning { get; set; }\r\n    public Style Info { get; set; }\r\n    public Style Light { get; set; }\r\n    public Style Dark { get; set; }\r\n    public Style Muted { get; set; }\r\n}\r\n\r\nclass Style\r\n{\r\n    public Color Foreground { get; set; }\r\n    public Color Background { get; set; }\r\n    public Decoration Decoration { get; set; }\r\n}\r\n\r\nclass Color\r\n{\r\n    // Maybe just the RGB value here.\r\n\r\n    public bool TryWriteAnsiPrefix(Span<char> buffer, out int amountWritten, bool isBackground = false);\r\n\r\n    public bool TryWriteAnsiReset(Span<char> buffer, out int amountWritten, bool isBackground = false);\r\n}\r\n\r\nclass Decoration\r\n{\r\n    public bool IsUnderlined { get; set; }\r\n\r\n    // etc\r\n\r\n    public bool TryWriteAnsiPrefix(Span<char> buffer, out int amountWritten);\r\n\r\n    public bool TryWriteAnsiReset(Span<char> buffer, out int amountWritten);\r\n}\r\n```\r\n\r\nWhere `$PSStyle` points to `Theme.Default` maybe with an ETS property called `Theme` that points to the parent?\r\n\r\n<sub>I realize this is a drastically different design in a few places that aren't relevant, it's just for illustration purposes.</sub>",
+      "created_at": "2020-07-01T17:55:23Z",
+      "updated_at": "2020-07-01T21:57:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The formatting system, pipelining, and redirection will be updated to respect the value of `$PSStyle.OutputRendering`\r\n\r\nI assume this means, as also implied by @jhoneill's comment, that the engine will have to check every output object for whether it is a string and, if so, whether it contains VT escape sequences - do we need to worry about performance, especially with sophisticated detection (see below)?\r\n\r\n> Returns if the string contains ANSI escape sequences based on if the string contains ESC.\r\n\r\nI suggest a more sophisticated test, along the lines of using regex `(?:\\e\\[|\\u009b)[^m]*m`, so as to not accidentally strip unrelated escape sequences used for different purposes (rare as that may be); this regex should cover all SGR (Select Graphic Rendition) sequences, which, however may still not be enough, given that other sequences do exist: see https://en.wikipedia.org/wiki/ANSI_escape_code#Escape_sequences; remember the discussion in #7744, initiated by @felixfbecker, in the context of an OSC (Operating System Command) sequence where not only the actual start and end sequences must be stripped, but also the text _in between_ (it is a hyperlink that shouldn't print when rendering as plain text).\r\n\r\nAt any rate, we need to clearly document what escape sequences we do detect as  `$PSStyle.OutputRendering`-relevant, and what the limitations are.\r\n\r\n\r\n\n\n<blockquote><img src=\"/static/favicon/wikipedia.ico\" width=\"48\" align=\"right\"><div><strong><a href=\"https://en.wikipedia.org/wiki/ANSI_escape_code#Escape_sequences\">ANSI escape code - Wikipedia</a></strong></div></blockquote>",
+      "created_at": "2020-07-01T20:14:05Z",
+      "updated_at": "2020-07-02T15:40:12Z"
+    },
+    {
+      "author": "mikeTWC1984",
+      "author_association": "CONTRIBUTOR",
+      "body": "$PSStyle.OutputRendering would also solve https://github.com/PowerShell/PowerShell/issues/12703 \r\nOther thoughts :\r\nSome of these can be implemented as string extenstions (e.g.  ```\"Powershell\".Green.Bold.Bg(\"Yellow\")``` )\r\nRgb method could accept named colors from System.Drawing.Color (256 colors)\r\nSome out of the box color testing cmdlet would be nice to have (maybe lolcat ? :) )\r\nConverto-Html should be able to convert ansi to colors",
+      "created_at": "2020-07-02T03:32:43Z",
+      "updated_at": "2020-07-02T03:52:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The formatting system, pipelining, and redirection will be updated to respect the value of $PSStyle.OutputRendering\r\n\r\nWe forget about Jason's PSMore idea. Formatting system based on the idea will be great. I do not think that it will require more efforts than this PSStyle proposal.\r\n\r\nAlso I'd think about generalizing of the rendering - `OutputRendering` could be `IRendering`/`IPSRendering` so that developers can easily address web and other scenarios like Markdown, HTML (5? :-) ) and other outputs.",
+      "created_at": "2020-07-02T09:16:42Z",
+      "updated_at": "2020-07-02T09:16:42Z"
+    },
+    {
+      "author": "felixfbecker",
+      "author_association": "CONTRIBUTOR",
+      "body": "The API looks good to me, but the proposal seems to be focused a lot on creating \"decorated strings\" for the pipeline and doesn't talk about the distinction between formatting and pipeline data. Colors are imo a formatting concern and should generally not be in strings in the pipeline. The API can of course be used inside formatting files, so there isn't a problem with the API, I just wished the proposal here targeted that use case explicitly and less so putting strings with ANSI sequences into the pipeline. Some people will do that of course, and that is ok, because the distinction doesn't matter for every quick shell script hacked together. But I expect PowerShell itself and many modules to use this feature the most, and they'll want to do it the proper way.\r\n\r\nSince this issue is very broadly named \"ANSI escape handling and PowerShell\", I'd also like to point out that there are some big issues with the way the formatting system handles color escapes that would need to be solved too (as others have also pointed out): https://github.com/PowerShell/PowerShell/issues/7744#issuecomment-489771728\r\n\r\nSome comment on the API:\r\nDoes `AttributesOff` only turn text attributes like bold and underline off? Or is it the RESET sequence that resets everything, including color? If the latter, I think `Reset` would be a less confusing name.\r\n\r\nIt also seems like it would make sense to add `-OutputRendering` also as a parameter to `Out-String`, `Out-Host`, etc cmdlets\r\n\r\nOverall would love to see such an API though!",
+      "created_at": "2020-07-02T09:39:34Z",
+      "updated_at": "2020-07-02T09:39:34Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> The API looks good to me, but the proposal seems to be focused a lot on creating \"decorated strings\" for the pipeline and doesn't talk about the distinction between formatting and pipeline data. Colors are imo a formatting concern and should generally not be in strings in the pipeline.\r\n\r\nYES!  I have marked myself out the position of \"the curmudgeon who wants monochrome\" but data has no colour - we add it to give humans something better to look at - therefore it should be applied at the very last moment via the formatting xml.  Nothing in this prevents that - I think it makes things easier. \r\nHowever, whether it is write-host with -foregroundcolor or embedding ANSI escape codes in strings writers, DO put colour in their output, and this gives a less bad way of doing it... It should still come with a very clear warning that when you turn data into formatted text getting back to the data may not be simple.  \r\n \r\n\r\n ",
+      "created_at": "2020-07-02T12:07:22Z",
+      "updated_at": "2020-07-02T12:07:22Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@felixfbecker the `SubString()` method is explicitly to handle proper truncated for decorated strings used with formatting.  `AttributesOff` is the `RESET` ESC sequence.  The name was borrowed from the .NET API, but can be changed to `Reset` if that's more obvious.  `-OutputRendering` to `Out-String` makes sense as a way to control it within the pipeline.  Will add.  I think `Out-Host` rendering should be implicit, is there a scenario where a script would control it vs the user?",
+      "created_at": "2020-07-02T14:51:04Z",
+      "updated_at": "2020-07-02T14:51:04Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "I second the comment about \"Reset\" being a better name than \"AttributesOff\". (I also prefer \"VT sequences\" to \"ANSI escape sequences\", but not quite as strongly.)\r\n\r\nRe: the `IsDecorated` method that looks for ESC characters: don't forget about [C1](https://en.wikipedia.org/wiki/C0_and_C1_control_codes) codes (the C1 CSI is a single 0x9b--no ESC (0x1b) character).\r\n\r\nOh wait... did you say this class would be internal only? That seems like it would be a shame... the PowerShell engine is not going to be the only thing that wants to be able to deal with this sort of stuff.\r\n\r\n(Feel free to borrow any code from my related [CaStringUtil class](https://github.com/microsoft/DbgShell/blob/master/DbgProvider/internal/CaStringUtil.cs).)\r\n\r\nThe \"fg\" and \"bg\" PSProviders in jaykul's [Pansies](https://github.com/PoshCode/Pansies/blob/master/Docs/Pansies.md) has a really nice terse syntax--`${fg:red}` versus `$PSStyle.Foreground.Red`--though maybe the latter is more descriptive. Maybe it's a \"why not both?\" situation.\r\n\r\nSide note (only very tangentially related to this): another thing we need is editors that understand VT SGR sequences. Once or twice I've taken to embedding SGR sequences in my comment-based help comments, which looks great when displayed, but gets real ugly real quick when reading the comments in the source and trying to edit it.\r\n",
+      "created_at": "2020-07-02T15:14:43Z",
+      "updated_at": "2020-07-02T15:14:43Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@jazzdelightsme updated to also include `C1 CSI`.  The intent of keeping the class internal is that .NET team is also working on some APIs to solve this problem, so would prefer not to have 2 public APIs once theirs is available.  Perhaps we can put it in the `internal` namespace rather than making it internal.  `Foreground` and `Background` could be just `FG` and `BG`, but wanted to follow PowerShell convention of verbosity.\r\n\r\nYou should open that editor complaint in the VSCode repo!",
+      "created_at": "2020-07-02T15:42:05Z",
+      "updated_at": "2020-07-02T15:42:05Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> The API looks good to me, but the proposal seems to be focused a lot on creating \"decorated strings\" for the pipeline and doesn't talk about the distinction between formatting and pipeline data. Colors are imo a formatting concern and should generally not be in strings in the pipeline. The API can of course be used inside formatting files, so there isn't a problem with the API, I just wished the proposal here targeted that use case explicitly and less so putting strings with ANSI sequences into the pipeline.\r\n\r\nI think this is a very important point.  Ideally the API would be designed in a way that doesn't make it appear that the best practice is to just output decorated strings.  With the current design I think we'd see an uptick in this sort of pattern.\r\n\r\n---\r\n\r\n@SteveL-MSFT \r\n\r\n> I think Out-Host rendering should be implicit, is there a scenario where a script would control it vs the user?\r\n\r\nI can definitely think of scenarios, but none that wouldn't be solved easily enough with `Out-String @formatting -Stream | Out-Host`\r\n\r\n> The intent of keeping the class internal is that .NET team is also working on some APIs to solve this problem, so would prefer not to have 2 public APIs once theirs is available.\r\n\r\nShould PowerShell wait then? Once the dotnet version comes out we'll have one public API that doesn't work with PS and one internal type we still can't use right?\r\n\r\nRealistically PowerShell is probably going to need it's own version anyway since the dotnet one will likely be pretty byref-like heavy. So my opinion would be make the PowerShell-centric version public, and just switch the implementation to use the dotnet version once it becomes available.  Maybe make them implicitly convertable to each other for extra points.\r\n\r\n> Perhaps we can put it in the `internal` namespace rather than making it internal.\r\n\r\nI mean we can use reflection if we don't care about using unsupported API's.  I feel like pubternal API's don't really work in PowerShell, most users won't understand what that means.  Especially with the already mixed messaging around them via `AutomationNull`.",
+      "created_at": "2020-07-02T16:17:07Z",
+      "updated_at": "2020-07-02T16:17:07Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "Forgive my ignorance but why are not solving this in the formatting layer like #11890? PowerShell has kept data and formatting separate and it seems like this is trying to combine formatting (color) into the data (strings).",
+      "created_at": "2020-07-02T16:31:15Z",
+      "updated_at": "2020-07-02T16:31:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To add to the comments by @felixfbecker, @SeeminglyScience, and @ThomasNieto  re the problematic use of VT strings _in the pipeline_:\r\n\r\n* **I think that the engine itself should _not_ be in the business of (conditionally) cleaning VT sequences from strings _in the pipeline_**. It is expensive, can lead to false positives, and we generally shouldn't _guess_ whether or not a command actually meant to output _data_ that happens to contain VT sequences.\r\n\r\n  * Besides, it is impractical, as the engine would have to walk an object's _properties_ if the VT string is not the output object itself, but in a property (something like ``[pscustomobject] @{ one = \"`e[31mred`e[m\" }``).\r\n\r\n* Instead, **the use of VT sequences for _formatting_ should be a _deliberate act_ by _each command_**, in one of two ways:\r\n\r\n  * Preferably, via the formatting layer (`format.ps1xml` files), where the use of `$PSStyle` will by definition affect formatted output only.\r\n\r\n  * Simpler alternatives for scripters:\r\n\r\n     * In the simplest form, allow signaling that a string's VT sequences are solely for formatting, e.g., by adding a new `-HostOnlyVT` switch (or some such thing) to `Write-Output`, which would tell it to strip the VT sequences (by default) except when writing to the host:\r\n\r\n           \"It ain't easy being $($PSStyle.Foreground.Green}green$($PSStyle.AttributesOff}.\" | Write-Output -HostOnlyVT\r\n\r\n    * For more control, let's revisit @KirkMunro's proposal to make output formatting easier by extending the `[OutputType()]` attribute, which could fit in here as well: #10463 (inspired by his earlier [FormatPx](https://github.com/KirkMunro/FormatPx) project). It could be integrated part of #11890 to provide property-specific formatting via calculated properties containing newly introduced formatting instructions.\r\n\r\n* The formatting engine then needs to be VT-aware in order to strip sequences on demand properly handle truncation of values to avoid the problems described in #7744, which is what the proposed `StringDecorated` class would do.\r\n\r\n     * All `Out-*` cmdlets should then respect `$PSStyle.OutputRendering`, which should default to `auto` (VT sequences only when printing to the host).\r\n\r\n     * All `Out-*` cmdlets could get a new `-PreserveVT <mode>` (name negotiable) parameter  to allow controlling the output mode on a per-call basis, with `<mode>` being one of  the values supported by `$PSStyle.OutputRendering` (which I propose be `auto`, `always`, and `never`).\r\n\r\n    * As proposed, a new CLI parameter could help when explicitly wanting colored output even when capturing output. For instance, from Bash: `capturedWithColor=\"$(pwsh -preserveVT always -c '\"foo\" | sls \"o\"')\"` (remember that what an external caller sees on stdout when calling the PowerShell CLI is _formatted_ output, unless `-OutputFormat XML` is used).\r\n\r\n---\r\n\r\n@SteveL-MSFT:\r\n\r\n* `Out-String -PreserveVT never` would then supersede `-RemoveAnsi`\r\n\r\n* I don't think `Select-String` should ignore VT sequences _by default_:\r\n  * We should stick with the assumption that what comes through the pipeline / from a file is _data_.\r\n  * Asking to ignore VT sequences should therefore be _opt-in_.\r\n\r\n---\r\n\r\n@jazzdelightsme:\r\n\r\n`${fg:red}` is definitely appealing for its concision and not having to use the ugly `$($...)` syntax.\r\n\r\nThe problem is that, by virtue of using namespace notation via a provider-based implementation, `fg` and `bg` are of necessity PS drives by that name; if we expose additional formatting capabilities, as proposed, we'll get a proliferation of PS drives with the potential for naming conflicts. (The nice thing about having drives is discoverability with `Get-ChildItem`).\r\n\r\n@Jaykul himself has proposed a single, hierarchical `text` drive as an alternative at https://github.com/PowerShell/PowerShell/issues/11890#issuecomment-592667804:\r\n\r\n> make the _provider_ a \"text effect\" and the drive \"text\" and make \"background\" (and \"bg\") and \"foreground\" (and \"fg\") as folders, so you could `Write-Host \"${text:fg\\red}${text:bg\\white}${text:underline}Hello World\"` or use _that_ in the format files and cmdlets ... \r\n\r\nRe SGR (VT escape sequences) in comment-based help:\r\n\r\nGiven that we want to move away from raw VT escape sequences, I think a more promising thing to consider is the use of (perhaps a limited subset of) _Markdown_ in comment-based help.\r\n\r\n\r\n",
+      "created_at": "2020-07-02T17:43:18Z",
+      "updated_at": "2020-07-02T17:43:18Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "It's a mistake to talk about \"moving away from raw VT escape sequences\" -- that is impossible, this is just UX.\r\n\r\nAlso, remember **the color palette** is always owned by the terminal. Practically all terminals support a base 16 color palette which can be configured. Most support changing the full 256 color xterm palette, nowadays. A growing number support using specific RGB values directly without a palette.  But in no case should **the shell** try to redefine any of those palette colors.\r\n\r\nAs far as the user experience goes, I think there are two separate concerns in the original pos that should _perhaps_ be separated.\r\n\r\nThe first part is the `OutputRendering` enum, and support for it (and overriding it) on all the output commands. I think that variable should be it's _own_ enum preference variable, and possibly a switch on the `pwsh` executable, as someone already suggested. Any discussion about adding a fancy class with named styles and so-on is also tangential, and not necessary for this. Any discussion about alternate ways of applying formats is tangential and not necessary for this. Remember, the only thing that truly exists for formatting are the VT escape sequences! For the purposes of this enum, we're just deciding when and whether or not to strip them off. \r\n\r\nThe second part is theming, and I think the design of a struct/class with specific named properties that are _primarily for use in formatting files_, and configured by the user according to their own preferences is a good one. There's no need for people to worry about when and where these things will be put into strings. We all know where things are converted into strings in PowerShell, and this does not change that. As a corollary, any discussion about alternate ways of applying formats is still tangential here!\r\n\r\nWe've always had an enum for colors for the output streams, but it doesn't support xterm or full color, and I like the idea of not only extending the color to \"any sequence supported by your terminal\" but also extending the list of colors from Default, Warning, Error, Verbose, Debug, Progress to include a few extra colors like Success, and even some \"accent\" colors like PrimaryAccent, PrimaryMuted, SecondaryAccent, SecondaryMuted, or whatever. \r\n\r\nIf we add these, then everything PowerShell outputs by default should only use the values defined here -- so that users can create specific combinations that they can read, and expect them to be respected throughout the shell.\r\n\r\nFor the sake of usability and accessibility, I'm not sure it's a good idea to have the foreground and background defined separately for these -- there's very little chance that combining the foreground from one with a different background is a good idea, so why bother requiring people to write both out every time they want to use one of these styles? Wouldn't it be better to just have a \"Warning\" style which can include a foreground _and_ background, depending on the preference of the user?\r\n\r\nI am not excited about the extra named formats (i.e. PSStyle) -- I think most of these are still too rarely functional to be of any use (for instance, bold is normally  just \"bright\", which is actually rendered as a _totally different color_, and only supported on the base 8 colors -- see [this comment](https://github.com/PowerShell/PSReadLine/issues/830#issuecomment-650508857)).  Frankly, we're probably better off using more generic names like \"PrimaryAccent\" and letting people define those to include blinking if they really want to ... \r\n\r\nIn case it's not obvious from what I've already written:\r\n\r\n## PowerShell **should _not_** define it's own _base 16 color palette_!\r\n\r\nThat is, please do not implement anything like the proposed PSStyle+ForegroundColor. It would be a mistake. The color palette belongs to the _terminal_, not the shell. Implementing a palette where the **names** of the base 16 colors are defined as a _different VT escape sequence_ than the default 16 color escape sequences would just confuse people and would wreck interaction with native apps. If you want to expose color names for simplicity, do what I did in Pansies and expose a shortcut way to use color names alongside rrggbb values to get the VT escape sequence for a color name, so that people don't need to learn the sequences -- but _don't make the sequence customizable_.",
+      "created_at": "2020-07-06T07:04:35Z",
+      "updated_at": "2020-07-06T07:05:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good points, @Jaykul, but just to be clear re:\r\n\r\n> It's a mistake to talk about \"moving away from raw VT escape sequences\"\r\n\r\nWhat the quoted statement meant is (a) that we don't want to _require_ that users deal directly with the underlying VT escape sequences (they should only have to deal with abstractions) and (b) for those advanced users that do, we should make it easy to generate such sequences with something like `Write-Host -AsDecoratedString`.",
+      "created_at": "2020-07-06T12:55:54Z",
+      "updated_at": "2020-07-06T12:57:01Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul I agree that the terminal owns the definitions of the palette and this proposal doesn't change that.  The only difference is that `$PSStyle.Foreground.Red` means a specific string which probably contains ANSI escape sequences.  The ANSI escape sequence for \"red\" as it shows up is still owned by the terminal.  In this case, a user may decide that they want `Write-Error` to show with red background, black foreground, italics, and blinking.  They can do that with `$PSStyle.Formatting`.  (Red and black would, of course, be whatever colors the terminal has defined for those entries in the palette).\r\n\r\n@PowerShell/powershell-committee had a discussion about this proposal today and some points made:\r\n\r\n- would like to see a complete example of how a user would use `$PSStyle` with custom formatting\r\n- consider a different setting for redirection vs host instead of all-in-one\r\n- does it make sense to have ANSI controlled at individual cmdlets rather than `Out-String`?\r\n- make clear that ANSI should only be used with formatting or text output and not as part of string members of objects which are just treated as pass-thru\r\n\r\nGiven that there doesn't seem to be consensus on this, rather than rushing this in, we're moving this to 7.2.",
+      "created_at": "2020-07-21T20:27:31Z",
+      "updated_at": "2020-07-21T20:27:31Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT as long as those Foreground.Red colors are _not settable_, and always result in [the simple 16 color codes](https://docs.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting) `` `e[31m`` etc., then we're on the same page \ud83d\ude01 I just don't want to deal with `git` outputting one version of red, and `PoshGit` outputting a different shade.\r\n\r\nI totally agree that \"ANSI should only be used with formatting or text output and not as part of string members of objects\" but given that statement, I don't understand what you mean about having \"ANSI controlled at individual cmdlets\"? If we \"control\" ANSI outside of the formatting or output commands, wouldn't that break the last point? \r\n\r\nI'm really not sure I'm totally on board with all this work going in to basically just create sets of colors. I can do that in a module and just tack it on to the Host.PrivateData for people to find....\r\n\r\nPersonally, I think it would be best to add ANSI parameters to the formatting commands and color **properties** to the formatting objects they output. Enhancing things with color there would be far less backward compatible (you couldn't just ship `$PSStyle` back to PS5), but having color on the formatting objects would be a dream. For examples, I have a format file now in EZTheme that has a bunch of entries that are something like this:\r\n\r\n```xml\r\n<ListItem>\r\n    <Label>green</Label>\r\n    <ScriptBlock>([PoshCode.Pansies.RgbColor]\"Green\").ToVtEscapeSequence() + \"Green\" + \"$([char]27)[49;39m\"</ScriptBlock>\r\n</ListItem>\r\n```\r\n\r\nI would much rather be able to write something like:\r\n```xml\r\n<ListItem>\r\n    <Label>green</Label>\r\n    <PropertyName Foreground=\"Black\" Background=\"Green\">Green</PropertyName>\r\n</ListItem>\r\n```\r\n\r\nOr even\r\n```xml\r\n    <Label>green</Label>\r\n    <PropertyName Foreground=\"Black\" Background=\"00EE00\">Green</PropertyName>\r\n```\r\n\r\nActually, I really want to be able to get the colors with script:\r\n```xml\r\n<TableColumnHeader>\r\n  <Alignment>Left</Alignment>\r\n  <Label>Green</Label>\r\n  <Width>5</Width>\r\n  <ForegroundColor>Black</ForegroundColor\r\n  <BackgroundColor>Green</BackgroundColor>\r\n</TableColumnHeader>\r\n...\r\n<TableColumnItem>\r\n  <PropertyName>Green</PropertyName>\r\n  <BackgroundColorScript>$_.Green</BackgroundColorScript> <!-- changes the background of JUST THIS CELL to my custom green -->\r\n</TableColumnItem>\r\n```\r\n\r\nWe want more than schemes. \r\n\r\nWe want to color things simply, maybe even have a `<highlight Color=\"Red\">term</highlight>` that we could add to automatically do a search and highlight key words in the output field. Maybe be able to script the values and even write something to  set the background of the FileInfoObject **Length** column to something like: `Get-Gradient Blue Red -Count 10 -Flatten | Select -Index ([Math]::Min(10, ($this.Length/10gb)))` as a way of coloring files relative to their size (ok, that's a super-simplistic gradient algorighm, but you get the point).\r\n\r\nOf course, we also need the formatting engine to clear the colors after each cell (or at least, set them back to the colors for the column or row ... \r\n\r\n",
+      "created_at": "2020-07-22T21:47:12Z",
+      "updated_at": "2020-07-22T22:18:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul if the desire is to have color be first classes in formatting, then we could add `ForegroundColor` and `BackgroundColor` elements to formatting XML (although I'd rather spend time moving away from XML to a DSL which could include attributes...).  However, that would be an addition and not mutually exclusive.\r\n\r\nWith the current proposal, people could use any library they want for decoration as long as the end result is ANSI escape sequences.  The main change in the engine is in formatting to use the new `substring()` method to correctly calculate column widths where ANSI escape sequences may exist.\r\n\r\nThe point about \"cmdlet controlled\" is that ANSI is still the de facto language, but specific cmdlets may have options to strip ANSI from received strings or strip ANSI (or not include ANSI) on output.  I personally prefer having stripping of ANSI just part of `Out-String`, but perhaps that's because I'm accusomted to using `Out-String` in my pester tests.",
+      "created_at": "2020-07-22T23:52:24Z",
+      "updated_at": "2020-07-22T23:52:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> although I'd rather spend time moving away from XML to a DSL which could include attributes\r\n\r\nGeneralization of formatting and rendering should be our priority. \r\nWe pay a lot of attention to output to ANSI terminal, but there are other scenarios with hosting applications. As an example we could think about PowerShell Web Console vNext based on Chrome Engine. In the case HTML/CSS output would be natively expected (maybe HTML5).\r\nWhat if we will generate HTML/CSS output and then convert to the format expected by target terminal?\r\n@Jaykul's examples resemble this. Anything that can be converted to HTML will render well and simple.\r\nFor example, MSFT team implemented Markdown rendering with escapes but we could convert Markdown to HTML and use generic API to send to _any_ console that is more flexible.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-07-23T13:01:33Z",
+      "updated_at": "2020-07-23T13:01:33Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Generalization of formatting and rendering should be our priority.\r\n\r\nI think that sounds good on paper, but it seems like we've already tried that experiment, and it failed (never gained any traction): the *current* formatting cmdlets don't `Console.WriteLine`; they output intermediate, generalized objects, allowing for alternative final rendering, should anyone choose to do that. But AFAIK, nobody has chosen to do that.\r\n\r\nAnd after having implemented my own \"Formatting+Output\" engine, I can see why--somebody else's \"generalized\" format is usually not going to be quite what you want, anyway. People want the source object itself, or the final rendering; nobody actually wants a generalized, un-rendered representation of formatting. Or put another way, the source objects themselves are much better \"intermediate forms\" than any other intermediate form you could come up with. If you want to render them in a different way; that's great. But I don't think anybody actually wants or needs any generalized middle step to do that.",
+      "created_at": "2020-07-24T04:53:37Z",
+      "updated_at": "2020-07-24T04:53:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I think ANSI escape sequences has already won the war.  You already have xterm.js that renders ANSI to HTML.  And Jupyter Notebooks with .NET Interactive also renders ANSI to HTML.  CI/CD systems also render ANSI to HTML.",
+      "created_at": "2020-07-25T14:47:09Z",
+      "updated_at": "2020-07-25T14:47:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Won the war? I would say the opposite. People prefer _the Web that won_. But tons of old applications that generate ANSI control codes are forced to work on the Web through extra adapters. Why should we go this crooked path? :-) \r\n\r\nToday PowerShell does not issue extra escapes and can output to (1) dumb terminals, (2) web engine like chromium.\r\nIf we want to enhance output formatting I'd prefer invest to modern chromium with HTML5 but not old dumb terminals.\r\n",
+      "created_at": "2020-07-27T17:52:22Z",
+      "updated_at": "2020-07-27T17:52:22Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov The current design would allow for translation of ANSI to HTML if that is required, but for console, ANSI is the de facto standard for authors of tooling",
+      "created_at": "2020-10-07T21:41:10Z",
+      "updated_at": "2020-10-07T21:41:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "By console, you mean a thin dumb teletype (tty) terminal. But at the same time we want coloring, multiple windows, background tasks, progress bar, power command line editor and so on - we actually want a _thick powerful_ terminal.\r\n\r\nI am at a loss that we are spending so much effort to overcome the limitations of tty (here and in PSReadline). (Note that these escape sequences are contrary to the object-based nature of PowerShell.) This approach is counterproductive - we are forced to perform complex string conversions at the application level, then at the terminal level, then at the OS level.\r\n\r\n_My strong belief is that PowerShell should only offer a generic interface and delegate the rest to the formatting system and host._ The formatting system must understand the target is either a console or a file to apply appropriate formatting.\r\nAs for the host, when we run PowerShell on Windows, a graphical window actually opens - why would we need a dumb terminal in it if we can use the full power of chromium engine? From the power console we can connect to any remote system (Core, Nano, Linux) and use all benefits of the console.\r\n\r\n\r\n",
+      "created_at": "2020-10-08T05:22:30Z",
+      "updated_at": "2020-10-08T05:22:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I would be inclined to agree that expending effort to letting users handle this in code itself manually would be massively wasted if it were not easily and readily accessible to formatters (if not outright designed for that first tbh).",
+      "created_at": "2020-10-08T05:29:34Z",
+      "updated_at": "2020-10-08T05:29:53Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #13758, which has now been successfully released as `v7.2.0-preview.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.2)\n",
+      "created_at": "2020-12-15T21:38:38Z",
+      "updated_at": "2020-12-15T21:38:38Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "Might want to add some kind of validation when setting certain sub-properties. For example, see how I was able to set the value of `$PSStyle.Formatting.Error = 'hi'`. @SteveL-MSFT \r\n\r\n![image](https://user-images.githubusercontent.com/466713/102286847-627a6f00-3ef6-11eb-9040-cbb055bc482f.png)\r\n",
+      "created_at": "2020-12-15T23:56:58Z",
+      "updated_at": "2020-12-15T23:56:58Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "Using `Out-String` to strip the ANSI escape sequences seems to work well, however it's adding a new line at the end. I would expect there to be no blank line.\r\n\r\n```\r\nPS /> @(\"$($PSStyle.Foreground.Blue)Hello$($PSStyle.Reset)\", 'string2') | Out-String | Set-content -path test2.txt\r\nPS /> cat ./test2.txt\r\nHello\r\nstring2\r\n\r\n```\r\n\r\nWith an array containing two string elements, I would expect there to be only two lines in the output.\r\n\r\n![image](https://user-images.githubusercontent.com/466713/102288351-87bcac80-3ef9-11eb-9287-65f02eca9acb.png)\r\n",
+      "created_at": "2020-12-16T00:18:15Z",
+      "updated_at": "2020-12-16T00:18:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point about the unwanted trailing newline, @pcgeek86, but note that - unfortunately - `Out-String` has always worked this way:\r\n\r\n```powershell\r\nPS> ('foo' | Out-String) -replace '\\r?\\n', '<newline>'\r\nfoo<newline>\r\n```\r\n\r\nPlease see #14444.\r\n",
+      "created_at": "2020-12-16T19:25:08Z",
+      "updated_at": "2020-12-16T19:25:08Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "Thanks for filing the new feedback. Upvoted.\r\n\r\nUnfortunately this new feature is exposing a bug in the core tool. Honestly I never had a need to use `Out-String` until this use case for stripping ANSI escape formatting cropped up.",
+      "created_at": "2020-12-16T19:33:42Z",
+      "updated_at": "2020-12-16T19:33:42Z"
+    },
+    {
+      "author": "ExE-Boss",
+      "author_association": "NONE",
+      "body": "@pcgeek86\r\nThis\u00a0is the\u00a0expected\u00a0behaviour, because both <code>[Out\u2011String][out-string]</code> and <code>[Set\u2011Content][set-content]</code> add a trailing newline by\u00a0default.\r\n\r\n[out-string]: https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/out-string\r\n[set-content]: https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.management/set-content\r\n\r\n---\r\n\r\nYou can\u00a0use the\u00a0`\u2011NoNewline`\u00a0switch with\u00a0<code>[Set\u2011Content][set-content]</code> to\u00a0disable\u00a0adding the\u00a0extra trailing\u00a0newline:\r\n```pwsh\r\n@(\r\n\t\"$($PSStyle.Foreground.Blue)Hello$($PSStyle.Reset)\",\r\n\t'string2'\r\n) `\r\n\t| Out-String `\r\n\t| Set-Content -Path test2.txt -NoNewline\r\n```",
+      "created_at": "2021-01-15T00:28:44Z",
+      "updated_at": "2021-01-15T00:33:30Z"
+    }
+  ],
+  "created_at": "2020-07-01T01:06:37Z",
+  "number": 13071,
+  "state": "closed",
+  "title": "ANSI escape handling and PowerShell",
+  "updated_at": "2021-01-15T00:33:30Z"
+}

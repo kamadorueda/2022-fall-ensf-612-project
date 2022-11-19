@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6377",
+  "author": "alx9r",
+  "body": "Sometimes read-only variables are allowed as parameters, other times they are not.  Is there a rule or some understandable mechanism at play here?  Is there a way to predict which names cause a `VariableNotWritable` error when used as parameters?\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n& {param($PSEdition)} # fails\r\n& { [bool]((Get-Variable PSEdition | % Options) -band 'Constant') } # true\r\n& {param([Alias('PSEdition')]$__PSEdition)} # succeeds\r\n\r\nSet-Variable IAmAConstant -Value 'constant value' -Option Constant\r\n& { [bool]((Get-Variable IAmAConstant | % Options) -band 'Constant') } # true\r\n& {param($IAmAConstant)} # succeeds\r\n\r\n$m = New-Module {}\r\n& $m { [bool]((Get-Variable PSEdition | % Options) -band 'Constant') } # true\r\n& $m {param($PSEdition)} # succeeds\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nI expected either all constant variables or none to be prohibited as parameters.\r\n\r\nActual behavior\r\n---------------\r\n\r\nIn some cases constant variables are permitted as parameters, in other cases they cause errors like following:\r\n\r\n```none\r\nCannot overwrite variable PSEdition because it is read-only or constant.\r\nAt line:1 char:1\r\n+ & {param($PSEdition)} # fails\r\n+ ~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : WriteError: (PSEdition:String) [], SessionStateUnauthorizedAccessExce \r\n   ption\r\n    + FullyQualifiedErrorId : VariableNotWritable\r\n\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value                                            \r\n----                           -----                                            \r\nPSVersion                      6.0.0                                            \r\nPSEdition                      Core                                             \r\nGitCommitId                    v6.0.0                                           \r\nOS                             Microsoft Windows 6.3.9600                       \r\nPlatform                       Win32NT                                          \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                          \r\nPSRemotingProtocolVersion      2.3                                              \r\nSerializationVersion           1.1.0.1                                          \r\nWSManStackVersion              3.0                                              \r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Hi @alx9r, there are several things going on here.  \r\n\r\nIn your first example with the parameter alias, you aren't actually touching the `$PSEdition` variable. The alias maps `-PSEdition` to `$__PSEdition` which is a completely different variable and so there is no error.\r\n\r\nThe behavior in the second example has to do with scopes and the `AllScope` option. A constant variable may be masked by a non-constant variable in a child scope unless that variable is marked `AllScope`. This is what's happening in your second example. Using '.' instead of '&' will cause it to fail because '.' evaluates the scriptblock in the current scope:\r\n```\r\nPS[1] (20) > & {param($IAmAConstant)} # succeeds because parameter is in child scope\r\nPS[1] (21) > . {param($IAmAConstant)} # fails because parameter is in current scope\r\nCannot overwrite variable IAmAConstant because it is read-only or constant.\r\nAt line:1 char:1\r\n+ . {param($IAmAConstant)} # fails because parameter is in current scop ...\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : WriteError: (IAmAConstant:String) [], SessionStateUnauthorizedAccessException\r\n    + FullyQualifiedErrorId : VariableNotWritable\r\n```\r\n(See [about_Scopes](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_scopes?view=powershell-6) for more information about how scopes and scope options work.)\r\n\r\nFinally the third example, involving module scopes, does seem to be a bug. Trying to modify a global, constant, allscope variable should result in an error even when evaluating a scriptblock in a module scope.\r\n\r\nTo summarize, marking a variable as `AllScope` prevents it from being hidden in a child scope. And there seems to be a bug in the way `AllScope` variables are being handled when evaluating a scriptblock in a module context. @lzybkr - any thoughts?",
+      "created_at": "2018-03-13T16:52:37Z",
+      "updated_at": "2018-03-13T16:52:37Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">A constant variable may be masked by a non-constant variable in a child scope unless that variable is marked AllScope. This is what's happening in your second example.\r\n\r\nI see.  The following seems to be consistent with this explanation:\r\n\r\n```PowerShell\r\nSet-Variable IAmAnAllScopeConstant -Value 'constant value' -Option Constant,AllScope\r\n& { Get-Variable IAmAnAllScopeConstant | % Options } # Constant, AllScope\r\n& {param($IAmAnAllScopeConstant)} # fails\r\n\r\nSet-Variable IAmAConstant -Value 'constant value' -Option Constant\r\n. {param($IAmAConstant)} # fails\r\n```",
+      "created_at": "2018-03-13T17:06:04Z",
+      "updated_at": "2018-03-13T17:06:04Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">Finally the third example, involving module scopes, does seem to be a bug. Trying to modify a global, constant, allscope variable should result in an error even when evaluating a scriptblock in a module scope.\r\n\r\nI'm not sure this is quite on-point, but I've opened #6378 as it seems that a write to an AllScope variable from a module does not affect that variable's value in the \"global\" session state.",
+      "created_at": "2018-03-13T17:30:15Z",
+      "updated_at": "2018-03-13T17:57:58Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Finally the third example, involving module scopes, does seem to be a bug. Trying to modify a global, constant, allscope variable should result in an error even when evaluating a scriptblock in a module scope.\r\n\r\n@BrucePay Unlike `$Error` and `$PSDefaultParameterValues` that are declared in every `SessionState`, `$PSEdition` is only declared in the default `SessionState` of the current `Runspace`. So the module scope doesn't have the variable `PSEdition` defined at all, and thus `& $m {param($PSEdition)}` works.\r\n```\r\nPS:106> $m = New-Module {}\r\nPS:107> & $m {Get-Variable PSEdition -Scope local }\r\nGet-Variable : Cannot find a variable with the name 'PSEdition'.\r\nAt line:1 char:7\r\n+ & $m {Get-Variable PSEdition -Scope local }\r\n+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (PSEdition:String) [Get-Variable], ItemNotFoundException\r\n+ FullyQualifiedErrorId : VariableNotFound,Microsoft.PowerShell.Commands.GetVariableCommand\r\n```\r\nAre you considering making `PSEdition` and other all scope const variables like `$Host` and `$PID` to be declared in every `SessionState`?",
+      "created_at": "2018-03-24T00:10:29Z",
+      "updated_at": "2018-03-24T00:10:29Z"
+    }
+  ],
+  "created_at": "2018-03-13T15:50:58Z",
+  "number": 6377,
+  "state": "open",
+  "title": "In what conditions is a parameter disallowed because it is a read-only variable?",
+  "updated_at": "2018-03-24T00:10:29Z"
+}

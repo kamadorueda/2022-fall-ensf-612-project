@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14950",
+  "author": "237dmitry",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nPS > Set-Location /\r\nPS > (Get-Location).Path\r\n/\r\nPS > [Environment]::CurrentDirectory\r\n/home/user\r\n\r\n```\r\n\r\n## Expected behavior\r\n\r\n```powershell\r\nPS > Set-Location /\r\nPS > (Get-Location).Path\r\n/\r\nPS > [Environment]::CurrentDirectory\r\n/\r\n```\r\n\r\n## Actual behavior\r\n`[Environment]::CurrentDirectory` shows not \"Current Directory\", rather \"Start Directory\"\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.2\r\nPSEdition                      Core\r\nGitCommitId                    7.1.2\r\nOS                             Linux 5.10.15-172.current #1 SMP PREEMPT Fri Feb 12 16:35:57 UTC 2021\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": "2021-03-12T00:00:05Z",
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "`[Environment]::CurrentDirectory` refers to the process wide working directory. This is different from the PowerShell location which is specific to the Runspace the pipeling is running in. They are not designed to impact each other because:\r\n\r\n* There can be multiple runspaces per thread, if you are running multiple runspaces then each could be setting their own location overwiting the process wide working directory causing all sorts of race conditions\r\n* A PowerShell location can be more than just a filesystem path, on Windows you have registry/cert/wsman/etc so setting a location to something that isn't a filesystem cannot translate to the current directory\r\n\r\nIn short you should always resolve your paths to the absolute path before calling any .NET functions. This will ensure that any relative directories are relative to PowerShell's location rather than the process wide currenct directory.",
+      "created_at": "2021-03-06T06:07:08Z",
+      "updated_at": "2021-03-06T06:07:08Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "> working directory\r\n\r\n\"Working Directory\" sounds better, don't be misleading. Or it has to have its own path provider, like registry, variable, environment, temp... or not a string as type to avoid erroneous actions. So that the user, for example, can't take and recursively delete something. ",
+      "created_at": "2021-03-06T07:04:08Z",
+      "updated_at": "2021-03-06T07:04:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To add to @jborean93's comments:\r\n\r\n* As unfortunate as this discrepancy is, it is the unavoidable price to pay for supporting multiple runspaces per process; this was first debated in #3428.\r\n\r\n* It is a moot point, but if syncing the current dirs. (\"working dirs.\" is just a synonym) _were_ possible, you could defensibly _always_ use the `FileSystem` provider's location, even if the current PowerShell location is a _different_ provider's; that is, you could use `(Get-Location -PSProvider FileSystem).ProviderPath` - in fact, the latter is the robust way to refer to PowerShell's current _file-system_ location (directory).\r\n\r\n* Unfortunately, it is currently cumbersome to resolve a mere file name or relative path to its full, _native_ path (given that .NET methods generally don't understand PowerShell-only drives), as is needed for calling. NET methods:\r\n  * If the path refers to an _existing_ item, the solution is simple: `(Convert-Path $relativePath)`\r\n  * Otherwise, things get cumbersome, because `Convert-Path` doesn't work with _not-yet-existing_ items, as is typical when you pass an _output_ file name, for instance; you have to resort to `Join-Path (Get-Location -PSProvider FileSystem).ProviderPath $relativePath` or `[IO.Path]::GetFullPath($relativePath, (Get-Location -PSProvider FileSystem).ProviderPath)` or - only interactively, because it isn't robust - `\"$PWD/$relativePath\"`\r\n  * Potential future improvements are:\r\n     * Make `Convert-Path` support non-existing paths too - see #2993\r\n     * Introduce a PowerShell-aware helper type that makes conversion to a full, native file-system path easy, along the lines of `[PSPathInfo] $relativePath` - see #14745 \r\n",
+      "created_at": "2021-03-06T13:59:57Z",
+      "updated_at": "2021-03-06T14:03:00Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "> To add\r\n\r\nThis is all clear. But nevertheless, a situation is possible when the user \"buys\" the name \"CurrentDirectory\"... I have shown by example how this can happen. And then, there will be complaints - \"powershell deleted all my pictures with kittens\". It's actually dangerous. Why \"Current\"? .Net-refered and hard to change static property name, backward compatibility?\r\n\r\nThis is not so much my request, but a concern for new users, which is becoming more and more.",
+      "created_at": "2021-03-06T15:03:00Z",
+      "updated_at": "2021-03-06T15:07:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "From .NET's perspective, it _is_ the current directory, at the _process_ level, which is all that it knows about and needs to know about (it is PowerShell that builds on .NET, which itself knows nothing about PowerShell).\r\n\r\nI get the potential for confusion, but from .NET's perspective the property name is perfectly appropriate.\r\n\r\nThe upshot is: In PowerShell:\r\n\r\n* Don't use `[Environment]::CurrentDirectory`  - use `Get-Location` / `$PWD` and generally stick to using PowerShell cmdlets; using .NET APIs directly is an advanced use case.\r\n \r\n* Always use full, native paths when referring to file-system items in .NET method calls - obtaining such paths should be made easier.\r\n  * This requirement, which is unrelated to the potential name confusion, is far more treacherous.\r\n\r\nThe best we can do is document this.\r\n",
+      "created_at": "2021-03-06T15:40:37Z",
+      "updated_at": "2021-03-06T15:45:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've created two documentation issues:\r\n\r\n* for `about_Locations`: https://github.com/MicrosoftDocs/PowerShell-Docs/issues/7318\r\n* for `about_Methods`: https://github.com/MicrosoftDocs/PowerShell-Docs/issues/7319",
+      "created_at": "2021-03-06T16:11:58Z",
+      "updated_at": "2021-03-06T16:11:58Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "> I get the potential for confusion\r\n\r\nThank you. I thought I was misunderstood with all these online translators.",
+      "created_at": "2021-03-06T16:24:03Z",
+      "updated_at": "2021-03-06T16:24:03Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-03-12T00:00:03Z",
+      "updated_at": "2021-03-12T00:00:03Z"
+    }
+  ],
+  "created_at": "2021-03-06T04:59:15Z",
+  "number": 14950,
+  "state": "closed",
+  "title": "[Environment]::CurrentDirectory is the Current Directory?",
+  "updated_at": "2021-03-12T00:00:05Z"
+}

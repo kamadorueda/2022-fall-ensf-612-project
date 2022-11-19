@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7199",
+  "author": "Fizcko",
+  "body": "Hi,\r\n\r\nI'm trying to send en POST request with a file attatchment to a REST web server.\r\nI need to wait for a 100 (Continue) response before sending the request body.\r\n\r\nWhen i specify the \"expect\" request-header field it seems to be ignored/discard while the other fields do not (accept,user-agent or custom field).\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n$head = @{\r\n    auth_token=\"123456\";\r\n    accept=\"*/*\";\r\n    expect=\"100-continue\";\r\n}\r\n\r\n$multipartContent = [System.Net.Http.MultipartFormDataContent]::new()\r\n\r\n$myFilePath = \"myFile.zip\"\r\n$FileStream = [System.IO.FileStream]::new($myFilePath, [System.IO.FileMode]::Open)\r\n$fileHeader = [System.Net.Http.Headers.ContentDispositionHeaderValue]::new(\"form-data\")\r\n$fileHeader.Name = \"uploadFile\"\r\n$fileHeader.FileName = \"$myFilePath\"\r\n$fileContent = [System.Net.Http.StreamContent]::new($FileStream)\r\n$fileContent.Headers.ContentDisposition = $fileHeader\r\n$fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse(\"application/octet-stream\")\r\n$multipartContent.Add($fileContent)\r\n\r\nInvoke-WebRequest -Uri \"http://MyRestServer/\" -Method \"POST\" -Headers \"$head\" -Body \"$MultipartContent\"\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n> --------- HTTP Headers --------- \r\n{\"connection\":\"Keep-Alive\",\"content-type\":\"multipart/form-data; boundary=\\\"49442f36-68c8-4e57-a5d0-feb7f1ce292a\\\"\",\"accept\":\"*/*\",\"user-agent\":\"Mozilla/5.0 (Windows NT 6.3; Microsoft Windows 6.3.9600; en-US) PowerShell/6.0.2\",**\"expect\":\"100-continue\"**,\"auth_token\":\"123456\",\"content-length\":\"79667491\",\"host\":\"MyRestServer\"}\r\n\r\n\r\nActual behavior\r\n---------------\r\n\r\n> --------- HTTP Headers --------- \r\n{\"connection\":\"Keep-Alive\",\"content-type\":\"multipart/form-data; boundary=\\\"49442f36-68c8-4e57-a5d0-feb7f1ce292a\\\"\",\"accept\":\"*/*\",\"user-agent\":\"Mozilla/5.0 (Windows NT 6.3; Microsoft Windows 6.3.9600; en-US) PowerShell/6.0.2\",\"auth_token\":\"123456\",\"content-length\":\"79667491\",\"host\":\"MyRestServer\"}\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.2\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-01-19T06:16:19Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "It looks like we have it hard coded to remove the Expect headers. I'm not exactly sure why\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/1d549497cfba144e978f3c66c4f817926afd46ef/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/Common/WebRequestPSCmdlet.Common.cs#L1105-L1108\r\n\r\nThe `Expect` header supplied to `-Headers` is applied first, but when Line 1108 is called, that removes any expect headers from the header collection. I have no clue why we would do that. By default, `HttpClient` doesn't send any `Expect` headers. All this line seems to serve is to remove any `Expect` headers supplied by the user which seems odd.",
+      "created_at": "2018-06-28T17:56:27Z",
+      "updated_at": "2018-06-28T17:56:27Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Digging through the history, this seems to have been translated over from when the `WebRequest` API was used. In the oldest commits I can dig back to on this (60b3b30) where the PowerShell team copied the source code over, there is this:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/60b3b304f2e1042bcf773d7e2ae3530a1f5d52f0/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/WebRequestPSCmdlet.cs#L842-L845\r\n\r\nI'm guessing this was to address some kind of issue at some point that doesn't seem relevant with HttpClient. I think it is safe to remove lines 1105-1108 in the current file now.\r\n\r\n@SteveL-MSFT If you have someone who can dig up some history on this I would be interested to know why this was done. If not, I'd like to axe this code.",
+      "created_at": "2018-06-28T18:33:41Z",
+      "updated_at": "2018-06-28T18:33:41Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus the people who worked on this originally are no longer on the PS team.  Based on your research, it seems that this code is no longer relevant and we should lave the Expect headers as-is.  Perhaps if you can verify the cmdlets work with the change against Twitter, we can address the comment in the code.",
+      "created_at": "2018-06-28T21:24:58Z",
+      "updated_at": "2018-06-28T21:24:58Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I did some more research on this and found this: https://github.com/dotnet/corefx/issues/8673\r\n\r\nNone of the concerns matter any more since HttpClient no longer uses WinHTTP nor curl. Looking at the source code, the new sockets handler has Expect 100 configured properly and linux no longer sends this by default (tested on a few flavors to be sure, but the shared code is pretty clear that it's not sent unless set in the HttpRequestMessage).\r\n\r\nPer all my tests, and research this should safe to remove.",
+      "created_at": "2019-01-18T00:22:24Z",
+      "updated_at": "2019-01-18T00:22:24Z"
+    }
+  ],
+  "created_at": "2018-06-28T10:28:08Z",
+  "number": 7199,
+  "state": "closed",
+  "title": "[Invoke-WebRequest][PSVersion 6.0.2] Unable to set \"expect\" (100-continue) request-header field in multipart/form-data",
+  "updated_at": "2019-01-19T07:54:56Z"
+}

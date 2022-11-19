@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3489",
+  "author": "wisemoth",
+  "body": "Steps to reproduce\r\n------------------\r\n```\r\n$d=@{'a'=\"A\";'b'=\"B\"}\r\n$d | add-member -MemberType NoteProperty -name np -value NP\r\n$d.hash=@{}\r\n$d.hash.e='E'\r\n$d.hash | add-member -MemberType NoteProperty -name np2 -value NP2\r\n$d\r\n\r\n> $d\r\n\r\nName                           Value\r\n----                           -----\r\na                              A\r\nhash                           {e}\r\nb                              B\r\n\r\n> $d|gm -membertype NoteProperty\r\n   TypeName: System.Collections.Hashtable\r\n\r\nName MemberType   Definition\r\n---- ----------   ----------\r\nnp   NoteProperty string np=NP\r\n\r\n$d.hash|gm\r\n> $d.hash|gm -membertype NoteProperty\r\n   TypeName: System.Collections.Hashtable\r\n\r\nName MemberType   Definition\r\n---- ----------   ----------\r\nnp2  NoteProperty string np2=NP2\r\n```\r\nNow export at the top level hashtable:\r\n```\r\n$d | Export-Clixml C:\\tmp\\exported\r\n```\r\nAnd import back into a new object, which should be the same as `$d`\r\n```\r\n$dd = Import-Clixml C:\\tmp\\exported\r\n$dd\r\n> $dd|gm -MemberType NoteProperty\r\n   TypeName: Deserialized.System.Collections.Hashtable\r\n\r\nName MemberType   Definition\r\n---- ----------   ----------\r\nnp   NoteProperty string np=NP\r\n\r\n> $dd.hash\r\n\r\nName                           Value\r\n----                           -----\r\ne                              E\r\n```\r\nThe top-level noteproperty survived the roundtrip; the noteproperty in the nested table did not:\r\n```\r\n> ($dd.hash|gm -MemberType NoteProperty) -eq $null\r\nTrue\r\n```\r\nExpected behavior\r\n-----------------\r\nIt would be strange semantics for a NoteProperty to sometimes survive round-tripping.  I'm aware that some membertypes (eg `ScriptProperty`) are not serialised at all (though that would be nice to have too); but having the top-level `NoteProperty` be correctly serialized and the second-level not is probably a bug.\r\n```\r\nPS C:\\dev\\PowerShell\\src\\Microsoft.PowerShell.Commands.Utility> $d.np -eq $dd.np\r\nTrue\r\nPS C:\\dev\\PowerShell\\src\\Microsoft.PowerShell.Commands.Utility> $d.hash.np2 -eq $dd.hash.np2\r\nTrue #but currently it's false\r\n```\r\nActual behavior\r\n---------------\r\nThe nested `NoteProperty` to also be in `$dd`:\r\n```\r\nPS C:\\dev\\PowerShell\\src\\Microsoft.PowerShell.Commands.Utility> $d.np -eq $dd.np\r\nTrue\r\nPS C:\\dev\\PowerShell\\src\\Microsoft.PowerShell.Commands.Utility> $d.hash.np2 -eq $dd.hash.np2\r\nFalse\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```\r\n> $psversiontable\r\n\r\nName                           Value\r\n----                           -----\r\nCLRVersion\r\nPSEdition                      Core\r\nWSManStackVersion              3.0\r\nPSVersion                      6.0.0-alpha\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nGitCommitId                    v6.0.0-alpha.17-69-g3be547c78e9878865445ca8e9108e914f029b80d\r\nBuildVersion                   3.0.0.0\r\nSerializationVersion           1.1.0.1\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "`Export-Clixml` does not include extended properties, when object is not wrapped into `PSObject`.\r\n```powershell\r\nPS> $hash = @{ a=1 }\r\nPS> Add-Member -InputObject $hash -NotePropertyName b -NotePropertyValue 2\r\nPS> $array = $hash, [PSObject]$hash\r\nPS> [System.Management.Automation.PSSerializer]::Serialize($array)\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">\r\n  <Obj RefId=\"0\">\r\n    <TN RefId=\"0\">\r\n      <T>System.Object[]</T>\r\n      <T>System.Array</T>\r\n      <T>System.Object</T>\r\n    </TN>\r\n    <LST>\r\n      <Obj RefId=\"1\">\r\n        <TN RefId=\"1\">\r\n          <T>System.Collections.Hashtable</T>\r\n          <T>System.Object</T>\r\n        </TN>\r\n        <DCT>\r\n          <En>\r\n            <S N=\"Key\">a</S>\r\n            <I32 N=\"Value\">1</I32>\r\n          </En>\r\n        </DCT>\r\n      </Obj>\r\n      <Obj RefId=\"2\">\r\n        <TNRef RefId=\"1\" />\r\n        <DCT>\r\n          <En>\r\n            <S N=\"Key\">a</S>\r\n            <I32 N=\"Value\">1</I32>\r\n          </En>\r\n        </DCT>\r\n        <MS>\r\n          <I32 N=\"b\">2</I32>\r\n        </MS>\r\n      </Obj>\r\n    </LST>\r\n  </Obj>\r\n</Objs>\r\n```\r\nThe\r\n```xml\r\n<MS>\r\n  <I32 N=\"b\">2</I32>\r\n</MS>\r\n```\r\nhere for second element, but not for first.",
+      "created_at": "2017-04-05T16:26:30Z",
+      "updated_at": "2017-04-05T16:28:13Z"
+    },
+    {
+      "author": "wisemoth",
+      "author_association": "NONE",
+      "body": "Thanks @PetSerAl .\r\n\r\nHowever I'm not sure this can be an intended: the `noteproperty` of the top-level hashtable is stored.  The `noteproperty` of the nested hashtable is not stored.  That doesn't seem right.  As a client I've just go two hashtables with noteproperties.  No casting to `[psobject]` for either; but the behavior is different.  The behavior is not described in the `-detail`ed help either., nor is there any `verbose` or `warning` stream output telling me that information-loss has occurred.\r\n\r\nI really think that exporting noteproperties is surely what callers would expect.  If I get a complex-ly nested hashtable object out of a third-party module which I want to store, I'd export `export-clixml` / `import-clixml` to allow me to store that object with very high fidelity.",
+      "created_at": "2017-04-07T18:54:22Z",
+      "updated_at": "2017-04-07T18:54:22Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": ">No casting to [psobject] for either; but the behavior is different.\r\n\r\n`InputObject` parameter of `Export-Clixml` cmdlet is types as `PSObject`:\r\n```powershell\r\n(Get-Command Export-Clixml).Parameters.InputObject.ParameterType\r\n```\r\nSo there is implicit cast for top level object to `PSObject`.",
+      "created_at": "2017-04-07T19:38:39Z",
+      "updated_at": "2017-04-07T19:38:39Z"
+    },
+    {
+      "author": "wisemoth",
+      "author_association": "NONE",
+      "body": "But the *intent* surely of the implementer at the time was not to have such awkward lossy semantics? I think you are highlighting how the code is - rather than how it was intended or should be.",
+      "created_at": "2017-04-24T09:26:05Z",
+      "updated_at": "2017-04-24T09:26:05Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "Is this still an issue worth looking at? \r\n\r\nI have seen no real need for this in the community - but I may have missed something! :-)\r\n\r\n",
+      "created_at": "2022-05-07T17:28:06Z",
+      "updated_at": "2022-05-07T17:28:06Z"
+    },
+    {
+      "author": "wisemoth",
+      "author_association": "NONE",
+      "body": "> I have seen no real need for this in the community \r\n\r\nThere is a need which is why I raised the issue.\r\n\r\nThe documentation for `export-clixml` does not suggest the lossiness implied by this issue.  As soon as you embed an object with `NoteProperty` members into some other object, the former will be serialized with lossiness.  This would cause rather difficult to find issues.\r\n\r\nUnless we want everyone to encode their own non-lossy encoders, `export-clixml` itself should perform non-lossy serialization (which is likely what people believe it *does* do at present).\r\n\r\n",
+      "created_at": "2022-05-16T08:12:22Z",
+      "updated_at": "2022-05-16T08:12:22Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/wg-powershell-cmdlets reviewed this.  Based on @SeeminglyScience's observation, this appears to be a bug that has existed for sometime.  We would be ok with an `ExperimentalFeature` that fixes this bug, however, we would want to verify what happens if you export from PS7 (with the change) and then try to import on WinPS (or older PS7).",
+      "created_at": "2022-06-01T16:17:35Z",
+      "updated_at": "2022-06-01T16:17:35Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "For a fix I'd probably look at changing this code:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/5b6407741cd2b85409538c1b99e858846a1259e7/src/System.Management.Automation/engine/serialization.cs#L1263-L1266\r\n\r\nto use `PSObject.HasInstanceMembers(object, out PSMemberInfoInternalCollection<PSMemberInfo>)`, or just always wrap with `PSObject.AsPSObject(object)`\r\n\r\nAs a work around, you can explicitly wrap objects you want to retain ETS members for. In the repro steps if you add this before the export, it'll retain them:\r\n\r\n```powershell\r\n$d.hash = [psobject]$d.hash\r\n```",
+      "created_at": "2022-06-01T16:58:27Z",
+      "updated_at": "2022-06-01T16:58:27Z"
+    }
+  ],
+  "created_at": "2017-04-05T14:39:06Z",
+  "number": 3489,
+  "state": "open",
+  "title": "Export-Clixml loses NoteProperties in nested hashtables",
+  "updated_at": "2022-06-01T16:58:28Z"
+}

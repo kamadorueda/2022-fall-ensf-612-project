@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12880",
+  "author": "Sidoran",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n$proc = Start-Process notepad++ -PassThru\r\nGet-Process -Id $proc.Id\r\nStop-Process $proc\r\nget-process -Id $proc.Id\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\n NPM(K)    PM(M)      WS(M)     CPU(s)      Id  SI ProcessName\r\n ------    -----      -----     ------      --  -- -----------\r\n      3     0,56       1,89       0,02    5996   7 notepad++\r\nGet-Process: untitled:Untitled-1:4:1\r\nLine |\r\n   4 |  get-process -Id $proc.Id\r\n     |  ~~~~~~~~~~~~~~~~~~~~\r\n     | Cannot find a process with the process identifier 1598.\r\n\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\n NPM(K)    PM(M)      WS(M)     CPU(s)      Id  SI ProcessName\r\n ------    -----      -----     ------      --  -- -----------\r\n      3     0,57       1,86       0,05    5580   7 notepad++\r\n      0     0,00       0,00       0,08    5580\r\n\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.1\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": "2020-06-08T12:00:11Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This might just be a timing issue, retrieving the process before it's finished shutting down. Killing a process isn't always instantaneous.\r\n\r\nDoes it still reproduce if you have a slight wait before calling the final Get-Process?",
+      "created_at": "2020-06-03T13:50:14Z",
+      "updated_at": "2020-06-03T13:50:14Z"
+    },
+    {
+      "author": "Sidoran",
+      "author_association": "NONE",
+      "body": "This issue are reproduced after a several minutes wait.\r\n```\r\n$proc = Start-Process notepad++ -PassThru\r\nGet-Process -Id $proc.Id\r\nStop-Process $proc\r\nStart-Sleep 180\r\nget-process -Id $proc.Id\r\n```\r\nReturn the same.\r\nOn powershell 5.1 everything works fine",
+      "created_at": "2020-06-03T13:58:55Z",
+      "updated_at": "2020-06-03T13:58:55Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting. I'm not seeing the same on MacOS.\r\n\r\nHard to say if this is a PowerShell or a .NET issue... Can you swap the final step for `[System.Diagnostics.Process]::GetProcessById($proc.Id)` and see if you get the same?\r\n\r\nWe may need to file an issue in the [dotnet](/dotnet/runtime) repository if it still reproduces with only .NET code.",
+      "created_at": "2020-06-03T14:02:55Z",
+      "updated_at": "2020-06-03T14:02:55Z"
+    },
+    {
+      "author": "Sidoran",
+      "author_association": "NONE",
+      "body": "```\r\n$proc = Start-Process notepad++ -PassThru\r\nGet-Process -Id $proc.Id\r\nStop-Process $proc\r\nStart-Sleep 180\r\n[System.Diagnostics.Process]::GetProcessById($proc.Id)\r\n```\r\nreturn the same:\r\n```\r\n NPM(K)    PM(M)      WS(M)     CPU(s)      Id  SI ProcessName\r\n ------    -----      -----     ------      --  -- -----------\r\n      3     0,54       1,66       0,08   15536   7 notepad++  \r\n      0     0,00       0,00       0,09   15536     \r\n\r\n```\r\nThis issue was first found on Windows Server 2012R2",
+      "created_at": "2020-06-03T14:45:02Z",
+      "updated_at": "2020-06-03T14:45:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Interesting... [The documentation for the Process class](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.process.kill?view=netcore-3.1) mentions that calling `Process.Kill()` is asynchronous, and if you want to wait for a process to fully exit you can check `Process.HasExited` or use `Process.WaitForExit()`\r\n\r\nLooking at the Stop-Process cmdlet code, it looks like it will pretty much always just call `Process.Kill()` and move on.\r\n\r\nI'm not entirely sure it makes sense for the cmdlet to always wait for each process to exit. It would cause problems if you were passing an array of processes to stop, and a particular process didn't exit, preventing the cmdlet from terminating subsequent processes.\r\n\r\nIf anything, I'd suggest we enhance `Stop-Process` to support:\r\n\r\n- A `-Wait` switch to wait for the process(es) to exit, and\r\n- A `-WaitTimeout` parameter to specify a number of seconds (maybe 3-5 seconds by default?) to wait for process terminations to complete.\r\n\r\nThe cmdlet can call `Kill()` on all the processes, and then wait in a loop with small sleeps in `EndProcessing()` until either the timeout has elapsed or all processes have exited. If the timeout elapses and some or all processes have not yet terminated, write non-terminating errors for each process that failed to stop.",
+      "created_at": "2020-06-03T16:54:23Z",
+      "updated_at": "2020-06-03T16:54:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We get the info from Process.GetProcessById(). So I think it is Windows behavior.\r\nYou can ask in .Net Runtime repository about this.",
+      "created_at": "2020-06-03T17:06:18Z",
+      "updated_at": "2020-06-03T17:06:54Z"
+    },
+    {
+      "author": "KalleOlaviNiemitalo",
+      "author_association": "NONE",
+      "body": "This is a .NET Core bug, mentioned in <https://github.com/dotnet/runtime/issues/20725#issuecomment-390391489> and presumably caused by <https://github.com/dotnet/corefx/pull/17476>, i.e. between .NET Core 1.1.13 and 2.0.0. On .NET Framework 4.8, `Process.GetProcessById` does not return a process that has already terminated, even if the process object still exists because of process handles.\r\n\r\n`Process.UpdateHasExited` uses a [zero-duration wait on the process handle](https://github.com/dotnet/corefx/blob/8321c729934c0f8be754953439b88e6e1c120c24/src/System.Diagnostics.Process/src/System/Diagnostics/Process.Windows.cs#L181-L191) to check whether the process has terminated. [`ProcessManager.IsProcessRunning`](https://github.com/dotnet/corefx/blob/8321c729934c0f8be754953439b88e6e1c120c24/src/System.Diagnostics.Process/src/System/Diagnostics/ProcessManager.Windows.cs#L24-L45) should be changed to do the same.\r\n",
+      "created_at": "2020-06-05T18:55:44Z",
+      "updated_at": "2020-06-05T19:11:20Z"
+    },
+    {
+      "author": "Sidoran",
+      "author_association": "NONE",
+      "body": "I writed a small console app\r\n```\r\nusing System;\r\nusing System.Diagnostics;\r\nusing System.Threading;\r\n\r\nnamespace ProcessTest\r\n{\r\n    class Program\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            Process testproc = Process.Start(@\"C:\\\\Program Files\\\\Notepad++\\notepad++\");\r\n            Console.WriteLine($\"Started  a new process with ID {testproc.Id}\");\r\n            Console.WriteLine($\"Get process by id {Process.GetProcessById(testproc.Id).ProcessName}\");\r\n            testproc.Kill();\r\n            Console.WriteLine($\"Process with Id {testproc.Id} was killed\");\r\n            Thread.Sleep(5000);\r\n            try\r\n            {\r\n                Console.WriteLine($\"Get process by id {Process.GetProcessById(testproc.Id).ProcessName}\");\r\n            }\r\n            catch (Exception e) {\r\n                Console.WriteLine($\"GetProcessById filed with Exception: {e.Message}\");\r\n            }\r\n        }\r\n    }\r\n}\r\n\r\n```\r\nOn .Net Core 2.1 and .net core 3.1 i received a next:\r\n\r\n```\r\nStarted  a new process with ID 9896\r\nGet process by id notepad++\r\nProcess with Id 9896 was killed\r\nGetProcessById filed with Exception: Process has exited, so the requested information is not available.\r\n\r\n```\r\n\r\nGetProcessByID works correctly with killed process in actual .net core version.\r\n\r\n",
+      "created_at": "2020-06-06T13:53:03Z",
+      "updated_at": "2020-06-06T13:53:32Z"
+    },
+    {
+      "author": "KalleOlaviNiemitalo",
+      "author_association": "NONE",
+      "body": "> ```\r\n> Started  a new process with ID 9896\r\n> Get process by id notepad++\r\n> Process with Id 9896 was killed\r\n> GetProcessById filed with Exception: Process has exited, so the requested information is not available.\r\n> ```\r\n\r\nThat exception comes from `Process.ProcessName`, not `Process.GetProcessById`.",
+      "created_at": "2020-06-06T15:24:23Z",
+      "updated_at": "2020-06-06T15:24:23Z"
+    },
+    {
+      "author": "KalleOlaviNiemitalo",
+      "author_association": "NONE",
+      "body": "> So I think it is Windows behavior.\r\n\r\nIt is Windows behavior that [OpenProcess](<https://docs.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess> \"OpenProcess function (processthreadsapi.h) - Win32 apps | Microsoft Docs\") can open a process that has already terminated. [Process.GetProcessById](<https://docs.microsoft.com/dotnet/api/system.diagnostics.process.getprocessbyid?view=netstandard-2.0> \"Process.GetProcessById Method (System.Diagnostics) | Microsoft Docs\") tries to detect that situation and throw `ArgumentException`, but the detection no longer works in .NET Core.\r\n\r\nA PowerShell script that uses [Get-Process](<https://docs.microsoft.com/powershell/module/microsoft.powershell.management/get-process?view=powershell-7> \"Get-Process\") can work around the bug by checking [Process.HasExited](<https://docs.microsoft.com/dotnet/api/system.diagnostics.process.hasexited?view=netstandard-2.0> \"Process.HasExited Property (System.Diagnostics) | Microsoft Docs\"), which has the correct value. Alternatively, `Get-Process` could be changed to do that.",
+      "created_at": "2020-06-07T10:28:41Z",
+      "updated_at": "2020-06-07T10:28:41Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-06-08T12:00:10Z",
+      "updated_at": "2020-06-08T12:00:10Z"
+    },
+    {
+      "author": "TishSerg",
+      "author_association": "NONE",
+      "body": "Hi. I just stumbled upon this nasty behavior of PowerShell 7.2.3. \r\nAnd like in the case of topicstarter:\r\n\r\n> On powershell 5.1 everything works fine\r\n\r\nOS: Microsoft Windows [Version 10.0.19044.1706]",
+      "created_at": "2022-05-23T14:47:14Z",
+      "updated_at": "2022-05-23T14:48:08Z"
+    },
+    {
+      "author": "KalleOlaviNiemitalo",
+      "author_association": "NONE",
+      "body": "<https://github.com/dotnet/runtime/issues/63937> was fixed in .NET v7.0.0-preview.3.22175.4. <https://github.com/PowerShell/PowerShell/pull/17061> updated to .NET SDK 7.0.100-preview.4.22252.9. When PowerShell v7.3.0-preview.4 is released, it should include the fix.",
+      "created_at": "2022-05-23T14:59:55Z",
+      "updated_at": "2022-05-23T14:59:55Z"
+    }
+  ],
+  "created_at": "2020-06-03T13:24:53Z",
+  "number": 12880,
+  "state": "closed",
+  "title": "Get-Process return closed(stoped) process",
+  "updated_at": "2022-05-23T14:59:55Z"
+}

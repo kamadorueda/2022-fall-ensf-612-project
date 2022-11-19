@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14679",
+  "author": "doctordns",
+  "body": "\r\n\r\nI have set the Console Session Configuration GPO settings and logon to a server with a user id. The policy is delivered successfully.\r\n\r\nHowever, when I run a non-elevated console it starts up and then disappears. This results in an Event Log error.\r\n\r\n\r\n## Steps to reproduce\r\n\r\n1. Create a new GPO, and set the Console Session Configuration policy. The end point specified is PowerShell.7\r\n Here is a pic\r\n\r\n![2021-01-28_21-28-43](https://user-images.githubusercontent.com/3630329/106201211-09b61b80-61b0-11eb-9f8a-1d78d9dbbf0e.png)\r\n\r\n2. Login and run an ordinary PowerShell console. The console starts up and dissapears.\r\n3. View the event log error:\r\n![2021-01-28_21-32-43](https://user-images.githubusercontent.com/3630329/106201631-a24c9b80-61b0-11eb-92f1-abe3e81396f1.png)\r\n\r\nI have tried using both the session configuration name and the full URI. Both fail with the same error code.\r\n\r\n## Expected behavior\r\n\r\nI expected console to finish starting up and allowing me to use the console with the defined endpoint.\r\n\r\n\r\n## Actual behavior\r\n\r\nRunning a console - starts up then disappears. On one occasion I actually got the console started, but the next time I tried it fails.\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\nPS C:\\Windows\\System32> $psversiontable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.1\r\nPSEdition                      Core\r\nGitCommitId                    7.1.1\r\nOS                             Microsoft Windows 10.0.20285\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```none\r\n\r\n```\r\n",
+  "closed_at": "2021-03-05T12:00:04Z",
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Based on the error it looks like it's actually using WSMan to connect to localhost and connect to the PS configuration you desire. The Windows WinRS client effectively stops you from doing that from an unelevated instance because it is a way to bypass UAC (even though UAC isn't a security boundary).",
+      "created_at": "2021-01-29T01:19:43Z",
+      "updated_at": "2021-01-29T01:19:43Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "That may be why the error occurs as it does - but it begs the question: how do you use this GPO setting to require a specific end-point? \r\n\r\nIf what you say is true, then there should be an error message generated at failure - a window just disappears seems incorrect. And can we have the error in the event log be more actionable? Just popping an error message seems less than desirable. \r\n\r\nif this POLICY can not actually be used to configure a console endpoint for a given user, then the documentation should say so. It currently does not, and it does not say which endpoint should be in the policy - the name or the URI.\r\n\r\nA particular use case here is for JEA sessions. If user JerryG logs into a DC, his PowerShell session should be a JEA-based session, or possibly a session that has had a start up script defined. I want to set, by policy, that the user does not use the normal endpoint. \r\n\r\nIf this policy can not be used to configure a default console for non-elevated cases, I am not entirely sure what the purpose of this GPO policy is?",
+      "created_at": "2021-01-29T12:05:54Z",
+      "updated_at": "2021-01-29T12:05:54Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Honestly I'm not sure, I wouldn't have thought using WSMan would be necessary at all but the whole configuration endpoint/JEA is highly tied into the WSMan stack so I'm also not surprised it is using it. When you look at the default options you can see the following groups have been allowed to access the endpoint\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/106346639-3aa76500-6304-11eb-8699-00b3183beb61.png)\r\n\r\n* Administrators\r\n* Remote Management Users\r\n* INTERACTIVE\r\n\r\nObviously your account does not have the `Administrators` group as it isn't an admin. Typically a WSMan logon will result in a `NETWORK` logon but after testing it does look like PowerShell is passing down the [WSMAN_OPTION_USE_INTERACTIVE_TOKEN ](https://github.com/PowerShell/PowerShell/blob/2784add414393b0ecab798055cfbac0d363c1c1e/src/System.Management.Automation/engine/remoting/fanin/WSManNativeAPI.cs#L521) that tells WSMan to use the current interactive token when it spawns the shell.\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/106346764-0b452800-6305-11eb-9b89-2c554e598078.png)\r\n\r\nSo going by this logic than a non-admin should have access to that endpoint as it will be spawned by an interactive logon but this is where I think WSMan has changed recently. It seems like it no longer allows a loopback logon if the caller is not an admin. You can even see it in action when you try and connect back to localhost with `Invoke-Command`\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/106347424-0c2c8880-630a-11eb-89c3-01122e928f9b.png)\r\n\r\nIt does seem like `-EnableNetworkAccess` can get past this so I don't now why `WSMAN_OPTION_USE_INTERACTIVE_TOKEN ` isn't also applied for this use case, someone more knowledable in the setup will probably have to answer that.\r\n\r\nAs for why the policy exists I think it may be a historical policy and recent changes make it less useful. The actual change occurred only in 2019 https://devblogs.microsoft.com/powershell/windows-security-change-affecting-powershell/.\n\n<blockquote><img src=\"https://devblogs.microsoft.com/powershell/wp-content/uploads/sites/30/2018/09/Powershell_256.png\" width=\"48\" align=\"right\"><div><img src=\"https://devblogs.microsoft.com/powershell/wp-content/uploads/sites/30/2019/02/Powershell_2561.png\" height=\"14\"> PowerShell</div><div><strong><a href=\"https://devblogs.microsoft.com/powershell/windows-security-change-affecting-powershell/\">Windows Security change affecting PowerShell | PowerShell</a></strong></div><div>Windows Security change affecting PowerShell January 9, 2019 The recent (1/8/2019) Windows security patch CVE-2019-0543, has introduced a breaking change for a PowerShell remoting scenario. It is a narrowly scoped scenario that should have low impact for most users. The breaking change only affects local loopback remoting,</div></blockquote>",
+      "created_at": "2021-01-30T04:50:09Z",
+      "updated_at": "2021-01-30T04:50:13Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@jborean93 is correct that currently endpoint session configuration is tied to WinRM (hopefully we'll have opportunity to support it via SSH in the future).  It also seems that the tightened security in Windows makes this capability much less useful for non-admins.  I don't think there's anything we can do for this in the meantime.",
+      "created_at": "2021-03-04T01:27:38Z",
+      "updated_at": "2021-03-04T01:27:38Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Sorry, didn't mean to just close.",
+      "created_at": "2021-03-04T01:27:54Z",
+      "updated_at": "2021-03-04T01:27:54Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-03-05T12:00:03Z",
+      "updated_at": "2021-03-05T12:00:03Z"
+    }
+  ],
+  "created_at": "2021-01-28T21:39:30Z",
+  "number": 14679,
+  "state": "closed",
+  "title": "Using Group Policy to Set Console Session Configuration Crashes PowerShell 7.1.1",
+  "updated_at": "2021-03-05T12:00:04Z"
+}

@@ -1,0 +1,34 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17473",
+  "author": "joolive",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\nWhen running WindowsPowerShell-only cmdlets via WinPSCompat implicit and leveraging a RunspacePool (runspaces running in parallel), memory leaks + thread leaks will occur.\r\n\r\nConsider the following snippet:\r\n```powershell\r\n$ScriptBlocks = @(\r\n    \"Get-WMIObject -Class Win32_Bios\",\r\n    \"Get-WMIObject -Class Win32_ComputerSystemProduct\",\r\n    \"Get-WMIObject -Class Win32_ComputerSystem\",\r\n    \"Get-WMIObject -Class Win32_ComputerSystemProcessor\",\r\n    \"Get-WMIObject -Class Win32_CurrentTime\"\r\n)\r\n1..50 | ForEach-Object {\r\n    $result = $ScriptBlocks | ForEach-Object -Parallel { & ([scriptblock]::Create($_)); } -ThrottleLimit 3 \r\n    Write-Host $result.Count\r\n    Start-Sleep -Seconds 10\r\n}\r\n```\r\nItems to consider:\r\n- A `ForEach-Object -Parallel` internally uses a runspace pool to orchestrate requests across multiple runspaces in parallel; This issue is also reproducible when a `RunspacePool` is used directly with `PowerShell` objects to run script blocks.\r\n- `Get-WMIObject` is a WindowsPowerShell-only cmdlet, so its invocation will use the Windows PowerShell compatibility (WinPSCompat session) implicitly.\r\n\r\n\r\n### Expected behavior\r\nNo memory leaks or thread leaks occur: PowerShell 7 is able to handle the implicit creation + disposal of the WinPSCompat session and corresponding remoteIpMoProxy_* stub modules automatically.\r\n\r\n\r\n### Actual behavior\r\nOn the PowerShell script share above, Memory leaks + thread leaks occur:\r\n- Threads are leaked (remain locked in `OutOfProcessClientSessionTransportManagerBase.ProcessMessageProc()`) \r\n- Memory leak of objects of OutOfProcessClientSessionTransportManager occur, since they usually are large objects referenced the call stack of the leaked threads. \r\n- remoteIpMoProxy_* folders in the temp folder of the current user keep being created but are not deleted.\r\n\r\n### Error details\r\n\r\n_No response_\r\n\r\n### Environment data\r\n\r\n```powershell\r\nPS C:\\Program Files\\PowerShell\\7> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.7\r\nPSEdition                      Core\r\nGitCommitId                    7.1.7\r\nOS                             Microsoft Windows 10.0.22598\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n- Folders remoteIpMoProxy_* keep being added but not deleted.\r\n![image](https://user-images.githubusercontent.com/52970903/171760088-001acb5c-f7d5-45f1-9327-6d0db358b203.png)\r\n\r\n- Theads and overall memory of the Pwsh.exe process keeps increasing as the above script runs. This is a snapshot after running for just a few minutes:\r\n![image](https://user-images.githubusercontent.com/52970903/171760650-943dd312-f70a-49a3-b036-cf2a11c268ba.png)\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "As for remoteIpMoProxy_ see #13198.",
+      "created_at": "2022-06-03T03:19:55Z",
+      "updated_at": "2022-06-03T03:19:55Z"
+    },
+    {
+      "author": "kasini3000",
+      "author_association": "NONE",
+      "body": "My environment is win+ ps7.3pr4, 7.2.4,\r\n I can't reproduce the problem, code:\r\n\r\n```\r\n$ScriptBlocks = @(\r\n    \"Get-CimInstance -Class Win32_Bios\",\r\n    \"Get-CimInstance -Class Win32_ComputerSystemProduct\",\r\n    \"Get-CimInstance -Class Win32_ComputerSystem\",\r\n    \"Get-CimInstance -Class Win32_ComputerSystemProcessor\",\r\n    \"Get-CimInstance -Class Win32_CurrentTime\"\r\n)\r\n\r\n1..50 | ForEach-Object {\r\n    $result = $ScriptBlocks | ForEach-Object  -UseNewRunspace -Parallel { & ([scriptblock]::Create($_)); } -ThrottleLimit 3 \r\n    Write-Host $result.Count\r\n    Start-Sleep -Seconds 10\r\n}\r\n\r\n```\r\n\r\ni tested without -UseNewRunspace too,Thread less than 35.",
+      "created_at": "2022-06-04T05:58:15Z",
+      "updated_at": "2022-06-04T14:53:49Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": " I am unable to reproduce the thread leak, with or without the `-UseNewRunspace` switch.  But if the local remote sessions (created by WinPSCompatSession) are not closed, then I would expect the kind of client-side message processing leaks noted above.  But I don't see the thread leak even when I interrupt the foreach -parallel with Ctrl+C, and I don't see any leaked runspaces or pwsh processes staying around.  It would help if the originator provided information about how the leaks were observed.\r\n\r\nNote that there is a memory leak issue with implicit remoting (#5244), and I believe WinPSCompatSession also uses implicit remoting.  But this leak is due to duplicate scriptblocks (created by implicit remoting) being cached on the client, and the cache size is limited so the memory usage is limited.\r\n\r\n/cc: @anmenaga ",
+      "created_at": "2022-06-06T17:19:15Z",
+      "updated_at": "2022-06-06T17:19:15Z"
+    }
+  ],
+  "created_at": "2022-06-03T00:22:30Z",
+  "number": 17473,
+  "state": "open",
+  "title": "Memory+Thread leak when using WinPSCompatSession and RunspacePool",
+  "updated_at": "2022-06-06T17:19:16Z"
+}

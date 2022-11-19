@@ -1,0 +1,230 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10982",
+  "author": "TobiasPSP",
+  "body": "Foreach-Object and Where-Object are among the most frequently used pipeline cmdlets, yet they tend to be very slow with a large number of iterations.\r\n\r\nA classic foreach loop in comparison to the pipeline often is 100x faster.\r\n\r\n### Suspected Design Flaw? Reason for Slowness:\r\nThat's because both take a scriptblock and invoke it via InvokeReturnAsIs() per each iteration. This prevents code and compiler optimizations. \r\n\r\n### Technical Improvement - how to make Foreach-Object as fast as foreach loops:\r\nBy replacing scriptblock invocation via InvokeReturnAsIs() by a steppable pipeline, Foreach-Object and Where-Object can be just as fast as foreach loops.\r\n\r\n### Prototypes and Explanation\r\nA detailed explanation, use-cases, and prototypes are available here: \r\nhttps://powershell.one/tricks/performance/pipeline\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This is a good and pretty thorough investigation, thanks! I'd like to have a look at the code here and see if I can put something together for the cmdlet proper, but I would have to wait until the weekend, I think. If someone else wants to have a stab in the meantime, please do!\r\n\r\nHowever, I notice some points missing from the solution. Unless we're willing to accept breaking changes, we will have some issues creating the scriptblock sequence quite as you describe. \r\n\r\nFor one, ForEach-Object currently accepts an _arbitrary_ number of scriptblocks, and then dynamically determines which should be treated as Begin, Process or End according to number of blocks and whether any were specified by name.\r\n\r\nTwo, if I'm not mistaken, we will cause potential breaking changes implementing the same solution as you propose, since we'd be altering the way in which the blocks are invoked. This isn't immediately apparent, and isn't generally an issue until you start working with multiple separate process blocks with variables. I think @jaykul might have name examples of that if he's interested, I remember him showing me a while back.\r\n\r\nThree, this method of constructing the scriptblock by returning it to string form again is a bit wasteful as it requires parsing all the blocks at least twice, and we should investigate if there's a more direct route available to us.\r\n\r\nThe concept is solid, but we need to find a solution that is more appropriate to the behaviour of the cmdlet. (Also, ForEach-Object is using .InvokeWithCmdlet() if I recall correctly, instead of .InvokeReturnAsIs())",
+      "created_at": "2019-11-04T10:38:39Z",
+      "updated_at": "2019-11-04T10:40:08Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> That's because both take a scriptblock and invoke it via InvokeReturnAsIs() per each iteration. This prevents code and compiler optimizations.\r\n\r\n`InvokeReturnAsIs` isn't what's used, and doesn't prevent optimization. Instead `InvokeWithCmdlet` is used (as @vexx32 pointed out), which *does* prevent optimization, but *only* because it's dot sourced.\r\n\r\nThat's not to say that `InvokeWithCmdlet` would be the same speed as `SteppablePipeline` if it wasn't for the fact that one dot sources and the other doesn't, ~~but the speed difference wouldn't be as drastic~~ (**Edit:** yeah it would, `Invoke*` methods are super slow). \r\n\r\nHere's my understanding.\r\n\r\nThere are only two things that control whether the compiler is in \"optimized\" mode:\r\n\r\n1. Debugging is enabled (e.g. a breakpoint is set, the debugger is currently stepping, etc)\r\n1. If a new local scope is created\r\n\r\nAnd iirc this mainly affects the lookup speed of variables local *to that scope in particular*.  That explains the `Testing Functions with Dynamic Scriptblocks` section.  ~~It's not that `InvokeReturnAsIs` is slow, it's that when it looks up the variable `$_`, that variable isn't actually in the *current* scope, so it has to fallback to the scope enumerator which is a lot slower than the local lookup tuple.~~ (**Edit:** While that does affect performance, the `Invoke*` methods are also just real slow)",
+      "created_at": "2019-11-04T13:19:56Z",
+      "updated_at": "2019-11-04T19:45:29Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "> However, I notice some points missing from the solution. Unless we're willing to accept breaking changes, we will have some issues creating the scriptblock sequence quite as you describe.\r\n> \r\nMy suggestion is just a proof-of-concept. We should keep the exact parameter logic that Foreach-Object uses. In the end, Foreach-Object bakes a scriptblock from the user input, and that's where we would kick in: instead of invoking it for each iteration, we would get a steppable pipeline and use Process(). That would also take care of the string-to-scriptblock conversion.\r\n\r\n> For one, ForEach-Object currently accepts an _arbitrary_ number of scriptblocks...\r\n> Two, if I'm not mistaken, we will cause potential breaking changes implementing the same solution as you propose, since we'd be altering the way in which the blocks are invoked.\r\n\r\nI would have to look at the sources but I believe these are two separate things:\r\n- first, Foreach-Object takes all user arguments and builds ONE scriptblock from it\r\n- next, it invokes the scriptblock.\r\nThe first part would remain unchanged. Only the way how the scriptblock is invoked would change. So hopefully there would be no breaking changes.\r\n\r\n> The concept is solid, but we need to find a solution that is more appropriate to the behaviour of the cmdlet. (Also, ForEach-Object is using .InvokeWithCmdlet() if I recall correctly, instead of .InvokeReturnAsIs())\r\n\r\nCorrect, but InvokeUsingCmdlet() is an internal method so I couldn't use it for prototyping in PowerShell and simply used InvokeReturnAsIs(). Both internally end up running InvokeWithPipe() so that shouldn't make too much of a difference.\r\n\r\n",
+      "created_at": "2019-11-04T14:06:33Z",
+      "updated_at": "2019-11-04T14:07:29Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "\r\n> `InvokeReturnAsIs` isn't what's used, and doesn't prevent optimization. Instead `InvokeWithCmdlet` is used (as @vexx32 pointed out), which _does_ prevent optimization, but _only_ because it's dot sourced.\r\n\r\nInvokeReturnAsIs() is a public method, InvokeUsingCmdlet() is private. Both end up calling the same InvokeWithPipe(). If InvokeReturnAsIs() does *not* prevent optimization, and since I used this method and still see the hefty performance penalty, then I assume dot-sourcing InvokeUsingCmdlet() won't make much of a difference.\r\n\r\nI am not an optimization expert but a scriptblock cannot optimize itself. When it is invoked, PowerShell simply doesn't know that it will be repeatly called. Only loops have this information. In the pipeline, a steppablePipeline is the equivalent of a loop. So IMHO the scriptblock should be invoked via a steppablePipeline and not via Invoke...() method calls. The findings in my prototypes seem to at least support this theory.\r\n> Here's my understanding.\r\n> \r\n> There are only two things that control whether the compiler is in \"optimized\" mode:\r\n> \r\n> 1. Debugging is enabled (e.g. a breakpoint is set, the debugger is currently stepping, etc)\r\n> 2. If a new local scope is created\r\n>\r\n\r\nWhich would raise the question how PowerShell knows that a scriptblock is going to be repeated. I assumed without looking at the code that PowerShell needs some knowledge about looping constructs that embed the scriptblock, but maybe I am wrong.\r\n\r\nThat said, could be there are multiple layers of optimizations. At least the facts speak a clear language, and the time penalty we are currently seeing isn't exactly \"academic\", so something major must be amiss.\r\n",
+      "created_at": "2019-11-04T14:26:15Z",
+      "updated_at": "2019-11-04T14:26:15Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> If InvokeReturnAsIs() does not prevent optimization, and since I used this method and still see the hefty performance penalty, then I assume dot-sourcing InvokeUsingCmdlet() won't make much of a difference.\r\n\r\nSorry, it wasn't clear what I was referring to, but the section below is the explanation for that: (**Edit:** except also the `Invoke*` methods are generally just super slow comparatively)\r\n\r\n> And iirc this mainly affects the lookup speed of variables local *to that scope in particular*.  That explains the `Testing Functions with Dynamic Scriptblocks` section.  It's not that `InvokeReturnAsIs` is slow, it's that when it looks up the variable `$_`, that variable isn't actually in the *current* scope, so it has to fallback to the scope enumerator which is a lot slower than the local lookup tuple.\r\n\r\nContinuing:\r\n\r\n> I am not an optimization expert but a scriptblock cannot optimize itself. When it is invoked, PowerShell simply doesn't know that it will be repeatly called. Only loops have this information.\r\n\r\nAs you mention later on, we're talking about different layers of optimization.  You're talking about interpretation vs JIT compiled IL, I'm talking about differences in the behavior of `SMA.Compiler` which it internally refers to as optimization.  The effect you're seeing is due to ~~the latter, and is the bane of a whole bunch of performance discussions here because of how often it makes other things look like a problem.~~ the `Invoke*` methods being a super slow code path in general (**Edit:** fixed).\r\n\r\nThat said, a scriptblock *can* optimize itself in the way you are referring to.  The optimization threshold is stored on the `LightLambda` object created that serves as the closure for a block.  For instance, if you look at a ScriptBlock with ImpliedReflection, follow this path: `$sb.EndBlock.Target._compilationThreshold`.  That number is decremented every invocation, and when it hits 0 then it compiles itself (assuming that the block is less than 300 statements, otherwise it's set to never compile).\r\n\r\n> At least the facts speak a clear language, and the time penalty we are currently seeing isn't exactly \"academic\", so something major must be amiss.\r\n\r\nYeah some work being put into optimizing variable lookup in dot sourced scopes, along with optimizing lookup of variables from previous scopes in general would be fantastic. (**Edit:** but more importantly also making the `Invoke*` methods faster)",
+      "created_at": "2019-11-04T15:10:49Z",
+      "updated_at": "2019-11-04T19:48:13Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "As a fun side note, if you follow these steps interactively (either use reflection manually with `ImpliedReflection`) you can see exactly when it's compiled.\r\n\r\n```powershell\r\n# Updated for new ImpliedReflection\r\nEnable-ImpliedReflection -YesIKnowIShouldNotDoThis\r\n$sb = { Write-Host Invoked! }\r\n& $sb\r\n$sb.EndBlock.Target.add_Compile{ Write-Host Compiled! }\r\n0..40 | % { $sb.InvokeReturnAsIs() }\r\n```",
+      "created_at": "2019-11-04T15:29:07Z",
+      "updated_at": "2022-02-03T01:39:48Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "> As a fun side note, if you follow these steps interactively (either use reflection manually or tab complete with `ImpliedReflection`) you can see exactly when it's compiled.\r\n> \r\n> 1. Create a ScriptBlock `$sb = { Write-Host Invoked! }`\r\n> 2. Invoke it once however you'd like so `EndBlock` is populated\r\n> 3. Navigate to `$sb.EndBlock.Target.add_Compile`\r\n> 4. Run `$sb.EndBlock.Target.add_Compiled{ Write-Host Compiled! }`\r\n> 5. Run `0..40 | % { $sb.InvokeReturnAsIs() }`\r\n\r\nAwesome stuff! Thanks for sharing!",
+      "created_at": "2019-11-04T15:47:08Z",
+      "updated_at": "2019-11-04T15:47:08Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Actually I got a little caught up in semantics there.  All of the `Invoke*` methods are way slower no matter settings are used. I don't think it's related to either layer of optimization though. My guess is that it's related to all of the spin up/tear down of pipeline/command processors.\r\n\r\n@TobiasPSP `SteppablePipeline` being faster is a good observation, maybe `ForEach-Object` should create it's own `PipelineProcessor` similar to `ScriptBlock.GetSteppablePipeline` as a fast path. @daxian-dbw I know you did some work on rewriting the pipeline in very simple cases, maybe this could be a way to expand that.",
+      "created_at": "2019-11-04T19:37:38Z",
+      "updated_at": "2019-11-04T19:37:38Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "One observation is that the time penalty is very different from machine to machine. It may depend on the CPU type or mobile processors. On some systems, below script takes 15-25 seconds, on others it takes a fraction of a second. So the suggested improvements would target and fix those where it takes 15-25 seconds. Finding out why this varies so much from machine to machine and who/how many are affected, should be the next step to investigate.\r\n\r\n$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()\r\n\r\n$result = 1..100000 | ForEach-Object {\r\n  \"I am at $_\"\r\n}\r\n\r\n$report = '{0} elements in {1:n2} seconds' \r\n$report -f $result.Count, $stopwatch.Elapsed.TotalSeconds",
+      "created_at": "2019-11-05T14:58:55Z",
+      "updated_at": "2019-11-05T14:58:55Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "I think I identified part of the problem:\r\nWhen full scriptblock logging is enabled, you see the full impact and speed penalty. Apparently, invoking scriptblocks triggers some logging for each scriptblock while a steppable pipeline will only logged once.\r\nSo with scriptblock logging enabled in full mode, Foreach-ObjectFast is roughly 100x faster. When it is enabled, it is \"only\" 3x faster...",
+      "created_at": "2019-11-05T17:51:38Z",
+      "updated_at": "2019-11-05T17:51:38Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Great write-up! I made efforts in the same space 2 months back trying to rewrite the pipeline for `ForEach-Object` for its most commonly used scenario, see #10454.\r\nUnfortunately, it resulted in a breaking change -- the value of `$MyInvocation` was then different in the script block specified to `ForEach-Object`. This is because `InvokeUsingCmdlet()` sets the `$MyInvocation` variable when invoking the script block ... And, `$MyInvocation` is used by many existing scripts with `ForEach-Object`. I searched the scripts in [PowerShell Corpus](https://onedrive.live.com/?authkey=%21AC9cbXs%2DtwuSZ%2DE&cid=7874CFD565B38D4B&id=7874CFD565B38D4B%211091892&parId=7874CFD565B38D4B%211091891&action=locate), and see many uses of `$MyInvocation` with `ForEach-Object`.\r\n\r\nGiven that, that PR was reverted by #10485. After this, it feels to me, the best we can do is to have a new `ForEach-Object` command that is simpler and invoke the specified script blocks in a different way, because any manipulation of how `ForEach-Object` currently invoke a script block will very likely introduce one breaking change or another.",
+      "created_at": "2019-11-05T19:15:26Z",
+      "updated_at": "2019-11-05T21:55:38Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "Agree, that makes sense. I just have revised the article and differentiated between systems with enabled scriptblock logging and those without, so this gives a better picture of the gains to be expected.\r\nHere are my thoughts:\r\n- To preserve compatibility, I would suggest adding a switch parameter to Foreach-Object/Where-Object, i.e. -Simple. Then, based on that switch, I would use the steppable pipeline instead of the Invoke...() methods on the scriptblock that was baked from the existing parameters, taking advantage of the existing parameters and the way how Foreach-Object composes the scriptblock.\r\n- Using the steppable pipeline instead of Invoke...() methods does take care of the issue with the scriptblock logging. Maybe this could also be fixed from the other end (by revising the way how scriptblock logging works), however the steppable pipeline seems to generally be pretty fast\r\n- as the article illustrates, it is *still* faster to directly invoke a scriptblock or simple function, so aside from the steppable pipeline, there seems to be additional opportunities to improve speed.\r\n",
+      "created_at": "2019-11-05T21:53:16Z",
+      "updated_at": "2019-11-05T21:53:16Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Another thing you want to consider is the debugging experience of script block arguments provided to `ForEach-Object`. #10454 tried very hard to keep the same experience as much as possible. I'm not sure how the experience would be if you use steppable pipeline.\r\n\r\n> it is still faster to directly invoke a scriptblock or simple function, so aside from the steppable pipeline, there seems to be additional opportunities to improve speed.\r\n\r\nThe main reason it's slow is:\r\n> `InvokeUsingCmdlet` needs to do necessary setups/cleanup before/after invoking the script block and `Foreach-Object` has to pay that tax over and over again. While for a filter or a simple function, the setup and cleanup is done only once because the invocation stays in the same function.\r\n\r\nI summarized why `ForEach-Object` is slow in my PR #10047.",
+      "created_at": "2019-11-05T22:05:07Z",
+      "updated_at": "2019-11-05T22:05:07Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw would it perhaps be possible to, for example, just have ForEach-Object simply call GetSteppablePipeline on each block individually, cache the pipeline processors and call them in sequence rather than using InvokeWithCmdlet and incurring the additional cost every time?",
+      "created_at": "2019-11-06T00:03:48Z",
+      "updated_at": "2019-11-06T00:03:48Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@vexx32 I think the steppable pipeline is a good idea of replacing the `InvokeWithPipeImpl` for invoking script block in `ForEach/Where-Object`. The problem is more about breaking changes brought in by changing how script blocks are invoked by those two cmdlets, as there will always be subtle differences like `$MyInvocation`. Adding a new parameter set like `-Simple` for a completely different implementation is something worth considering, but I guess it will still raise questions and complains about inconsistencies like `$MyInvocation` comparing with the legacy implementation.",
+      "created_at": "2019-11-06T20:43:42Z",
+      "updated_at": "2019-11-06T20:43:42Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw I'm wondering if it's possible to mimic how the invocation presents itself with a stoppable pipeline... I guess I'll have a look at it probably this weekend and see how it works with a naive implementation and get back to y'all with potential point points if I see them.\r\n\r\nWould you be willing to write and PR some regression tests to cover these scenarios for ForEach-Object so that we can better make an informed judgement of whether a separate switch is or is not necessary.\r\n\r\nAlso, rather than a permanent cmdlet switch, we do have the option of putting it behind an experimental feature flag.",
+      "created_at": "2019-11-07T00:01:18Z",
+      "updated_at": "2019-11-07T00:01:32Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@vexx32 The reason SteppablePipeline is faster as shown in @TobiasPSP's work is that like invoking a filter function or a script block, the setup (scopes, function_context and etc.) and cleanup are done only once because the invocation stays in the same function/script, while for the `InvokeUsingPipeImpl`, it has to setup then cleanup every time the script block is invoked.\r\n\r\nAs for the regression tests, currently the one I'm aware of is `$MyInvocation`, see #10477 for related discussion. I can write tests targeting it without problem, but I think there will be other subtle things depending on how we are invoking script blocks in `ForEach-Object` and `Where-Object` today.",
+      "created_at": "2019-11-07T01:04:14Z",
+      "updated_at": "2019-11-07T01:04:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw yep, I fully expect there to be. I'm just looking for some baseline tests we can put possible solutions against, and then we can explore from there and cover edge cases as best we can.\r\n\r\nI think that from a UX standpoint, having a cmdlet that has two competing behaviour patterns with no easily demonstrated difference between them should be avoided.\r\n\r\nIf we must break it, we should just break it imo. But I think that break should be an minimal as we can possibly make it, and ideally there should be no user-facing difference apart from speed. :slightly_smiling_face: ",
+      "created_at": "2019-11-07T01:40:18Z",
+      "updated_at": "2019-11-07T01:41:52Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "At the end, the current implementation of Foreach-Object constructs one single scriptblock from the user-submitted parameters, so if we left this as-is and just changed the way how the internal scriptblock is invoked, this should preserve most backwards compatibility. The other major change I see is $MyInvocation, and maybe someone can shed light into why it is different in the first place, and whether it is doable to emit a \"corrected\" $MyInvocation. Note that my prototype is calling GetSteppablePipeline() w/o any arguments where proxy functions do submit invocation details. Maybe there is an easy way of tuning $MyInvocation so it is compatible.\r\nSo my hope would be to implement the invocation changes w/o breaking changes.",
+      "created_at": "2019-11-07T12:11:34Z",
+      "updated_at": "2019-11-07T12:11:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@TobiasPSP the reason changing this has a tendency to break the way $MyInvocation is set is because ForEach-Object (currently) is not constructing a single scriptblock from the input. All the blocks are invoked separately, everytime, even each individual process block is invoked separately, one at a time, using `InvokeWithCmdlet()`\r\n\r\nI think you may be right in that we may be able to preserve the MyInvocation information, but I'll have to take a closer look at the code and try a few things.",
+      "created_at": "2019-11-07T12:33:34Z",
+      "updated_at": "2019-11-07T12:33:34Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@TobiasPSP `InvokeUsingCmdlet` explicitly uses the `InvocationInfo` object from the caller scope, see the code here:\r\nhttps://github.com/PowerShell/PowerShell/blob/d58a82ad19fbfad81e85778c8b08cb1b28f58fce/src/System.Management.Automation/engine/lang/scriptblock.cs#L676-L677\r\n\r\nWhile when invoking filter/function/simple scriptblock (including through SteppablePipeline), the `InvocationInfo` object is generated based on the script being invoked, which is correct when invocation happens this way. I don't see a way to force using a specific `InvocationInfo` object when a script block is invoked in this way.",
+      "created_at": "2019-11-07T18:26:23Z",
+      "updated_at": "2019-11-07T18:26:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I don't see a way to force using a specific `InvocationInfo` object when a script block is invoked in this way.\r\n\r\n`SteppablePipeline` could be altered to support this.  It already does something similar when the pipeline it's wrapping has parameters:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/d58a82ad19fbfad81e85778c8b08cb1b28f58fce/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L651-L667\r\n\r\nAnother parameter could be added to `GetSteppablePipeline` (or somewhere else in the code path) that would do something similar, but just for `MyInvocation`.  Might/probably will hurt performance or alter behavior though.",
+      "created_at": "2019-11-07T19:38:45Z",
+      "updated_at": "2019-11-07T19:38:45Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience Yes, that's something worth looking into. Be noted, if we are aiming at replace the current `ForEach/Where-Object` implementation, then it's important to retain the current debugging experience as much as possible, which might be a problem if using `SteppablePipeline` with a wrapping script.",
+      "created_at": "2019-11-07T20:20:12Z",
+      "updated_at": "2019-11-07T20:20:49Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Be noted, if we are aiming at replace the current `ForEach/Where-Object` implementation, then it's important to retain the current debugging experience as much as possible, which might be a problem if using `SteppablePipeline` with a wrapping script.\r\n\r\nYeah... I think there's a lot of obstacles to specifically using `SteppablePipeline`.  I think it makes sense to pursue creating your own pipeline processor manually, similar to how it's done for a steppable pipeline, but purpose built so the experience can be specifically catered to this scenario.  Ideally it would be built out into a public API similar to `SteppablePipeline`, but maybe more specifically for performance sensitive areas (though obviously I'd settle for just having `ForEach-Object` be faster).",
+      "created_at": "2019-11-07T22:14:06Z",
+      "updated_at": "2019-11-07T22:14:06Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "Is there anything we can do? Foreach/Where-Object are fundamental to PowerShell, and they are extremely slow. Any investment here would pay off considerably. Plus there is another severe issue tied to it: when scriptblock logging is enabled, the time penalty grows to a level that I'd call a bug. ",
+      "created_at": "2020-07-06T09:08:42Z",
+      "updated_at": "2020-07-06T09:08:42Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@TobiasPSP I'm pretty sure creating a pipeline processor manually as outlined above is the right path.  Problem is, that's a pretty significant investment.  It'll be a pretty time consuming task, and likely require one of the most experienced members of the team.\r\n\r\nAs much as I'd love to see this happen, I can see why it might be hard to justify.  The amount of users who are going to use `ForEach-Object` to the scale where it becomes a problem *and* actually care about the extra runtime aren't very likely to be that high. High enough that if the fix was pretty quick it'd be an easy win for sure, but I'm not sure it balances the scales atm.",
+      "created_at": "2020-07-06T11:41:51Z",
+      "updated_at": "2020-07-06T11:41:51Z"
+    },
+    {
+      "author": "TobiasPSP",
+      "author_association": "COLLABORATOR",
+      "body": "I hear you. I\u2018d think it is an investment in one of the most fundamental features of Powershell, a one-time investment for good, plus with the advent of scriptblock logging, the current implementation is essentially broken (the performance degradation with scriptblock logging turned on is crippling when processing large collections). I\u2018d rather cut on some bells and whistles if that would buy me solid and fast core pipeline cmdlets. But I understand budget is always difficult. \r\n\r\nWhile fixing the issue via a steppable pipeline would be super simple and low cost, I can see there is a slight chance of compatibility issues especially with the debug experience. I agree a new pipeline processor is technically the best choice. Yet if that means we won\u2019t ever get it, I\u2018d rather settle for second-best ;-). \r\n\r\nIt would be unfortunate if we had to live with this fundamental flaw forever. Powershell pipeline has become notorious to be super slow compared to nonstreaming loops, and to be generally avoided, which is sad because the primary reason for the disadvantage is this flaw only. Powershells pipeline is very fast by design.\r\n\r\nShould we close this thread?",
+      "created_at": "2020-07-06T14:30:03Z",
+      "updated_at": "2020-07-06T14:30:03Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I hear you. I\u2018d think it is an investment in one of the most fundamental features of Powershell, a one-time investment for good, plus with the advent of scriptblock logging, the current implementation is essentially broken (the performance degradation with scriptblock logging turned on is crippling when processing large collections). I\u2018d rather cut on some bells and whistles if that would buy me solid and fast core pipeline cmdlets. But I understand budget is always difficult.\r\n\r\nNote I'm mainly talking from what I am guessing is the PowerShell teams perspective.  Personally I run into this often enough that I think it's worth it as well.  The worth diminishes a bit if you consider the ~95% of users for which this scenario will be (more than likely) exceedingly rare.\r\n\r\n> While fixing the issue via a steppable pipeline would be super simple and low cost, I can see there is a slight chance of compatibility issues especially with the debug experience. I agree a new pipeline processor is technically the best choice. Yet if that means we won\u2019t ever get it, I\u2018d rather settle for second-best ;-).\r\n\r\nFWIW it seems like risk of breaking change is a bigger hurdle to the PowerShell team than implementation difficulty.\r\n\r\n> It would be unfortunate if we had to live with this fundamental flaw forever.\r\n\r\nForever is a long time.  Maybe the landscape changes in a year and everyone is using large collections for some reason.  Maybe more advanced users flood to PowerShell and high performance scenarios become important.  Maybe other engine changes enable a change like this with relative ease.  Maybe the PowerShell team doubles in size \ud83e\udd1e \ud83e\udd1e \r\n\r\n>Powershell pipeline has become notorious to be super slow compared to nonstreaming loops, and to be generally avoided, which is sad because the primary reason for the disadvantage is this flaw only. Powershells pipeline is very fast by design.\r\n\r\nIf we're not accounting for the allocation of the `foreach` \"condition\", it'll always be the better choice for when performance is important.  Pipeline will always be doing more or less the same with but with extra architecture around it.  Absolutely worth improving though.\r\n\r\n> Should we close this thread?\r\n\r\nNah, unless the PowerShell team comes out and says it'll never happen there's still hope.",
+      "created_at": "2020-07-06T15:59:02Z",
+      "updated_at": "2020-07-06T15:59:02Z"
+    },
+    {
+      "author": "HerbM",
+      "author_association": "NONE",
+      "body": "To bump this again, and to add to recognizing the importance:\r\n\r\nProbably the most valid and common criticism of PowerShell is that it is \"slow\" -- those of us who use it regularly know how to mitigate that and when to build/find another tool, but it does detract from PowerShell's overall reputation whether valid or only partially valid.\r\n\r\nImproving the performance of these most basic of PowerShell cmdlets used in it's arguably most unique feature for a command shell would go a long way to enhance productivity AND reputation.",
+      "created_at": "2022-03-17T14:15:09Z",
+      "updated_at": "2022-03-17T14:15:09Z"
+    },
+    {
+      "author": "Preposterone",
+      "author_association": "NONE",
+      "body": "> Improving the performance of these most basic of PowerShell cmdlets used in it's arguably most unique feature for a command shell would go a long way to enhance productivity AND reputation.\r\n\r\nCouldn't agree more. I recently, have had the displeasure of using powershell to solve a simple task:\r\n>Given a number of similarly formatted text files (~800mb worth of them, in my case), retrieve all lines in them and delete duplicates.\r\n\r\nSolving this with bash (and coreutils) would be trivial and would barely take any time, however with powershell, it required thorough examination of multiple tutorials, [a question on SO](https://stackoverflow.com/questions/73566275/powershell-concatenating-files-and-piping-result-to-sort-object-unique-yields) and, in the end, raw usage of .NET library to solve this.\r\n\r\nEven on a machine with 16gb of RAM, powershell's cat (Get-Content) cannot load 800 mb worth of files without using ALL the ram... And it's a well known problem, yet vast majority of tutorials (including microsoft ones) point to Get-Content as a go-to tool for file concatenation.\r\n\r\nTotal insanity.",
+      "created_at": "2022-09-01T11:54:45Z",
+      "updated_at": "2022-09-01T11:55:02Z"
+    },
+    {
+      "author": "ImportTaste",
+      "author_association": "NONE",
+      "body": "> > Improving the performance of these most basic of PowerShell cmdlets used in it's arguably most unique feature for a command shell would go a long way to enhance productivity AND reputation.\r\n> \r\n> Couldn't agree more. I recently, have had the displeasure of using powershell to solve a simple task:\r\n> \r\n> > Given a number of similarly formatted text files (~800mb worth of them, in my case), retrieve all lines in them and delete duplicates.\r\n> \r\n> Solving this with bash (and coreutils) would be trivial and would barely take any time, however with powershell, it required thorough examination of multiple tutorials, [a question on SO](https://stackoverflow.com/questions/73566275/powershell-concatenating-files-and-piping-result-to-sort-object-unique-yields) and, in the end, raw usage of .NET library to solve this.\r\n> \r\n> Even on a machine with 16gb of RAM, powershell's cat (Get-Content) cannot load 800 mb worth of files without using ALL the ram... And it's a well known problem, yet vast majority of tutorials (including microsoft ones) point to Get-Content as a go-to tool for file concatenation.\r\n> \r\n> Total insanity.\r\n\r\nI've personally gotten in the habit of using &{process{ instead of ForEach-Object for 95% of all cases.",
+      "created_at": "2022-09-01T12:31:26Z",
+      "updated_at": "2022-09-01T12:31:26Z"
+    }
+  ],
+  "created_at": "2019-11-04T07:47:56Z",
+  "number": 10982,
+  "state": "open",
+  "title": "Speed up Foreach-Object and Where-Object by using Steppable Pipeline",
+  "updated_at": "2022-09-01T12:31:26Z"
+}

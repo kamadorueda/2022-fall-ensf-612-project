@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3974",
+  "author": "jtippet",
+  "body": "The builtin Get-Counter cmdlet queries the system performance counters.  Many counters are presented as rates, i.e., thing-per-second.  In order to measure the rate, the Get-Counter cmdlet takes one measurement, sleeps for a second, takes a second measurement, then does the arithmetic.  Get-Counter returns an object that contains both the raw counter value and the computed rate of change.\r\n\r\nFor example, a network interface has a \"Bytes Total/sec\" counter:\r\n\r\n````\r\nPS C:\\> (Get-Counter '\\Network Interface(*)\\Bytes Total/sec').CounterSamples[0] | fl *\r\n\r\nPath             : \\\\computer\\network interface(intel[r] 82579v gigabit network connection)\\bytes total/sec\r\nInstanceName     : intel[r] 82579v gigabit network connection\r\nCookedValue      : 64.1894983120117\r\nRawValue         : 2522840331\r\nSecondValue      : 2927905331869\r\nMultipleCount    : 1\r\nCounterType      : RateOfCountsPerSecond64\r\nTimestamp        : 6/8/2017 23:50:36\r\nTimestamp100NSec : 131414394363810000\r\nStatus           : 0\r\nDefaultScale     : 4294967292\r\nTimeBase         : 3020490\r\n````\r\n\r\nHere the `CookedValue` is the rate, measured in bytes per second, and is what the user usually wants to see.  The formatter for a `PerformanceCounterSample` highlights this value, and that's great.  In contrast, the `RawValue` is the absolute total number of bytes sent (since the system rebooted).  Usually the user doesn't need this.  But there *are* a few good uses for the RawValue.\r\n\r\nOne use for RawValue: Suppose you want to get a rolling average over the last 60 seconds.   The cmdlet itself doesn't support rolling averages, so you have to build it yourself.  You could either run Get-Counter 60 times in parallel, which gets a bit silly.  Or you could run Get-Counter once every second, capturing the RawValues (and discarding the rest of the data).  But now there's a new problem -- because Get-Counter internally sleeps for 1 second, you can't quite run it 60 times consecutively in 60 second.  You either have to fudge the arithmetic with some errors, or run multiple Get-Counter calls in parallel.\r\n\r\nThere are a few other reasons you'd *only* want the RawValue -- you might want to get statistics measured over a large interval like an hour, but you don't want the cmdlet to sit there sleeping for an hour.  You might want to build a weighted average.  The end user might just only be interested in the total number of packets sent, not the rate.  If you're doing any sort of statistical analysis, the RawValue is almost always a better starting point than the CookedValue.  Sleeping for a second to get the CookedValue just gets in the way, then.\r\n\r\nAnyway, I propose we add a new parameter to Get-Counter.  The new parameter tells the cmdlet to just capture the first raw sample, do not sleep, and do not bother trying to calculate any CookedValue.  The new parameter is not compatible with the preexisting -SampleInterval or -MaxSamples parameters, so it should probably go into a new ParameterSet.\r\n\r\nNaming is always hard.  I can think of a few names for the new thing, and I'm totally open to suggestions & analogies to preexisting features in other cmdlets:\r\n  *  -RawOnly (hinting that the user is only interested in the RawValue from the output)\r\n  *  -CookedValue:$false  (which tells the user what will be missing from the output)\r\n  *  -Instantaneous  (which suggests why you'd want this option: the cmdlet runs much faster with it)\r\n\r\nI'm willing to implement, test, and document it myself.  I have a working prototype that -- amazingly enough -- demonstrates how eliminating a 1-second sleep from something makes it almost 1000 milliseconds faster:\r\n\r\n````\r\n# Before\r\nPS C:\\Source\\Repos\\PowerShell> Measure-Command { Get-Counter '\\Network Interface(*)\\Bytes Total/sec' }\r\nTotalMilliseconds : 1002.9342\r\n\r\n# After, with the new thing\r\nPS C:\\Source\\Repos\\PowerShell> Measure-Command { Get-Counter -RawOnly '\\Network Interface(*)\\Bytes Total/sec' }\r\nTotalMilliseconds : 4.6826\r\n````\r\n\r\nThanks for reading.  Is the motivation motivating?  Any thoughts on the design or naming?",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "My understanding you want to get one instantaneous value without delay and fix should just let you remove the delay.",
+      "created_at": "2017-06-09T11:22:49Z",
+      "updated_at": "2017-06-09T11:22:49Z"
+    },
+    {
+      "author": "jtippet",
+      "author_association": "NONE",
+      "body": "Yeah that's the one-sentence summary :)",
+      "created_at": "2017-06-09T15:26:32Z",
+      "updated_at": "2017-06-09T15:26:32Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We can get the same single raw couter values by [WMI](https://blogs.technet.microsoft.com/georgewallace/2013/10/29/pulling-performance-counters-from-wmi-with-powershell/). So I see no reasons why this is not possible by `Get-Counter`.",
+      "created_at": "2017-06-09T15:39:36Z",
+      "updated_at": "2017-06-09T15:39:36Z"
+    },
+    {
+      "author": "jtippet",
+      "author_association": "NONE",
+      "body": "Well the blog you linked to demonstrates how to get cooked counters out of WMI.  But I did a bit of looking, and found that you can also get raw counters from WMI using perf*raw*data:\r\n````\r\nPS C:\\> measure-command { Get-WmiObject -Query 'Select PacketsPerSec from Win32_perfrawdata_tcpip_networkadapter' }\r\nTotalMilliseconds : 28.7029\r\n````\r\nGiven that there's a reasonably-fast workaround, I think the priority of this feature request is lower.  Do you think it's still worth adding built-in raw counter support to Get-Counter?",
+      "created_at": "2017-06-09T19:32:07Z",
+      "updated_at": "2017-06-09T19:36:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think it might be useful.\r\nIf PDH doesn't scare you, you can easily push the PR - welcome!",
+      "created_at": "2017-06-10T18:27:33Z",
+      "updated_at": "2017-06-10T18:27:33Z"
+    }
+  ],
+  "created_at": "2017-06-09T07:19:47Z",
+  "number": 3974,
+  "state": "open",
+  "title": "Add a new parameter to Get-Counter to quickly capture instantaneous raw data",
+  "updated_at": "2017-06-10T18:27:50Z"
+}

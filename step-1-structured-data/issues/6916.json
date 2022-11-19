@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6916",
+  "author": "hubuk",
+  "body": "Related issue: #4645\r\n\r\nrun.ps1\r\n------------------\r\n\r\n```powershell \r\nStart-Transcript -Path (Join-Path $PSScriptRoot 'transcriptdata.txt')\r\n$InformationPreference = 'SilentlyContinue'\r\nWrite-Information 'SilentlyContinue'\r\n$InformationPreference = 'Continue'\r\nWrite-Information 'LoudlyContinue'\r\nStop-Transcript\r\n```\r\n\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell \r\n.\\run.ps1\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\ntranscriptdata.txt should contains only LoudlyContinue\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\ntranscriptdata.txt contains only SilentlyContinue\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.1.0-preview.1\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\nInvestigation\r\n----------------\r\n\r\nThe problem is in if/else statement which starts here:\r\nhttps://github.com/PowerShell/PowerShell/blob/948532ac839f3bc7e8bbbd3c9f5f292868ac8687/src/System.Management.Automation/engine/MshCommandRuntime.cs#L757-L758\r\nand has a continuation here:\r\nhttps://github.com/PowerShell/PowerShell/blob/948532ac839f3bc7e8bbbd3c9f5f292868ac8687/src/System.Management.Automation/engine/MshCommandRuntime.cs#L824-L828\r\n\r\nTranscription of Write-Host commands are handled in InternalUI.Write* methods as the comment suggests. These commands are distinguished by \"PSHOST\" tag.\r\nTranscription of Write-Information commands is supposed to take place in the else statement but code in this statement is being executed only if \r\n``` C#\r\n(!record.Tags.Contains(\"PSHOST\") || record.Tags.Contains(\"FORWARDED\"))\r\n&&\r\npreference != ActionPreference.Continue)\r\n```\r\nThis condition is invalid. Correct condition is:\r\n``` C#\r\n!record.Tags.Contains(\"PSHOST\")\r\n&&\r\npreference == ActionPreference.Continue)\r\n```\r\n\r\nPR pending...",
+  "closed_at": "2018-06-16T17:10:15Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Could you please comment?",
+      "created_at": "2018-05-22T10:41:56Z",
+      "updated_at": "2018-05-22T10:41:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for taking this on, @hubuk.\r\n\r\nIt's definitely a step in the right direction, but other quirks remain, so maybe we can expand the scope of your PR.\r\n\r\nThe following test code contrast the console output of various `Write-Information` / `Write-Host` / `Out-Host` commands with respect to what prints to the console vs. what shows in the transcript (which should be the same):\r\n\r\n```powershell\r\n\"--- CONSOLE output`n\"\r\n$null = Start-Transcript\r\n\r\nWrite-Host 'write-host silentlycontinue'\r\nWrite-Information 'write-info silentlycontinue'\r\n\r\nWrite-Host 'write-host continue' -InformationAction Continue\r\nWrite-Information 'write-info continue' -InformationAction Continue\r\n\r\nWrite-Host 'write-host ignore' -InformationAction Ignore\r\nWrite-Information 'write-info ignore' -InformationAction Ignore\r\n\r\nOut-Host -InputObject 'out-host' # always prints to both the console and the transcript\r\n\r\n\r\n$f = (Stop-Transcript).Path\r\n\"`n---- TRANSCRIPT contents\"\r\n((gc -raw $f) -split '(?m)^\\*+$')[2]\r\n'----'\r\nRemove-Item $f\r\n```\r\n\r\n* Your current PR commendably fixes the `Write-Information` behavior in principle, but in the transcript its output is still prefixed with `INFO: `, unlike in the console.\r\n\r\n* `Write-Host` output still _invariably_ end up in the transcript - while `-InformationAction Ignore` / `6>$null` works in the _console_, it doesn't in the transcript.\r\n\r\nWhile fixing the quirks is definitely desirable, we also have to ask ourselves whether user may depend on the old behavior, such as expecting `Write-Information` output to be there by default.\r\n\r\n@SteveL-MSFT, any thoughts on this and the other issues mentioned in #4645 with respect to backward compatibility?\r\n\r\n",
+      "created_at": "2018-05-22T22:16:26Z",
+      "updated_at": "2018-05-22T22:16:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I agree with fixing the Issue too.\r\n\r\nFor others I'd open new issue for every inconsistency - I believe we get conclusions faster.",
+      "created_at": "2018-05-23T03:46:40Z",
+      "updated_at": "2018-05-23T03:46:40Z"
+    },
+    {
+      "author": "hubuk",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I made changes to INFO: prefix, but I observe different behavior in `Write-Host 'write-host ignore' -InformationAction Ignore` than you described. It is present in transcript but not in the console.\r\n\r\n```\r\n--- CONSOLE output\r\nwrite-host silentlycontinue\r\nwrite-host continue\r\nwrite-info continue\r\nout-host\r\n---- TRANSCRIPT contents\r\nwrite-host silentlycontinue\r\nwrite-host continue\r\nwrite-info continue\r\nwrite-host ignore\r\nout-host\r\n----\r\n```\r\n\r\nI think that Write-Host should always be visible in both console and transcript regardless of InformationAction and $InformationPreference.",
+      "created_at": "2018-05-23T06:05:09Z",
+      "updated_at": "2018-05-23T06:05:09Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "My general view is that `Start-Transcript`, by default, is expected to log your inputs and the outputs and should resemble what you would see at the console.  Anything more than that should require the use of a parameter or switch.  Where behavior changes (breaking changes) are needed to accomplish this, we'll need to determine the impact to the user and decide on a case-by-base basis.",
+      "created_at": "2018-05-23T16:14:24Z",
+      "updated_at": "2018-05-23T16:14:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@hubuk:\r\n\r\n> but I observe different behavior in Write-Host 'write-host ignore' -InformationAction Ignore than you described. It is present in transcript but not in the console.\r\n\r\nYes, that is the behavior  I was trying to describe.\r\n\r\n> I think that Write-Host should always be visible in both console and transcript regardless of InformationAction and $InformationPreference.\r\n\r\nThat applies to `Out-Host`, but not to `Write-Host`, which is now a bit of a misnomer in that it writes to the information stream, not to the host directly.\r\n\r\nFrom what I understand it is by design that in v5+ you can silence `Write-Host` with ` -InformationAction Ignore` / `6>$null` (and that you can generally redirect it with `6>`).\r\n\r\nIn short: My understanding is that `Write-Host` is now an output-by-default companion to the silent-by-default `Write-Information` (with additional, UI-related features).\r\n\r\n",
+      "created_at": "2018-05-23T17:33:28Z",
+      "updated_at": "2018-05-23T17:33:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Write-Host, which is now a bit of a misnomer in that it writes to the information stream, not to the host directly.\r\n\r\nIt writes to the informational stream and then to host directly based on tag presence.",
+      "created_at": "2018-05-23T17:42:46Z",
+      "updated_at": "2018-05-23T17:42:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Yes, but you can suppress `Write-Host` output to the _host_ with `-InformationAction Ignore` / `6>$null`, whereas the output still shows in the _transcript_, and that's the problem.",
+      "created_at": "2018-05-23T18:00:04Z",
+      "updated_at": "2018-05-23T18:00:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">the output still shows in the transcript, and that's the problem\r\n\r\nAgree.",
+      "created_at": "2018-05-23T18:07:18Z",
+      "updated_at": "2018-05-23T18:07:18Z"
+    },
+    {
+      "author": "hubuk",
+      "author_association": "CONTRIBUTOR",
+      "body": "> the output still shows in the transcript, and that's the problem\r\n\r\nIf `-InformatioAction Ignore` should suppress `Write-Host` from writing to console then `-InformationAction SilentlyContinue` should also suppress console output for consistency.\r\n\r\nBut for me it seems more natural that `Write-Host` should always writes to host. Its interaction with InformationStream can be controlled using InformationAction and InformationPreference variable. If the appearance on the console shall be controlled using these then Write-Information should be used instead. That was my understanding of the differences between these two commands.",
+      "created_at": "2018-05-23T18:38:13Z",
+      "updated_at": "2018-05-23T18:38:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> If `-InformationAction Ignore` should suppress `Write-Host` from writing to console, then `-InformationAction SilentlyContinue` should also suppress console output for consistency.\r\n\r\nThat's not possible, because that would make `Write-Host` _silent_ by default, given that `$InformationPreference` defaults to `SilentlyContinue` and, in the absence of an explicit `-InformationAction` argument, is equivalent to passing `-InformationAction SilentlyContinue`.\r\n\r\nFor backward compatibility (alone) you don't want `Write-Host` to be silent by default.\r\n\r\n> But for me it seems more natural that Write-Host should always writes to host.\r\n\r\nThat's what the name of the cmdlet suggests, and that's how it _used to_ work.\r\n\r\nHowever, as https://github.com/PowerShell/PowerShell-Docs/blob/staging/reference/6/Microsoft.PowerShell.Utility/Write-Information.md states:\r\n\r\n> Starting in Windows PowerShell 5.0, Write-Host is a wrapper for Write-Information. You can now use Write-Host to emit output to the information stream, but the $InformationPreference preference variable and InformationAction common parameter do not affect Write-Host messages. \r\n\r\n(Ignore the fact that this is not the entirely accurate, because the `Ignore` value passed to `-InformationAction` _does_ affect `Write-Host` and is in effect equivalent to `6>$null`.)\r\n\r\nPresumably - and perhaps someone from the team can confirm - this slight repurposing of `Write-Host` since v5 was to compensate for frequent misuse of `Write-Host` by cmdlet/function authors, which resulted in callers being unable to capture or suppress its output.\r\n\r\nBy making `Write-Host` write to the information stream (number `6`) instead, it became possible to either suppress or capture its output. (Note that, as stated, `Out-Host` indeed still only and invariably prints to the host (and possibly transcript)).\r\n",
+      "created_at": "2018-05-23T20:39:59Z",
+      "updated_at": "2018-05-23T20:39:59Z"
+    },
+    {
+      "author": "hubuk",
+      "author_association": "CONTRIBUTOR",
+      "body": "Closed via #6917.",
+      "created_at": "2018-06-16T17:10:14Z",
+      "updated_at": "2018-06-16T17:10:14Z"
+    }
+  ],
+  "created_at": "2018-05-22T05:44:44Z",
+  "number": 6916,
+  "state": "closed",
+  "title": "Transcription of Write-Information works if preference is 'SilentlyContinue'",
+  "updated_at": "2018-06-16T18:11:39Z"
+}

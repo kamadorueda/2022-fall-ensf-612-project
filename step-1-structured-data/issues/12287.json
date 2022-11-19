@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12287",
+  "author": "SeeminglyScience",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nWhen a command has a `ScriptBlock` parameter, it can be difficult for static analysis tools like `PSScriptAnalyzer` to determine how the `ScriptBlock` will be invoked.  This makes tracking some things significantly more difficult (like if an assigned variable is utilized). For example, although `ForEach-Object` is invoked in the current scope, it's not possible for PSSA to determine variable usage in this example:\r\n\r\n```powershell\r\n$a = @()\r\n0..10 | ForEach-Object { $a += $PSItem }\r\nreturn $a\r\n```\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nIntroduce an attribute `InvokedInCurrentScopeAttribute` that can be used to tell static analysis tools what scope the command plans to invoke the parameter.\r\n\r\n```csharp\r\nusing System;\r\n\r\nnamespace System.Management.Automation\r\n{\r\n    [AttributeUsage(AttributeTargets.Property | AttributeTargets.Parameter)]\r\n    public sealed class InvokedInCurrentScopeAttribute : Attribute\r\n    {\r\n        public string WhenPresent { get; set; }\r\n    }\r\n\r\n    public partial sealed class ForEachObjectCommand\r\n    {\r\n        [InvokedInCurrentScope]\r\n        public ScriptBlock Begin { get; set; }\r\n\r\n        [InvokedInCurrentScope]\r\n        public ScriptBlock[] Process { get; set; }\r\n\r\n        [InvokedInCurrentScope]\r\n        public ScriptBlock End { get; set; }\r\n\r\n        [InvokedInCurrentScope]\r\n        public ScriptBlock[] RemainingScripts { get; set; }\r\n    }\r\n\r\n    public partial sealed class WhereObjectCommand\r\n    {\r\n        [InvokedInCurrentScope]\r\n        public ScriptBlock FilterScript { get; set; }\r\n    }\r\n\r\n    public partial class InvokeCommandCommand\r\n    {\r\n        [InvokedInCurrentScope(WhenPresent = nameof(NoNewScope))]\r\n        public override ScriptBlock ScriptBlock { get; set; }\r\n    }\r\n}\r\n```\r\n\r\nTooling support for this should be implemented similarly to how Roslyn handles nullability decorations.  Mainly, looking for this decoration should be done by type *name* instead of identity.  Binary modules targeting 5.1 should be able to define this attribute within their own assembly and still have it detected by analysis tools.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @bergmeister Thoughts?",
+      "created_at": "2020-04-11T08:11:05Z",
+      "updated_at": "2020-04-11T08:11:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps we could add more for PSScriptAnalyzer in Engine/API.",
+      "created_at": "2020-04-11T08:12:18Z",
+      "updated_at": "2020-04-11T08:12:18Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps we could create a supplementary module of static analysis attributes, so that we can ship that module in-box in future versions of us, but something like PSScriptAnalyzer could just take a dependency on that module and have them available downlevel to ps5.1 as well.",
+      "created_at": "2020-04-11T17:33:40Z",
+      "updated_at": "2020-04-11T17:33:40Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Such attribute would definitely help but since I assume this issue was created due to the known issue of the `PSUseDeclaredVarsMoreThanAssignments` PSSA rule that has false positives when variable usage crosses multiple scriptblocks? Therefore an alternative would also be to relax the rule and assume invocation in current scope. Personally, I was never too bother about its false positives and find the rule itself still useful. The problem of PSSA not being aware of Pester syntax like e.g. a variable declared in `BeforeAll` would still remain with such attributes I suppose.",
+      "created_at": "2020-04-12T21:05:57Z",
+      "updated_at": "2020-04-12T21:05:57Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Would it? Both `BeforeAll {}` and `It {}` invoke their scripts in the same scope -- that of the parent `Context {}` or `Describe {}` block. As such, you could apply such an attribute to both `It` and the `Before`/`After`-type blocks and remove those false positives. There would still be _some_ if you're declaring values outside a context/describe, but iirc that's generally considered poor form anyway?",
+      "created_at": "2020-04-12T21:08:36Z",
+      "updated_at": "2020-04-12T21:08:36Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Such attribute would definitely help but since I assume this issue was created due to the known issue of the `PSUseDeclaredVarsMoreThanAssignments` PSSA rule that has false positives when variable usage crosses multiple scriptblocks?\r\n\r\nIt's an easy example of something that already exists that could benefit, but not my motivation for creating the issue.\r\n\r\nI was working on a sort of type inference overhaul.  Part of that was making the variable inference more accurate which involves some flow analysis.  I realized the same problem that plagues that rule would make any sort of flow analysis inaccurate whenever command with a scriptblock was used.\r\n\r\n> The problem of PSSA not being aware of Pester syntax like e.g. a variable declared in BeforeAll would still remain with such attributes I suppose.\r\n\r\nI think you'd just put the attribute on `BeforeAll` no?  I guess it depends how the rule is set up, but if you're actually trying to check execution flow, marking `BeforeAll` with `InvokedInCurrentScope` and leaving the `It` blocks undecorated should give enough information.",
+      "created_at": "2020-04-12T22:17:20Z",
+      "updated_at": "2020-04-12T22:17:20Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hmm, you're right about Pester's BeforeAll. I initially thought PSSA would need to know the order of execution but it actually seems that `PSUseDeclaredVarsMoreThanAssignments` doesn't care about the order, i.e. `foo $a; $a =42` makes it not trigger a warning, one could also argue this is actually a bug...\r\nMy main point is that if the problem we try to solve is reducing the false positives of this rule, we could relax it and just assume current scope, WDYT?",
+      "created_at": "2020-04-12T22:42:37Z",
+      "updated_at": "2020-04-13T08:07:50Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> My main point is that if the problem we try to solve is reducing the false positives of this rule, we could relax it an just assume current scope, WDYT?\r\n\r\nLike I said that rule was just a convenient example of something existing that could benefit, but not why I opened the issue.  I think a lot of potential tools could benefit from this sort of data.\r\n\r\nThat said, relaxing it to assume current scope would probably be sufficient for that rule specifically.  Personally I'd like to see it *catch more* like the order problem you refer to, but that would probably be a pretty significant undertaking (e.g. if you're in a loop, that order is still valid for accessing the same var).",
+      "created_at": "2020-04-12T23:53:34Z",
+      "updated_at": "2020-04-12T23:53:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If we look C# nullable annotations there are  many new attributes. For the issue I want to know - do we expect a set of new attributes for such annotations for static analysis? My concern is that it is public API and we need a good design before start.",
+      "created_at": "2020-04-13T06:07:33Z",
+      "updated_at": "2020-04-13T06:07:33Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Given that there is more than half a year of .Net 5 and therefore also PowerShell Previews, there should be enough time to test and iterate over the design. Now is actually the best time to experiment :)",
+      "created_at": "2020-04-13T08:19:03Z",
+      "updated_at": "2020-04-13T08:19:03Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah I think there's a lot of room for more annotations to assist with static analysis.  Like @bergmeister  mentioned, there's no need to wait until we figure out what all of them will be.\r\n\r\nAt a high level the most important things to me are:\r\n\r\n1. They are used *purely* for static analysis.  They have zero run time effect.\r\n1. Tooling matches based on type *name* not *identity*.\r\n\r\nTo expand on `#2`, I expect to be able to target `PowerShellStandard.Library` 5.1 and still support a new static analysis attribute like this:\r\n\r\n```csharp\r\nnamespace System.Management.Automation\r\n{\r\n    [AttributeUsage(AttributeTargets.Property | AttributeTargets.Parameter)]\r\n    internal sealed class InvokedInCurrentScopeAttribute : Attribute\r\n    {\r\n        public string WhenPresent { get; set; }\r\n    }\r\n}\r\n\r\nnamespace MyProject.Commands\r\n{\r\n    [Cmdlet(VerbsDiagnostic.Test, \"MyCommand\")]\r\n    public InvokeMyCommandCommand : PSCmdlet\r\n    {\r\n        [Parameter]\r\n        [InvokedInCurrentScope]\r\n        public ScriptBlock Action { get; set; }\r\n    }\r\n}\r\n```\r\n\r\nMaybe PowerShell can be a little less strict than roslyn and ignore namespace as well.",
+      "created_at": "2020-04-13T14:18:33Z",
+      "updated_at": "2020-04-13T14:18:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> there's no need to wait until we figure out what all of them will be.\r\n\r\nThe API is public and will be used in external repo - so we need to get approval from PowerShell Committee and security team. So it is better to start with good design so as not to waste their time.\r\n\r\nI guess we need a base abstract class like \"StaticAnalyzerAttribute\".\r\n",
+      "created_at": "2020-04-14T05:31:09Z",
+      "updated_at": "2020-04-14T05:31:09Z"
+    }
+  ],
+  "created_at": "2020-04-09T14:55:25Z",
+  "number": 12287,
+  "state": "open",
+  "title": "Introduce \"InvokedInCurrentScopeAttribute\" for static analysis",
+  "updated_at": "2020-04-14T05:31:09Z"
+}

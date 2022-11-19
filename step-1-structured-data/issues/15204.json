@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15204",
+  "author": "mklement0",
+  "body": "PowerShell makes a hard-coded exception for types that implement the _non-generic_ `System.Collections.IDictionary` interface with respect to behavior in the pipeline: even though such types are _enumerable_, PowerShell sends them _as a whole_ through the pipeline.\r\n\r\nSource code here: https://github.com/PowerShell/PowerShell/blob/48c7e112db8f0506a74555c83ecb8bec509b6597/src/System.Management.Automation/engine/LanguagePrimitives.cs#L523-L543\r\n\r\nHowever, some types _only_ implement the _generic_ equivalent of this interface, `System.Collections.Generic.IDictionary<TKey, TValue>`.\r\nSuch type are therefore unexpectedly _enumerated_ in the pipeline, i.e their _key-value_ pairs are sent rather than the dictionary itself.\r\n\r\nNote that while with the `IEnumerable` / `IEnumerable<Type>` interface pair implementing the generic version _implicitly_ also implements the non-generic one, this does _not_ apply to the `IDictionary` / `IDictionary<TKey, TValue>` pair.\r\n\r\nI don't know what the official recommendations are in this case, but at least one notable example of a type that _only_ implements the generic interface is [`System.Dynamic.ExpandoObject`](https://docs.microsoft.com/en-US/dotnet/api/System.Dynamic.ExpandoObject), used in the repro below.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n$o = [System.Dynamic.ExpandoObject]::new(); $o.one = 1; $o.two = 2\r\n\r\n($o | Measure-Object).Count | Should -Be 1\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe test should succeed: the `IDictionary`2`-implementing type's instance should be sent _as a whole_ through the pipeline.\r\n\r\n## Actual behavior\r\n\r\nThe test fails, because the instance is enumerated and its key-value pairs are sent through the pipeline.\r\n\r\n```none\r\nInvalidResult: Expected 1, but got 2.\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.2.0-preview.4\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This could be too expensive to implement https://tmont.com/blargh/2011/3/determining-if-an-open-generic-type-isassignablefrom-a-type\r\n\r\nWithout an critical scenario I'd freeze the fix.\n\n<blockquote><img src=\"//static2.tmont.com/images/0.1.35/logo-16x16.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://tmont.com/blargh/2011/3/determining-if-an-open-generic-type-isassignablefrom-a-type\">Determining if an Open Generic Type IsAssignableFrom a Type - BLARGH!! \u00a7 Tommy Montgomery</a></strong></div><div>Determining if an Open Generic Type IsAssignableFrom a Type</div></blockquote>",
+      "created_at": "2021-04-12T05:54:25Z",
+      "updated_at": "2021-04-12T05:54:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A streamlined test is possible:\r\n\r\n```csharp\r\n! (objectType.GetInterface(\"System.Collections.Generic.IDictionary`2\", false) is null)\r\n```\r\n\r\nAnd, even though it is an _additional_ test that must be performed, the performance impact is ~~surprisingly small~~:\r\n\r\nSee the updated benchmarks [below](https://github.com/PowerShell/PowerShell/issues/15204#issuecomment-818235777).\r\n\r\n<details>\r\n<summary>Outdated results and outdated benchmark code:</summary>\r\n\r\nHere is sample output from running the benchmarks below on my macOS 10.15.7 system with .NET 6.0.100-preview.3.21202.5\r\n\r\n```none\r\nCumulative timings from 1000 runs:\r\n  non-generic, .IsAssignableFrom()   : 00:00:00.0031652\r\n  generic, .GetInterface()           : 00:00:00.0033636\r\n  combined                           : 00:00:00.0035919\r\nRatio of generic vs. non-generic test : 1.06\r\nRatio of combined vs. non-generic test: 1.13\r\n```\r\n\r\nIn repeated runs the ranking of ratios on occasion even reverses (the _combined_ test is reported as faster) or the two ratios are the same. (The input type was chosen so that _both_ tests are indeed performed so that no short-circuiting occurs).\r\n\r\nIt is possible that my benchmarks (see below) are flawed; I have little experience with profiling C# code.\r\n\r\n\r\n\r\n```csharp\r\nusing System;\r\nusing System.Collections.Generic;\r\nusing System.Collections;\r\nusing System.Diagnostics;\r\nusing System.Dynamic;\r\n\r\nnamespace demo\r\n{\r\n\r\n  class Program\r\n  {\r\n    static TimeSpan timeAction(Action action, int runs)\r\n    {\r\n      var thisProcess = Process.GetCurrentProcess();\r\n      TimeSpan tsBefore, tsAfter, tsTotal = new TimeSpan(0);\r\n      for (var i = 0; i < runs; ++i)\r\n      {\r\n        tsBefore = thisProcess.TotalProcessorTime;\r\n        action.Invoke();\r\n        tsAfter = thisProcess.TotalProcessorTime;\r\n        tsTotal += tsAfter - tsBefore;\r\n      }\r\n      return tsTotal;\r\n    }\r\n\r\n    static void Main(string[] args)\r\n    {\r\n\r\n      var obj = new ExpandoObject();\r\n      var objectType = obj.GetType();\r\n\r\n      string[] descriptions =\r\n      {\r\n        \"non-generic, .IsAssignableFrom()\",\r\n        \"generic, .GetInterface()\",\r\n        \"combined\"\r\n      };\r\n\r\n      Action[] actions =\r\n      {\r\n        () => { var isNonGenericDict  = typeof(IDictionary).IsAssignableFrom(objectType); },\r\n        () => { var isGenericDict     = ! (objectType.GetInterface(\"System.Collections.Generic.IDictionary`2\", false) is null); },\r\n        () => { var isEither          = typeof(IDictionary).IsAssignableFrom(objectType) || ! (objectType.GetInterface(\"System.Collections.Generic.IDictionary`2\", false) is null); }\r\n      };\r\n\r\n      // Run the commands in isolation first, to level the playing field with\r\n      // respect to one-time initializations, such as loading types on demand.\r\n      foreach (var action in actions) { action.Invoke(); }\r\n\r\n      // Run the benchmarks:\r\n      int runs = 1000; \r\n      List<TimeSpan> timings = new();\r\n      foreach (var action in actions)\r\n      {\r\n        timings.Add(timeAction(action, runs));\r\n      }\r\n\r\n      Console.WriteLine($\"Cumulative timings from {runs} runs:\");\r\n      var i = 0;\r\n      foreach (var ts in timings)\r\n      {\r\n        Console.WriteLine($\"  {descriptions[i++].PadRight(35)}: {ts}\");\r\n      }\r\n      Console.WriteLine($\"Ratio of generic vs. non-generic test : {timings[1] / timings[0]:N2}\");\r\n      Console.WriteLine($\"Ratio of combined vs. non-generic test: {timings[2] / timings[0]:N2}\");\r\n\r\n    } // Main()\r\n\r\n  } // class\r\n\r\n} // namespace\r\n```\r\n</details>",
+      "created_at": "2021-04-12T17:58:18Z",
+      "updated_at": "2021-04-12T21:04:55Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> It is possible that my benchmarks (see below) are flawed; I have little experience with profiling C# code.\r\n\r\n[BenchmarkDotNet](https://benchmarkdotnet.org/) is the standard. Really difficult to get reliable results outside of it.",
+      "created_at": "2021-04-12T19:26:26Z",
+      "updated_at": "2021-04-12T19:26:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I appreciate the pointer, @SeeminglyScience.\r\n\r\nUsing BenchmarkDotNet indeed paints a different picture:\r\n\r\n```none\r\n|            Method |      Mean |    Error |   StdDev |\r\n|------------------ |----------:|---------:|---------:|\r\n|    TestForGeneric | 167.66 ns | 1.836 ns | 1.627 ns |\r\n| TestForNonGeneric |  11.82 ns | 0.075 ns | 0.071 ns |\r\n|     TestForEither | 183.13 ns | 1.491 ns | 1.322 ns |\r\n```\r\n\r\nThat is, the combined test takes around 16 times as long as the current, non-generic-interface-only test, on my macOS 10.15.7 machine with .NET 6.0.100-preview.3.21202.5\r\n\r\nWhat that would mean in terms of real-world impact I don't know.\r\n\r\n<details>\r\n<summary>Benchmark code based on BenchmarkDotNet</summary>\r\n\r\n```csharp\r\nusing System;\r\nusing System.Collections;\r\nusing System.Dynamic;\r\nusing BenchmarkDotNet.Attributes;\r\nusing BenchmarkDotNet.Running;\r\n\r\nnamespace csbm\r\n{\r\n  public class InterfaceTestBenchmarks\r\n  {\r\n\r\n    // A type that implements IDictionary`2, but not also the non-generic IDictionary interface.\r\n    static readonly Type s_typeToInspect = new ExpandoObject().GetType();\r\n\r\n    [Benchmark]\r\n    public bool TestForGeneric()\r\n    {\r\n        return ! (s_typeToInspect.GetInterface(\"System.Collections.Generic.IDictionary`2\") is null);\r\n    }\r\n    \r\n    [Benchmark]\r\n    public bool TestForNonGeneric()\r\n    {\r\n        return typeof(IDictionary).IsAssignableFrom(s_typeToInspect);\r\n    }\r\n\r\n    [Benchmark]\r\n    public bool TestForEither()\r\n    {\r\n        return typeof(IDictionary).IsAssignableFrom(s_typeToInspect) || ! (s_typeToInspect.GetInterface(\"System.Collections.Generic.IDictionary`2\") is null);\r\n    }\r\n\r\n  }\r\n  class Program\r\n  {\r\n    static void Main(string[] args)\r\n    {\r\n        // For verifying that the tests are correct: Should be False, True, True\r\n        Console.WriteLine(new InterfaceTestBenchmarks().TestForNonGeneric());\r\n        Console.WriteLine(new InterfaceTestBenchmarks().TestForGeneric());\r\n        Console.WriteLine(new InterfaceTestBenchmarks().TestForEither());\r\n\r\n        BenchmarkRunner.Run<InterfaceTestBenchmarks>();\r\n    }\r\n  }\r\n\r\n}\r\n```\r\n</details>\r\n",
+      "created_at": "2021-04-12T21:03:33Z",
+      "updated_at": "2021-04-12T21:05:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> What that would mean in terms of real-world impact I don't know.\r\n\r\nI see over 40 code path use the method so it is a high risk to catch a performance regression.\r\n\r\nSince we are in C#, not in script, I guess there is more fast way for the check. https://docs.microsoft.com/en-us/dotnet/framework/reflection-and-codedom/how-to-examine-and-instantiate-generic-types-with-reflection\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/framework/reflection-and-codedom/how-to-examine-and-instantiate-generic-types-with-reflection\">How to: Examine and Instantiate Generic Types with Reflection</a></strong></div><div>See how to examine and instantiate generic types with reflection. Use the IsGenericType, IsGenericParameter, and GenericParameterPosition properties.</div></blockquote>",
+      "created_at": "2021-04-13T04:44:10Z",
+      "updated_at": "2021-04-13T04:44:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov, but I don't see a faster way to do it based on the linked article. Did you have a specific approach in mind?\r\n",
+      "created_at": "2021-04-13T13:49:48Z",
+      "updated_at": "2021-04-13T13:49:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe we could fix the issue in `private static IEnumerable GetEnumerableFromIEnumerableT(object obj)` method. We fallback to the method for generics.\r\nhttps://github.com/PowerShell/PowerShell/blob/2f3f39906f6f58e1028672ae3aeffb83934c5153/src/System.Management.Automation/engine/LanguagePrimitives.cs#L402-L413",
+      "created_at": "2021-04-13T16:17:29Z",
+      "updated_at": "2021-04-13T16:17:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That actually performs worse than the `.GetInterface(\"...\")` approach (but it outperforms the delegate-based `.FindInterfaces()` approach):\r\n\r\n```none\r\n|                                  Method |     Mean |   Error |  StdDev |\r\n|---------------------------------------- |---------:|--------:|--------:|\r\n|          TestForGeneric_GetByNameString | 169.7 ns | 2.37 ns | 2.22 ns |\r\n| TestForGeneric_EnumerateAndCompareTypes | 225.2 ns | 1.53 ns | 1.35 ns |\r\n|           TestForGeneric_FindInterfaces | 283.5 ns | 2.53 ns | 2.37 ns |\r\n```\r\n\r\n<details>\r\n<summary>Benchmark code:</summary>\r\n\r\n```csharp\r\nusing System;\r\nusing System.Collections;\r\nusing System.Collections.Generic;\r\nusing System.Dynamic;\r\nusing BenchmarkDotNet.Attributes;\r\nusing BenchmarkDotNet.Running;\r\n\r\nnamespace csbm\r\n{\r\n  public class InterfaceTestBenchmarks\r\n  {\r\n\r\n    // A type that implements IDictionary`2, but not also the non-generic IDictionary interface.\r\n    static readonly Type s_typeToInspect = typeof(ExpandoObject);\r\n\r\n    [Benchmark]\r\n    public bool TestForGeneric_GetByNameString()\r\n    {\r\n        return s_typeToInspect.GetInterface(\"System.Collections.Generic.IDictionary`2\") != null;\r\n    }\r\n\r\n    [Benchmark]\r\n    public bool TestForGeneric_EnumerateAndCompareTypes()\r\n    {\r\n     foreach (Type i in s_typeToInspect.GetInterfaces()) \r\n     { \r\n         if (i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>)) return true;\r\n     }\r\n     return false;\r\n    }\r\n    \r\n    [Benchmark]\r\n    public bool TestForGeneric_FindInterfaces()\r\n    {\r\n     return 0 != s_typeToInspect.FindInterfaces((t, o) => t.IsGenericType && t.GetGenericTypeDefinition() == typeof(IEnumerable<>), null).Length;\r\n    }\r\n    \r\n  }\r\n  class Program\r\n  {\r\n    static void Main(string[] args)\r\n    {\r\n        // For verifying that the tests are correct: Should be True, True, True\r\n        Console.WriteLine(new InterfaceTestBenchmarks().TestForGeneric_GetByNameString());\r\n        Console.WriteLine(new InterfaceTestBenchmarks().TestForGeneric_EnumerateAndCompareTypes());\r\n        Console.WriteLine(new InterfaceTestBenchmarks().TestForGeneric_FindInterfaces());\r\n \r\n        BenchmarkRunner.Run<InterfaceTestBenchmarks>();\r\n    }\r\n  }\r\n\r\n}\r\n```\r\n\r\n</detals>",
+      "created_at": "2021-04-13T17:19:31Z",
+      "updated_at": "2021-04-13T17:19:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "GetEnumerableFromIEnumerableT should return null for IDictionary`2 too so we need to enumerate `obj.GetType().GetInterfaces()` in any case.\r\n\r\n```c#\r\n private static IEnumerable GetEnumerableFromIEnumerableT(object obj) \r\n { \r\n     foreach (Type i in obj.GetType().GetInterfaces()) \r\n     { \r\n         if (i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>) && \"it is not IDictionary`2\") \r\n         { \r\n             return new EnumerableTWrapper(obj, i); \r\n         } \r\n     } \r\n  \r\n     return null; \r\n } \r\n```",
+      "created_at": "2021-04-13T17:30:15Z",
+      "updated_at": "2021-04-13T17:31:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Oops! I missed that you had used ``IEnumerable`1`` in your example rather than `` IDictionary`2 `` - if I fix the code above to use the latter, the enumerate-and-compare approach outperforms `.GetInterface(\"...\")` - but that tells us that the speed is dependent on the order in which the interfaces happen to be enumerated (`` IDictionary`2 `` comes 2nd, ``IEnumerable`1`` 4th with type `ExpandoObject`).\r\n\r\nGood point about needing to enumerate all interfaces anyway.\r\n",
+      "created_at": "2021-04-13T19:21:31Z",
+      "updated_at": "2021-04-13T19:21:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Performance will not be affected since if this fallback happens then we enumerate the interfaces anyway and one more check does not add noticeable delay.",
+      "created_at": "2021-04-14T03:58:29Z",
+      "updated_at": "2021-04-14T03:58:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "However, assuming I'm reading the code correctly, this interface enumeration currently only happens in _exceptional_ circumstances, namely when calling `.GetEnumerator()` on the non-generic `IEnumerable` unexpectedly returns `null` or throws an exception. \r\n\r\nThere also seems to be an inconsistency in the code: in the `null` case, the absence of the generic ``IEnumerable`1`` results in `null` getting returned, whereas if an exception occurred a (different) exception is thrown:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/2f3f39906f6f58e1028672ae3aeffb83934c5153/src/System.Management.Automation/engine/LanguagePrimitives.cs#L493-L523",
+      "created_at": "2021-04-14T04:23:31Z",
+      "updated_at": "2021-04-14T04:23:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I played with debugger and it seems we consider wrong code path for the issue. The methods are only called from formatting subsystem.\r\nAlso `internal static IEnumerable GetEnumerable(object obj)` has specific code path for IDictionary to consider it as IEnumerable. why should generic IEnumerable behave else?",
+      "created_at": "2021-04-14T07:19:42Z",
+      "updated_at": "2021-04-14T07:19:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The difference in enumeration behavior between _processing in the pipeline_ and _output formatting_ is by design:\r\n\r\n* In the pipeline, dictionaries should  _not_ be enumerated, irrespective of whether they're non-generic(-only) or generic(-only) dictionaries. That its, it makes sense to think of them more like an _object with properties_ (entries), analogous to a `[pscustomobject]` instance.\r\n\r\n* In output formatting, you _do_ want enumeration, so as to present a tabular display of the entries (key-value pairs).\r\n\r\nThis distinction has always existed, and makes sense.\r\n\r\nThere is no reason for a given dictionary to behave differently, just because of an _implementation detail_ (implementing _only_ the generic interface, not also the non-generic one).\r\n\r\nThat is the _conceptual_ view. I do get the _pragmatic_ perspective:\r\n\r\n* Such generic-interface-only types _may_ be rare in practice (I don't know).\r\n\r\n* Fixing the problem may worsen performance.\r\n\r\nMy general preference is always to fix inconsistencies, especially such obscure ones, but I understand that pragmatic considerations may prevail.\r\n\r\nLooking at the code, there definitely seems to be potential for optimization, though that may be outweighed by introducing _unconditional_ enumeration of all interfaces. Personally, I think it's worth a closer look, but it's certainly a tricky area of the code, and we should understand the real-world performance implications.\r\n\r\n",
+      "created_at": "2021-04-14T13:44:48Z",
+      "updated_at": "2021-04-14T13:44:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "So we have two issue - (1) in pipeline, (2) in formatting.\r\n\r\nFor (1) we need to find the place to fix and investigate performance risk.\r\nFor (2) we already found the fix place. I haven't  a concern about performance since we already enumerate all interfaces. We need explicit examples which we could use as tests.",
+      "created_at": "2021-04-14T16:23:08Z",
+      "updated_at": "2021-04-14T16:23:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well, for (2) we don't need a fix, because we _do_ want such generic-interface-only dictionaries to be enumerated for _formatting_ purposes, and that's already happening (though maybe cleanup / adding comments is called for):\r\n\r\n```powershell\r\n# System.Dynamic.ExpandoObject implements only IDictionary`2, not also IDictionary.\r\nPS> $o = [System.Dynamic.ExpandoObject]::new(); $o.foo = 1; $o.bar = 2; $o\r\n\r\nKey Value\r\n--- -----\r\nfoo     1\r\nbar     2\r\n```",
+      "created_at": "2021-04-14T16:27:23Z",
+      "updated_at": "2021-04-14T16:27:23Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "We discussed this today in the Engine Working Group.\r\n\r\nWe all generally agree that the current behaviour is unintuitive and arguably bugged. Concerns were raised about the potential performance implications, although we all agree that we don't have sufficient data at this point to rule one way or another.\r\n\r\n@mklement0's benchmarks are a great starting point, and we'd like to see a combination of isolated tests and testing done after making the change in PowerShell itself to determine in context how much of a difference it would cause.\r\n\r\nAt minimum, we think we'd need to have the following test cases for comparison's sake:\r\n\r\n- Processing objects that implement neither `IDictionary` nor `IDictionary<,>`\r\n- Processing objects that implement `IDictionary`\r\n- Processing objects that implement `IDictionary<,>`\r\n\r\nFor each of these, we'd need to compare the current and proposed new behaviour in an isolated benchmark, as well as tests done within PowerShell before and after making the change to compare performance differences in-context.\r\n\r\nIf anyone has additional suggestions on ways to implement the check that may have a lesser performance impact than the already given suggestions, those are also worth discussing as well. \ud83d\ude42 ",
+      "created_at": "2021-06-11T00:16:23Z",
+      "updated_at": "2021-06-11T00:16:23Z"
+    }
+  ],
+  "created_at": "2021-04-11T19:58:53Z",
+  "number": 15204,
+  "state": "open",
+  "title": "A dictionary type that only implements the generic IDictionary interface is unexpectedly enumerated in the pipeline",
+  "updated_at": "2021-08-25T17:01:14Z"
+}

@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15285",
+  "author": "rjmholt",
+  "body": "In PowerShell Editor Services, the debugger can pass us the path to a script and any arguments to use with it, like:\r\n\r\n```json\r\n{\r\n    \"script\": \"C:\\\\Users\\\\me\\\\script.ps1\",\r\n    \"args\": [\r\n        \"-Param1\",\r\n        \"foo\",\r\n        \"-Param2\",\r\n        \"bar\"\r\n    ]\r\n}\r\n```\r\n\r\nThen in .NET, we need to pass those through to a `PowerShell` object to run the script.\r\n\r\nUnfortunately, we don't seem to have a way to provide a script path as a command and an array of arguments to bind to it.\r\n\r\nThe options I can see are `AddCommand(script)` and then us having to recreate the parameter binding algorithm to decide when to use `AddParameter(\"switch\")`, `AddParameter(\"parameter\", \"argument\")` and `AddArgument(\"arg\")`. This isn't possible in general though, since we must know which parameters are switch parameters on the script to do this correctly.\r\n\r\nSo then we're forced to use `AddScript` and use some string templating:\r\n\r\n```csharp\r\n$\"& '{scriptPath.Replace(\"'\", \"''\")}' {string.Join(\" \", args)}\"\r\n```\r\n\r\nThis has some serious drawbacks:\r\n\r\n- Injection becomes a possibility\r\n- Some arguments need escaping and others don't. Parameters shouldn't be escaped, but we don't actually know what's a parameter or not (that's what parameter binding works out).\r\n- The actual command execution stack now has an extra script layer in it, which isn't a nice artefact when debugging\r\n\r\nIs there a better way? It would be nice if we could effectively array-splat from .NET.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Unfortunately, you can't just do:\r\n\r\n```powershell\r\n$a = @('-module','microsoft.powershell.utility','-name','invoke-restmethod')\r\nget-command @a\r\n```\r\n\r\nas it all becomes positional.",
+      "created_at": "2021-04-20T20:59:20Z",
+      "updated_at": "2021-04-20T20:59:20Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "You could look though each and follow these rules\r\n\r\n* If it starts with `-` it's a parameter key\r\n* If the next arg also starts with `-` the value from before is `$true` (it's a switch) and this is a new parameter key\r\n* If it doesn't start with `-` it's a value\r\n  * If the previous is a parameter key use this as the value\r\n  * Else it's a positional argument and use `AddArgument`\r\n\r\nDefinitely not simple as you need to look ahead before determining whether something is a switch or a parameter with a value.\r\n\r\nEdit: This won't work due to https://github.com/PowerShell/PowerShell/issues/15285#issuecomment-823636792",
+      "created_at": "2021-04-20T22:07:01Z",
+      "updated_at": "2021-04-20T22:52:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "What is called for is a way to expose what is already implemented as part of the `-File` _CLI_ parameter: a way to take an array of _verbatim_ tokens and apply PowerShell's usual parameter binding to them.\r\n\r\nThat is, the _SDK_ (the [`PowerShell`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.PowerShell) class) needs something like an `.AddParametersFromVerbatimTokens()` method.",
+      "created_at": "2021-04-20T22:19:38Z",
+      "updated_at": "2021-04-20T22:19:51Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> You could look though each and follow these rules\r\n\r\nYes I thought about that. But:\r\n\r\n```powershell\r\nGet-ChildItem -Recurse ./dir\r\n```\r\n\r\nWe're forced to know the specifics of the command's parameters, which puts us into full parameter binding territory",
+      "created_at": "2021-04-20T22:21:27Z",
+      "updated_at": "2021-04-20T22:21:27Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> We're forced to know the specifics of the command's parameters\r\n\r\nAhh yes I didn't think about that unfortunately, sorry for the extra noise.",
+      "created_at": "2021-04-20T22:51:54Z",
+      "updated_at": "2021-04-20T22:51:54Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> sorry for the extra noise.\r\n\r\nNo not at all -- appreciate the help! I very nearly implemented what you suggested, but then was lucky to hit upon that counterexample.",
+      "created_at": "2021-04-20T23:43:18Z",
+      "updated_at": "2021-04-20T23:43:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Here is a code for -File scenario\r\nhttps://github.com/PowerShell/PowerShell/blob/2f0cc3b0f82e0e07e693db90daca39adb2caf591/src/Microsoft.PowerShell.ConsoleHost/host/msh/ConsoleHost.cs#L1852-L1881\r\n\r\ninitialCommandArgs comes from CommandLineParser\r\nhttps://github.com/PowerShell/PowerShell/blob/2f0cc3b0f82e0e07e693db90daca39adb2caf591/src/Microsoft.PowerShell.ConsoleHost/host/msh/CommandLineParameterParser.cs#L1168-L1210\r\n\r\nThis could work for the json scenario too.",
+      "created_at": "2021-04-21T11:33:43Z",
+      "updated_at": "2021-04-21T11:33:43Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rjmholt This *can't* work because editor services is not giving you enough information to correctly invoke the command. For example, you don't *know* if \"-param1\" is a formal parameter or a string argument. You need a richer API with some kind of extra Metadata in the `args` collection for this to be possible.",
+      "created_at": "2021-04-21T17:06:07Z",
+      "updated_at": "2021-04-21T17:06:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The functionality exists, as part of the CLI's `-File` parameter, and @iSazonov has thankfully pointed to the relevant source-code locations.\r\n\r\nWhat's needed is to bring this functionality to the SDK.\r\n\r\nTo revise and extend my previous suggestion:\r\n\r\n* Add a new `.Add*()`  method for \"baked in\" arguments, to complement the existing [`.AddParameters()`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.PowerShell.AddParameters) method(s):\r\n\r\n```c#\r\n// Accept a list (array) of strings to be interpreted as named arguments, as by the CLI's -File parameter.\r\npublic System.Management.Automation.PowerShell AddRawParameters (\r\n  System.Collections.Generic.IList<string> rawParameters\r\n);\r\n```\r\n\r\nAdd new `.InvokeWith*()` methods that parallel the `.Add*Parameters()` ones, for _repeatable_ calls with _different per-call arguments_, as previously discussed in https://github.com/PowerShell/PowerShell/issues/15004#issuecomment-799653120  (I'm leaving out overloads with the other parameters / generic return values supported by [`.Invoke()`](https://docs.microsoft.com/en-US/dotnet/api/System.Management.Automation.PowerShell.Invoke), the number of which could be reduced with optional parameters):\r\n\r\n```c#\r\n// positional arguments \r\npublic System.Collections.ObjectModel.Collection<System.Management.Automation.PSObject> InvokeWithParameters (\r\n  System.Collections.IList parameters)                        \r\n);\r\n\r\n// named arguments \r\npublic System.Collections.ObjectModel.Collection<System.Management.Automation.PSObject> InvokeWithParameters (\r\n  System.Collections.IDictionary parameters                        \r\n);\r\n\r\n// raw string tokens to be interpreted as named arguments, as by the CLI's -File parameter.\r\npublic System.Collections.ObjectModel.Collection<System.Management.Automation.PSObject> InvokeWithRawParameters (\r\n  System.Collections.Generic.IList<string> rawParameters) \r\n);\r\n```\r\n",
+      "created_at": "2021-04-21T18:04:48Z",
+      "updated_at": "2021-04-21T18:05:10Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Conceptually though I have an array of tokens or command elements.\r\n\r\nBetween the parser and the compiler, the parser just decides whether something is a parameter name or not based on whether it begins with `-` (which seems like a reasonable way to go), but doesn't try to associate arguments to parameters:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/2f0cc3b0f82e0e07e693db90daca39adb2caf591/src/System.Management.Automation/engine/parser/Parser.cs#L6536-L6576\r\n\r\nInstead, it creates a command element array and gives that to the compiler:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/2f0cc3b0f82e0e07e693db90daca39adb2caf591/src/System.Management.Automation/engine/parser/Compiler.cs#L4142-L4172\r\n\r\nAnd then that array is interpreted by PowerShell at runtime:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/2f0cc3b0f82e0e07e693db90daca39adb2caf591/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L164-L188\r\n\r\nI do understand what you're saying @BrucePay, that the tokeniser/parser theoretically does this classification work. I guess I'm saying that I'm happy to provide that step in a dumb way (essentially by providing a `CommandParameterInternal[]` array), so I can go halfway but still reuse PowerShell's logic to associate parameters with arguments.\r\n",
+      "created_at": "2021-04-21T18:11:04Z",
+      "updated_at": "2021-04-21T18:11:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the deep dive, @rjmholt. Do you see any problems with / do you have suggestions regarding the proposed API surface?",
+      "created_at": "2021-04-21T18:23:40Z",
+      "updated_at": "2021-04-21T18:23:40Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "One problem could potentially be how this is exposed for pipelines run in a remote runspace. I don\u2019t think there is any parsing done locally for this case as the command/script is sent to the remote alongside any parameters as a list of name/value pairs (arguments just being values without a name). Adding such an API would have to raise an exception if run on a pipeline attached to a remote runspace.",
+      "created_at": "2021-04-21T18:46:25Z",
+      "updated_at": "2021-04-21T18:47:05Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": ">  I don\u2019t think there is any parsing done locally for this case as the command/script is sent to the remote alongside any parameters as a list of name/value pairs (arguments just being values without a name). Adding such an API would have to raise an exception if run on a pipeline attached to a remote runspace.\r\n\r\nI'm guessing that's a problem that `PowerShell.AddParameter()` has already had to solve, since you can attach a remote runspace to such an object.",
+      "created_at": "2021-04-21T20:12:46Z",
+      "updated_at": "2021-04-21T20:12:46Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Do you see any problems with / do you have suggestions regarding the proposed API surface?\r\n\r\nI don't want to go too far into things, but it feels like we need to use some kind of object here to say \"this is a parameter name\" and \"this is a value\". That's kind of the point we have to get it to to integrate with existing functionality. Perhaps PowerShell should do that though, I don't know.\r\n\r\nI think we'd need a proof of concept to really explore it further. I mainly opened the issue as a dual question/suggestion, to see if any alternative approaches existed and also if anyone else had this desire.",
+      "created_at": "2021-04-21T20:17:19Z",
+      "updated_at": "2021-04-21T20:17:19Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> I'm guessing that's a problem that PowerShell.AddParameter() has already had to solve\r\n\r\nNot really, AFAIK these are just sent verbatim. The raw [CLIXML message](https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/2cf8cccb-63ab-404a-82df-caef0c41717a) that contains the pipeline commands/scripts looks somewhat like this\r\n\r\n```xml\r\n<Obj RefId=\"3\">\r\n  <MS>\r\n    <S N=\"Cmd\">script or command to run, IsScript states which of the 2 this is</S>\r\n    <B N=\"IsScript\">true</B>\r\n    <Nil N=\"UseLocalScope\"/>\r\n    <Obj N=\"MergeMyResult\" RefId=\"4\">some values here that don't matter to this issue</Obj>\r\n    <Obj N=\"MergeToResult\" RefId=\"5\" />\r\n    <Obj N=\"MergePreviousResults\" RefId=\"6\" />\r\n    <Obj N=\"MergeError\" RefId=\"7\" />\r\n    <Obj N=\"MergeWarning\" RefId=\"8\" />\r\n    <Obj N=\"MergeVerbose\" RefId=\"9\" />\r\n    <Obj N=\"MergeDebug\" RefId=\"10\" />\r\n    <Obj N=\"Args\" RefId=\"11\">\r\n      <TNRef RefId=\"0\"/>\r\n      <LST>\r\n        <!--This is an argument, i.e. no Name just a value-->\r\n        <Obj RefId=\"7b\">\r\n          <MS>\r\n            <Nil N=\"N\"/>\r\n            <S N=\"V\">argument value</S>\r\n          </MS>\r\n        </Obj>\r\n        <!--This is a parameter, i.e. Name with a value, switches just use a boolean value-->\r\n        <Obj RefId=\"7b\">\r\n          <MS>\r\n            <S N=\"N\">ParameterName</S>\r\n            <S N=\"V\">parameter value</S>\r\n          </MS>\r\n        </Obj>\r\n      </LST>\r\n    </Obj>\r\n  </MS>\r\n</Obj>\r\n```\r\n\r\nSo regardless of whether `.AddArgument()` or `.AddParameter()` is used the raw CLIXML message still needs to know whether it's a positional argument or parameter which as you've said cannot be gleamed without reading the parameter definition and becoming your own binder. This is why the proposed method would require one of the 2 things to happen to support remote invocations\r\n\r\n* An exception saying this only works for local stuff where it can utilise the builtin binder to determine whether it's a positional argument or parameter to build the internal info\r\n* An extension to the CLIXML that allows you to just pass in a raw list of values and the parsing happens on the remote side\r\n\r\nThe 2nd is a lot more useful and works in more situations but it would require further extensions to the remote spec which may not be feasible. It's definitely possible as the `CREATE_PIPELINE` message already has variable properties based on the PowerShell version (`MergeInformation` is v5+).",
+      "created_at": "2021-04-21T20:52:48Z",
+      "updated_at": "2021-04-21T20:53:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Great stuff, @jborean93.\r\n\r\nOn a quick meta note: As is probably evident, I'm out of my depth with respect to the innards of the SDK, parser, compiler, remoting, but I always welcome the opportunity to learn more, and I'm hoping that my somewhat-unencumbered outsider perspective is at least somewhat helpful on occasion.\r\n\r\nUnderstood re not wanting to go deeper, @rjmholt, but re\r\n\r\n> It it feels like we need to use some kind of object here to say \"this is a parameter name\" and \"this is a value\".\r\n\r\nWasn't _not_ having to preprocess the array of would-be parameters and letting PowerShell do the heavy lifting the motivation for opening this issue?",
+      "created_at": "2021-04-22T12:39:57Z",
+      "updated_at": "2021-04-22T12:39:57Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Something you can technically do in the absence of a proper API is manually create a `CommandAst`.\r\n\r\nEverything that isn't a parameter *does* come through as a literal string though, unless you explicitly change up the ASTs you are creating.\r\n\r\nExample:\r\n\r\n```powershell\r\nusing namespace System.Management.Automation.Language\r\n\r\n$command = 'Get-ChildItem'\r\n$params = @(\r\n    '-Path',\r\n    'Something',\r\n    '-File')\r\n\r\n$ep = [ScriptPosition]::new(\r\n    <# scriptName: #> '',\r\n    <# scriptLineNumber: #> 0,\r\n    <# offsetInLine: #> 0,\r\n    <# line: #> '',\r\n    <# fullScript: #> '')\r\n\r\n$ee = [ScriptExtent]::new($ep, $ep)\r\n\r\n$commandElements = [CommandElementAst[]]::new($params.Length + 1)\r\n\r\n$commandElements[0] = [StringConstantExpressionAst]::new(\r\n    <# extent: #> $ee,\r\n    <# value: #> $command,\r\n    <# stringConstantType: #> [StringConstantType]::BareWord)\r\n\r\nfor ($i = 0; $i -lt $params.Length; $i++) {\r\n    $text = $params[$i]\r\n    if (-not $text.StartsWith('-')) {\r\n        $commandElements[$i + 1] = [StringConstantExpressionAst]::new($ee, $text, [StringConstantType]::BareWord)\r\n        continue\r\n    }\r\n\r\n    $commandElements[$i + 1] = [CommandParameterAst]::new(\r\n        <# extent: #> $ee,\r\n        <# parameterName: #> $text.Substring(1),\r\n        <# argument: #> $null,\r\n        <# errorPosition: #> $ee)\r\n}\r\n\r\n$sbAst = [ScriptBlockAst]::new(\r\n    <# extent: #> $ee,\r\n    <# paramBlock: #> $null,\r\n    <# statements: #> [StatementBlockAst]::new(\r\n        <# extent: #> $ee,\r\n        <# statements: #> [StatementAst[]](\r\n            [PipelineAst]::new(\r\n                <# extent: #> $ee,\r\n                <# pipelineElements: #> [CommandBaseAst[]](\r\n                    [CommandAst]::new(\r\n                        <# extent: #> $ee,\r\n                        <# commandElements: #> $commandElements,\r\n                        <# invocationOperator: #> [TokenKind]::Ampersand,\r\n                        <# redirections: #> $null)))),\r\n        <# traps: #> $null),\r\n    <# isFilter: #> $false)\r\n\r\n& $sbAst.GetScriptBlock()\r\n```",
+      "created_at": "2021-08-23T03:17:46Z",
+      "updated_at": "2021-08-23T03:17:46Z"
+    }
+  ],
+  "created_at": "2021-04-20T20:22:02Z",
+  "number": 15285,
+  "state": "open",
+  "title": "How to get parameter binding in .NET with an array of arguments/parameters?",
+  "updated_at": "2021-08-23T03:17:46Z"
+}

@@ -1,0 +1,34 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12039",
+  "author": "alx9r",
+  "body": "This came up after #12036 and #12014 while trying to implement [the proposed solution for those issues](https://github.com/PowerShell/PowerShell/issues/12036#issuecomment-595425489).  The solution to those issues will, ostensibly, involve liberal calls to `Import-Module` within modules during module loading to shadow the names of commands such that name resolution occurs in module and not global scope.  In practice I have found that there are scenarios where such liberal use of `Import-Module` causes stack overflows.  Some such stack overflows are the result of straightforward cyclic calls to `Import-Module`.  This one is slightly different as it is apparently acyclic.  \r\n\r\nOne module affected by this is (a later, internal version of) [StructuredResource](https://github.com/alx9r/StructuredResource).  The culprit seems to be [these lines which validate that the DSC resource module imports without error](https://github.com/alx9r/StructuredResource/blob/2efcdfceb4760b500344034e847accad9059d0bf/Functions/tests_.ps1#L194-L198).  A DSC resource that requires `StructuredResource` is also tested by and therefore imported by `StructuredResource`.  I suspect this is an unusual perhaps inadvisable use case, but I'd still like to understand what is happening so I can conclusively work around the stack overflow.\r\n\r\nThis leaves me with the following questions:\r\n\r\n1. Why isn't this acyclic?  Why does this cause a stack overflow?\r\n2. Is there some other way to cross-import without stack overflow?\r\n---\r\n\r\nReferring to the repro below, here is what I would have expected to happen:\r\n\r\n1. `p1` is called which results in imported module `p` then `p1` is invoked\r\n2. `p1` outputs `p1` then imports module `m` into `p1`'s scope\r\n3. import of module `m` includes a call to `Import-Module p` so module `p` is imported a second time, this time into module `m`'s scope\r\n4. the second import of module `p` does not result in any more imports or calls and the whole stack unwinds (*)\r\n\r\n(*) In (4) the call to `Import-Module m` is within the `p1` scriptblock and so should not be invoked by the module import.\r\n\r\nThis is not, however, what happens.  Stack overflow seems to occur after (3) but before (4) is reached.\r\n\r\n# Steps to reproduce\r\n\r\nCreate two well-formed modules `m` and `p` in `$Env:PSModulePath`:\r\n\r\n```powershell\r\n# m.psm1\r\nWrite-Host 'import m'\r\nImport-Module p\r\n```\r\n```powershell\r\n# p.psm1\r\nWrite-Host 'import p'\r\nfunction p1 { Write-Host 'p1'; Import-Module m}\r\n```\r\n\r\nInvoke the following:\r\n\r\n```PowerShell\r\np1\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nimport p\r\np1\r\nimport m\r\nimport p\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nimport p\r\np1\r\nimport m\r\nStack overflow.\r\n```\r\n![image](https://user-images.githubusercontent.com/11237922/76027623-cf7fc380-5ee5-11ea-887f-dd37cdb14041.png)\r\n\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u0393\u00c7\u00aa}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "This recursive line seems to be the culprit:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/3c22b5a3080e3074adf9f8713bdd1543f31c23c7/src/System.Management.Automation/engine/Modules/PSModuleInfo.cs#L633\r\n\r\n`nestedModule` bounces between `m` and `p` indefinitely.",
+      "created_at": "2020-05-20T21:52:17Z",
+      "updated_at": "2020-05-20T21:52:17Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@daxian-dbw I see from your comments on #6843 that this guard was meant to prevent infinite recursion for a particular case:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/3c22b5a3080e3074adf9f8713bdd1543f31c23c7/src/System.Management.Automation/engine/Modules/PSModuleInfo.cs#L624-L631\r\n\r\nIt looks like the guard doesn't pick up the infinite recursion in this repro, though.\r\n\r\nI'm occasionally seeing this manifest in production even after passing our entire test suite.  I _think_ that happens because whether the recursion here terminates is sensitive to module loading order. \r\n\r\nDo you have any guidance about a fix or workaround?",
+      "created_at": "2020-05-20T22:32:49Z",
+      "updated_at": "2020-05-20T22:32:49Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@daxian-dbw \r\n\r\nIn our internal test suite I have witnessed `nestedModule` on [this line](https://github.com/PowerShell/PowerShell/blob/3c22b5a3080e3074adf9f8713bdd1543f31c23c7/src/System.Management.Automation/engine/Modules/PSModuleInfo.cs#L633) bounce between \"Microsoft.Powershell.Utility\" and \"Microsoft.PowerShell.Security\" on its way to the stack overflow.  That looks very similar to #12734.",
+      "created_at": "2020-05-21T16:00:35Z",
+      "updated_at": "2020-05-21T16:00:35Z"
+    }
+  ],
+  "created_at": "2020-03-05T22:04:42Z",
+  "number": 12039,
+  "state": "open",
+  "title": "This apparently acyclic combination of Import-Module calls results in stack overflow",
+  "updated_at": "2020-05-21T16:00:35Z"
+}

@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15592",
+  "author": "rjmholt",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nThe `PSBoundParametersDictionary` type is internal, but has public members and is itself exposed as a public property as `Cmdlet.MyInvocation.BoundParameters`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/658837323599ab1c7a81fe66fcd43f7420e4402b/src/System.Management.Automation/engine/ParameterBinderBase.cs#L1973-L1991\r\n\r\nThis means that, because PowerShell assesses access based on runtime reflection, you can access those members from PowerShell:\r\n\r\n```powershell\r\nfunction Test\r\n{\r\n    # This completes and is valid - it's public and people depend on it\r\n    $PSBoundParameters.BoundPositionally\r\n}\r\n```\r\n\r\nHowever, the actual `Cmdlet.MyInvocation.BoundParameters` property is exposed as `Dictionary<string, object>`. In fact the property itself may be a simple `Dictionary<string, object>`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/658837323599ab1c7a81fe66fcd43f7420e4402b/src/System.Management.Automation/engine/InvocationInfo.cs#L196-L211\r\n\r\nHowever, in practice the parameter binder sets this to a `PSBoundParametersDictionary` instance in most conventional cases:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/658837323599ab1c7a81fe66fcd43f7420e4402b/src/System.Management.Automation/engine/ParameterBinderBase.cs#L2015-L2020\r\n\r\nThis creates an API mismatch between PowerShell and C#, and also makes this difficult to rely on from PowerShell, and in a way that users probably don't expect.\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nWe should make the `PSBoundParametersDictionary` type public and expose it as the type of the `BoundParameters` property, ensuring that all the instances of this property are always that type.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Note that changing the typing of `BoundParameters` would be a binary breaking change.  It may need a new property or documentation that the consumer would need to explicitly cast.",
+      "created_at": "2021-06-17T13:18:38Z",
+      "updated_at": "2021-06-17T13:18:38Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Note that changing the typing of BoundParameters would be a binary breaking change\r\n\r\nGiven that `PSBoundParametersDictionary` inherits from `Dictionary<string, object>`, what examples of (non-reflection) breakage remain possible? I was hoping to lean on Liskov here.",
+      "created_at": "2021-06-17T16:14:40Z",
+      "updated_at": "2021-06-17T16:15:04Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Any usage of `BoundParameters` would need to be recompiled. Otherwise at JIT time it would throw a missing member exception because it would no longer be able to find a method with the signature `Dictionary<string, object> get_BoundParameters()`\r\n\r\n**Edit:** This is such a pain to demo quickly, I'm really kicking myself for not finishing the the full assembly emit for ILAssembler -_-",
+      "created_at": "2021-06-17T16:40:21Z",
+      "updated_at": "2021-06-17T16:58:11Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Here's a repro for what I'm talking about:\r\n\r\n<details>\r\n\r\n<summary>Script to generate example projects</summary>\r\n\r\n```powershell\r\nNew-Item -ItemType Directory DemoBinaryBreak | Set-Location\r\nNew-Item -ItemType Directory Library | Set-Location\r\n\r\ndotnet new classlib\r\n\r\nSet-Content ./Class1.cs -Value 'using System.IO;\r\n\r\nnamespace Library\r\n{\r\n    public class Class1\r\n    {\r\n        public FileSystemInfo Info => null;\r\n    }\r\n}\r\n'\r\n\r\nNew-Item -ItemType Directory ../Consumer | Set-Location\r\n\r\ndotnet new classlib\r\ndotnet add reference ../Library\r\n\r\nSet-Content ./Class1.cs -Value '\r\nnamespace Consumer\r\n{\r\n    public class Class1\r\n    {\r\n        public static string GetName(Library.Class1 source) => source.Info.Name;\r\n    }\r\n}\r\n'\r\n\r\ndotnet publish\r\n\r\nSet-Location ../Library\r\n\r\nSet-Content ./Class1.cs -Value 'using System.IO;\r\n\r\nnamespace Library\r\n{\r\n    public class Class1\r\n    {\r\n        public FileInfo Info => null;\r\n    }\r\n}\r\n'\r\n\r\ndotnet publish\r\n\r\nGet-ChildItem ./bin/debug/*/publish/Library.dll | ForEach-Object { Add-Type -Path $_.FullName }\r\n\r\n# Explicitly do *not* recompile `Consumer`\r\nSet-Location ../Consumer\r\n\r\nGet-ChildItem ./bin/debug/*/publish/Consumer.dll | ForEach-Object { Add-Type -Path $_.FullName }\r\n\r\n[Consumer.Class1]::GetName($null)\r\n```\r\n\r\n</details>\r\n\r\nYou should get:\r\n\r\n```\r\nMethodInvocationException:\r\nLine |\r\n  55 |  [Consumer.Class1]::GetName($null)\r\n     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n     | Exception calling \"GetName\" with \"1\" argument(s): \"Method not found: 'System.IO.FileSystemInfo Library.Class1.get_Info()'.\"\r\n```",
+      "created_at": "2021-06-17T17:15:19Z",
+      "updated_at": "2021-06-17T17:15:19Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Really appreciate the repro, thanks!",
+      "created_at": "2021-06-17T20:06:49Z",
+      "updated_at": "2021-06-17T20:06:49Z"
+    }
+  ],
+  "created_at": "2021-06-16T16:31:52Z",
+  "number": 15592,
+  "state": "open",
+  "title": "PSBoundParametersDictionary is exposed in PowerShell and has public members, but is internal to C#",
+  "updated_at": "2021-06-17T20:06:49Z"
+}

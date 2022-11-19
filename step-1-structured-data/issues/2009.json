@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2009",
+  "author": "jeremylandon",
+  "body": "# Steps to reproduce\n\n`[environment]::OSVersion.Version`\n# Expected behavior\n\nShould be return the OS Version\n# Actual behavior\n- Windows 10 with PowerShell 5 : 10.0.10536.0\n- Windows 10 with PowerShell 6 : 6.2.9200.0\n- Ubuntu : throw an error\n# Potential error of the problem\n\nThe method used by PowerShell must be GetVersionInfoEX ([depreciated since Windows 8.1](https://msdn.microsoft.com/en-us/library/windows/desktop/dn302074%28v=vs.85%29.aspx)) instead of GetVersionInfo\n# Environment data\n\n```\nPS C:\\> $PSVersionTable\n\nName                           Value\n----                           -----\nCLRVersion\nSerializationVersion           1.1.0.1\nWSManStackVersion              3.0\nPSVersion                      6.0.0-alpha\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\nPSRemotingProtocolVersion      2.3\nPSEdition                      Core\nGitCommitId                    v6.0.0-alpha.9\nBuildVersion                   3.0.0.0\n```\n",
+  "closed_at": "2016-10-28T18:37:42Z",
+  "comments": [
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "Nah the reason is NOT using GetVersionEx. It works fine in Windows 10. You're referring to a right documentation though. The exe of that PowerShell _lacks manifestation_, as you can see it is reporting Windows 8.1.\n\nGetVersionInfo seems not to be a Win32 API, can you find a documentation on it? As far as I know, Microsoft only recommends using version helper functions (hmmm I'd have to say many programmers aren't logical enough to correctly check version numbers so MS is providing helper functions haha). And for getting the native system information, use GetFileVersionInfo. GetVersionEx returns the compatibility mode version number and if the app is not manifested for Windows 8.1/10, VersionLie shim gets in.\n",
+      "created_at": "2016-08-22T18:15:14Z",
+      "updated_at": "2016-08-22T18:15:14Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "`[environment]::OSVersion.Version` is actually calling .NET Core code:\n\n```\nPS C:\\> [environment]::OSVersion.GetType().Assembly\n\nGAC    Version        Location\n---    -------        --------\n       v4.0.30319     C:\\Users\\dongbow\\Downloads\\powershell-6.0.0-alpha.9\\System.Private.CoreLib.ni.dll\n\nPS C:\\>\nPS C:\\> [environment].Assembly\n\nGAC    Version        Location\n---    -------        --------\n       v4.0.30319     C:\\Users\\dongbow\\Downloads\\powershell-6.0.0-alpha.9\\System.Private.CoreLib.ni.dll\n```\n\nSystem.Environment::OSVersion is not exposed in [.NET Core contract](https://docs.microsoft.com/en-us/dotnet/core/api/system.environment), but it's obviously still preserved in the runtime assembly.\n\n.NET Core team will bring back OSVersion and other public surface from `System.Private.Corelib` in .NET Core 1.1 release, see [dotnet-core#6006](https://github.com/dotnet/coreclr/pull/6006)\n",
+      "created_at": "2016-08-22T20:52:17Z",
+      "updated_at": "2016-08-22T20:52:17Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "we are doing work to expose OS info in psversiontable #1635 , this is already tracked in dotnet repo\n",
+      "created_at": "2016-10-28T18:37:42Z",
+      "updated_at": "2016-10-28T18:37:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just a heads-up that, at least as of this writing, while [dotnet-core#6006](https://github.com/dotnet/coreclr/pull/6006) does intend to bring `System.Environment`'s `OSVersion` back:\r\n\r\n* its implementation is [not cross-platform yet](https://github.com/dotnet/coreclr/blob/cdff8b0babe5d82737058ccdae8b14d8ae90160d/src/mscorlib/src/System/Environment.cs#L398), \r\n\r\n* and is furthermore currently based on calls to the deprecated-since-Windows-8.1 `GetVersion` and `GetVersionEx` Windows API functions, which as has been pointed out, do _not_ report the true OS version.\r\n\r\n  * @GeeLaw: The Core `powershell.exe` does have an (embedded) manifest too, but one without entries targeting specific Windows version, hence it is \"stuck\" at reporting Windows 8 (6.2), as you state.  \r\nThat said, even the _Windows_ PowerShell `powershell.exe`, with its Windows-version-targeting entries [would be lied to _in the future_](https://msdn.microsoft.com/en-us/library/windows/desktop/ms724451(v=vs.85).aspx), _if_ it used `GetVersion(Ex)` _directly_:  \r\n \r\n  > \"Once an application is manifested for a given operating system version, GetVersionEx will always return the version that the application is manifested for in future releases.\" - \r\n\r\n  * However, it seems that the .NET _Framework_ (I presume) [works around this](https://github.com/dotnet/coreclr/blob/5ec5c2f859f8ff1dc99a2bb95b640b82d2937cc8/src/classlibnative/bcltype/system.cpp#L665):\r\n> /*\r\n> * SystemNative::GetOSVersion - Fcall corresponding to System.Environment.GetVersion\r\n> * It calls clr!GetOSVersion to get the real OS version even when running in \r\n> * app compat. Calling kernel32!GetVersionEx() directly will be shimmed and will return the\r\n> * fake OS version. In order to avoid this the call to getVersionEx is made via mscoree.dll.\r\n> * Mscoree.dll resides in system32 dir and is never lied about OS version.\r\n> */\r\n \r\n   * It sounds like .NET _Core_, which I presume doesn't use `mscoree.dll`, cannot take advantage of this, which is why the Core edition reports the fake version.\r\n\r\n* It is hard to believe, but [the method that the official docs recommend for determining the _true_ Windows version number](https://msdn.microsoft.com/en-us/library/windows/desktop/ms724429(v=vs.85).aspx) is:\r\n\r\n> call the GetFileVersionInfo function on one of the system DLLs, such as Kernel32.dll, then call VerQueryValue to obtain the \\\\StringFileInfo\\\\<lang><codepage>\\\\ProductVersion sub-block of the file version information.\"\r\n\r\nTo put it in PowerShell terms (Windows-only):  \r\n`(Get-FileVersionInfo $env:SystemRoot\\System32\\kernel32.dll).ProductVersion`",
+      "created_at": "2017-03-22T19:45:13Z",
+      "updated_at": "2017-03-22T19:45:13Z"
+    }
+  ],
+  "created_at": "2016-08-22T09:35:55Z",
+  "number": 2009,
+  "state": "closed",
+  "title": "[environment]::OSVersion.Version returns a wrong result of the OS",
+  "updated_at": "2017-03-22T19:45:13Z"
+}

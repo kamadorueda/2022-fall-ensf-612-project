@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12177",
+  "author": "jszabo98",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\nVersioninfo is gone too.  A workaround is to use start-threadjob instead.\r\n\r\n```powershell\r\nget-childitem file | start-job { $input.basename } | receive-job -wait -auto\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nfile\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\n# no output\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 10.0.14393\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jszabo98",
+      "author_association": "NONE",
+      "body": "Datetime's seems to be an exception, the scriptproperty becomes a string:\r\n\r\n```powershell\r\nget-date | start-job { $input.datetime } | receive-job -wait -auto\r\n\r\nMonday, March 23, 2020 8:34:23 AM\r\n```\r\n",
+      "created_at": "2020-03-23T12:40:07Z",
+      "updated_at": "2020-03-23T12:40:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The behavior is certainly surprising.\r\n\r\nWhat properties `BaseName` and `VersionInfo` (and `Group`, `Size`, `UnixMode` and `User`) have in common is not only that they're ETS type members, but, specifically, of type `ScriptProperty`.\r\n\r\nWhile (static `NoteProperty` copies of the values of) the conceptually related `CodeProperty`  members _are_ included, (static copies of) the `ScriptProperty` members seem to be omitted entirely from the (de)serialized objects.\r\n\r\n@SeeminglyScience, can you shed light on this?\r\n\r\n---\r\n\r\n> A workaround is to use `start-threadjob` instead.\r\n\r\nIndeed; because a _thread_ job executes in-process, the remoting / background (out-of-process) serialization infrastructure isn't involved, and the new thread receives the caller's object _as-is_ (if it is an instance of a reference type), which by definition maintains type fidelity.\r\n\r\nNote that `Start-ThreadJob` is more than just a workaround: in most use cases, it is preferable to `Start-Job` (child process-based jobs), for type fidelity, execution speed, and resource use.\r\n",
+      "created_at": "2020-03-23T12:50:55Z",
+      "updated_at": "2020-03-23T12:50:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jszabo98 , `[datetime]` is not an exception per se: a handful of well-known types are deserialized with type fidelity (see [this SO answer](https://stackoverflow.com/a/59180367/45375)), and `[datetime]` (`System.DateTime`)  is among them. \r\n\r\nThe question is whether all non-well-known types - those that are _emulated_ with `[psobject]` - lack static copies of `ScriptProperty` members.",
+      "created_at": "2020-03-23T12:56:17Z",
+      "updated_at": "2020-03-23T12:56:17Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience, can you shed light on this?\r\n\r\nDepends on the thread that the serializer is called on.  For example, do this:\r\n\r\n```powershell\r\n[Management.Automation.PSSerializer]::Deserialize([Management.Automation.PSSerializer]::Serialize((gi .)))|gm\r\n```\r\n\r\n`BaseName` is present with the above.  In order for `ScriptProperty`'s to be serialized the following conditions need to be met:\r\n\r\n1. The thread where the serializer is called must have a default runspace\r\n1. The default runspace must have a currently active pipeline\r\n1. The execution thread for that pipeline must be the same thread that the serializer was called on\r\n\r\nIn other words, you need to call it from the pipeline thread while controlling pipeline execution, otherwise it isn't safe. My guess is that `Start-Job` calls the serializer on a different thread for performance.",
+      "created_at": "2020-03-23T14:28:22Z",
+      "updated_at": "2020-03-23T14:28:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience.\r\n\r\nIt looks like `Invoke-Command` is also affected - and therefore, I presume, all remoting:\r\n\r\n```powershell\r\n# No output.\r\nELEV> icm -computername . { param($fi) $fi | gm BaseName } -args (gi /) \r\n```\r\n\r\nMinishells seem to be the only exception; there, inclusion of `ScriptProperty`s currently _does_ work - or can you think of others?:\r\n\r\n```powershell\r\n# OK\r\nPS> pwsh -nop -c { param($fi) $fi | gm BaseName } -args (gi /)\r\n```\r\n```none\r\n   TypeName: Deserialized.System.IO.DirectoryInfo\r\n\r\nName     MemberType   Definition\r\n----     ----------   ----------\r\nBaseName NoteProperty string BaseName=/\r\n```\r\n",
+      "created_at": "2020-03-23T14:58:56Z",
+      "updated_at": "2020-03-23T14:59:28Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "iirc minishell doesn't actually use the remoting protocol, just serializes over standard in/out. `Export-CliXml` probably works too.",
+      "created_at": "2020-03-23T18:42:48Z",
+      "updated_at": "2020-03-23T18:42:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience; you're correct about `Export-CliXml` (and `ConvertTo-Xml`).\r\n\r\n```powershell\r\ngi / | Export-CliXml t.xml; sls -quiet BaseName -lp t.xml; ri t.xml # $true\r\n\r\ngi / | ConvertTo-Xml -As String | sls BaseName -quiet # $true\r\n```",
+      "created_at": "2020-03-24T13:02:51Z",
+      "updated_at": "2020-03-24T13:02:59Z"
+    }
+  ],
+  "created_at": "2020-03-23T03:15:28Z",
+  "number": 12177,
+  "state": "open",
+  "title": "objects lose scriptproperty's inside jobs",
+  "updated_at": "2021-01-16T06:23:49Z"
+}

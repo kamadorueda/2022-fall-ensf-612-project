@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8778",
+  "author": "mklement0",
+  "body": "Note: The repro below uses the `ValidateSet` attribute to demonstrate the problem, but at least one other attribute is affected too, namely `ValidatePattern` - possibly more. Presumably, fixing the problem for one attribute also fixes it for the others.\r\n\r\n_Update_: \r\n\r\n* The  core issue is that when script block text with parameter declarations is invoked via `Invoke-Expression`, default-parameter-value validation for parameters that have `Validate*` attributes takes place in an _overzealous_ manner: even if there is _no_ default value, the implied value of `$null` is evaluated against the validation attributes - however, it should be possible to simply _omit_ a default value for validation-constrained parameters (and that is how it works with _direct_ invocations of functions / scripts / script-block literals).\r\n\r\n   * [@SeeminglyScience's comment below](https://github.com/PowerShell/PowerShell/issues/8778#issuecomment-458540130) provides helpful analysis of the root cause, source-code links, and a suggested fix.\r\n\r\n* As an aside: The helpful aspect of this validation - namely if there _is_ a default value - is currently missing  from  _direct_ function / script / script-block literal invocations; remedying that is the subject of #8795.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n. { param([ValidateSet(\"one\", \"two\")] $foo) \"hi\" }\r\n# This command should be equivalent to the above.\r\nInvoke-Expression 'param([ValidateSet(\"one\", \"two\")] $foo) \"hi\"'\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nhi\r\nhi\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nhi\r\nInvoke-Expression : The attribute cannot be added because variable foo with value  would no longer be valid.\r\n```\r\n\r\n```none\r\nPowerShell Core v6.2.0-preview.3 on macOS 10.14.2\r\nPowerShell Core v6.2.0-preview.3 on Ubuntu 18.04.1 LTS\r\nPowerShell Core v6.2.0-preview.3 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\nWindows PowerShell v5.1.17134.407 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 If you add a valid initializer then it's fine\r\n```powershell\r\nPSCore (2:59) >  Invoke-Expression 'param([ValidateSet(\"one\", \"two\")] $foo = \"one\") \"hi\"'\r\nhi\r\n```\r\nNote that the behaviour is the same with the `InvokeScript` method:\r\n```powershell\r\n$ExecutionContext.InvokeCommand.InvokeScript('param([ValidateSet(\"one\", \"two\")] $foo) \"hi\"')\r\n```\r\nas well as\r\n```powershell\r\n{param([ValidateSet(\"one\", \"two\")] $foo) \"hi}.Invoke()\r\n```\r\nWhy the error isn't raised when running a script does warrant further investigation.",
+      "created_at": "2019-01-29T05:47:04Z",
+      "updated_at": "2019-01-29T05:47:04Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay that discrepancy is weird. This pattern of declaring a parameter with a validation attribute and then **not** giving it a default value is pretty common and has been the way it is understood to work for a long time. \r\n\r\nI think the better question is why is this error appearing in this context when this pattern has been used for a long time now in declaring parameters. :confused:",
+      "created_at": "2019-01-29T11:14:47Z",
+      "updated_at": "2019-01-29T11:14:47Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The scenarios that fail use `ScriptBlock.InvokeWithPipeImpl` (or any of the other `*Invoke*` methods that eventually hit it)\r\n\r\nThe scenarios that don't fail are from a compiled command AST, which creates a [command processor instead](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L93).\r\n\r\nMore specifically, [here's the line from the `InvokeWithPipe` code path where it fails](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/runtime/CompiledScriptBlock.cs#L1269).  I believe it should use `PSVariable.AddParameterAttributesNoChecks` instead of that constructor.\r\n\r\n**Note** Same thing happens with the `Where`/`ForEach` magic methods as well as `ForEach-Object`",
+      "created_at": "2019-01-29T13:31:20Z",
+      "updated_at": "2019-01-29T14:56:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @vexx32 and @SeeminglyScience.\r\n\r\n@BrucePay:\r\n\r\n@vexx32 is correct that not specifying a value has always worked and should work in all situations.\r\nIn fact, even specifying an _invalid_ default value has always worked:\r\n\r\n```powershell\r\nPS> . { param([ValidateSet(\"one\", \"two\")] $foo = \"invalid\") $foo }\r\ninvalid\r\n```\r\n\r\nAlso, the fact that `& ([scriptblock]::Create('param([ValidateSet(\"one\", \"two\")] $foo = \"invalid\") $foo'))')` works fine too supports @SeeminglyScience's findings.\r\n\r\nI haven't delved into the code, but, functionally, it seems that the default value / lack thereof is validated when it shouldn't be.",
+      "created_at": "2019-01-29T14:34:42Z",
+      "updated_at": "2019-01-29T14:35:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thinking about this some more, based on @BrucePay's response and @SeeminglyScience's findings:\r\n\r\n* It sounds like the - sensible - original design intent was indeed to check whether a validation-constrained parameter's default value passes the validation and to complain at parse time, if not.\r\n\r\n * Currently only the `Invoke-Expression` code path enforces that check, but it does so _overzealously_, because _not using a default value at all_ should definitely be considered acceptable.\r\n\r\n* Conversely, the fact that regular invocation - perhaps accidentally - _bypass_ the check  opened the door for behavior that is arguably _too permissive_:\r\n\r\n   * As demonstrated, default values that are _invalid_ in terms of the parameter's validation attributes are happily accepted.\r\n\r\nI see two possible resolutions:\r\n\r\n* Make `Invoke-Expression` invocations as permissive as the AST-based invocations.\r\n\r\n* Fix the `Invoke-Expression` invocations to accept the case where a validation-constrained parameter has _no_ default value - while still enforcing the validation of default values -  _and make AST-based invocations do the same_.\r\n\r\n   * Caveat: Technically, that would be a _breaking change_, as it is conceivable that there are functions out there that use an invalid default value as an _explicit_ signal that no argument was passed, along the lines of: `. { param([ValidateSet(\"one\", \"two\")] $foo=\"<none>\") $foo }`\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-01-30T14:55:27Z",
+      "updated_at": "2019-01-30T14:55:27Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I believe it's just a bug.  I think the `ScriptBlock.InvokeWithPipeImpl` code path should just use the `PSVariable.AddParameterAttributesNoChecks` method, like the AST compiler code path already does.",
+      "created_at": "2019-01-30T15:21:47Z",
+      "updated_at": "2019-01-30T15:21:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience: That's definitely the most straightforward way to resolve this issue.\r\n\r\nHowever, the question is whether we see value in _preventing invalid default values_, which currently doesn't happen (and the bug fix wouldn't give us).\r\n\r\nI personally see value in that (e.g., during refactoring of a validation set you may forget to update the default value accordingly),  but there are two considerations:\r\n\r\n* backward compatibility, as stated above\r\n\r\n* performance (introducing additional checks; seemingly even script blocks for `ValidateScript` attributes are executed during the validation; e.g.: `iex 'param([ValidateScript({ $_ -eq \"A\" })] $foo=\"B\") $foo'`)\r\n\r\n",
+      "created_at": "2019-01-30T15:33:02Z",
+      "updated_at": "2019-01-30T15:33:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 while I do agree that preventing invalid default values is probably a good idea &mdash; after all, one can generally check `$PSBoundParameters.ContainsKey()` if there is a need to verify if a particular parameter is supplied &mdash; I think it would be best if that were questioned in a separate issue, rather than attempting to answer both questions in this one issue. \ud83d\ude42 ",
+      "created_at": "2019-01-30T15:38:02Z",
+      "updated_at": "2019-01-30T15:38:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @vexx32 - please see #8795\r\n",
+      "created_at": "2019-01-30T15:58:52Z",
+      "updated_at": "2019-01-30T15:58:52Z"
+    },
+    {
+      "author": "johngeorgef1",
+      "author_association": "NONE",
+      "body": "Also interestingly it seems that if you declare a parameter with validation, then change the value of that variable inside the script to something that is _not_ a valid value; it will throw this exception.\r\n\r\ne.g.\r\n\r\nSave this as a file and execute, supplying one of the three _valid_ options for this parameter [ biff, bash, bosh ];\r\n\r\n```PowerShell\r\n[Cmdletbinding()]\r\nParam(\r\n    [Parameter(Mandatory=$True)]\r\n    [ValidateSet(\"biff\",\"bash\",\"bosh\")]\r\n    [String]$Word\r\n)\r\n\r\n$ErrorActionPreference = \"Stop\";\r\nWrite-Host \"Let's give this thing something to do\";\r\n\r\n$Word = \"boosh\"; # This will throw an exception\r\n```\r\naaand..\r\n```\r\nPS C:\\DevOps\\Snips> .\\param-validation.ps1 biff\r\nLet's give this thing something to do\r\nC:\\DevOps\\Snips\\param-validation.ps1 : The variable cannot be validated because the value boosh is not a valid value for the Word variable.\r\nAt line:1 char:1\r\n+ .\\param-validation.ps1 biff\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : MetadataError: (:) [param-validation.ps1], ValidationMetadataException\r\n    + FullyQualifiedErrorId : ValidateSetFailure,param-validation.ps1\r\n \r\n\r\nPS C:\\DevOps\\Snips> \r\n```\r\nIt's quite interesting to learn that the params are _continually_ evaluated to see whether they confirm to the validation attributes.\r\n\r\n-J",
+      "created_at": "2020-02-05T12:21:29Z",
+      "updated_at": "2020-02-05T12:21:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@johngeorgef1, this is actually standard behavior, and not specific to `Invoke-Expression` use:\r\n\r\n```powershell\r\n& { param([ValidateRange(1,2)] $foo) $foo = 3 }\r\nMetadataError: The variable cannot be validated because the value 3 is not a valid value for the foo variable.\r\n```\r\n\r\nIt is not well known, but you can apply constraints to _any_ variable, not just a _parameter_ variable:\r\n\r\n```powershell\r\n[ValidateRange(1,2)] $foo = 1;  # regular variable with validation attribute\r\n$foo = 3 # same error as above\r\n```\r\n\r\nWhile that is a powerful feature,  constraints that apply to _parameter_ variables only are inappropriately applied in at least one case: #10426\r\n",
+      "created_at": "2020-02-05T13:12:59Z",
+      "updated_at": "2020-02-05T13:12:59Z"
+    }
+  ],
+  "created_at": "2019-01-29T03:01:09Z",
+  "number": 8778,
+  "state": "open",
+  "title": "Invoke-Expression validates nonexistent parameter default values.",
+  "updated_at": "2020-02-05T13:12:59Z"
+}

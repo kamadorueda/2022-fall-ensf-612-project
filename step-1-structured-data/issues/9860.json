@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9860",
+  "author": "bergmeister",
+  "body": "# PR Summary\r\n\r\nThis avoids errors being thrown when `PSScriptAnalyzer` executes concurrent `Test-ModuleManifest` calls\r\nThe issues were reported in the following issues and the stack traces all pointed to PowerShell's code\r\n\r\n- https://github.com/PowerShell/PSScriptAnalyzer/issues/901\r\n- https://github.com/PowerShell/PSScriptAnalyzer/issues/900\r\n- https://github.com/PowerShell/PSScriptAnalyzer/issues/902\r\n\r\nThe bug is very hard to repro, the best example was [this](https://github.com/PowerShell/PSScriptAnalyzer/issues/902#issuecomment-470757602) one and one needs a fast machine as I found that once I attached the debugger to PowerShell it was not happening any more on my dev machine so I had to spin up a 16 core Azure development VM to repro whilst still having the debugger attached...\r\nI verified that this fix makes the concurrency errors not surface any more. The errors were surfacing in all recent version of PowerShell (5.1, 6.2, 7.0-preview1) and PSScriptAnalyzer (1.18.0, 1.17.1, 1.16.1). This PR will resolve the issue going forwards. To make PSScriptAnalyzer cope with it better when version older than PS v7 are used, PSScriptAnalyzer will probably use some retry logic as proposed in [this](https://github.com/PowerShell/PSScriptAnalyzer/pull/1257) PR.\r\ncc @JamesWTruher  @Jaykul @LaurentDardenne \r\n\r\n## PR Context\r\n\r\n<!-- Provide a little reasoning as to why this Pull Request helps and why you have opened it. -->\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.\r\n- **[Breaking changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)**\r\n    - [ ] None\r\n    - **OR**\r\n    - [ ] [Experimental feature(s) needed](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/6/Microsoft.PowerShell.Core/About/about_Experimental_Features.md)\r\n        - [ ] Experimental feature name(s): <!-- Experimental feature name(s) here -->\r\n- **User-facing changes**\r\n    - [ ] Not Applicable\r\n    - **OR**\r\n    - [ ] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed: <!-- Number/link of that issue here -->\r\n- **Testing - New and feature**\r\n    - [ ] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [ ] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n",
+  "closed_at": "2019-06-13T18:33:29Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@bergmeister Could you please clarify - running some Test-ModuleManifest-s in parallel raises exceptions? For the same module or different module?",
+      "created_at": "2019-06-09T11:23:20Z",
+      "updated_at": "2019-06-09T11:23:20Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov For the same module manifest if I understand the workings of PSSA correctly (not just because it was easier to repro but I think this is also what happens in sporadic  production failures because PSSA runs all rules in parallel foreach file and there are 2 rules that call it to get the PSModuleInfo and check if the module manifest is in a certain expected, 'healthy' state). Yes, in theory, PSSA could try to have a (thread safe) cache similar to the `CommandInfo` cache but to me it seems a general issue that thread safety has been missed out in this area of PowerShell or maybe experienced reviewers can say if the problem should be fixed at a higher architectural level.",
+      "created_at": "2019-06-09T19:10:25Z",
+      "updated_at": "2019-06-09T19:15:38Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm not sure this is the right fix.\r\n\r\nFirst, I wonder why a `ModuleInfo` is shared across threads. If the instance comes from the same runspace, then I think this is a PSSA problem - much of PowerShell avoids locks as it assumes you'll only use something from the origin runspace.\r\n\r\nIf the `ModuleInfo` is meant to be shared, then I'd expect locking somewhere else. With this change, I wouldn't be surprised to see duplicate items added.",
+      "created_at": "2019-06-09T20:48:20Z",
+      "updated_at": "2019-06-09T20:48:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I'm not sure this is the right fix.\r\n\r\nYes, I agree too. At first look the exceptions come from enumeration (ex., exportedCmdlets property) in time when second runspace (thread) changes the same property - what is the second action? module autoloading? If so second thread must wait until first one finish to load the module and a right fix would be to isolate the module until finish the module loading.\r\nAthother fix. I remember the suggestion that this cmdlet should not cause a module (module manifest) to be loaded/executed.",
+      "created_at": "2019-06-10T04:15:43Z",
+      "updated_at": "2019-06-10T04:15:43Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr @iSazonov \r\nFor context, here is how PSSA calls `Test-ModuleManifest` in the `Singleton` `Helper` class by creating an instance of `PowerShell` each time (that gets disposed afterwards) but with a re-used runspace pool (previous versions did not re-use the runspace pool and suffered from the same issue as well though).\r\nhttps://github.com/PowerShell/PSScriptAnalyzer/blob/0bef1c8b8ddf5b570dd0b6c90f0d0257b94eb374/Engine/Helper.cs#L306-L315\r\n```csharp\r\nusing (var ps = System.Management.Automation.PowerShell.Create())\r\n{\r\n    ps.RunspacePool = _runSpacePool;\r\n    ps.AddCommand(\"Test-ModuleManifest\")\r\n        .AddParameter(\"Path\", filePath)\r\n        .AddParameter(\"WarningAction\", ActionPreference.SilentlyContinue);\r\n    try\r\n    {\r\n        psObj = ps.Invoke();\r\n    }\r\n    { ... }\r\n}\r\n```\r\nThe above code gets called from from different threads (each rule has its own thread) that are started as follows here:\r\nhttps://github.com/PowerShell/PSScriptAnalyzer/blob/a68b13956ab1136af91066d1ce61113574447945/Engine/ScriptAnalyzer.cs#L2075\r\n```csharp\r\nallowedRules.Select(scriptRule => Task.Factory.StartNew(() => .... );\r\n```\r\nDo me this looks like legit usage of the PowerShell API, i.e. the `PSModuleInfo` is not really shared across PSSA's threads if I understand correctly. Would you otherwise expect any user of the PowerShell API to have a (heavy) lock around `PowerShell.Invoke()` calls? PSSA is by nature very multi-threaded and at least for `Get-Command`, concurrency has not been an issue.",
+      "created_at": "2019-06-10T10:34:48Z",
+      "updated_at": "2019-06-10T10:47:08Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@bergmeister - the PowerShell api usage looks fine, so I'm assuming a PowerShell data structure is being shared across threads, in which case this comment applies:\r\n\r\n> If the ModuleInfo is meant to be shared, then I'd expect locking somewhere else. With this change, I wouldn't be surprised to see duplicate items added.",
+      "created_at": "2019-06-10T15:02:26Z",
+      "updated_at": "2019-06-10T15:02:26Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr  OK, so should the locking then be somewhere in the `Test-ModuleManifest` cmdlet or somewhere deep inside `ModuleCmdletBase` or `PowerShell.cs`? I assume the latter. Can you please give some pointers where to look, what to debug, etc.\r\nThe stack trace is below and I uploaded a minidump with heap [here](https://www.dropbox.com/s/pgblge4chymc8wc/pwsh.dmp?dl=0) from the latest `master` commit `bdc8548700118cea6c31420c2f7478785e6d84ac` of `PowerShell` for one of the most common exceptions (`CmdletInvocationException` with inner exception from `System.Collections.ListDictionaryInternal`:  `'Collection was modified; enumeration operation may not execute.'`)\r\n```\r\n   at System.Management.Automation.Runspaces.PipelineBase.Invoke(IEnumerable input) in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\pipelinebase.cs:line 416\r\n   at System.Management.Automation.Runspaces.Pipeline.Invoke() in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\Pipeline.cs:line 531\r\n   at System.Management.Automation.PowerShell.Worker.ConstructPipelineAndDoWork(Runspace rs, Boolean performSyncInvoke) in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\PowerShell.cs:line 5619\r\n   at System.Management.Automation.PowerShell.Worker.CreateRunspaceIfNeededAndDoWork(Runspace rsToUse, Boolean isSync) in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\PowerShell.cs:line 5466\r\n   at System.Management.Automation.PowerShell.CoreInvokeHelper[TInput,TOutput](PSDataCollection`1 input, PSDataCollection`1 output, PSInvocationSettings settings) in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\PowerShell.cs:line 4588\r\n   at System.Management.Automation.PowerShell.CoreInvoke[TInput,TOutput](PSDataCollection`1 input, PSDataCollection`1 output, PSInvocationSettings settings) in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\PowerShell.cs:line 4780\r\n   at System.Management.Automation.PowerShell.CoreInvoke[TOutput](IEnumerable input, PSDataCollection`1 output, PSInvocationSettings settings) in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\PowerShell.cs:line 4530\r\n   at System.Management.Automation.PowerShell.Invoke(IEnumerable input, PSInvocationSettings settings) in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\PowerShell.cs:line 2425\r\n   at System.Management.Automation.PowerShell.Invoke() in C:\\Users\\chris\\PowerShell\\src\\System.Management.Automation\\engine\\hostifaces\\PowerShell.cs:line 2296\r\n   at Microsoft.Windows.PowerShell.ScriptAnalyzer.BuiltinRules.AvoidUsingDeprecatedManifestFields.AnalyzeScript(Ast ast, String fileName)+MoveNext()\r\n```\r\nI wonder if the call to `return Output.NonBlockingRead(Int32.MaxValue);` in [pipelinebase.cs (line 416) ](https://github.com/PowerShell/PowerShell/blob/d80154430d600a52a1d1e3a9f3ecf032b36185d4/src/System.Management.Automation/engine/hostifaces/pipelinebase.cs#L416) would need to be blocking?\r\n",
+      "created_at": "2019-06-11T16:44:45Z",
+      "updated_at": "2019-06-11T20:26:24Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@bergmeister - I'm honestly not too sure, but `ModuleCmdletBase` is probably the closest to where I'd look at. Definitely not `PowerShell.cs` and maybe not `Test-ModuleManifest`.  Maybe we should be cloning module info instances somewhere?\r\n\r\nI'd really have to dig to provide a more concrete direction.",
+      "created_at": "2019-06-11T17:48:45Z",
+      "updated_at": "2019-06-11T17:48:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@bergmeister If it is time critical you could make a workaround in PSSA for the rule. (I guess that the fix can take more time in PowerShell engine).",
+      "created_at": "2019-06-12T16:58:21Z",
+      "updated_at": "2019-06-12T16:58:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@KirkMunro If you are digging in Import-Module you could keep in mind the race condition issue too.",
+      "created_at": "2019-06-12T17:36:02Z",
+      "updated_at": "2019-06-12T17:36:02Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov We have merged a PR yesterday in PSSA to workaround this by having a lock around calls to `Test-ModuleManifest` but since this might be a general issue in the PS code base it might still be wortwhile trying to fix it. I think I will open an issue with more details and easier REPRO steps in the next steps. Do you want me to close this PR then once I've logged the issue?",
+      "created_at": "2019-06-12T17:50:30Z",
+      "updated_at": "2019-06-12T17:50:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@bergmeister I agree to close the PR and open new issue.",
+      "created_at": "2019-06-13T03:24:21Z",
+      "updated_at": "2019-06-13T03:24:21Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Opened issue #9889 and will therefore close this PR for now",
+      "created_at": "2019-06-13T18:33:29Z",
+      "updated_at": "2019-06-13T18:33:29Z"
+    }
+  ],
+  "created_at": "2019-06-08T18:15:16Z",
+  "number": 9860,
+  "state": "closed",
+  "title": "WIP: Make module intrinsics code thread safe by using a ConcurrentBag instead of a Collection to prevent errors that surface in PSSA",
+  "updated_at": "2019-06-13T18:33:29Z"
+}

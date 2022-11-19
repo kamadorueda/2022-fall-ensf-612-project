@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6679",
+  "author": "MichaelStankiewicz",
+  "body": "Steps to reproduce\r\n------------------\r\n\r\n```\r\nNOTE: This issue was only validated on Linux (RHEL7) but could potentially be an issue on Windows as well, depending on how the history file is stored/used.\r\n\r\nInstall pwsh, and perform an ls -l on the following file:\r\n\r\n~/.local/share/powershell/PSReadLine/ConsoleHost_history.txt\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```\r\nOnly the owner should have access to read this file.  In it's current configuration, in addition to the owner, both group/everyone can also read this file.  Due to the content of this file, only the owner should have read rights by default.  With the current permission structure, a threat actor could read/replay the command history and use it for malicious purposes.  \r\n\r\nThe CHMOD file map should be set to 700 or 600 by default.\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```\r\nBy default the CHMOD access map on this file is: 664\r\n\r\nThe above file map grants the owner R/W, the group R/W, and everyone R.\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```\r\n> Name                           Value\r\n----                           -----\r\nPSVersion                      6.0.0\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0\r\nOS                             Linux 3.10.0-693.11.6.el7.x86_64 #1 SMP Thu Dec 28 14:23:39 EST 2017\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": "2018-04-19T15:41:59Z",
+  "comments": [
+    {
+      "author": "psmulovics",
+      "author_association": "NONE",
+      "body": "FYI, @SteveL-MSFT & @MaximoTrinidad , the item mentioned in #6675 's comment",
+      "created_at": "2018-04-19T14:01:42Z",
+      "updated_at": "2018-04-19T14:01:42Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "This is behavior of [System.IO.File]::CreateText(\"file\") which is what PSReadline uses.  I checked on my Ubuntu16.04 machine and the default `umask` is `0002` which results in the permissions you are observing.  Changing it to `0022` should get the result you want.",
+      "created_at": "2018-04-19T15:41:57Z",
+      "updated_at": "2018-04-19T15:41:57Z"
+    },
+    {
+      "author": "psmulovics",
+      "author_association": "NONE",
+      "body": "Yes, I agree, that having an umask of 0077 would solve it, but should not rather the files and the directories created by pwsh be more secure by default?",
+      "created_at": "2018-04-19T15:51:00Z",
+      "updated_at": "2018-04-19T15:51:00Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@psmulovics but then you'd have other people complain that PowerShell or .Net is not respecting umask",
+      "created_at": "2018-04-20T08:54:44Z",
+      "updated_at": "2018-04-20T08:54:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just a quick pointer for those who want to change the `umask` value:\r\n\r\nYou cannot do it from `$PROFILE`, because `umask` is a POSIX-like shell _builtin_ that affects the current process only, so calling something like `sh -c 'umask 0022'` is an effective _no-op_.\r\n\r\n(However, if your default shell is `bash` and you launch `pwsh` from there, you can add something like `umask 0022` to your `~/.bash_profile` (macOS) / `~/.bashrc` (Linux) file.)\r\n\r\nOn _Linux_ system you can change it _globally_ via `/etc/profile`.\r\n  * _Update: A more comprehensive solution can be found in [this AskUbuntu answer](https://askubuntu.com/a/930012/225111)._\r\n\r\nOn _macOS_ however, this only works if `pwsh` is invoked via a POSIX-like shell such as `bash` (a shell that when launched as a _login_ shell (the default on macOS) sources `/etc/profile`, which `pwsh` cannot); in other words: it wouldn't work if you used `pwsh` as your _default shell_.\r\n\r\n@SteveL-MSFT: Do you know of a .NET Core way to do what `umask` does?\r\n\r\n",
+      "created_at": "2018-04-20T19:54:01Z",
+      "updated_at": "2018-04-24T22:53:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 it appears that the recommended way is to use [Mono.Posix.NETStandard](https://www.nuget.org/packages/Mono.Posix.NETStandard/1.0.0-beta1)",
+      "created_at": "2018-04-21T07:34:53Z",
+      "updated_at": "2018-04-21T07:34:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SteveL-MSFT. \r\n\r\nThere is now a [v1](https://www.nuget.org/packages/Mono.Posix.NETStandard/1.0.0) (not a beta), and its use from a .NET Core C# project is pretty straightforward.\r\n\r\nBy contrast, **trying to use it from PowerShell turned out to be a  major headache**:\r\n\r\n* An incorrect NuGet API URL prevented discovery of NuGet packages with `Find-Package` / `Install-Package` - see [this SO answer](https://stackoverflow.com/a/50004706/45375).\r\n\r\n* Even once the package is successfully downloaded, using it is far from straightforward, for two reasons:\r\n\r\n   * The platform-appropriate `*.dll` must be located. \r\n   * Its dependencies aren't correctly resolved, necessitating the creation of a symlink to the platform-native helper library alongside the `*.dll` in order for `Add-Type -Path` to correctly load the assembly.\r\n\r\nHere's a working solution, whose complexity is disconcerting:\r\n\r\n```powershell\r\n$ErrorActionPreference = 'Stop'; Set-StrictMode -Version 1\r\nif (-not ($IsMacOS -or $IsLinux)) { Throw \"Only supported on Unix platforms.\" }\r\n$packageName = 'Mono.Posix.NETStandard'\r\n$package = Get-Package -ea Ignore $packageName\r\n$wasInstalled = [bool] $package\r\n\r\nif (-not $wasInstalled) {\r\n    # Install the Nuget package via Install-Package\r\n    # Note: Requires installation and correct setup of the Nuget package provider - see https://stackoverflow.com/a/50004706/45375\r\n    Write-Verbose \"Installing package '$packageName' in user scope...\"\r\n    # Note: Even though both Install-Package and Get-Package return [Microsoft.PackageManagement.Packaging.SoftwareIdentity] instances,\r\n    #       the Install-Package output objects do not yet contain the local filesystem path in the .Source property.\r\n    $null = Install-Package $packageName -Scope CurrentUser\r\n    $package = Get-Package $packageName -Scope CurrentUser\r\n}\r\n\r\n# Determine the full path to the platform-appropriate DLL\r\n$osSpec = if ($IsMacOS) { \r\n            'osx'\r\n          } else { # Linux\r\n            $arch = switch -regex (uname -m) {\r\n              'x86_64' { 'x64'}\r\n              'i.86'  { 'x86' }\r\n              default  { Throw \"Unanticipated architecture: $(uname -m)\"}\r\n            }\r\n            '{0}-{1}' -f 'linux', $arch\r\n          } \r\n$dllFilePath = \"$(Split-Path -Parent $package.Source)/runtimes/$osSpec/lib/netstandard2.0/$packageName.dll\"\r\n\r\nif (-not $wasInstalled) {\r\n  # !! The native helper *.dylib file / *.so is NOT found by default (even though from a .NET Core C# source-code project it is)\r\n  # !! and on macOS even setting $env:DYLD_LIBRARY_PATH and $env:DYLD_FALLBACK_LIBRARY_PATH doesn't seem to help.\r\n  # !! The only thing that helps is to *symlink* (or copy) the *.dylib file / *.so file into the directory where the *.dll lives\r\n  $nativeExt = ('dylib', 'so')[$IsLinux]\r\n  Write-Verbose \"Linking ../../native/libMonoPosixHelper.$nativeExt to $(Split-Path -Parent $dllFilePath)/\"\r\n  ln -s ../../native/libMonoPosixHelper.$nativeExt (Split-Path -Parent $dllFilePath)\r\n}\r\n\r\n# Load the assembly via the full path to the DLL.\r\n# This makes the types in the Mono.Unix.Native namespace available.\r\nWrite-Verbose \"Loading assembly '$dllFilePath'...\"\r\nAdd-Type -Path $dllFilePath\r\n\r\n# Finally, call the static `.umask()` method in [Mono.Unix.Native.Syscall]\r\n# The equivalent of umask 0066: only the owning user can read and write. \r\n# Note that the *old* value is output, as a list of symbolic [Mono.Unix.Native.FilePermissions]\r\n# enumeration values.\r\n[Mono.Unix.Native.Syscall]::umask('S_IROTH, S_IWOTH, S_IRGRP, S_IWGRP')\r\n# Print the newly set `umask` value for verification.\r\nsh -c umask\r\n```\r\n\r\n",
+      "created_at": "2018-04-24T22:14:03Z",
+      "updated_at": "2018-04-24T22:14:03Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "So maybe this is something we should have built-in to PowerShell on *nix: `Set-UMask`. ",
+      "created_at": "2018-04-24T22:51:07Z",
+      "updated_at": "2018-04-24T22:51:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay: Certainly worth considering, and, while we're at it, let's look at _all_ methods exposed by `[Mono.Unix.Native.Syscall]` to see which ones we'd expect shell users to use routinely and are therefore worth surfacing via cmdlets.",
+      "created_at": "2018-04-24T22:56:08Z",
+      "updated_at": "2018-04-24T22:56:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 we should continue this in a new issue rather than this one",
+      "created_at": "2018-04-24T23:46:33Z",
+      "updated_at": "2018-04-24T23:46:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Separately, it's worth considering adding better support for loading assemblies from installed NuGet packages to `Add-Type` - please see  #6724.\r\n",
+      "created_at": "2018-04-24T23:46:42Z",
+      "updated_at": "2018-04-24T23:46:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: Sounds good; please see #6725.",
+      "created_at": "2018-04-24T23:54:44Z",
+      "updated_at": "2018-04-24T23:54:44Z"
+    }
+  ],
+  "created_at": "2018-04-19T13:10:37Z",
+  "number": 6679,
+  "state": "closed",
+  "title": "Read access for group/everyone is allowed on ConsoleHost_history.txt file by default.",
+  "updated_at": "2018-04-24T23:54:45Z"
+}

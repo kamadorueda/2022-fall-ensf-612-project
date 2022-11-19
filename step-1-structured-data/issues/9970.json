@@ -1,0 +1,160 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9970",
+  "author": "lzybkr",
+  "body": "## Steps to reproduce\r\n\r\nRun a Windows program installed in `${env:USERPROFILE}\\AppData\\Local\\Microsoft\\WindowsApps`, e.g. `iTunes.exe` or `wt.exe` (the new Windows Terminal) from the interactive command line.\r\n\r\n## Expected behavior\r\n\r\nThe process launches in a new window, a new prompt is displayed and you can run new commands in PowerShell.\r\n\r\n## Actual behavior\r\n\r\nPowerShell waits until the Windows application exits before allowing new commands to be entered. PowerShell is behaving as though the program was a console application.\r\n\r\nIt makes perfect sense to wait when PowerShell can't determine if the process is a Windows or console application, so a proper should do a better job processing these reparse points to inspect the real executable.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "This is probably a Windows issue (in the `CreateProcess` _AppExecutionAlias_ extension) honestly. Powershell doesn't necessarily control whether new processes attach to existing or allocate new consoles.",
+      "created_at": "2019-06-26T21:44:18Z",
+      "updated_at": "2019-06-26T21:44:57Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@DHowett-MSFT - possibly, but I was thinking this PowerShell [code](https://github.com/PowerShell/PowerShell/blob/dd7e45fe2ebb358f0833c1c5be0f8f5eb90d2554/src/System.Management.Automation/engine/NativeCommandProcessor.cs#L935) is perhaps missing something.",
+      "created_at": "2019-06-26T22:03:48Z",
+      "updated_at": "2019-06-26T22:03:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I found `MicrosoftEdge.exe` in my WindowsApps folder and the application runs as expected. I installed iTunes - PowerShell waits.\r\nFor both SHGetFileInfo() returns zero - \"not exe\".\r\n\r\nUpdate: then we calculate _isRunningInBackground - in both cases it returns false\r\nhttps://github.com/PowerShell/PowerShell/blob/dd7e45fe2ebb358f0833c1c5be0f8f5eb90d2554/src/System.Management.Automation/engine/NativeCommandProcessor.cs#L522\r\n",
+      "created_at": "2019-06-27T03:28:37Z",
+      "updated_at": "2019-06-27T03:36:29Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Just a guess - but does that api work with symbolic links? If not, resolving the links might be the fix.",
+      "created_at": "2019-06-27T15:50:39Z",
+      "updated_at": "2019-06-27T15:50:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Both is symlinks:\r\n```powershell\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\nd----          21.06.2019    14:26                AppleInc.iTunes_nzyj5cx40ttqa\r\nd----          30.11.2018    16:57                Microsoft.MicrosoftEdge_8wekyb3d8bbwe\r\nla---          21.06.2019    14:26              0 AppleInc.Defaults.exe ->\r\nla---          21.06.2019    14:26              0 AppleInc.MDCrashReportTool.exe ->\r\nla---          21.06.2019    14:26              0 iTunes.exe ->\r\nla---          30.11.2018    16:57              0 MicrosoftEdge.exe ->\r\n```\r\n",
+      "created_at": "2019-06-27T15:59:00Z",
+      "updated_at": "2019-06-27T15:59:00Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "They\u2019re not actually symbolic links. They are \u201capp execution alias\u201d reparse points that store a package family name and app model ID instead of a path. Check one out with `fsutil reparsepoint query <filename>`.",
+      "created_at": "2019-06-27T16:01:33Z",
+      "updated_at": "2019-06-27T16:01:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "So we need to compare reparsepoint properties for the objects to find difference in their behavior?",
+      "created_at": "2019-06-27T18:14:11Z",
+      "updated_at": "2019-06-27T18:14:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Doesn't repro with PS7 P5",
+      "created_at": "2019-11-04T21:41:21Z",
+      "updated_at": "2019-11-04T21:41:21Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "I'm seeing this repro with PS7 RC1 and 2.",
+      "created_at": "2020-01-31T22:57:18Z",
+      "updated_at": "2020-01-31T22:57:18Z"
+    },
+    {
+      "author": "DHowett-MSFT",
+      "author_association": "NONE",
+      "body": "It looks like the pull request above added support to the filesystem provider for detecting these, but not to the process launcher for not waiting on them to return.",
+      "created_at": "2020-01-31T22:58:45Z",
+      "updated_at": "2020-01-31T22:58:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, the PR above added a check to FileSystem provider only. We can use the same one for AppX application launch too.",
+      "created_at": "2020-02-01T08:04:19Z",
+      "updated_at": "2020-02-01T08:04:19Z"
+    },
+    {
+      "author": "fcharlie",
+      "author_association": "NONE",
+      "body": "The root cause of this problem is that `CreateFileW` cannot open the target file like a symbolic link. Therefore,`GetBinaryTypeW` cannot obtain the Subsystem information of WindowsTerminal.exe, so this problem occurs.\r\n\r\nSolving this problem is not complicated. We can directly parse ReparsePoint, and then obtain the PE subsytem of its target, so that's it.\r\n\r\n```c++\r\n//https://github.com/fcharlie/bela/blob/728a4b726f303e7c861823232991de7fdea4d992/src/belawin/reparsepoint.cc#L278\r\nstd::optional<std::wstring> RealPathEx(std::wstring_view src,\r\n                                       bela::error_code &ec) {\r\n  FileReparser reparser;\r\n  if (!reparser.FileDeviceLookup(src, ec)) {\r\n    if (ec.code == ERROR_NOT_A_REPARSE_POINT) {\r\n      ec.code = 0;\r\n      return std::make_optional(bela::PathAbsolute(src));\r\n    }\r\n    return std::nullopt;\r\n  }\r\n  switch (reparser.buffer->ReparseTag) {\r\n  case IO_REPARSE_TAG_APPEXECLINK:\r\n    if (AppExecTarget target; DecodeAppLink(reparser.buffer, target)) {\r\n      return std::make_optional(std::move(target.target));\r\n    }\r\n    ec = bela::make_error_code(1, L\"BAD: unable decode AppLinkExec\");\r\n    return std::nullopt;\r\n  case IO_REPARSE_TAG_SYMLINK:\r\n    CloseHandle(reparser.FileHandle);\r\n    reparser.FileHandle = INVALID_HANDLE_VALUE;\r\n    if (auto target = bela::RealPath(src, ec); target) {\r\n      return std::make_optional(std::move(*target));\r\n    }\r\n    return std::nullopt;\r\n  case IO_REPARSE_TAG_GLOBAL_REPARSE:\r\n    if (std::wstring target; DecodeSymbolicLink(reparser.buffer, target)) {\r\n      return std::make_optional(std::move(target));\r\n    }\r\n    ec = bela::make_error_code(1, L\"BAD: unable decode Global SymbolicLink\");\r\n    return std::nullopt;\r\n  default:\r\n    break;\r\n  }\r\n  return std::make_optional<std::wstring>(src);\r\n}\r\n```\r\n\r\n\r\n```c\r\n// ntimage.h\r\n// Subsystem Values\r\n\r\n#define IMAGE_SUBSYSTEM_UNKNOWN              0   // Unknown subsystem.\r\n#define IMAGE_SUBSYSTEM_NATIVE               1   // Image doesn't require a subsystem.\r\n#define IMAGE_SUBSYSTEM_WINDOWS_GUI          2   // Image runs in the Windows GUI subsystem.\r\n#define IMAGE_SUBSYSTEM_WINDOWS_CUI          3   // Image runs in the Windows character subsystem.\r\n// end_winnt\r\n// reserved                                  4   // Old Windows CE subsystem.\r\n// begin_winnt\r\n#define IMAGE_SUBSYSTEM_OS2_CUI              5   // image runs in the OS/2 character subsystem.\r\n#define IMAGE_SUBSYSTEM_POSIX_CUI            7   // image runs in the Posix character subsystem.\r\n#define IMAGE_SUBSYSTEM_NATIVE_WINDOWS       8   // image is a native Win9x driver.\r\n#define IMAGE_SUBSYSTEM_WINDOWS_CE_GUI       9   // Image runs in the Windows CE subsystem.\r\n#define IMAGE_SUBSYSTEM_EFI_APPLICATION      10  //\r\n#define IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER  11   //\r\n#define IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER   12  //\r\n#define IMAGE_SUBSYSTEM_EFI_ROM              13\r\n#define IMAGE_SUBSYSTEM_XBOX                 14\r\n#define IMAGE_SUBSYSTEM_WINDOWS_BOOT_APPLICATION 16\r\n#define IMAGE_SUBSYSTEM_XBOX_CODE_CATALOG    17\r\n```\r\n",
+      "created_at": "2020-04-22T12:12:43Z",
+      "updated_at": "2020-04-23T12:23:45Z"
+    },
+    {
+      "author": "DHowett",
+      "author_association": "NONE",
+      "body": "FWIW, Terminal is working around this (and a few other issues) by shipping a separate stub executable, wt, that exits immediately after spawning the real one. We're not blocked by this any longer. :smile:",
+      "created_at": "2020-07-11T21:45:47Z",
+      "updated_at": "2020-07-11T21:45:47Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #13481, which has now been successfully released as `v7.1.0-preview.7`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.7)\n",
+      "created_at": "2020-09-08T22:51:28Z",
+      "updated_at": "2020-09-08T22:51:28Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "This issue was regressed after reverting the code that retrieves `AppExecLink` targets (#16044) due to undocumented API.\r\nThis is a regression from 7.1, but it is by-design for 7.2 because to retrieve the target for `AppExecLink`, we have to use undocumented APIs, which is not allowed.\r\n\r\nWe will start a conversation with the Windows App team and see if they can have the API documented so that we can have a better experience.",
+      "created_at": "2021-09-28T20:50:34Z",
+      "updated_at": "2021-09-28T21:18:26Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "See https://github.com/PowerShell/PowerShell/pull/16295#discussion_r736028929 for a potential solution for determining the final executable path. It relies on Windows to resolve the link using the \u201cdocumented\u201d method. The only hiccup is that it relies on the ability to spawn a suspended process which .NET doesn\u2019t expose. There are workarounds to this problem but it essentially moves the wait check until after the process has spawned rather than before as the final exe path is resolved by Windows.",
+      "created_at": "2021-10-26T22:25:58Z",
+      "updated_at": "2021-10-26T22:25:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> We will start a conversation with the Windows App team and see if they can have the API documented so that we can have a better experience.\r\n\r\nQuoted from https://github.com/PowerShell/PowerShell/pull/16295#issuecomment-959815020\r\n\r\n> From the last conversation with the Windows Store team about this, they said it was by-design to not document that API, because they might change how the mapping goes behind the scene.\r\n>\r\n> I don't think anyone from our team has started the conversation again after we learnt about this regression in `NativeCommandProcessor`, and I don't know if that will change any of their decision. But if they documented the API, .NET team will update `ResolveLinkTarget` to support `AppExecLink`, so we can just add back `File.ResolveLinkTarget` when that day comes.",
+      "created_at": "2021-11-03T19:15:04Z",
+      "updated_at": "2021-11-03T22:10:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@DHowett-MSFT Do you know a p/invoke to get an information is a running process GUI or CUI?",
+      "created_at": "2021-11-05T11:52:49Z",
+      "updated_at": "2021-11-05T11:52:49Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "FYI, the Windows Store App team agreed to expose a new API to get the information about the application type (e.g. CUI/GUI) of a Store app (called as \"App Execution Alias\"). They will consider using Windows App SDK (aka Reunion) as the shipping vehicle for the new API.\r\n\r\nBut the `AppExecLink` related APIs will remain undocumented because that link type is an internal implementation detail and subject to change.",
+      "created_at": "2021-11-05T17:47:07Z",
+      "updated_at": "2021-11-05T17:48:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Good news! But Really we need an universal API to get the information for _any_ exe by path.\r\n\r\nWill SHGetFileInfo be updated?",
+      "created_at": "2021-11-05T17:52:48Z",
+      "updated_at": "2021-11-06T12:19:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "After we create new process we could read the process image and get subsystem:\r\nhttps://github.com/dotnet/runtime/blob/852405c649c1f26124974c97199053d6d8f2adab/src/libraries/System.Reflection.Metadata/tests/TestUtilities/LoaderUtilities.cs#L30\r\n\r\nUpdate: we can not read another process memory without specific permissions so it is not right way.\r\n\r\n<blockquote><img src=\"https://opengraph.githubassets.com/f9f56e1b0302085ac56897d621b38be7f977c12d63e7388f8f39594088875739/dotnet/runtime\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dotnet/runtime\">runtime/LoaderUtilities.cs at 852405c649c1f26124974c97199053d6d8f2adab \u00b7 dotnet/runtime</a></strong></div><div>.NET is a cross-platform runtime for cloud, mobile, desktop, and IoT apps. - runtime/LoaderUtilities.cs at 852405c649c1f26124974c97199053d6d8f2adab \u00b7 dotnet/runtime</div></blockquote>",
+      "created_at": "2021-11-05T18:21:49Z",
+      "updated_at": "2021-11-06T12:17:49Z"
+    }
+  ],
+  "created_at": "2019-06-20T19:42:42Z",
+  "number": 9970,
+  "state": "open",
+  "title": "Windows Store applications incorrectly assumed to be console applications",
+  "updated_at": "2021-11-06T12:19:08Z"
+}

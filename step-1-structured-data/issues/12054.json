@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12054",
+  "author": "alx9r",
+  "body": "This came up while trying to apply the proactive importing of required modules described in [#12036 (comment)](https://github.com/PowerShell/PowerShell/issues/12036#issuecomment-595391659) to my repo of PowerShell 5.1 modules.  (There is also some background in #12014.)  I have a number of modules that export DSC Resources and use the [public `SqlServer` module](https://docs.microsoft.com/en-us/powershell/module/sqlserver/?view=sqlserver-ps).  For this discussion and the repro below, I am referring to such a module as `m` and the resource it exports as `r`.\r\n\r\nWithout importing the `SqlServer` module inside `m`, command resolution for `SqlServer` occurs in the global scope.  Resolution in the global scope can lead to a name inside module `m` resolving to a command in an unrelated module.  That problem is demonstrated in #12014 and #12036.\r\n\r\nIn order to force command resolution to the commands exported by the `SqlServer` module to occur inside module `m` the `SqlServer` module is imported inside the user module.  This is mocked by the line `# Import-Module SqlServer` below.  The effect of this import on name resolution is demonstrated [here](https://github.com/PowerShell/PowerShell/issues/12036#issuecomment-595391659). With that import in place command resolution occurs inside module `m` instead of in the global scope.  That much is good.\r\n\r\nIntroducing `Import-Module SqlServer` inside module `m` has the side-effect of `m` exporting all of the commands that `SqlServer` exports.  The customary way to manage this is to specify `Cmdlets/Aliases/FunctionsToExport` in `m`'s module manifest.  Specifying all three, however, has the side-effect of preventing DSC resources from being exported from `m`.  So I'm left with three undesirable options, it seems:\r\n\r\n1. Permit names to resolve to commands in the global scope, thereby not solving the problems in #12014 and #12035 \r\n2. Allow module `m` to export commands from `SqlServer` thereby polluting the namespace with those numerous commands wherever module `m` is used.\r\n3. Don't export DSC resources from `m`.\r\n\r\n---\r\n\r\nI have the following questions:\r\n\r\n1. Is this a bug?  Or is this in line with the design intent?\r\n2. Is there some other way to restrict the export of commands without also inadvertently preventing the export of DSC resources?\r\n\r\n# Steps to reproduce\r\n\r\nCreate the following well-formed module in `$Env:PSModulePath`:\r\n\r\n```powershell\r\n# m.psd1\r\n@{\r\n    ModuleVersion        = '0.1.0'\r\n    RootModule           = 'm.psm1'\r\n    DscResourcesToExport = 'r'\r\n    CmdletsToExport   = @() # Commenting out any \r\n    AliasesToExport   = @() # of these lines results\r\n    FunctionsToExport = @() # in the expected behavior.\r\n}\r\n\r\n```\r\n```powershell\r\n# m.psm1\r\n\r\n# Import-Module SqlServer\r\n\r\n[DscResource()]\r\nclass r\r\n{\r\n    [DscProperty(Key)]\r\n    [string]\r\n    $Key\r\n\r\n    Set() {}\r\n    [bool] Test(){ return $true }\r\n    [r] Get(){ return $this }\r\n}\r\n```\r\n\r\nInvoke the following command:\r\n\r\n```powershell\r\nImport-Module m; Get-DscResource r m\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nName Module Properties\r\n---- ------ ----------\r\nr    m      {Key, DependsOn, PsDscRunAsCredential}\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nWrite-Error: C:\\program files\\powershell\\7\\Modules\\PSDesiredStateConfiguration\\PSDesiredStateConfiguration.psm1:4035\r\nLine |\r\n4035 |              CheckResourceFound $Name $Resources\r\n     |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n     | The term 'r' is not recognized as the name of a Resource.\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 6.3.9600\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u0393\u00c7\u00aa}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "General-Chaos",
+      "author_association": "NONE",
+      "body": "I have also run into this today for module 'JeaDSC' version 0.6.5 which has embedded dsc class resources, this behavior is still present in 7.1.0-preview.5 (for mof compilation in this case) , both on windows and Ubuntu 18.04. Setting 'Aliasestoexport' to '*' also prevents this happening, but that isn't an option for external modules.\r\n\r\nJeaDsc: https://github.com/dsccommunity/JeaDsc\n\n<blockquote><img src=\"https://avatars2.githubusercontent.com/u/51456978?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dsccommunity/JeaDsc\">dsccommunity/JeaDsc</a></strong></div><div>Just Enough Administration. Contribute to dsccommunity/JeaDsc development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2020-07-21T14:04:54Z",
+      "updated_at": "2020-07-21T14:04:56Z"
+    },
+    {
+      "author": "alexbuzzbee",
+      "author_association": "NONE",
+      "body": "I have hit this on a module I'm developing. Fortunately for me, the module in question only provides DSC resources, so I could easily work around it, but it was still extremely confusing.",
+      "created_at": "2020-09-04T17:12:12Z",
+      "updated_at": "2020-09-04T17:12:12Z"
+    },
+    {
+      "author": "anmenaga",
+      "author_association": "CONTRIBUTOR",
+      "body": "This is a bug in `Get-Module -ListAvailable -Name m` that is used by DSC, where [there is a code path](https://github.com/PowerShell/PowerShell/blob/e2ee8e7e1fa3854fb22dc1c494c01351f19ddff6/src/System.Management.Automation/engine/Modules/ModuleCmdletBase.cs#L2768) that [returns ](https://github.com/PowerShell/PowerShell/blob/e2ee8e7e1fa3854fb22dc1c494c01351f19ddff6/src/System.Management.Automation/engine/Modules/ModuleCmdletBase.cs#L2804)the collected module information before[ the ExportedDscResources is set for the module](https://github.com/PowerShell/PowerShell/blob/e2ee8e7e1fa3854fb22dc1c494c01351f19ddff6/src/System.Management.Automation/engine/Modules/ModuleCmdletBase.cs#L3503).",
+      "created_at": "2021-06-21T20:51:38Z",
+      "updated_at": "2021-06-21T20:51:38Z"
+    },
+    {
+      "author": "alexbuzzbee",
+      "author_association": "NONE",
+      "body": "I just hit this issue again and spent a bunch of time stepping through a debug build of PS7.2.6. The exact trigger conditions are if none of `CmdletsToExport`, `FunctionsToExport`, or `AliasesToExport` *uses a wildcard*; all three default to `'*'` if not specified, which prevents triggering the bug. My suggestion would be to copy the `SetDeclaredDscResources()` call from line 3503 (of `ModuleCmdletBase.cs`) into the if block starting on line 2796 (line numbers as of tag `v7.2.6`), though I don't know if that method has more complex requirements.\r\n\r\nIt may be a good idea to look through the rest of the skipped code for other, similar issues.",
+      "created_at": "2022-09-21T16:10:22Z",
+      "updated_at": "2022-10-03T13:52:25Z"
+    }
+  ],
+  "created_at": "2020-03-06T16:04:08Z",
+  "number": 12054,
+  "state": "open",
+  "title": "Specifying all three of Cmdlets/Aliases/FunctionsToExport prevents export of DSC Resources",
+  "updated_at": "2022-10-03T13:52:25Z"
+}

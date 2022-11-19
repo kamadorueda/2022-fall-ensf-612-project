@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17788",
+  "author": "pkosek",
+  "body": "Hi,\r\n\r\nI've been investigating an odd issue, where Get-Secret is exposed through JEA. And when it's called, it breaks transcript logging for the reminder of the entire JEA session. I wonder if this a bug, or by design.\r\n\r\nJEA transcript log:\r\n\r\n**********************\r\nWindows PowerShell transcript start\r\nStart time: 20220329205906\r\nUsername: n/a\r\nHost Application: C:\\Windows\\system32\\wsmprovhost.exe -Embedding\r\nProcess ID: 2956\r\nPSVersion: 5.1.17763.771\r\nPSEdition: Desktop\r\nPSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.17763.771\r\nBuildVersion: 10.0.17763.771\r\nCLRVersion: 4.0.30319.42000\r\nWSManStackVersion: 3.0\r\nPSRemotingProtocolVersion: 2.3\r\nSerializationVersion: 1.1.0.1\r\n\r\n\r\nPS>CommandInvocation(Get-Secret): \"Get-Secret\"\r\n>> ParameterBinding(Get-Secret): name=\"Name\"; value=\"testcred\"\r\n>> ParameterBinding(Get-Secret): name=\"Verbose\"; value=\"True\"\r\n>> ParameterBinding(Get-Secret): name=\"Debug\"; value=\"True\"\r\n>> CommandInvocation(Out-Default): \"Out-Default\"\r\n**********************\r\nWindows PowerShell transcript end\r\nEnd time: 20220329205913\r\n**********************\r\n\r\n\r\nthanks\r\nPete\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "No, this is not by design for SecretManagement.  It seems like it may be a bug in PowerShell transcripts, but I don't really know without a repro to look at.  Can you provide a simple JEA set up that demonstrates this problem?",
+      "created_at": "2022-04-04T22:36:25Z",
+      "updated_at": "2022-04-04T22:36:25Z"
+    },
+    {
+      "author": "pkosek",
+      "author_association": "NONE",
+      "body": "Hi Paul,\r\n\r\nthanks for looking into this. I have reproduced it on couple of machines, both running Windows Server 1809 with Windows Powershell 5.1.\r\n\r\nJEA Role:\r\n\r\n```\r\n@{   \r\n    SchemaVersion = '2.0.0.0'\r\n    GUID = 'dcfe83a6-9346-4250-ae38-3c5247a61962'\r\n    Author = 'pkosek'\r\n    CompanyName = 'Company'\r\n    Copyright = '(c) Company. All rights reserved.'\r\n    Description = 'Test Role'\r\n    SessionType = 'RestrictedRemoteServer'\r\n    TranscriptDirectory = '\\\\server\\share'\r\n    GroupManagedServiceAccount = 'domain\\gMSA'\r\n    ScriptsToProcess = 'C:\\Program Files\\WindowsPowerShell\\Modules\\JEAConfiguration\\InitScript.ps1'\r\n    RoleDefinitions = @{\r\n        'domain\\JEA-Role' = @{'RoleCapabilities' = 'JEA.testRole' }\r\n    }\r\n}\r\n```\r\n\r\nJEA Capability:\r\n```\r\n@{\r\n    GUID = '7c5815e5-8899-4fc1-b6dd-73be6664addd'\r\n    Author = 'pkosek'\r\n    CompanyName = 'Company'\r\n    Copyright = '(c) 2019 Company. All rights reserved.'\r\n    ModulesToImport = 'Microsoft.PowerShell.SecretStore', 'Microsoft.PowerShell.SecretManagement'\r\n    VisibleAliases = 'Help'\r\n    VisibleCmdlets = 'Get-Secret', 'Clear-Host', 'Exit-PSSession', 'Get-Command', 'Get-FormatData', 'Get-Help', 'Measure-Object', 'Out-Default', 'Select-Object'\r\n    VisibleProviders = 'FileSystem'\r\n}\r\n```\r\n",
+      "created_at": "2022-04-05T10:23:56Z",
+      "updated_at": "2022-04-05T10:23:56Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks for the repro information.  I suspect that the problem is with this in your configuration:\r\n```powershell\r\nGroupManagedServiceAccount = 'domain\\gMSA'\r\n```\r\nBoth SecretManagement and SecretStore are designed to install and run under user accounts.  Windows virtual and managed accounts are different from normal user accounts, and SecretManagement/SecretStore will likely not run correctly under them.  I wanted to eventually update these modules to optionally install and run at 'machine' scope, so that they would run under these kinds of accounts.  But there has been no funding for this yet, sadly.\r\n\r\nMy guess is that transcriptions ended after 'Get-Secret' because a terminating error ended the session.\r\nUnfortunately, there is no workaround other than doing the work needed to run under these kinds of managed accounts.",
+      "created_at": "2022-04-05T19:23:23Z",
+      "updated_at": "2022-04-05T19:23:23Z"
+    },
+    {
+      "author": "pkosek",
+      "author_association": "NONE",
+      "body": "This may well be, however I must emphasize that it is only the log transcript that breaks. Everything else works just fine under gMSA - I can retrieve secrets from vaults using my custom wrapper functions that utilize SecretManagement module.\r\n\r\nOne thing to note here, I have a 'special' JEA admin role that allows me to manage secrets - add / change / remove secrets. This works in the context if the gMSA account. Once secrets are set up, I can use them across all other JEA roles that run under the same gMSA.\r\n\r\nMy JEA admin role looks like this:\r\n\r\n```\r\n@{   \r\n    SchemaVersion = '2.0.0.0'\r\n    GUID = '011d1b86-914a-4a26-b10b-a27115f61bb5'\r\n    Description = 'JEA Admin'\r\n    SessionType = 'Default'\r\n    TranscriptDirectory = 'C:\\Logs'\r\n    GroupManagedServiceAccount = 'domain\\gMSA'\r\n    RoleDefinitions = @{\r\n        'domain\\jeaAdmin' = @{'RoleCapabilities' = 'JEA.Admin' }\r\n    }\r\n}\r\n```\r\n\r\n```\r\n@{\r\n    GUID = '5df50060-d798-4b5f-99e3-8ff3ba7f33d6'\r\n    Description = 'JEA Admin'\r\n    ModulesToImport = 'Microsoft.PowerShell.SecretManagement', 'Microsoft.PowerShell.SecretStore'\r\n    VisibleAliases = '*'\r\n    VisibleCmdlets = '*'\r\n    VisibleFunctions = '*'\r\n    VisibleExternalCommands = 'C:\\Windows\\System32\\whoami.exe'\r\n    VisibleProviders = '*'\r\n}\r\n```",
+      "created_at": "2022-04-07T08:50:50Z",
+      "updated_at": "2022-04-07T08:50:50Z"
+    },
+    {
+      "author": "pkosek",
+      "author_association": "NONE",
+      "body": "I should have added that Get-Secret does not seem to throw, it definitely doe not terminate the session and everything else seems to work fine, except for the transcripts from the point when Get-Secret is called.",
+      "created_at": "2022-04-07T08:52:59Z",
+      "updated_at": "2022-04-07T08:52:59Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm, that is interesting.  I know virtual accounts won't work, but have not tried managed.  Let me try to get a repro and see what is going on.  ",
+      "created_at": "2022-04-07T15:22:24Z",
+      "updated_at": "2022-04-07T15:22:24Z"
+    },
+    {
+      "author": "pkosek",
+      "author_association": "NONE",
+      "body": "Hi @PaulHigin - have you had a chance looking into this yet? I'm still scratching my head here.",
+      "created_at": "2022-06-29T09:59:48Z",
+      "updated_at": "2022-06-29T09:59:48Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Sorry, no I haven't had a chance to look at this yet.  But I have bumped it back up the priority list.",
+      "created_at": "2022-06-30T20:26:08Z",
+      "updated_at": "2022-06-30T20:26:08Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Unfortunately, I am not able to repro this since I cannot get a set-up with gMSA accounts.  But I looked at the code and PowerShell will only write the transcript epilog (other than when calling Stop-Transcript explicitly) when it thinks all session runspaces are closed.  SecretManagement loads and runs extension vaults in separate runspaces for isolation, and I am thinking some non-terminating error is causing the extension vault runspaces to be recreated, which in turn is somehow triggering transcription to end.  I know this is speculative, but it is all I have for now.\r\n\r\nIn general I think we can say that SecretManagement/SecretStore is not supported for non-standard accounts (such as virtual or gMSA accounts).  At some point I want to upgrade both modules to support 'AllUsers' or machine wide scope operation, but that may not happen soon as we don't currently have resources to allocate for the work.",
+      "created_at": "2022-07-05T22:02:15Z",
+      "updated_at": "2022-07-05T22:02:15Z"
+    },
+    {
+      "author": "jaamarcelis",
+      "author_association": "NONE",
+      "body": "We are using the Secretsmanagement module also under a gMA account. After we execute 'get-secret' all logging (Write-information, Write-debug etc.) is also broken. \r\n\r\nAs a workaround I execute the get secret as job on localhost. This works (for me) like a charm, for now:\r\n\r\nOld:  $FTPCredential = Get-Secret -Name \"MySecret\" -> logging broken after executing\r\nNew:  $FTPCredential = Invoke-Command -ComputerName localhost -ScriptBlock { Get-Secret -Name \"MySecret\"} -AsJob | Receive-Job -Wait -AutoRemoveJob -> logging keeps working",
+      "created_at": "2022-07-14T09:10:16Z",
+      "updated_at": "2022-07-14T09:10:16Z"
+    },
+    {
+      "author": "pkosek",
+      "author_association": "NONE",
+      "body": "> We are using the Secretsmanagement module also under a gMA account. After we execute 'get-secret' all logging (Write-information, Write-debug etc.) is also broken.\r\n> \r\n> As a workaround I execute the get secret as job on localhost. This works (for me) like a charm, for now:\r\n> \r\n> Old: $FTPCredential = Get-Secret -Name \"MySecret\" -> logging broken after executing New: $FTPCredential = Invoke-Command -ComputerName localhost -ScriptBlock { Get-Secret -Name \"MySecret\"} -AsJob | Receive-Job -Wait -AutoRemoveJob -> logging keeps working\r\n\r\nHA! This is very cool. I'll give it a try. Thank you @jaamarcelis!!",
+      "created_at": "2022-07-14T09:55:49Z",
+      "updated_at": "2022-07-14T09:55:49Z"
+    },
+    {
+      "author": "jaamarcelis",
+      "author_association": "NONE",
+      "body": "I'm curious if it is a solution for the broken Transcript logging also.\r\nHappy to hear from you.",
+      "created_at": "2022-07-14T10:10:52Z",
+      "updated_at": "2022-07-14T10:10:52Z"
+    },
+    {
+      "author": "pkosek",
+      "author_association": "NONE",
+      "body": "It worked a treat! It may not be the prettiest of solutions but as a workaround I'm happy with it!! Thanks again!",
+      "created_at": "2022-07-26T13:24:15Z",
+      "updated_at": "2022-07-26T13:24:15Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is very interesting, and I suspect it works because SecretManagement is being run in a PowerShell job, which in turn runs in a child process.  So whatever breaks transcripts/information data is isolated there.  Fortunately, PowerShell's remoting layer (which is used by PowerShell jobs) safely handles the SecureSting type so the returned string secret type is protected.\r\n\r\nI am re-opening this because I think the PowerShell team should investigate.  My suspicion is that something is breaking in the console host, since that is one of the common points for transcripts and data streams.",
+      "created_at": "2022-07-26T15:30:41Z",
+      "updated_at": "2022-07-26T15:30:41Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Closing this issue as I feel it needs to be investigated by PowerShell team, since it is breaking PowerShell transcripts/data streams, and it has been transferred to PowerShell repository.",
+      "created_at": "2022-07-27T22:11:31Z",
+      "updated_at": "2022-07-27T22:11:31Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Oh, I see this is the same PR just transferred.  Re-opening.",
+      "created_at": "2022-07-27T22:14:05Z",
+      "updated_at": "2022-07-27T22:14:05Z"
+    }
+  ],
+  "created_at": "2022-03-29T19:04:11Z",
+  "number": 17788,
+  "state": "open",
+  "title": "[SecretManagment not supported in non-standard Windows accounts] Get-Secret breaks JEA transcript",
+  "updated_at": "2022-07-27T22:14:05Z"
+}

@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10067",
+  "author": "bergmeister",
+  "body": "Updating the 2 NuGet package [System.ServiceProcess.ServiceController](https://www.nuget.org/packages/System.ServiceProcess.ServiceController) (or `Microsoft.Windows.Compatibility`, which is depending on it) from `4.5.0` (.Net Core 2.1) to `4.6.0-preview6.19303.8` (.Net Core 3-preview6)  breaks 2 tests and the reason for their failure seems to be unclear (i.e. whether it is a problem of PowerShell itself that is now being exposed or a regression in the `System.ServiceProcess.ServiceController`  NuGet package itself), therefore their update was deferred in PR 9888\r\n\r\n# Steps to reproduce\r\n\r\nUpdate the `System.ServiceProcess.ServiceController` NuGet package to `4.6.0-preview6.19303.8`\r\n\r\n# Expected behavior\r\n\r\nAll tests pass.\r\n\r\n# Actual behavior\r\n\r\nThere are 2 failures on Windows:\r\n\r\n- Set/New/Remove-Service cmdlet tests.Set-Service can accept a ServiceController as positional input:\r\n```\r\nExpected strings to be the same, but they were different.\r\nString lengths are both 14.\r\nStrings differ at index 0.\r\nExpected: 'newdisplayname'\r\nBut was:  'testsetservice'\r\nat <ScriptBlock>, D:\\a\\1\\s\\test\\powershell\\Modules\\Microsoft.PowerShell.Management\\Set-Service.Tests.ps1: line 321\r\n321:             $service.DisplayName | Should -BeExactly $newdisplayname\r\n```\r\nIt is worthwhile noting that the first Windows service test throws an `ObjectDisposedException` before it fails:\r\n```\r\n\t\tSet-Service : Cannot access a disposed object.\r\nObject name: 'ServiceController'.\r\nAt C:\\Users\\cberg\\git\\PowerShell\\test\\powershell\\Modules\\Microsoft.PowerShell.Management\\Set-Service.Tests.ps1:318 char:25\r\n+ ...       $script = { Set-Service $service -DisplayName $newdisplayname }\r\n+                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (:) [Set-Service], ObjectDisposedException\r\n+ FullyQualifiedErrorId : InvalidOperationException,Microsoft.PowerShell.Commands.SetServiceCommand\r\n```\r\n![image](https://user-images.githubusercontent.com/9250262/59588305-31da2f00-90df-11e9-952d-be655ff6deae.png)\r\n\r\n\r\n\r\n\r\n- Get-WinEvent.Get-WinEvent can retrieve events.Get-WinEvent can use the simplest of filters\r\n```\r\nCannot convert argument \"value\", with value: \"System.Diagnostics.Eventing.Reader.EventLogRecord\", for \"TryAdd\" to type \"System.Diagnostics.Eventing.Reader.EventLogRecord\": \"Cannot convert the \"System.Diagnostics.Eventing.Reader.EventLogRecord\" value of type \"System.Diagnostics.Eventing.Reader.EventLogRecord\" to type \"System.Diagnostics.Eventing.Reader.EventLogRecord\".\"\r\nat <ScriptBlock>, D:\\a\\1\\s\\test\\powershell\\Modules\\Microsoft.PowerShell.Diagnostics\\Get-WinEvent.Tests.ps1: line 61\r\n61:                 $testEventDict.TryAdd($te.Id, $te)\r\n```\r\n\r\n# Environment data\r\n\r\nWindows",
+  "closed_at": "2019-08-08T12:44:55Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I looked at history of the source code and I don't see any changes. I guess root of the issue in another place. New-Service disposes the object before write to pipeline. Perhaps GC was updated in Preview6.",
+      "created_at": "2019-07-06T19:25:03Z",
+      "updated_at": "2019-07-06T19:25:03Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "For the first failure, it's caused by [this line](https://github.com/dotnet/corefx/blame/master/src/System.ServiceProcess.ServiceController/src/System/ServiceProcess/ServiceController.cs#L482), which was added by https://github.com/dotnet/corefx/pull/32072 in .NET Core 3.0.\r\nSimply put it, before .NET Core 3, `ServiceController.ServiceName` returns a string even if the object has been disposed. In .NET Core 3, the call to `GetDataBaseHandleWithConnectAccess` causes it to throw `ObjectDisposedException` when the object has been disposed.\r\nThis looks like a change by design, and we just need to update our test.\r\n\r\nFor the second failure, it's more problematic. The new NuGet package [System.Diagnostics.EventLog](https://www.nuget.org/packages/System.Diagnostics.EventLog/4.6.0-preview7.19362.9) includes a few more namespaces than the `4.5.0` version, including `System.Diagnostics.Eventing.Reader`, which has `EventLogRecord` type. However, our `Microsoft.PowerShell.CoreCLR.Eventing.dll`, which contains the ported .NET code for `EventProvider` also contains that type. So there is a conflict now.",
+      "created_at": "2019-08-02T00:12:05Z",
+      "updated_at": "2019-08-05T17:05:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> This looks like a change by design, and we just need to update our test.\r\n\r\nWhy do we dispose only in one cmdlet (New-Service)?\r\nhttps://github.com/PowerShell/PowerShell/blob/17fb524adb85566aa5cb6041db279905c2700e6d/src/Microsoft.PowerShell.Commands.Management/commands/management/Service.cs#L2276-L2281",
+      "created_at": "2019-08-02T03:18:15Z",
+      "updated_at": "2019-08-02T03:18:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> our Microsoft.PowerShell.CoreCLR.Eventing.dll, which contains the ported .NET code for EventProvider also contains that type. So there is a conflict now.\r\n\r\nFor reference https://github.com/Microsoft/referencesource/blob/master/System.Core/System/Diagnostics/Eventing/Reader/EventLogRecord.cs - at first look it is the same code as in PowerShell repo.\r\n\n\n<blockquote><img src=\"https://avatars2.githubusercontent.com/u/6154722?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/microsoft/referencesource\">microsoft/referencesource</a></strong></div><div>Source from the Microsoft .NET Reference Source that represent a subset of the .NET Framework - microsoft/referencesource</div></blockquote>",
+      "created_at": "2019-08-02T03:42:41Z",
+      "updated_at": "2019-08-02T03:42:42Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Why do we dispose only in one cmdlet (New-Service)?\r\n\r\nGood question. No idea why doing that. Seems wrong to me.",
+      "created_at": "2019-08-05T17:20:56Z",
+      "updated_at": "2019-08-05T17:20:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Good question. No idea why doing that. Seems wrong to me.\r\n\r\nWrong that we dispose in New-Service?",
+      "created_at": "2019-08-08T12:46:44Z",
+      "updated_at": "2019-08-08T12:46:44Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Yes, it seems wrong to me that we dispose the `ServiceController` object in `New-Service`. I'm not sure if that's on purpose though ... See this is why we need good comment in code :)",
+      "created_at": "2019-08-08T17:00:46Z",
+      "updated_at": "2019-08-08T17:01:05Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #10305, which has now been successfully released as `v7.0.0-preview.3`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.3)\n",
+      "created_at": "2019-08-20T22:36:22Z",
+      "updated_at": "2019-08-20T22:36:22Z"
+    }
+  ],
+  "created_at": "2019-07-05T22:41:07Z",
+  "number": 10067,
+  "state": "closed",
+  "title": "Updating System.ServiceProcess.ServiceController to its .Net Core 3-preview6 version breaks 2 tests",
+  "updated_at": "2019-08-20T22:36:22Z"
+}

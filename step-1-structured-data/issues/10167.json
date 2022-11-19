@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10167",
+  "author": "KirkMunro",
+  "body": "This issue is reproducible in PS 5.1 and 6.2.1 (and presumably 7 preview since the buggy code is still there, although I didn't test that version specifically yet).\r\n\r\nIf you debug a job, you enter a nested debugging session. From within that session, you can set, enable, disable, or remove breakpoints in the job debugger. Setting or removing breakpoints will result in the same changes made to any breakpoints with the corresponding IDs that were set in the parent debugger.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n# Create a job that does some stuff\r\n$job = Start-Job -ScriptBlock {\r\n    1..1000 | ForEach-Object {\r\n        Start-Sleep -Seconds 1\r\n        $_\r\n        Write-Error 'boo'\r\n        Write-Verbose 'Verbose' -Verbose\r\n        $DebugPreference = 'Continue'\r\n        Write-Debug 'Debug'\r\n        Write-Warning 'Warning'\r\n    }\r\n}\r\n\r\n# Set some local breakpoints, and remove one\r\n$bp1 = Set-PSBreakpoint -Command Write-Verbose\r\n$bp2 = Set-PSBreakpoint -Command Get-Date\r\n$bp3 = Set-PSBreakpoint -Variable Home -Mode Read -Action {Write-Host 'Read var'}\r\nRemove-PSBreakpoint -Breakpoint $bp2\r\n\r\n# Have a look at your local breakpoints (these do not impact the running job).\r\nGet-PSBreakpoint\r\n\r\n# Wait for the job and its child job to enter a running state\r\nwhile ($job.State -ne 'Running' -or $job.ChildJobs[0].State -ne 'Running') {\r\n    Start-Sleep -Milliseconds 250\r\n}\r\n\r\n# Debug the job\r\nDebug-Job -Job $job\r\n```\r\n\r\nAt this point you will be in the job debugger. From here, run the following commands:\r\n\r\n```powershell\r\n# Create a bunch of breakpoints\r\n$jbp1 = Set-PSBreakpoint -Variable DebugPreference\r\n$jbp2 = Set-PSBreakpoint -Command Write-Debug\r\n$jbp3 = Set-PSBreakpoint -Command Start-Sleep\r\n\r\n# Have a look at your job breakpoints\r\nGet-PSBreakpoint\r\n\r\n# Disable the second breakpoint\r\nDisable-PSBreakpoint -Breakpoint $jbp2\r\n\r\n# Remove the last breakpoint\r\nRemove-PSBreakpoint -Breakpoint $jbp3\r\n\r\n# Detach your debugger\r\nd\r\n```\r\n\r\nNow you're back in your main runspace, outside of the job. Have a look at your breakpoints by invoking the following command:\r\n\r\n```powershell\r\nGet-PSBreakpoint\r\n```\r\n\r\nThis output shows that:\r\n- breakpoint 0 was overwritten with a completely different breakpoint (the first one that was set in the job)\r\n- breakpoint 1 was re-created (remember that it was removed before debugging the job), and it's not the same as it was before (note that it is not disabled in the parent even though we disabled it in the job debugger because the code behind that simply disables the breakpoint object again, which is already disabled).\r\n- breakpoint 2 was deleted (remember that it was removed from within the job debugging session)\r\n\r\n# Expected behavior\r\n\r\n```none\r\n ID Script                            Line Command                           Variable                          Action\r\n  -- ------                            ---- -------                           --------                          ------\r\n   0                                        Write-Verbose\r\n   2                                                                          Home                              Write-Host 'Read var'\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\n  ID Script                            Line Command                           Variable                          Action\r\n  -- ------                            ---- -------                           --------                          ------\r\n   0                                                                          DebugPreference\r\n   1                                        Write-Debug\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.1\r\nPSEdition                      Core\r\nGitCommitId                    6.2.1\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-09-10T22:47:51Z",
+  "comments": [
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I could use some additional eyes on the root cause behind this issue, because what is done in PowerShell right now is off, and I can fix it, but I don't have the history behind it.\r\n\r\nThe code in question is in [debugger.cs, on lines 3227 to 3247](https://github.com/PowerShell/PowerShell/blob/a34d094b21057299dfd6501b9df897216e947780/src/System.Management.Automation/engine/debugger/debugger.cs#L3227-L3247).\r\n\r\nThat event handler is invoked in response to a breakpoint being updated in the local debugger _or in any nested debugger_. This includes the `PSTaskChildDebugger`, `RemotingJobDebugger`,  `RemoteDebugger`, `ServerRemoteDebugger`, and `NestedRunspaceDebugger`. That's why modifications to breakpoints in a remote runspace (in the example above, in a job) result in breakpoints changing in the local debugger. The local debugger `HandleBreakpointUpdated` event receives details about the breakpoint that was changed _in another runspace_, and then tries to make the same changes in the local debugger.\r\n\r\nThis behavior seems clearly wrong to me, and I'd like to fix it. My initial thought is: that event handler doesn't appear to be needed at all, so remove it. If I create, enable, disable, or remove a breakpoint in a local debugger, the breakpoint is created, enabled, disabled or removed via direct API invocation. If I do the same in a remote debugger, the same happens. Why then do we have an event handler that is notified when a breakpoint is updated in a remote session in PowerShell itself? The only logical reason I could come up with was to synchronize breakpoints across all runspaces, but we don't do that -- we manage breakpoints separately in each runspace.\r\n\r\nAt any rate, @PaulHigin, if you could have a look at this and share your thoughts, it would be appreciated.",
+      "created_at": "2019-08-21T20:31:28Z",
+      "updated_at": "2019-08-21T20:31:28Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This definitely doesn't sound right.  I haven't looked at this in a long while, but much of it was added to support workflow script debugging, and I am not surprised it could use some re-factoring.  I'll try to look at this early next week and give you my thoughts.",
+      "created_at": "2019-08-23T16:00:20Z",
+      "updated_at": "2019-08-23T16:00:20Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hey @PaulHigin, just curious, did you find time to have a look at this yet?\r\n\r\nI'm currently working on a PR that adds a `-Runspace` parameter to the PSBreakpoint cmdlets. It may be appropriate to fix this issue as part of that PR, which is why I ask.\r\n\r\nIt's not a hard requirement though, since this issue can be addressed separately as well, so no real rush.",
+      "created_at": "2019-09-06T02:56:15Z",
+      "updated_at": "2019-09-06T02:56:15Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Sorry for the late reply.  It looks like this is just a coding mistake.  The parent debugger is handling 'BreakpointUpdated' events from a nested debugger and updating its breakpoints.  I can't think why this would ever be needed or correct, and my guess is that it was added for 'completeness'.  \r\n\r\nI think this breakpoint update handler can be completely removed.\r\nhttps://github.com/PowerShell/PowerShell/blob/139cd942b23b18c3220cb57ea2564e6f154c8fef/src/System.Management.Automation/engine/debugger/debugger.cs#L3311\r\n\r\nI am fine doing this in one of your debugging PRs.  Thanks!\r\n",
+      "created_at": "2019-09-09T16:37:33Z",
+      "updated_at": "2019-09-09T16:37:33Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's the exact same outcome that I came up with as well. Thank you @PaulHigin for confirming you feel the same. I'll submit a PR for that shortly to get this corrected.",
+      "created_at": "2019-09-09T17:03:17Z",
+      "updated_at": "2019-09-09T17:03:17Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #10503, which has now been successfully released as `v7.0.0-preview.4`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.4)\n",
+      "created_at": "2019-09-19T17:52:00Z",
+      "updated_at": "2019-09-19T17:52:00Z"
+    }
+  ],
+  "created_at": "2019-07-16T00:48:24Z",
+  "number": 10167,
+  "state": "closed",
+  "title": "Updating breakpoints in a nested debugger or in a job debugger results in breakpoints with the same id in the parent being overwritten",
+  "updated_at": "2019-09-19T17:52:00Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15411",
+  "author": "icebluey",
+  "body": "Powershell: [powershell-7.1.3-linux-x64.tar.gz](https://github.com/PowerShell/PowerShell/releases/download/v7.1.3/powershell-7.1.3-linux-x64.tar.gz)\r\nOS: ubuntu 16.04\r\n```\r\n$ ./pwsh \r\nPowerShell 7.1.3\r\nCopyright (c) Microsoft Corporation.\r\n\r\nhttps://aka.ms/powershell\r\nType 'help' to get help.\r\n\r\nCannot get required symbol EVP_rc2_cbc from libssl\r\nAborted\r\n```\r\n```\r\n$ readelf -a libssl.so.1.0.0 | grep EVP_rc2_cbc\r\n0000002660f8  007a00000007 R_X86_64_JUMP_SLO 0000000000000000 EVP_rc2_cbc@OPENSSL_1.0.0 + 0\r\n   122: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND EVP_rc2_cbc@OPENSSL_1.0.0 (7)\r\n\r\n$ readelf -a libcrypto.so.1.0.0 | grep EVP_rc2_cbc\r\n  3571: 00000000001265d0     8 FUNC    GLOBAL DEFAULT   13 EVP_rc2_cbc@@OPENSSL_1.0.0\r\n\r\n```\r\n\r\nAny ideas to resolve this issue or get more error output for details?\r\n\r\n\r\n\r\n",
+  "closed_at": "2021-06-02T04:51:06Z",
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "IIRC the EVP functions are stored in `libcrypto` which `libssl` is linked to. You can try some of the following to track down more info\r\n\r\n```bash\r\nobjdump -TC /path/to/libcrypto.so | grep EVP_rc2_cbc\r\n\r\nldd --verbose /path/to/libssl.so\r\nldd --verbose /path/to/libcrypto.so\r\n```\r\n\r\nYou can also do `LD_DEBUG=all pwsh -Command echo \"hi\" &> debug.txt` to print out all the binding/linking information in the process. Beware this is a lot of information but I would search for `EVP_rc2_cbc` in that output and try and determine what actual libraries are being loaded and searched in. Other things that are important to know is the actual `libssl` and `libcrypto` files that are being loaded by pwsh/.NET. This can help track down whether it's trying the system provided ones at `/lib/x86_64-linux-gnu/lib[ssl|crypto].so` or some other one that's taking priority.\r\n\r\nI also cannot replicate this problem in an Ubuntu 16.04 docker container so sounds like there's some conflict happening with your specific setup. You could try doing `pwsh -NoProfile` to rule out any commands being run in your profile.",
+      "created_at": "2021-05-16T02:36:04Z",
+      "updated_at": "2021-05-16T02:36:04Z"
+    },
+    {
+      "author": "icebluey",
+      "author_association": "NONE",
+      "body": "This issue cab be reproduced in ubuntu 16.04 docker container when openssl-1.1.1 is installed with \"no-rc2 no-rc4 no-rc5\".\r\n```\r\napt update -yqqq && apt upgrade -fy -qqq\r\napt install -yqqq curl wget vim openssl libssl-dev libicu-dev perl make gcc g++\r\nldconfig\r\n\r\ncd /tmp\r\nwget https://www.openssl.org/source/openssl-1.1.1k.tar.gz\r\ntar -xf openssl-1.1.1k.tar.gz\r\ncd openssl-1.1.1k\r\n\r\n./Configure --prefix=/usr/local/openssl-1.1.1 \\\r\nzlib enable-tls1_3 threads shared \\\r\nno-mdc2 no-ec2m \\\r\nno-rc2 no-rc4 no-rc5 \\\r\nno-sm2 no-sm3 no-sm4 \\\r\nenable-ec_nistp_64_gcc_128 \\\r\nlinux-x86_64 \r\n\r\nmake all\r\nrm -fr /usr/local/openssl-1.1.1\r\nmake install_sw\r\n\r\necho '/usr/local/openssl-1.1.1/lib' > /etc/ld.so.conf.d/openssl-1.1.1.conf\r\nldconfig\r\n```\r\n\r\n```\r\n# must delete ~/.local/share/powershell sometimes\r\nrm -fr ~/.local/share/powershell\r\n/opt/microsoft/powershell/7/pwsh\r\n\r\nCannot get required symbol EVP_rc2_cbc from libssl\r\nAborted (core dumped)\r\n```\r\n\r\nBut when I delete /etc/ld.so.conf.d/openssl-1.1.1.conf and update the ldconfig cache, pwsh works.\r\n```\r\nrm -f /etc/ld.so.conf.d/openssl-1.1.1.conf\r\nldconfig\r\nrm -fr ~/.local/share/powershell\r\n/opt/microsoft/powershell/7/pwsh\r\n\r\nPS /tmp>\r\n```\r\n\r\nPowerShell should be linked to lib[ssl|crypto].so.1.0.0 , why does openssl-1.1.1(libssl.so.1.1, libcrypto.so.1.1) matter?\r\n\r\n",
+      "created_at": "2021-05-16T06:11:18Z",
+      "updated_at": "2021-05-16T06:11:18Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "Check your symlinks in $PSHOME directory, and change there target if it is necessary. I did something to fix stalelinks, but I don't remember what exactly. ArcoLinux.\r\n```\r\n $ (dir $PSHome) -match 'lib(ssl|crypto).*'\r\n\r\n    Directory: /opt/microsoft/powershell/7\r\n\r\nUnixMode   User             Group                 LastWriteTime           Size Name\r\n--------   ----             -----                 -------------           ---- ----\r\nlrwxrwxrwx root             root               04.04.2021 10:29             25 libcrypto.so.1.0.0 -> /usr/lib/libcrypto.so.1.0.0\r\nlrwxrwxrwx root             root               04.04.2021 10:30             22 libssl.so.1.0.0 -> /usr/lib/libssl.so.1.0.0\r\n```",
+      "created_at": "2021-05-16T07:33:39Z",
+      "updated_at": "2021-05-16T07:35:27Z"
+    },
+    {
+      "author": "icebluey",
+      "author_association": "NONE",
+      "body": "pwsh aborted even that\r\n/opt/microsoft/powershell/7/libcrypto.so.1.0.0 was linked to /lib/x86_64-linux-gnu/libcrypto.so.1.0.0\r\n/opt/microsoft/powershell/7/libssl.so.1.0.0 was linked to /lib/x86_64-linux-gnu/libssl.so.1.0.0\r\nwhen /usr/local/openssl-1.1.1/lib was added to ldconfig cache\r\n```\r\necho '/usr/local/openssl-1.1.1/lib' > /etc/ld.so.conf.d/openssl-1.1.1.conf\r\nldconfig\r\nrm -fr ~/.local/share/powershell\r\n\r\n```\r\n",
+      "created_at": "2021-05-16T07:50:02Z",
+      "updated_at": "2021-05-16T07:50:02Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "The libcrypto and libssl symlinks in the pwsh dir are used for libmi (WSMan). Im fairly certain that the .NET side does not use these libraries from this location and they use the SSL libs provided by the system.",
+      "created_at": "2021-05-16T08:29:07Z",
+      "updated_at": "2021-05-16T08:29:07Z"
+    },
+    {
+      "author": "icebluey",
+      "author_association": "NONE",
+      "body": "```\r\n# /opt/microsoft/powershell/7/pwsh -Command echo hello\r\nhello\r\n\r\n# /opt/microsoft/powershell/7/pwsh\r\nPowerShell 7.1.3\r\nCopyright (c) Microsoft Corporation.\r\n\r\nhttps://aka.ms/powershell\r\nType 'help' to get help.\r\n\r\nCannot get required symbol EVP_rc2_cbc from libssl\r\nAborted\r\n\r\n```\r\nIt's weird.\r\n",
+      "created_at": "2021-05-16T09:02:29Z",
+      "updated_at": "2021-05-16T09:02:29Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "Was you trying to install *.deb for 16.04 or snap (I do not know if it is in 16.04)?",
+      "created_at": "2021-05-16T09:11:39Z",
+      "updated_at": "2021-05-16T09:11:39Z"
+    },
+    {
+      "author": "icebluey",
+      "author_association": "NONE",
+      "body": "I have tried , and got the same issue.",
+      "created_at": "2021-05-16T09:24:09Z",
+      "updated_at": "2021-05-16T09:24:09Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks for the reproducer I'm able to replicate the problem in a docker container myself. I can see that the `/opt/microsoft/powershell/7/libSystem.Security.Cryptography.Native.OpenSsl.so` library is the one that's dynamically loading the `libssl` library which in turn loads the `libcrypto` library. You can see this by doing `LD_DEBUG=all pwsh` and looking at this in the output\r\n\r\n```\r\n     14282:     calling init: /opt/microsoft/powershell/7/libSystem.Security.Cryptography.Native.OpenSsl.so\r\n     14282:\r\n     14282:\r\n     14282:     file=libssl.so.1.1 [0];  dynamically loaded by /opt/microsoft/powershell/7/libSystem.Security.Cryptography.Native.OpenSsl.so [0]\r\n     14282:     find library=libssl.so.1.1 [0]; searching\r\n     14282:      search cache=/etc/ld.so.cache\r\n     14282:       trying file=/usr/local/openssl-1.1.1/lib/libssl.so.1.1\r\n     14282:\r\n     14282:     file=libssl.so.1.1 [0];  generating link map\r\n     14282:       dynamic: 0x00007f517ee6fd60  base: 0x00007f517ebe1000   size: 0x0000000000293780\r\n     14282:         entry: 0x00007f517ebfe710  phdr: 0x00007f517ebe1040  phnum:                  7\r\n     14282:\r\n     14282:\r\n     14282:     file=libcrypto.so.1.1 [0];  needed by /usr/local/openssl-1.1.1/lib/libssl.so.1.1 [0]\r\n     14282:     find library=libcrypto.so.1.1 [0]; searching\r\n     14282:      search cache=/etc/ld.so.cache\r\n     14282:       trying file=/usr/local/openssl-1.1.1/lib/libcrypto.so.1.1\r\n     14282:\r\n     14282:     file=libcrypto.so.1.1 [0];  generating link map\r\n     14282:       dynamic: 0x00007f517ebd9d08  base: 0x00007f517e6e5000   size: 0x00000000004fb3a0\r\n     14282:         entry: 0x00007f517e75b000  phdr: 0x00007f517e6e5040  phnum:   \r\n```\r\n\r\nIt shows that it is correctly looking in the `ld.so.cache` fo `libssl.so.1.1` and because there's now a match it uses the custom ssl library and not the one the system provides. You can see in the native code that the OpenSSL shim `libSystem.Security.Cryptography.Native.OpenSsl.so` setups up tries a whole bunch of versions using `dlopen` so you won't see a direct dependency when checking through `ldd` https://github.com/dotnet/runtime/blob/64303750a9198a49f596bcc3aa13de804e421579/src/libraries/Native/Unix/System.Security.Cryptography.Native/opensslshim.c#L78-L133.\r\n\r\nAlso in that code you can see that during the init phase defined in [InitializeOpenSSLShim](https://github.com/dotnet/runtime/blob/64303750a9198a49f596bcc3aa13de804e421579/src/libraries/Native/Unix/System.Security.Cryptography.Native/opensslshim.c#L136) it first checks if `SSL_State` is defined to determine if the linked OpenSSL lib is based on 1.0.0 or not. We can see in the LD logs that this happens and fails because the loaded OpenSSL library is based on 1.1.x\r\n\r\n```\r\n     14335:     symbol=SSL_state;  lookup in file=/usr/local/openssl-1.1.1/lib/libssl.so.1.1 [0]\r\n     14335:     symbol=SSL_state;  lookup in file=/usr/local/openssl-1.1.1/lib/libcrypto.so.1.1 [0]\r\n     14335:     symbol=SSL_state;  lookup in file=/lib/x86_64-linux-gnu/libpthread.so.0 [0]\r\n     14335:     symbol=SSL_state;  lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]\r\n     14335:     symbol=SSL_state;  lookup in file=/lib/x86_64-linux-gnu/libz.so.1 [0]\r\n     14335:     symbol=SSL_state;  lookup in file=/lib/x86_64-linux-gnu/libdl.so.2 [0]\r\n     14335:     symbol=SSL_state;  lookup in file=/lib64/ld-linux-x86-64.so.2 [0]\r\n     14335:     /usr/local/openssl-1.1.1/lib/libssl.so.1.1: error: symbol lookup error: undefined symbol: SSL_state (fatal)\r\n```\r\n\r\nIt then goes on to check that a whole bunch of functions that are required by the .NET OpenSSL shim are present and we can find [EVP_rc2_cbc](https://github.com/dotnet/runtime/blob/189105a302766b4d71c99c8fe0d6458476a53568/src/libraries/Native/Unix/System.Security.Cryptography.Native/opensslshim.h#L357). Because `EVP_rc2_cbc` is a required function the .NET code goes to look up that symbol and we get this error in the LD_DEBUG log\r\n\r\n```\r\n     14335:     symbol=EVP_rc2_cbc;  lookup in file=/usr/local/openssl-1.1.1/lib/libssl.so.1.1 [0]\r\n     14335:     symbol=EVP_rc2_cbc;  lookup in file=/usr/local/openssl-1.1.1/lib/libcrypto.so.1.1 [0]\r\n     14335:     symbol=EVP_rc2_cbc;  lookup in file=/lib/x86_64-linux-gnu/libpthread.so.0 [0]\r\n     14335:     symbol=EVP_rc2_cbc;  lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]\r\n     14335:     symbol=EVP_rc2_cbc;  lookup in file=/lib/x86_64-linux-gnu/libz.so.1 [0]\r\n     14335:     symbol=EVP_rc2_cbc;  lookup in file=/lib/x86_64-linux-gnu/libdl.so.2 [0]\r\n     14335:     symbol=EVP_rc2_cbc;  lookup in file=/lib64/ld-linux-x86-64.so.2 [0]\r\n     14335:     /usr/local/openssl-1.1.1/lib/libssl.so.1.1: error: symbol lookup error: undefined symbol: EVP_rc2_cbc (fatal)\r\n```\r\n\r\nIf any one of these symbols don't exist then .NET prints out the error message you see and calls [abort](https://man7.org/linux/man-pages/man3/abort.3.html) https://github.com/dotnet/runtime/blob/64303750a9198a49f596bcc3aa13de804e421579/src/libraries/Native/Unix/System.Security.Cryptography.Native/opensslshim.c#L154 bringing down the whole application. We can even prove that the `libcrypto.so` compiled and added to the ld cache doesn't contain the symbol when the system library one does.\r\n\r\n```bash\r\nroot@165e3b6118e9:/# objdump -TC /usr/lib/x86_64-linux-gnu/libcrypto.so | grep EVP_rc2_cbc\r\n00000000001265d0 g    DF .text\t0000000000000008  OPENSSL_1.0.0 EVP_rc2_cbc\r\n\r\nroot@165e3b6118e9:/# objdump -TC /usr/local/openssl-1.1.1/lib/libcrypto.so | grep EVP_rc2_cbc\r\n```\r\n\r\nUltimately what this means is that a library provided by .NET requires the dynamically loaded OpenSSL lib have this symbol amongst others to be present for it to work. This isn't someting controlled by the PowerShell team and a requirement from dotnet themselves.\r\n\r\nThe reason why you can do `pwsh -Command ...` and it not fail is due to `PSReadLine` which is loaded for interactive sessions. This will be in some way calling some crypto function which in turns calls the OpenSSL shim init code that ends up in the `abort`. By removing the module entirely, or by running in some non-interactive mode, you can get PowerShell to run. Or at least it will run until you yourself try to run some crypto based code like `Invoke-WebRequest https://google.com`. Ultimately it doesn't matter as much as the problem lies in trying to use an incomplete OpenSSL lib from .NET's perspective.\r\n\r\nAs for why .NET has a hard requirement of these functions you would have to open an issue on their end to get an answer.\r\n\r\n<blockquote><img src=\"https://opengraph.githubassets.com/de549c48ab8f518112b97bd26b724cf53b4df280ea8f2d7e8b0eea69b0eb9f5d/dotnet/runtime\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dotnet/runtime\">dotnet/runtime</a></strong></div><div>.NET is a cross-platform runtime for cloud, mobile, desktop, and IoT apps. - dotnet/runtime</div></blockquote>\r\n<blockquote><img src=\"https://opengraph.githubassets.com/de549c48ab8f518112b97bd26b724cf53b4df280ea8f2d7e8b0eea69b0eb9f5d/dotnet/runtime\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dotnet/runtime\">dotnet/runtime</a></strong></div><div>.NET is a cross-platform runtime for cloud, mobile, desktop, and IoT apps. - dotnet/runtime</div></blockquote>",
+      "created_at": "2021-05-16T11:27:35Z",
+      "updated_at": "2021-05-16T11:38:09Z"
+    },
+    {
+      "author": "icebluey",
+      "author_association": "NONE",
+      "body": "Thank you @jborean93 .\r\nI found a solution from debug information:\r\n\r\n> ...\r\n32227: file=libssl.so.1.1 [0];  dynamically loaded by /opt/microsoft/powershell/7/libSystem.Security.Cryptography.Native.OpenSsl.so [0]\r\n32227: find library=libssl.so.1.1 [0]; searching\r\n32227:  search path=/opt/microsoft/powershell/7/netcoredeps/tls/x86_64:/opt/microsoft/powershell/7/netcoredeps/tls:/opt/microsoft/powershell/7/netcoredeps     (RPATH from file /opt/microsoft/powershell/7/pwsh)\r\n32227:   trying file=/opt/microsoft/powershell/7/netcoredeps/tls/x86_64/libssl.so.1.1\r\n32227:   trying file=/opt/microsoft/powershell/7/netcoredeps/tls/libssl.so.1.1\r\n32227:   trying file=/opt/microsoft/powershell/7/netcoredeps/libssl.so.1.1\r\n...\r\n32227: file=libcrypto.so.1.1 [0];  needed by /usr/local/openssl-1.1.1/lib/libssl.so.1.1 [0]\r\n32227: find library=libcrypto.so.1.1 [0]; searching\r\n32227:  search path=/opt/microsoft/powershell/7/netcoredeps/tls/x86_64:/opt/microsoft/powershell/7/netcoredeps/tls:/opt/microsoft/powershell/7/netcoredeps     (RPATH from file /opt/microsoft/powershell/7/pwsh)\r\n32227:   trying file=/opt/microsoft/powershell/7/netcoredeps/tls/x86_64/libcrypto.so.1.1\r\n32227:   trying file=/opt/microsoft/powershell/7/netcoredeps/tls/libcrypto.so.1.1\r\n32227:   trying file=/opt/microsoft/powershell/7/netcoredeps/libcrypto.so.1.1\r\n\r\nWe build custom openssl 1.1.1 only for powershell and copy libssl.so.1.1 and libcrypto.so.1.1 to /opt/microsoft/powershell/7/netcoredeps/tls/x86_64/ .\r\n\r\nPowerShell and .NET work fine.\r\n",
+      "created_at": "2021-05-16T15:39:37Z",
+      "updated_at": "2021-05-16T15:39:37Z"
+    }
+  ],
+  "created_at": "2021-05-15T19:48:08Z",
+  "number": 15411,
+  "state": "closed",
+  "title": "Cannot get required symbol EVP_rc2_cbc from libssl",
+  "updated_at": "2021-06-02T05:23:14Z"
+}

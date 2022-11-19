@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10278",
+  "author": "mikebattista",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\n# CD to user home directory then call GetFullPath with a relative path\r\ncd; [System.IO.Path]::GetFullPath(\"path\")\r\n```\r\n\r\n# Expected behavior\r\nPer [the documentation for GetFullPath](https://docs.microsoft.com/en-us/dotnet/api/system.io.path.getfullpath?view=netstandard-2.1) and the behavior in Windows PowerShell:\r\n\r\n```none\r\nC:\\Users\\<USER>\\path\r\n```\r\n\r\n# Actual behavior\r\nA path relative to \"c:\\windows\\system32\\\" is returned regardless of the current working directory.\r\n```none\r\nC:\\WINDOWS\\system32\\path\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.2\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.2\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-08-01T21:26:04Z",
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "None of the .NET internal/integral methods recognize the current $PWD to the best of my knowledge.   My first experience with this was with the [XML.Document] Save() method.",
+      "created_at": "2019-08-01T20:02:25Z",
+      "updated_at": "2019-08-01T20:02:25Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I wouldn't be surprised if Windows PowerShell behaves the same, just happens to set the current .NET directory differently.\r\n\r\nJust checked it, actually, and using PowerShell Set-Location commands does _not_ affect the current directory from .NET's end. Windows PowerShell _does_ however set the initial location differently.\r\n\r\nSo this is the same in Windows PS, just with different initial locations between winPS and Core",
+      "created_at": "2019-08-01T20:57:02Z",
+      "updated_at": "2019-08-01T20:57:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Please see #3428.\r\n\r\nThe short of it:\r\n\r\n* Use `Convert-Path` to resolve a (relative) PowerShell path to a full one.\r\n\r\n* Because PowerShell allows you to create multiple runspaces in a single process, each with its own current location, while .NET has only _one_ current directory for the whole process (`[Environment]::CurrentDirectory`), it cannot keep the current PowerShell (filesystem) location in sync with .NET\r\n\r\n\r\n\r\n",
+      "created_at": "2019-08-01T21:00:54Z",
+      "updated_at": "2019-08-01T21:00:54Z"
+    },
+    {
+      "author": "mikebattista",
+      "author_association": "NONE",
+      "body": "Ok. I see there is an [open doc issue for this](https://github.com/MicrosoftDocs/PowerShell-Docs/issues/2626). Would be nice to see this captured somewhere discoverable as while always converting to absolute paths works that's not obvious or natural if you haven't been burned by this before.",
+      "created_at": "2019-08-01T21:26:04Z",
+      "updated_at": "2019-08-01T21:26:04Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32, the difference is in the setting of the `Start in:`  setting in the start menu shortcut.  Windows Powershell has it set to `%HOMEDRIVE%%HOMEPATH%`, while PowerShell Core doesn't specify it.\r\n\r\nThis is one of those items 'Hey,  you can just access the entire .NET subsystem...', 'Yes, ...but there are so many thing you will need to learn first!'",
+      "created_at": "2019-08-01T23:00:53Z",
+      "updated_at": "2019-08-01T23:00:53Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0, just found out `Convert-Path` is worthless if the path does not yet exist, say when you are using the 'MoveTo()' method.",
+      "created_at": "2019-08-02T22:24:17Z",
+      "updated_at": "2019-08-02T22:24:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@msftrncs, yes, good point, that is a current limitation - see #2993",
+      "created_at": "2019-08-02T22:27:13Z",
+      "updated_at": "2019-08-02T22:27:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The short of it is:\r\n\r\nTo pass  **not-yet-extant paths** (PowerShell _Core_ only, because only .NET Core supports the `.GetFullPath()` overload with a second argument that specifies the reference directory):\r\n\r\n```\r\n[IO.Path]::GetFullPath($path, $PWD.ProviderPath)\r\n```\r\n\r\nTo be fully robust, you additionally need to guard against the current location not being a _filesystem_ location:\r\n\r\n```\r\n[IO.Path]::GetFullPath($path, (Get-Location -PSProvider FileSystem).ProviderPath)\r\n```\r\n\r\nThe latter should work in _all_ scenarios - but it doesn't exactly roll off the tongue.\r\n",
+      "created_at": "2019-08-02T22:50:26Z",
+      "updated_at": "2019-08-02T22:51:30Z"
+    },
+    {
+      "author": "hunandy14",
+      "author_association": "NONE",
+      "body": "> The short of it is:\r\n> \r\n> To pass **not-yet-extant paths** (PowerShell _Core_ only, because only .NET Core supports the `.GetFullPath()` overload with a second argument that specifies the reference directory):\r\n> \r\n> ```\r\n> [IO.Path]::GetFullPath($path, $PWD.ProviderPath)\r\n> ```\r\n> \r\n> To be fully robust, you additionally need to guard against the current location not being a _filesystem_ location:\r\n> \r\n> ```\r\n> [IO.Path]::GetFullPath($path, (Get-Location -PSProvider FileSystem).ProviderPath)\r\n> ```\r\n> \r\n> The latter should work in _all_ scenarios - but it doesn't exactly roll off the tongue.\r\n\r\nHi\r\nI had the same problem, but with my Powershell version 5.1,\r\nIn version 5.1 this method does not work.\r\n\r\nPlease if there is any alternative to solve it.\r\n\r\n```txt\r\nCannot find overload and argument count for 'GetFullPath': '2'.\r\nat line:1 character:1\r\n+ [IO.Path]::GetFullPath($path, $PWD.ProviderPath)\r\n+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n     + CategoryInfo : NotSpecified: (:) [], MethodException\r\n     + FullyQualifiedErrorId : MethodCountCouldNotFindBest\r\n```",
+      "created_at": "2022-09-18T12:03:57Z",
+      "updated_at": "2022-09-18T12:05:51Z"
+    }
+  ],
+  "created_at": "2019-08-01T19:37:01Z",
+  "number": 10278,
+  "state": "closed",
+  "title": "[System.IO.Path]::GetFullPath with a relative path is not honoring the current working directory as documented",
+  "updated_at": "2022-09-18T12:05:51Z"
+}

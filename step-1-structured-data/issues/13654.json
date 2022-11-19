@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13654",
+  "author": "pcgeek86",
+  "body": "## Steps to reproduce\r\n\r\n1. Enable Hyper-V\r\n1. Install Cisco VPN client\r\n1. Install Proton VPN client\r\n1. Enable Windows Subsystem for Linux (WSL)\r\n1. Install Wireshark with NPCAP virtual adapter\r\n\r\n```powershell\r\nC:\\Users\\TrevorSullivan> Set-Item -Path WSMan:\\localhost\\Service\\AllowUnencrypted -Value true\r\nSet-Item: WinRM firewall exception will not work since one of the network connection types on this machine is set to Public. Change the network connection type to either Domain or Private and try again.\r\nC:\\Users\\TrevorSullivan> Get-NetConnectionProfile\r\n\r\nName             : Andromeda\r\nInterfaceAlias   : Wi-Fi\r\nInterfaceIndex   : 3\r\nNetworkCategory  : Private\r\nIPv4Connectivity : Internet\r\nIPv6Connectivity : NoTraffic\r\n\r\nC:\\Users\\TrevorSullivan> Enter-PSSession -ComputerName localhost\r\nEnter-PSSession: Connecting to remote server localhost failed with the following error message : Access is denied. For more information, see the about_Remote_Troubleshooting Help topic.\r\n```\r\n\r\nObviously, the `Enter-PSSession` command fails with `Access is denied`. I traced this back to the `AllowUnencrypted` setting on the WinRM service.\r\n\r\n![image](https://user-images.githubusercontent.com/466713/93616276-c510ad00-f991-11ea-9fbe-a3122f518b4e.png)\r\n![image](https://user-images.githubusercontent.com/466713/93616762-5ed85a00-f992-11ea-88a9-70e0d8767251.png)\r\n\r\nAs you can see from the screenshots, the \"Network Category\" field is straight up missing for all but one of my network connections. Also, there's only one connection profile returned by `Get-NetConnectionProfile`, and it's already set to `Private`. \r\n\r\nHow am I supposed to discover which of my network connections is being detected as `public`?\r\n\r\n## Expected behavior\r\n\r\n* **Network Category** is set for all network connections\r\n* `Get-NetConnectionProfile` shows me which of my networks is `public`\r\n* PowerShell sets WinRM configuration to allow unencrypted, without throwing any error messages\r\n\r\n## Actual behavior\r\n\r\nPowerShell indicates that one of my network connections is public, although as best I can tell, none of them are set that way. There's a conflict between what's being reported by PowerShell and what's being reported by Windows 10.\r\n\r\n## Environment data\r\n\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.3\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2021-01-18T06:43:13Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT this might need to be passed along to the windows team responsible for this module; if their module is reporting incorrect information, it'll make life difficult for folks trying to handle this kind of thing in any automated fashion.",
+      "created_at": "2020-09-18T15:48:29Z",
+      "updated_at": "2020-09-18T15:48:29Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah I don't know what's up with that API, but try this:\r\n\r\n```powershell\r\nusing namespace System.Runtime.InteropServices\r\n\r\n$ERROR_NOT_CONNECTED = 0x800708CA\r\n$NLM_ENUM_NETWORK_ALL = 0x03\r\n\r\nenum NlmNetworkCategory {\r\n    Public = 0x00\r\n    Private = 0x01\r\n    DomainAuthenticated = 0x02\r\n}\r\n\r\n# Don't know the progid, but here's the docs:\r\n# https://docs.microsoft.com/en-us/windows/win32/api/netlistmgr/nn-netlistmgr-inetworklistmanager\r\n$type = [type]::GetTypeFromCLSID('DCB00C01-570F-4A9B-8D69-199FDBA5723B')\r\n$netMgr = $null\r\n$networks = $null\r\ntry {\r\n    $netMgr = [Activator]::CreateInstance($type)\r\n\r\n    $networks = $netMgr.GetNetworks($NLM_ENUM_NETWORK_ALL)\r\n    foreach ($network in $networks) {\r\n        try {\r\n            $category = [NlmNetworkCategory]::DomainAuthenticated\r\n            $category.value__ = $network.GetCategory()\r\n\r\n            <# yield return #> [PSCustomObject]@{\r\n                Name = $network.GetName()\r\n                Category = $category\r\n            }\r\n\r\n            # Uncomment to set all public to private.\r\n            # if ($category -eq [NlmNetworkCategory]::Public) {\r\n            #     try {\r\n            #         $network.SetCategory([NlmNetworkCategory]::Private)\r\n            #     } catch [System.Runtime.InteropServices.COMException] {\r\n            #         # SetCategory will throw when it's not connected, but it'll still work anyway.\r\n            #         if ($PSItem.Exception.HResult -ne $ERROR_NOT_CONNECTED) {\r\n            #             throw $PSItem\r\n            #         }\r\n            #     }\r\n            # }\r\n        } finally {\r\n            if ($null -ne $network) {\r\n                $null = [Marshal]::ReleaseComObject($network)\r\n            }\r\n        }\r\n    }\r\n} finally {\r\n    if ($null -ne $networks) {\r\n        $null = [Marshal]::ReleaseComObject($networks)\r\n    }\r\n\r\n    if ($null -ne $netMgr) {\r\n        $null = [Marshal]::ReleaseComObject($netMgr)\r\n    }\r\n}\r\n```",
+      "created_at": "2020-09-18T17:01:22Z",
+      "updated_at": "2020-09-18T17:01:22Z"
+    },
+    {
+      "author": "pcgeek86",
+      "author_association": "NONE",
+      "body": "I was able to work around this problem by creating a self-signed certificate, and setting up an HTTPS listener for WinRM. That way, I don't need to worry about enabling `AllowUnencrypted`. \r\n\r\nStill, this should be considered a bug.\r\n\r\n@SeeminglyScience good idea. I tried that code, and it seems to have set the category to private. However, PowerShell is still complaining. See below.\r\n\r\n```\r\nC:\\Users\\TrevorSullivan> $networks | % { $_.getcategory() }\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\nC:\\Users\\TrevorSullivan> Set-Item -Path WSMan:\\localhost\\Service\\AllowUnencrypted -Value true\r\nSet-Item: WinRM firewall exception will not work since one of the network connection types on this machine is set to Public. Change the network connection type to either Domain or Private and try again.\r\n```",
+      "created_at": "2020-09-18T17:42:06Z",
+      "updated_at": "2020-09-18T17:42:06Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Curious why you are enabling unencrypted connections, that's just plain bad behaviour and should be avoidable of any decent WinRM client.",
+      "created_at": "2020-09-18T19:12:48Z",
+      "updated_at": "2020-09-18T19:12:48Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "So I had a look into this and the code that is generating this error is not in PowerShell but the native WSMan API that PowerShell is calling. You can verify this by finding that exact same error message in `C:\\Windows\\System32\\en-US\\WsmRes.dll.mui`\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/93659119-4d23af00-fa85-11ea-93c9-e8f889488f52.png)\r\n\r\nSo PowerShell is effectively calling https://github.com/PowerShell/PowerShell/blob/3effa204103460c996a8612aa70718fdf924047d/src/Microsoft.WSMan.Management/ConfigProvider.cs#L2689 and the exception from this is what you are seeing in the error message. PowerShell can't do much about this as the check is performed in a dll not owned by this team so @vexx32 suggestion is the next step https://github.com/PowerShell/PowerShell/issues/13654#issuecomment-694944801.\r\n\r\nFor your actual issue, you shouldn't ever really set this config option to `True`. Unless you are using a 3rd party WinRM library that doesn't support message encryption over NTLM or Kerberos then your only real option is to use HTTPS as you've pointed out. By having to set this to `True` any data that is exchanged will be in plaintext which is really dangerous, considering how easy it is to set up a self signed cert then a HTTPS listener isn't really that harder to do. I would even consider finding a different WinRM client if possible as this should be something added from the get go.\r\n\r\nIf you really, really, really want to shoot yourself in the foot I believe you can set this policy through GPO which effectively means it's a registry key. Searching the registry for `AllowUnencrypted` might yield some extra info.",
+      "created_at": "2020-09-19T04:46:35Z",
+      "updated_at": "2020-09-19T04:46:35Z"
+    }
+  ],
+  "created_at": "2020-09-18T15:36:31Z",
+  "number": 13654,
+  "state": "closed",
+  "title": "PowerShell will not allow me to enable unencrypted connections, due to missing Network Connection Profiles",
+  "updated_at": "2021-01-18T06:43:13Z"
+}

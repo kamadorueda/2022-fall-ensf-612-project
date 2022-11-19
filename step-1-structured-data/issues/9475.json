@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9475",
+  "author": "mklement0",
+  "body": "Note: This seems to affect all file-creating cmdlets - including `>` and `>>` - with the laudable exception of `Set-Content` and `Add-Content`.\r\n\r\nConceptually related: #7999\r\n\r\nSay you want to create a file literally named `file[1].txt`.\r\n\r\nIn order to successfully pass this name to a `-Path` parameter (or `-FilePath` for `-OutFile`), it must be escaped as `` file`[1`].txt ``, because `-Path` parameters interpret their arguments as wildcard expressions.\r\n\r\nWhile such an escaped path is _accepted_, the problem is that _it isn't retranslated into its literal equivalent on file creation_, resulting in the _escaped_ representation being used as the filename; in the example above, you end up with a file literally named `` file`[1`].txt `` instead of the intended `` file[1].txt ``\r\n\r\nThis problem can generally be avoided by passing the filename to the `-LiteralPath` parameter instead, but that is not yet always an option - see #3174 - and, of course, the bug is worth fixing either way.\r\n\r\n# Steps to reproduce\r\n\r\nRun the following Pester tests:\r\n\r\n```powershell\r\nDescribe '-Path file-creation test' {\r\n  BeforeAll { Push-Location TestDrive:\\ }\r\n  AfterAll { Pop-Location }\r\n  It \"Escaped wildcard paths are created as their literal equivalents\" {\r\n   'hi' | Out-File -FilePath 'file`[1`].txt'\r\n    Test-Path -LiteralPath 'file[1].txt' | Should -Be $true\r\n    Test-Path -LiteralPath 'file`[1`].txt' | Should -Be $false\r\n }\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe tests should pass.\r\n\r\n# Actual behavior\r\n\r\nThe tests fail, because the actual name of the file created is literally `` file`[1`].txt ``, i.e., the _escaped_ name.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 6.2.0 / Windows PowerShell v5.1\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "kwkam",
+      "author_association": "CONTRIBUTOR",
+      "body": "https://github.com/PowerShell/PowerShell/pull/9258 is related to this but I am not sure if it covers all situations.",
+      "created_at": "2019-05-07T16:11:17Z",
+      "updated_at": "2019-05-07T16:11:17Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "It feels to me the right behavior for `Out-File -FilePath` may be:\r\n- when searching for an existing file, wildcard and escaped wildcard characters are respected, meaning `Out-File -FilePath [ab].txt` should be able to target the existing file `a.txt`, and `Out-File -FilePath '`[out`].txt'` should be able to target the existing file `[out].txt`.\r\n- when no existing file is found, the provided path to `-FilePath` should be used as literal path to create the new file, just like what `New-Item` does, meaning `Out-File -FilePath [hello].txt` should create '[hello].txt' when no existing file found that matches the wildcard pattern.\r\n- redirection operator `>` and `>>` may be better always use `-LiteralPath` parameter when invoking `Out-File`. But this will be a breaking change.\r\n\r\nThe part I don't like about this proposal is that `Out-File -FilePath` would target different files depending on if an existing file that matches the wildcard pattern exists or not. For example, `Out-File -FilePath [ab].txt` would target `a.txt` if that file already exists, and `[ab].txt` if no matching file found.\r\n\r\nThis is a general issue that exists for all cmdlets that do operations that **search** existing files before **create** new files.",
+      "created_at": "2019-05-13T17:20:26Z",
+      "updated_at": "2019-05-13T17:20:26Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "https://github.com/PowerShell/PowerShell/pull/9258 is an attempt to address the issue reported here for `Out-File -FilePath`. But I think this is a general issue that should be fixed in a wider scope.",
+      "created_at": "2019-05-13T17:22:37Z",
+      "updated_at": "2019-05-13T17:22:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I have always been surprised that the behavior of the path (literalpath) parameters varies in different cmdlets. This causes an endless stream of fixes.\r\nIt would be great if the paths (literalpaths) always behaved in the same way, and any deviations were regulated by separate parameters.",
+      "created_at": "2019-05-13T18:05:53Z",
+      "updated_at": "2019-05-13T18:05:53Z"
+    },
+    {
+      "author": "kwkam",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It feels to me the right behavior for `Out-File -FilePath` may be:\r\n> \r\n> * when searching for an existing file, wildcard and escaped wildcard characters are respected, meaning `Out-File -FilePath [ab].txt` should be able to target the existing file `a.txt`, and `Out-File -FilePath '`[out`].txt'` should be able to target the existing file `[out].txt`.\r\n> * when no existing file is found, the provided path to `-FilePath` should be used as literal path to create the new file, just like what `New-Item` does, meaning `Out-File -FilePath [hello].txt` should create '[hello].txt' when no existing file found that matches the wildcard pattern.\r\n> * redirection operator `>` and `>>` may be better always use `-LiteralPath` parameter when invoking `Out-File`. But this will be a breaking change.\r\n> \r\n> The part I don't like about this proposal is that `Out-File -FilePath` would target different files depending on if an existing file that matches the wildcard pattern exists or not. For example, `Out-File -FilePath [ab].txt` would target `a.txt` if that file already exists, and `[ab].txt` if no matching file found.\r\n\r\nI believe it is not a good idea to have a single parameter handling two different usages that might conflict with each other. For example, how do we tell if a user typed an incorrect wildcard accidentally, or a literal filename intentionally? To keep the things simple, I would prefer to use the existing Path/LiteralPath concept:\r\n1. Make `-FilePath` an alias of `-Path`\r\n2. Add `-LiteralPath` to the cmdlet\r\n\r\nAs for `>` and `>>`, would it be possible to add configurable settings (e.g. environment variable) to define whether it (or even the engine itself) accepts `-Path` or `-LiteralPath` by default when it is called from console/script-file, to give users more control?",
+      "created_at": "2019-05-14T12:35:48Z",
+      "updated_at": "2019-05-14T12:35:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed re consistency, @kwkam.\r\n\r\nThe larger issue, however, is that _output_ file paths should never have been treated as wildcards to begin with, which takes us back to #4726, #6729, and also #9225\r\n\r\nP.S.: The `-FilePath` parameters already are aliased to `-Path`:\r\n\r\n```none\r\nCommand           Name                   Aliases\r\n-------           ----                   -------\r\nExport-FormatData Path                   {FilePath}\r\nInvoke-Command    FilePath               {PSPath}\r\nOut-File          FilePath               {Path}\r\nSet-TraceSource   FilePath               {PSPath, Path}\r\nStart-Process     FilePath               {PSPath, Path}\r\nTee-Object        FilePath               {Path}\r\nTrace-Command     FilePath               {PSPath, Path}\r\n```\r\n\r\nNote that `PSPath` is yet another alias for some of them, which is also problematic, because `PSPath` should be the alias of `-LiteralPath`, to ensure treatment of pipeline input from, e.g., `Get-ChildItem` as the literal paths that they are.\r\n",
+      "created_at": "2019-05-22T23:57:39Z",
+      "updated_at": "2019-05-22T23:57:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "As @mklement0 pointed in #6729 writing using wildcards to multiple destinations is dangerous.\r\nWhile changing this behavior in Set-Content/Add-Content would be huge breaking change and I guess it is not for Out-File (>,>>), it is seem reasonable to switch Out-File (>,>>) to LiteralPath by default, specially it is not obvious for user that >,>> are mapped to Out-File, I guess nobody use the complex behavior in the redirection.\r\n\r\nAlso PSPath alias already points to LiteralPath in Out-File. (So if path comes from pipeline by name it binds to LiteralPath but I guess it is not mainstream scenario).",
+      "created_at": "2021-12-01T11:15:42Z",
+      "updated_at": "2021-12-01T11:18:58Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  The case we believe is inconsistent is `out-file file``[1``].txt` where you would properly expect this to be treated as literal as you are escaping the escape character.  Looking at the traces, the parser unescapes it once and the parameter binder is sending ``file`[1`].txt`` to the cmdlet.  The cmdlet calls into the FileSystemProvider which receives this but as it's processing the path, during normalization it appears it gets unescaped to just `file[1].txt` and later the code sees this as a valid wildcard pattern and does globbing.\r\n\r\nGiven that the current FileSystemProvider is sensitive to changes, we recommend that this scenario be addressed in FileSystemProvider v2 rather than trying to fix this in v1 and risk regression.",
+      "created_at": "2021-12-01T23:48:33Z",
+      "updated_at": "2021-12-01T23:48:33Z"
+    }
+  ],
+  "created_at": "2019-04-26T18:23:35Z",
+  "number": 9475,
+  "state": "open",
+  "title": "Passing an escaped wildcard expression to -Path in file-creating cmdlets causes the escaped representation to be used as the literal filename",
+  "updated_at": "2022-09-08T05:09:23Z"
+}

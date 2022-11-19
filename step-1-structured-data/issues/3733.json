@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3733",
+  "author": "mklement0",
+  "body": "<sup>Related: #3734 </sup>\r\n\r\nFor the stop-parsing symbol, `--%`, to work sensibly on Unix:\r\n\r\n* [preferably] _either_: `/bin/sh`, the default shell, must be invoked, passing it a command line as a single string via `-c`.  \r\nAs a - in my view beneficial - side effect, `sh` would perform _globbing_ on unquoted tokens.\r\n\r\n* _or_: PowerShell must still first interpret the tokens of the pass-through command line to strip syntactical quoting, in addition to expanding environment/shell variable references.  \r\nThat may still run afoul of users' expectation that _globbing_ should be performed.\r\n\r\nNote: On _Windows_ PowerShell can get away with only expanding `%<name>%`-style environment-variable references and then invoking the target utility _without shell involvement_, but that's not an option on Unix, where the shell is expected to perform tokenization up front and pass an _array_ of _literal_ arguments instead (with syntactical elements such as quoting characters removed).\r\n\r\nTo illustrate the problem with the current behavior (run the commands on a _Unix_ platform):\r\n\r\n```powershell\r\n> /bin/echo --% 'hi, mom'\r\n'hi mom'   # The enclosing single quotes were treated as *literals*\r\n```\r\n\r\nTrying to pass an `awk` command that from `sh` looks like this: `awk -F\\\" 'BEGIN { print \"hi, mom\" }'`\r\n\r\n```powershell\r\n> awk --% -F\\\" 'BEGIN { print \"hi, mom\" }'\r\n/usr/bin/awk: syntax error at source line 1\r\n context is\r\n\t >>> ' <<< \r\n/usr/bin/awk: bailing out at source line 1\r\n```\r\n\r\nThe array of arguments getting passed to `awk` breaks down as follows (`$<n>` represents the nth positional argument):\r\n\r\n```none\r\n$1=[-F\"]\r\n$2=['BEGIN]\r\n$3=[{]\r\n$4=[print]\r\n$5=[hi, mom]\r\n$6=[}']\r\n```\r\n\r\nAs you can see, the intended argument boundaries weren't respected, and the `'` quoting characters were retained.\r\n\r\nIn fact, there's currently no way to make the above command work with `--%`, because no one is interpreting the quoting and removing the syntactical quoting characters.\r\n\r\nCurrently, only the following truly Byzantine invocation - _not_ involving `--%` - can make the above `awk` command work:\r\n\r\n```powershell\r\n/bin/sh -c \"awk -F\\\\\\`\" 'BEGIN { print \\`\"hi, mom\\`\" }'\"\r\n```\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-alpha (v6.0.0-alpha.18) on macOS 10.12.4\r\nPowerShell Core v6.0.0-alpha (v6.0.0-alpha.18) on Ubuntu 16.04.1 LTS\r\n```\r\n",
+  "closed_at": "2017-09-06T23:41:04Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "--% is very specifically a Windows thing designed as a (rather poor) workaround for the inconsistencies in command line processing on Windows.  I'm not sure it has or should have a role on non-Windows systems. It would be better if PowerShell quoting \"just worked\" on these systems. ",
+      "created_at": "2017-05-17T22:37:04Z",
+      "updated_at": "2017-05-17T22:37:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay: \r\n\r\nThat's a commendable goal, but I fear it is unrealistic:\r\n\r\nWhile automatically applying globbing on Unix platforms when invoking external utilities is helpful, I don't think you can ever make PowerShell-parsed command lines \"just work\" as POSIX-like shell command lines.\r\n\r\nTake the following example, which relies on [(POSIX-compliant) shell parameter expansion](http://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_06_02):\r\n\r\n```sh\r\n$ /bin/echo \"${HOME##*/}\"  # remove the path prefix from $HOME\r\njdoe\r\n```\r\nIf you try this from PowerShell:\r\n\r\n```powershell\r\n> /bin/echo \"${HOME##*/}\" \r\n     # !! no output - PS interpreted *everything* inside {...} as an *identifier*\r\n```\r\n\r\nOn a secondary note: \r\n\r\nI presume that the `%` in `--%` is a nod to the `cmd.exe` syntax of environment-variable references (`%<name>%`), so, I suppose, the POSIX-shell equivalent would be `--$`, but I'm not sure that platform distinction is worth introducing.\r\n\r\n\r\n\r\n",
+      "created_at": "2017-05-23T20:40:08Z",
+      "updated_at": "2017-05-23T20:40:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To provide some more problematic examples:\r\n\r\n---\r\n\r\nBacktick-based [command substitutions](http://mywiki.wooledge.org/CommandSubstitution):\r\n\r\nWhile `$(...)` is the preferred, modern syntax for command substitutions, `` `...` ``, the legacy syntax using backticks, is still widely used (and _not_ deprecated).\r\n\r\n```sh\r\n$ /bin/echo \"`ls -d /`\"\r\n/\r\n```\r\nFor obvious reasons, this command breaks PowerShell's parsing.\r\n\r\n---\r\n\r\n[Word splitting](https://www.gnu.org/software/bash/manual/bashref.html#Word-Splitting)\r\nin POSIX shells means that output from command substitutions is blindly split into tokens by whitespace:\r\n\r\n```sh\r\n$ printf '%s@' $(printf 'a b\\nc')\r\na@b@c\r\n```\r\n\r\nPowerShell preserves the partitioning into arguments based on line breaks:\r\n\r\n```powershell\r\n> printf '%s@' $(printf 'a b\\nc')\r\na b@c  # !! 'a b' was preserved as a *single* argument\r\n```\r\n\r\n\r\n---\r\n\r\n`$(( ... ))` are POSIX-compliant [arithmetic expansion](http://wiki.bash-hackers.org/syntax/expansion/arith) in which variables needn't - and generally shouldn't - be `$`-prefixed:\r\n\r\n```sh\r\n$ v=1; /bin/echo $(( v + 1 ))\r\n2\r\n```\r\n\r\nThe missing `$` before `v` breaks the command in powershell (or, worse, does something else).\r\n\r\n---\r\n\r\nThe following frequently used _nonstandard_ (not POSIX-compliant) `bash` features are less of a concern, because users cannot reasonably assume that they work without calling `bash` explicitly, given that it is customary to call `/bin/sh` behind the scenes, which can be presumed to implement POSIX features only:\r\n\r\nThus, with the need to pass a _single_ string to the `bash` executable, that string can be protected from PowerShell's interpretation with `'...'` (assuming that the PS quoting problems are solved):\r\n\r\n[Brace expansion](https://www.gnu.org/software/bash/manual/html_node/Brace-Expansion.html#Brace-Expansion):\r\n\r\n```powershell\r\n> bash -c 'echo A{1..3}'\r\nA1 A2 A3\r\n```\r\n\r\n[Process substitution (`<(...)`)](http://mywiki.wooledge.org/ProcessSubstitution)\r\n\r\n```powershell\r\n> bash -c 'cat -n <(ls -d /)'\r\n1 /\r\n```\r\n",
+      "created_at": "2017-05-24T17:54:02Z",
+      "updated_at": "2017-05-24T17:54:02Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": "@mklement0 you are right, those things are unlikely to work soon, but if I understood @BrucePay correctly, he only said, that \"quoting\" (e.g. https://github.com/PowerShell/PowerShell/issues/3734) should just work as expected.\r\n\r\nThe examples you mention, are about emulating POSIX-Shell or bash-specific behavior. Although I would really like powershell being able to emulate bash (and dash and cmd.exe) and even thought about writing an RFC myself, I don't believe such functionality will ever be built into powershell.\r\n\r\nThe stop-parsing-symbol (`--%`) is not any kind of cmd.exe-emulation:\r\nAFAIK it just stops the parser from doing anything and passes all content of the line to the executable.\r\nAs this also stops interpreting variables, one wouldn't be able to pass any content dynamically, so they added the Windows-typical environment-variable replacement (`%variable%`).\r\nThis environment-variable replacement is however nothing special of `cmd.exe` -- it's for example also used in `Win+R` dialog and for `REG_EXPAND_SZ` registry keys. There's an [API-Function](https://msdn.microsoft.com/en-us/library/windows/desktop/ms724265.aspx), that does this replacement.\r\n\r\nAs mentioned, `--%` does not emulate `cmd.exe`: Replacement operations, like `%envVar:old=new%` don't work, the cmd escape character `^` can't escape anything and no cmd operators like `&` or such are supported.\r\n\r\nThe only reason, why `--%` acts similar to cmd, is because cmd did very little parsing and basically just passed the whole commandline to the executable. When `--%` is used, powershell also doesn't do any parsing, so it behaves similar to cmd.\r\n\r\nOne more reason not to change `--%` on *nix:\r\nIt is AFAIK the only option to safely pass quotes (`\"`) to child processes and currently works on windows and linux. I think, we should not break this.",
+      "created_at": "2017-05-24T20:18:12Z",
+      "updated_at": "2017-05-24T20:37:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TSlivede:\r\n\r\n> I don't believe such functionality will ever be built into powershell.\r\n\r\nAnd I think that's a good thing: **PowerShell should _not_ try to become Bash** (which has a lot of warts not worth contracting).\r\n\r\nMy point was: **Just like `--%` provides an escape route for users stuck in the `cmd.exe` world, there should be one for Bash (POSIX-like shell) users** - whether that symbol will be \"localized\" to `--$` or not is a secondary issue.\r\n\r\n> The stop-parsing-symbol is not any kind of cmd.exe-emulation:\r\n\r\nYes, it is. The very point of `--%` was to allow people people to execute command lines they were used to executing from `cmd.exe` / batch files - even if that emulation is _incomplete_, as you demonstrate.\r\n\r\nYour parameter-expansion example aside (to put in POSIX terms), the  emulation was always limited to a _single_ command, so involving control operators such as `&`  or `|` was never meant to be supported.\r\n",
+      "created_at": "2017-05-24T20:39:30Z",
+      "updated_at": "2017-05-24T20:40:02Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": "> Yes, it is. The very point of --% was to allow people people to execute command lines they were used to executing from cmd.exe / batch files\r\n\r\nIn that case, it was not implemented very well in my opinion... (advanced variable substitution, escape symbol (`^`), I can't even get output redirection (`>`) to work, but maybe that's my fault...)\r\n\r\nHowever I still don't think `--%` should be changed -- please don't break the (until now) only reliable way to pass quotes.\r\n\r\nI also don't think we need a special bash emulation (or bash call or cmd emulation) syntax. Whats wrong with `bash -c '...'`?\r\nIf the problem is the necessary quoting/escaping, I think this problem can be splitt into https://github.com/PowerShell/PowerShell/issues/1995 and maybe the need for some easier (maybe single line?) here string syntax...",
+      "created_at": "2017-05-24T20:57:42Z",
+      "updated_at": "2017-05-24T21:09:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> However still don't think --% should be changed -- please don't break the (until now) only reliable way to pass quotes.\r\n\r\nMy suggestion was to implement `--%` _analogously_ on _Unix_ platforms, not to change the way it works on _Windows_.\r\n\r\n> What's wrong with bash -c '...'?\r\n\r\nNothing per se, but it does add another circle to Quoting Hell - which, I presume, people who need `--%` in the first place are likely to end up in.\r\n\r\nHere-_documents_ _do_ work:\r\n\r\n```powershell\r\nbash -c @'\r\necho a\\'b\"`date`\"\r\n'@\r\n```\r\nbut, again, not easy on beginners.\r\n\r\nAs for a  _single-line_ solution: I think something like `--%` (or `--$`) is probably as simple as it gets.\r\n\r\nBut for beginners even discovering `--%` is a challenge... - see #1761.\r\n\r\n\r\n\r\n",
+      "created_at": "2017-05-24T21:11:59Z",
+      "updated_at": "2017-05-24T21:11:59Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": ">My suggestion was to implement --% analogously on Unix platforms, not to change the way it works on Windows.\r\n\r\nBut also on Unix `--%` is currently the only reliable and portable way to pass `\"` to a child command -- this will hopefully change soon. \r\nIf `--%` is changed, old scripts, for example ported from windows (or scripts, that need to run on multiple versions of powershell), will break, therefore I'd strongly prefer a different symbol than `--%`. \r\n\r\n\r\n",
+      "created_at": "2017-05-24T21:19:00Z",
+      "updated_at": "2017-05-24T21:28:13Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": "> Quoting Hell \r\n\r\nYes, that's a problem, therefore I suggested the single line here-string (for example `@@' ... '@@` or similar, must be well documented, maybe suggested in the documentation near to `--%`) -- a three line here-doc just looks a little bit strange, although I don't know if it's worth to add a new syntax...",
+      "created_at": "2017-05-24T21:24:07Z",
+      "updated_at": "2017-05-24T21:25:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> But also on Unix --% is currently the only reliable and portable way to pass `\"` to a child command\r\n\r\nNo, unfortunately, **it is _broken_ on Unix**, as my first post tried to demonstrate:\r\n\r\n```powershell\r\n> /bin/echo --% 'hi, mom'\r\n'hi, mom'\r\n```\r\n\r\nAs you can see, **the single quotes were _preserved_**, which is not what you get when you execute the same command (sans `--%`) in a POSIX-like shell:\r\n\r\n```sh\r\n$ /bin/echo 'hi, mom'\r\nhi, mom\r\n```\r\n\r\n**Passing parameters (arguments) works very differently on Unix, where it is the _shell_ that provides the argument parsing, not the _target_ command**.\r\n\r\nI haven't read through all the comments on the related issues and your RFC in full yet, but it's clear to me that **there is no need to _reconstruct_ a _command-line string_ on _Unix_ after PowerShell has done its own parsing**  - instead, **pass the PowerShell-parsed/expanded arguments as-is** to the underlying system function  (e.g., `execv()`), as an **array of _literal_ tokens**.\r\n\r\n**It is only the anarchy that is _Windows_ command-line handling that requires the - brittle - reconstruction of a _single-string command line_ behind the scenes.**\r\n\r\nIn POSIX-like shells on Unix, it is the _shell_ that provides said preprocessing and then passes an _array_ of _as-is_ arguments - after having performed [quote removal](http://wiki.bash-hackers.org/syntax/quoting) to remove the _shell-relevant-only_  _syntactical_ quotes.\r\n\r\nI haven't considered all potential backward-compatibility issues, but if there weren't any, that's undoubtedly the way to go.\r\n\r\n\r\n\r\n",
+      "created_at": "2017-05-24T21:32:15Z",
+      "updated_at": "2017-05-24T21:38:25Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": "I wouldn't consider `--%` broken: It behaves equally to windows, and as the normal calling is broken (like you correctly noticed in https://github.com/PowerShell/PowerShell/issues/3734) some garbage like\r\n```\r\nfunction Run-Native($command) {\r\n    $env:commandlineargumentstring=($args | %{'\"'+ ($_ -replace '(\\\\*)\"','$1$1\\\"' -replace '(\\\\*)$','$1$1') + '\"'}) -join ' ';\r\n    & $command --% %commandlineargumentstring%\r\n}\r\n\r\nRun-Native .\\echoargs.exe 'A \"B' 'A\" B'\r\n```\r\nis the only reliable way that works in all powershell versions on linux and windows (only v3 and above).\r\n\r\n>Passing parameters (arguments) works very differently on Unix, where it is the shell that provides the argument passing, not the target command.\r\nI haven't read through all the comments on the related issues and your RFC in full yet, but it's clear to me that there is no need to reconstruct a command-line string on Unix after PowerShell has done its own parsing - instead, pass the PowerShell-parsed/expanded arguments as-is to the underlying system function (e.g., execv()), as an array of literal tokens.\r\nIt is only the anarchy that is Windows command-line handling that requires the - brittle - reconstruction of a single-string command line behind the scenes.\r\nIn POSIX-like shells on Unix, it is the shell that provides said preprocessing and then passes an array of as-is arguments - after having performed quote removal to remove the shell-relevant-only syntactical quotes.\r\n\r\nI completely agree, although I don't see a big problem with the construction of one argument string -- but it's just essential, that the commandline is splitt into the same strings it was previously constructed from. The current behavior is fatal. Ok, skipping construction of the single string and splitting afterwards would improve performance, but that's the only reason I see. Skipping this joining and splitting would require different code branches for linux and windows and require p/invoke on linux AFAIK.\r\n",
+      "created_at": "2017-05-24T21:51:02Z",
+      "updated_at": "2017-05-24T21:51:02Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": "One more reason why `--%` isn't broken: https://github.com/PowerShell/PowerShell-Docs/blob/staging/reference/6/About/about_Parsing.md states, that\r\n>PowerShell treats the remaining characters in the line as a literal. The only interpretation it performs is to substitute values for environment variables that use standard Windows notation, such as %USERPROFILE%\r\n\r\nIt does not state, how that literal line is split into multiple tokens on Unix -- And on windows it doesn't need to split the literal, as the child executable gets this as one string.",
+      "created_at": "2017-05-24T22:00:55Z",
+      "updated_at": "2017-05-24T22:00:55Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": "Back to the topic -- Although I think `--%` should keep working, I thought again about something like `--$`, \r\nthat also stops parsing, but then passes the remaining line as argument to `bash -c ...`.\r\n\r\nSuch a syntax would help bash users when they start using powershell, this way helping to aquire new users  and therefore maybe actually worth the new syntax addition.\r\n(Although I absolutely don't like the syntax of `--%` and think it should never have been added the way it is.)",
+      "created_at": "2017-05-24T22:11:57Z",
+      "updated_at": "2017-05-24T22:11:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "There is no disagreement except that I said `--%` is broken on _Unix_  - you may choose to call this _inapplicable_ instead, which is fine (I think that was @BrucePay's point) - it was, after all, devised for _Windows_.\r\n\r\nAnd adapting it to work _analogously_ on _Unix_ was the whole point of creating this issue.\r\n\r\nIf the answer is: _don't use this on Unix_, that's fine - if so, it deserves _documenting_ and possibly a _warning_ at parsing / runtime.\r\n\r\n\r\n> I don't see a big problem with the construction of one argument string \r\n\r\nI _do_ see a big problem with that: _Don't assume how the target program will interpret its arguments_. The fact that different programs do so differently is one of the existing pain points on Windows - see [this SO answer](https://stackoverflow.com/a/31413730/45375) of mine.\r\n\r\n> different code branches for linux and windows and require p/invoke on linux AFAIK.\r\n\r\nThat's perfectly appropriate, _if_ feasible (I don't know enough to comment).\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-05-24T22:14:36Z",
+      "updated_at": "2017-05-25T00:28:01Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": ">you may choose to call this inapplicable\r\n\r\n>If the answer is: don't use this on Unix, that's fine - if so, it deserves documenting and possible a warning at parsing / runtime.\r\n\r\nI completely agree with both.\r\n\r\n>I do see a big problem with that: Don't assume how the target program will interpret its arguments.\r\n\r\nYes, that's the pain on Windows. On Unix however, the commandline is always split by the .Net Core framework -- if the commandline is build compatible to the Unix .Net Core version of `Process.Start` / `ProcessStartInfo.Arguments`, the arguments will always reach the child executable correctly.\r\n\r\nBTW - nice answer on SO",
+      "created_at": "2017-05-24T22:43:41Z",
+      "updated_at": "2017-05-24T22:43:41Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  due to inherent differences between Windows and Unix on argument processing, `--%` was originally designed for Windows and we don't want different behavior for this switch on Windows on Unix.  We are looking at making changes to improve native command arg processing on both Windows and Unix so that `--%` isn't required (where possible)",
+      "created_at": "2017-09-06T23:41:04Z",
+      "updated_at": "2017-09-06T23:41:04Z"
+    }
+  ],
+  "created_at": "2017-05-08T21:31:06Z",
+  "number": 3733,
+  "state": "closed",
+  "title": "Make the stop-parsing symbol (--%) work on Unix ",
+  "updated_at": "2017-11-17T11:04:39Z"
+}

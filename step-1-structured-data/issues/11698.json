@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11698",
+  "author": "mklement0",
+  "body": "Currently and historically, `[scriptblock]` instances are deserialized as `[string]` rather than as type `[scriptblock]`:\r\n\r\nThis leads to surprising behavior:\r\n\r\n```powershell\r\n# FAILS, because the script block deserializes to a string parameter\r\nPS> pwsh -nop -c { param($sb) & $sb } -args { 'hi' }\r\n&: The term ' 'hi' ' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\n```\r\n\r\n```powershell\r\n# FAILS, because the background job sees the script block as a string after deserialization.\r\nPS> $sb = { 'hi' }; (Measure-Command $using:sb &) | Receive-Job -Wait -AutoRemoveJob\r\nMeasure-Command: Cannot bind parameter 'Expression'. Cannot convert the \" 'hi' \" value of type \"System.String\" to type \"System.Management.Automation.ScriptBlock\".\r\n```\r\n\r\nThe _serialization_ part already contains all the required information - e.g. the above script block serializes as XML text `<SBK> 'hi' </SBK>`, but, surprisingly, during _deserialization_  `[scriptblock]::Create()` is _not_ called on this string.\r\n\r\nNote: This simple plain-text serialization of the script block's content means that the `$using:`-scope feature for embedding values from the caller's scope doesn't work - references such as `$using:foo` are serialized as-is and would _fail_ on execution of the recreated script block in the caller's scope.\r\n\r\nThe historical design rationale for this behavior was given by @BrucePay  in https://github.com/PowerShell/PowerShell/issues/4218#issuecomment-314851921:\r\n\r\n> Historically this is by design. Serializing scriptblocks with fidelity resulted in too many places where there was automatic code execution so to facilitate secure restricted runspaces, scriptblocks are always deserialized to strings.\r\n\r\nTo safely avoid this problem and to correct the surprising behavior, it  sounds like we'd need to simply make sure that PowerShell-_internally_ no accidental execution (not sure when and why that would happen; simply _parsing_ strings into script blocks seems to be allowed even in restricted runspaces).\r\n\r\nFrom the _user_'s perspective, a script block should deserialize as such, and it is their responsibility, as always, to decide if and when to invoke it.\r\n\r\nFor old code that worked around the limitation, this change should have little to no impact, given how `[scriptblock]` instances stringify:\r\n\r\n```powershell\r\n# The following should be equivalent\r\n[scriptblock]::create(\" 'foo' \") # convert from string\r\n[scriptblock]::create({ 'foo' }) # redundant conversion from script block, which old code may end up doing\r\n```\r\n\r\nHypothetically, old code that tries to access `[string]` properties on a deserialized script block could break - hopefully, this scenario falls into [bucket 3](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).\r\n\r\n\r\n\r\n",
+  "closed_at": "2021-07-08T21:00:48Z",
+  "comments": [
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Remoting working group:\r\nWe could have a conversion that allows a deserialized script block to be re-parsed into a scriptblock.  But we will always just pass the script block string over the wire.  One reason for this is it is much lighter weight for performance reasons.  The other is that scriptblocks contain trust information that needs to be re-evaluated in the target session when the string is re-parsed into a script block.",
+      "created_at": "2021-03-17T22:03:29Z",
+      "updated_at": "2021-03-17T22:03:29Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Remoting working group:\r\nOn further consideration, this is by design.  We don't want to be able to cast a deserialized scriptblock (or string) into a scriptblock, because this opens up security issues.  It is essentially a 'bad' constructor and is why scriptblock has a 'Create' function.",
+      "created_at": "2021-03-17T22:14:22Z",
+      "updated_at": "2021-03-17T22:14:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> because this opens up security issues.\r\n\r\nIt doesn't open up security issues _per se_, because a script block is just a piece of code that must be _invoked explicitly_ in order to do anything (including potential harm).\r\n\r\nBy not deserializing to a script block, all you're doing is to create extra work for the user, by forcing them to call `[scriptblock]::Create()` themselves or - God forbid - `Invoke-Expression` - the need for which they won't expect, as demonstrated by the examples in the initial post.",
+      "created_at": "2021-03-17T22:53:34Z",
+      "updated_at": "2021-03-17T22:53:34Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "It is funny how pen testers can change your mind :).  The serialization system is used in remoting and we've had enough security reviews to know we don't want to do this.",
+      "created_at": "2021-03-17T23:06:31Z",
+      "updated_at": "2021-03-17T23:06:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin, what are pen testers?\r\n\r\nAnd how does \"trust me, we've looked into this before\" address the specific argument I've made?",
+      "created_at": "2021-03-17T23:09:18Z",
+      "updated_at": "2021-03-17T23:09:18Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Penetration testers.  We will not implement automatic conversion of string to scriptblock via constructor as that can open up injection attacks as shown by our penetration testers.",
+      "created_at": "2021-03-17T23:11:40Z",
+      "updated_at": "2021-03-17T23:11:40Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for clarifying the terminology.\r\n\r\nSo, how does deserialization to a script block enable an injection attack if it requires an _explicit, deliberate act of invocation_ to execute the deserialized script block?",
+      "created_at": "2021-03-17T23:14:48Z",
+      "updated_at": "2021-03-17T23:16:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Given how this conversation has unfolded, it is to be feared that this fiat decision stands, even though it is sole justification is the abstract claim that there is an injection-attack security concern, without supporting that claim or being willing to debate it.\r\n\r\nTherefore, the following is likely only for the benefit of future readers (disclaimer: I am by no means a security expert):\r\n\r\nFrom what I gather, an injection attack can mean one of two things:\r\n  * Execution of (malicious) code where no execution of code is expected at all.\r\n  * Execution of maliciously _modified_ code.\r\n\r\nNeither scenario applies in the situation at hand:\r\n\r\n* If what is _serialized_ as a script block (in type-specific `<SBK>` elements, by mere stringification, i.e. the block's verbatim source code),\r\n* then _deserializing_ it as such (via `[scriptblock]::Create()`) cannot possibly result in execution of unwanted code, because _constructing_ a script block doesn't result in its _execution_; it takes _explicit invocation_ (via `&`, `.Invoke()` methods) for actual execution to occur. \r\n  * That a stringified script block representation cannot fully capture all aspects of the original script block is incidental to this discussion; (partial) loss of type fidelity is inherent in serialization, whether applied cross-process locally or in remoting.\r\n\r\nNote that concern about the serialized data itself getting maliciously modified is an entirely separate debate that is not specific to this use case.\r\n\r\nTo put it differently: If the user's intent in trying something like `pwsh -nop -c { param($sb) & $sb } -args { 'hi' }` is to execute the script block being passed, then they can make that happen even with the current limitation:\r\n`pwsh -nop -c { param($sb) Invoke-Expression \"& { $sb }\" } -args { 'hi' }`\r\n\r\nThat it requires an _explicit_ act to recreate a serialized script block is nothing but an unexpected annoyance - it provides no security.\r\n\r\nConversely, if someone managed to tamper with the serialized data itself - an entirely separate, fundamental problem - all bets would be off even with respect to the script block that _is_ directly executed,  `{ param($sb) & $sb }` / `{ param($sb) Invoke-Expression \"& { $sb }\" }{ param($sb) Invoke-Expression \"& { $sb }\" }`.\r\n\r\n",
+      "created_at": "2021-03-18T16:53:32Z",
+      "updated_at": "2022-01-01T22:29:17Z"
+    },
+    {
+      "author": "dkattan",
+      "author_association": "NONE",
+      "body": "I just ran into this issue myself. @PaulHigin Can you shed some light on how/why code could get executed if the ScriptBlock was deserialized automatically?",
+      "created_at": "2021-04-13T21:56:50Z",
+      "updated_at": "2021-04-13T21:56:50Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as by-design and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-07-08T21:00:47Z",
+      "updated_at": "2021-07-08T21:00:47Z"
+    },
+    {
+      "author": "oz53719",
+      "author_association": "NONE",
+      "body": "Has the situation improved since this was declared \"as designed\"? I'm trying to move some PowerShell from an in-process session to an out-of-process session, but I can't invoke Invoke-Command -ScriptBlock $sb in the out-of-process session:\r\n\r\nCannot bind parameter 'ScriptBlock'. Cannot convert the \"<script body>\" value of type \"System.String\" to\r\ntype \"System.Management.Automation.ScriptBlock\".\r\n\r\nIt'd be great if the parameter value emerged from serialization/deserialization as a ScriptBlock. It'd be tolerable (in my current situation, at least) if Invoke-Command accepted -ScriptBlock {string} and internally called ScriptBlock.Create(). If neither of those are going to work, is there a documented workaround (with useful examples)? ",
+      "created_at": "2022-01-04T00:19:33Z",
+      "updated_at": "2022-01-04T00:20:18Z"
+    },
+    {
+      "author": "suprak",
+      "author_association": "NONE",
+      "body": "@mklement0 (or others), it is possible to replicate the behavior of Import/Export-Clixml as well as PSSerializer, but with scriptblocks being roundtripped correctly.\r\n\r\nIt requires some reflection, works on PS 5.1 and Core, and if you're in a pinch, it may just do,\r\n\r\n```PS1\r\n# ideally we could use the [System.Management.Automation.PSSerializer]::Deserialize\r\n# however the public implementation (and as exposed by Import-CliXml) always deserializes\r\n# scriptblocks as string, whereas we need them to remain scriptblocks after the roundtrip\r\n# turns out in the innards of the implementation, there is an option to deserialize correctly\r\n# so below is a bunch reflection to achieve that\r\n$x = [System.Management.Automation.PSSerializer]::Serialize(@{ X = { \"Y\" }})\r\n$psAssembly = [System.Reflection.Assembly]::GetAssembly([psobject])\r\n$xmlReaderSettings = $psAssembly.GetType('System.Management.Automation.InternalDeserializer').GetProperty('XmlReaderSettingsForCliXml', ([System.Reflection.BindingFlags]::Static -bor [System.Reflection.BindingFlags]::NonPublic)).GetValue($null)\r\n\r\n$xmlReader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($x), $xmlReaderSettings)\r\n\r\n$options = [enum]::ToObject($psAssembly.GetType('System.Management.Automation.DeserializationOptions'), 0x400)\r\n\r\n$context = $psAssembly.CreateInstance('System.Management.Automation.DeserializationContext', $false, ([System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance), $null, @($options, $null), $null, $null)\r\n\r\n$deserializer = $psAssembly.CreateInstance('System.Management.Automation.Deserializer', $false, ([System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance), $null, @($xmlReader, $context), $null, $null)\r\n\r\n$deserialize = $deserializer.GetType().GetMethod('Deserialize', ([System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance), $null, @(), $null)\r\n\r\n$y = $deserialize.Invoke($deserializer, $null)\r\n\r\n# validates output\r\n$y\r\n$y.X.GetType()\r\n```\r\n\r\nBased on advice from here,\r\nhttps://stackoverflow.com/a/64209181",
+      "created_at": "2022-11-04T01:08:00Z",
+      "updated_at": "2022-11-04T01:09:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The workaround is much simpler: use `[scriptblock]::Create()` (e.g. `$sb = { 'hi' }; Start-Job { & ([scriptblock]::Create($using:sb)) } | Receive-Job -Wait -AutoRemove`); however, the point of this issue is that _no workaround should be needed_.",
+      "created_at": "2022-11-04T03:03:17Z",
+      "updated_at": "2022-11-04T03:03:17Z"
+    },
+    {
+      "author": "suprak",
+      "author_association": "NONE",
+      "body": "I agree. But given the stance and the digging that I did, the above is what unblocked my scenario.",
+      "created_at": "2022-11-04T13:33:30Z",
+      "updated_at": "2022-11-04T13:33:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@suprak, I see.\r\n\r\nNice job on getting this to work without the need to modify the code in the script block itself (which is what my ad hoc workaround is based on), but how would you make this work in practice, given that you'd need access to the raw serialization data in order to apply your custom deserialization?\r\nOr are you sending the raw serialization data _as a string_? \r\n\r\nTo me it looks like _some_ workaround  that requires extra work on a _per-call_ basis is needed, or am I missing something?\r\nAfterthought: your workaround does have the advantage of not needing to modify and therefore not needing to know the contents of the script block.\r\n\r\n\r\n",
+      "created_at": "2022-11-04T14:16:47Z",
+      "updated_at": "2022-11-04T14:56:07Z"
+    },
+    {
+      "author": "suprak",
+      "author_association": "NONE",
+      "body": "Right, in my scenario I needed to serialize PS object state and deserialize it back reliably. Things like hashtables, and scriptblocks.\r\nI would have just used Import/Export-Clixml except for the scriptblock deserializing back as strings and not scriptblocks.\r\nAfter studying how clixml is generated, I realized that deserializing scriptblocks back into scriptblocks is supported just not exposed.\r\nSo what I pasted is the solution for my scenario.",
+      "created_at": "2022-11-04T15:37:03Z",
+      "updated_at": "2022-11-04T15:37:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Makes sense; thanks for sharing.",
+      "created_at": "2022-11-04T15:44:23Z",
+      "updated_at": "2022-11-04T15:44:23Z"
+    }
+  ],
+  "created_at": "2020-01-27T21:18:02Z",
+  "number": 11698,
+  "state": "closed",
+  "title": "Consider deserializing serialized script blocks as such (remoting, background jobs)",
+  "updated_at": "2022-11-04T15:44:23Z"
+}

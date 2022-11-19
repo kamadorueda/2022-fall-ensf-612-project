@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15781",
+  "author": "iRon7",
+  "body": "### Summary of the new feature / enhancement\r\n\r\n[`Write-Output`](https://docs.microsoft.com/powershell/module/microsoft.powershell.utility/write-output) description excerpt:\r\n\r\n> In PowerShell, it is generally not necessary to use the cmdlet in instances where the output is displayed by default.\r\n\r\nThis is a very nice feature but at the other hand could cause quite some confusion for a novice PowerShell scripter or with complex (recursive) functions as it implies that unwanted objects (including `$null`) could be accidently dropped into the pipeline by an included command (function, method or cmdlet) without notice.\r\nBesides, if it known that a custom function leaks objects into the pipeline,  it might still be a hassle to actually track them down.\r\n\r\nSee StackOverflow issues along with:\r\n* [PowerShell Pipeline Pollution](https://stackoverflow.com/q/67718817/1701026)\r\n* [Powershell ArrayList magically inserts a zero](https://stackoverflow.com/q/52641400/1701026)\r\n* [Why does Range.BorderAround emit \u201cTrue\u201d to the console?](https://stackoverflow.com/q/55659654/1701026)\r\n\r\n\r\n\r\n### Proposed technical implementation details (optional)\r\n\r\nDespite the reasons to [avoid the use of the `Write-Output` cmdlet](https://get-powershellblog.blogspot.com/2017/06/lets-kill-write-output.html), it would be nice to have a [`Set-StrictMode`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/set-strictmode) version that enforces the use of [`Write-Output`](https://docs.microsoft.com/powershell/module/microsoft.powershell.utility/write-output) or [`Return`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_return). Meaning, if anything is placed on the pipeline that doesn't come from `Write-Output` or `Return`, a \"strict\" error should be raised pushing for a fix either way:\r\n* If it was the intention to add something to the pipeline, use the `Write-Output` cmdlet.\r\n* if it was not the intention to add anything to the pipeline, waste the results by using the `[Void]` initiator or assigning it\r\n(e.g. `$Null = ...`)\r\n\r\nCaveats\r\n<strike>\r\n* I have no clue how difficult it is to determine whether a function or method _always_ returns nothing or for a cmdlet (like `Export-Csv`) _always_ returns a `System.Management.Automation.Internal.AutomationNull`.\r\n* I suspect that that external commands should always be voided (`[void](NotePad)`) or assigned (`$Null = NotePad`)\r\n* As `Set-StrictMode` is also applied to the child scopes, I presume that custom child functions can just be checked for the existence of `Write-Host` or `return` statement to determine whether something is returned.\r\n</Strike>\r\n\r\nActually,  at second thought, the above caveats ar probably not relevant as the strict check (whether `Write-Output` or `Return` is used when something is added to the pipeline)  should take place at runtime.\r\n\r\n* `Set-StrictMode` can be set from within a function but could also be set (temporary for trouble shooting) at the prompt level (or even at a global scope with `Set-PSDebug -Strict` command). The indiscriminate implication of this request would be that every expression (including a simple **expression-mode** calculation as `2 * 3` or `.\\MyTestFunction.ps1` invocation)  would require a `Write-Output` (as: `2 * 3 |Write-Output` or `.\\MyTestFunction.ps1 |Write-Output`) unless exceptions are made at the top/shell-level.",
+  "closed_at": "2022-01-22T10:00:45Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The pitfall of accidental output is real, but I wonder if it is better addressed with a _debugging_ feature rather than a new strict mode, which would in essence take away a fundamental PowerShell feature (implicit output). Also, as a fundamental problem, the lack of lexical scoping makes any strict mode liable to break unrelated code.\r\n\r\nTherefore, I wonder if enhancing, say, `Set-PSDebug` is a better way forward, allowing users to locate all lines in their script that produce output in a given call.\r\n\r\n```powershell\r\n# HYPOTHETICAL example.\r\n# As an aside: -Trace is currently [int]-typed  - switching to an *enum* with descriptive symbolic value names\r\n# would make sense.\r\n# 3 == hypothetical new output-tracing flag\r\nPS> Set-PSDebug -Trace 3; ./script.ps1\r\n\r\nDEBUG:    8+  >>>> $arrayList.Add($foo)\r\n0\r\n```\r\n\r\nThat is, the above indicates that the statement on line `8` produced output.\r\n\r\n---\r\n\r\nAs a stopgap  you can use the following technique to print the locations and source code of output-producing statements:\r\n\r\n```powershell\r\nPS> ./script.ps1 | % { \r\n  Write-Verbose -vb \"Output from $(($entry=(Get-PsCallStack)[1]).Location): $($entry.Position.Text)\"; $_ \r\n}\r\n\r\nVERBOSE: Output from script.ps1: line 8: $arrayList.Add($foo)\r\n0\r\n```\r\n\r\n",
+      "created_at": "2021-11-01T15:09:19Z",
+      "updated_at": "2021-11-01T15:09:19Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@mklement0, thanks for the comments, I indeed *also* like the `Set-PSDebug` idea.\r\n\r\n> a new strict mode, which would in essence take away a fundamental PowerShell feature (implicit output). Also, as a fundamental problem, the lack of lexical scoping makes any strict mode liable to break unrelated code.\r\n\r\nI agree, the idea is quite controversy. Yet avoiding *accidental pitfalls* is exactly why someone would prefer strict programming (modes). Besides it is an optional choice. By default, PowerShell is still a loosely programming language.",
+      "created_at": "2021-11-07T12:10:51Z",
+      "updated_at": "2021-11-07T13:49:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Re `Set-PSDebug`: Glad to hear it, @iRon7.\r\n\r\nRe introducing new strict modes in general: I am wary:\r\n\r\n* The lack of _lexical_ scoping of strict modes makes their use treacherous.\r\n* Even if lexical scoping were to be introduced, the dynamic scoping of the _existing_ strict modes would have to be retained for backward compatibility, which would invite confusion and subtle bugs.\r\n* Generally, strict modes make it harder to reason about a given piece of code.\r\n\r\nAs for the specific new mode proposed:\r\n\r\n* While such a mode would undoubtedly help, to me the philosophical question is whether carving out a \"non-PowerShell niche\" inside of PowerShell that subscribes to a different output philosophy is worth doing.\r\n\r\nTherefore, my personal preference would be to help prevent this pitfall via _debugging_ and _linting_ features (PSSA, also as an opt-in).\r\n\r\n\r\n",
+      "created_at": "2021-11-09T15:16:25Z",
+      "updated_at": "2021-11-09T15:16:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7, I assume you meant to post [this comment](https://github.com/PowerShell/PowerShell/issues/16388#issuecomment-981671241) here instead:\r\n\r\n> @mklement0,\r\n\r\n>> Even if lexical scoping were to be introduced, the dynamic scoping of the existing strict modes would have to be >> retained for backward compatibility, which would invite confusion and subtle bugs.\r\n\r\n> A different way to implement lexical scoping is by excluding using [SuppressMessageAttribute](https://docs.microsoft.com/dotnet/api/system.diagnostics.codeanalysis.suppressmessageattribute) class in the cmdlet binding similar to the approach of PSScriptAnalyzer.\r\n\r\nThat would certainly fix the scoping issue (it could even be a _property_ of the existing `CmdletBinding` attribute) and make code easier to reason about.\r\n\r\nHowever, requiring the use of an _attribute_ - undoubtedly an _advanced_ technique -  could prove too high of a hurdle for the intended target audience, _novice_ scripters. (For those comfortable with implicit output who are merely looking to troubleshoot code, a `Set-PSDebug` solution should suffice.)",
+      "created_at": "2021-12-07T16:07:09Z",
+      "updated_at": "2021-12-07T16:08:29Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The Engine WG reviewed this issue today. We don't think introducing a new strict mode is the right way to help prevent this issue because that could easily break other scripts. If a script uses strict mode, then most likely it's using `Set-StrictMode latest`, which means new strict mode like the proposed one will be applied to it, and thus potentially break the script.\r\n\r\nWe believe [PowerShell Script Analyzer](https://github.com/PowerShell/PSScriptAnalyzer) should be the right tool to help, by emitting warnings for expressions that generate output directly to pipeline. Feel free to open an issue in that repo.",
+      "created_at": "2022-01-21T00:40:09Z",
+      "updated_at": "2022-01-21T00:41:17Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as declined and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-01-22T10:00:44Z",
+      "updated_at": "2022-01-22T10:00:44Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "Sorry, I was on holidays and couldn't immediately respond.\r\n\r\n> If a script uses strict mode, then most likely it's using Set-StrictMode latest, which means new strict mode like the proposed one will be applied to it, and thus potentially break the script.\r\n\r\nThis argument is more related to the implementation of `Set-StrictMode` and how the scope is linked to a version rather than a lexical scoping using a different parameter or cmdlet annotations (using the [System.Diagnostics.CodeAnalysis Namespace](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.codeanalysis?view=net-6.0)?) instead. See also: [`#16388` `-Mode` parameter for `Set-StrictMode`](https://github.com/PowerShell/PowerShell/issues/16388).\r\n\r\n> We believe PowerShell Script Analyzer should be the right tool to help, by emitting warnings for expressions that generate output directly to pipeline. Feel free to open an issue in that repo.\r\n\r\nAfaik, [PowerShell Script Analyzer](https://github.com/PowerShell/PSScriptAnalyzer) is not able to catch runtime errors/situation knowing that a (custom) function/cmdlet could potentially return an object but effectively never does during runtime...\r\nAnyways, I am happy to give it a try if you think otherwise.",
+      "created_at": "2022-01-24T11:06:46Z",
+      "updated_at": "2022-01-24T11:06:46Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "Related: [`#3669` Allow advanced functions to only return objects to the pipeline explicitly](https://github.com/PowerShell/PowerShell/issues/3669)",
+      "created_at": "2022-04-11T08:07:51Z",
+      "updated_at": "2022-04-11T08:07:51Z"
+    }
+  ],
+  "created_at": "2021-07-15T12:48:14Z",
+  "number": 15781,
+  "state": "closed",
+  "title": "Strict `Write-Output`",
+  "updated_at": "2022-04-11T08:07:51Z"
+}

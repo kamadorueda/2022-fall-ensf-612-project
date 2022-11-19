@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8813",
+  "author": "mklement0",
+  "body": "With implicit remoting with `Import-PSSesssion` / `Export-PSSession`, If I ask for `get-foo` with `-CommandName`, and it is found as script `get-foo.ps1` on the remote machine, the implicitly remoting proxy _function_ that is created for it is currently literally named  `get-foo.ps1` - including the `.ps1` extension - which is problematic in two respects:\r\n\r\n* I can't invoke `get-foo.ps1` as just `get-foo`, the way I can when invoking an actual script.\r\n\r\n* If there's a local _non-script_ command named `get-foo` (e.g., a local _function_), `Import-PSSession` doesn't recognize the name collision and happily defines `get-foo.ps1` quietly. Invoking `get-foo` then continues to call the _local_ command.\r\n\r\n\r\n# Steps to reproduce\r\n\r\n* On one machine that acts as the remote machine:\r\n   * Make sure that it can be remoted into (`Enable-PSRemoting`).\r\n   * Create a `Get-Foo.ps1` script with content `'hi from Get-Foo.ps1'` and put in a folder in `$env:PATH` (as visible to the user account that will be used for remoting).\r\n\r\n* On another machine, from which to implicitly remote:\r\n  * Run `Import-PSSession -CommandType ExternalScript -CommandName Get-Foo (New-PSSession <remote-machine>)`\r\n  * Run `Get-Foo; Get-Foo.ps1`\r\n\r\n# Expected behavior\r\n\r\n```none\r\nhi from Get-Foo.ps1\r\nhi from Get-Foo.ps1\r\n```\r\n\r\nThat is, both `Get-Foo` and `Get-Foo.ps1` should succeed in transparently invoking the remote `Get-Foo.ps1` script via implicit remoting.\r\n\r\n# Actual behavior\r\n\r\n```none\r\nThe term 'Get-Foo' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\nhi from Get-Foo.ps1\r\n```\r\n\r\nThat is, `Get-Foo` didn't work, because the local proxy _function_ is _literally_ named `Get-Foo.ps1`.\r\n\r\nTo replicate local invocation behavior of an external script, both `Get-Foo` an `Get-Foo.ps1` must be defined; one could be the actual proxy function, the other an alias.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core v6.2.0-preview.4 on macOS 10.14.2\r\nPowerShell Core v6.2.0-preview.4 on Ubuntu 18.04.1 LTS\r\nPowerShell Core v6.2.0-preview.4 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\nWindows PowerShell v5.1.17134.407 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Could you please comment?",
+      "created_at": "2019-02-02T14:38:21Z",
+      "updated_at": "2019-02-02T14:38:21Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This appears to be related to a command discovery issue.  Any discoverable script can be invoked by just the name or the name and extension (Get-Foo or Get-Foo.ps1).  And the name returned includes the extension:\r\n```\r\n> (Get-Command Get-Foo).Name\r\nGet-Foo.ps1\r\n```\r\nThis may be intentional ... I don't know.\r\n\r\nRegarding implicit remoting name collision, you can mitigate that by specifying a name prefix:\r\n```\r\nImport-PSSession -Session $session -CommandName Get-Foo -Prefix My\r\nGet-MyFoo.ps1\r\n```\r\n",
+      "created_at": "2019-02-04T17:49:16Z",
+      "updated_at": "2019-02-04T17:49:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin:\r\n\r\n> Any discoverable script can be invoked by just the name or the name and extension \r\n\r\nYes, if it is a _script_.\r\n\r\nIn the implicit remoting case, the _script_ is proxied by a _function_, and that's what causes the problem:\r\n\r\nIf you _include `.ps1` in the function name_, as implicit remoting currently does, you can _only_ invoke that function _with_ the \"extension\" - which introduces an undesirable _asymmetry_:\r\n\r\n* The (reasonable) expectation that a command that can _locally_ be called with `Get-Foo` can be invoked the same way via implicit remoting  is not fulfilled - you now _must_ invoke as `Get-Foo.ps1`.\r\n\r\n* While the `-Prefix` parameter is handy for _anticipated_ collisions, in the case at hand the problem is that there is _no_ collision - even though there should be:\r\n   * If you (reasonably) expect `Get-Foo` to call the transparently proxied `Get-Foo.ps1` script, you'll be surprised if `Get-Foo` calls a different local function or alias by that name.\r\n\r\n\r\n\r\n",
+      "created_at": "2019-02-04T18:20:36Z",
+      "updated_at": "2019-02-04T22:17:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> To replicate local invocation behavior of an external script, both `Get-Foo` an `Get-Foo.ps1` must be defined; one could be the actual proxy function, the other an alias.\r\n\r\nIf we define `Get-Foo` we can have a conflict with a local name. How would we distinguish them?",
+      "created_at": "2019-02-05T06:06:31Z",
+      "updated_at": "2019-02-05T06:06:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "There's potential for conflict with _both_ names, but even a conflict with _one_ of them should be treated as a collision that is handled as usual (failure by default, explicit override via `-AllowClobber`).\r\n\r\nTo spell out the collision scenarios:\r\n\r\n* `Get-Foo.ps1` could be an existing local script on the calling machine that's in a folder listed in `$env:PATH`.\r\n\r\n* `Get-Foo` could (also) be an existing local _non-script_ command (which, due to command precedence, could shadow a `Get-Foo.ps1` script)\r\n\r\nWith `-AllowClobber`, defining _both_ `Get-Foo` and `Get-Foo.ps1` proxies (one as the alias of the other) then unambiguously calls the remote `Get-Foo.ps1` script, whether you invoke the proxy as `Get-Foo` or as `Get-Foo.ps1` - replicating the local invocation behavior.",
+      "created_at": "2019-02-05T16:41:31Z",
+      "updated_at": "2019-02-05T16:43:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This could be proposed solution in the PR description.",
+      "created_at": "2019-02-05T17:36:15Z",
+      "updated_at": "2019-02-05T17:36:15Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This a bug in implicit remoting.  I was just pointing out that command discovery returns the name plus extension, implicit remoting relies on command discovery and probably uses the name as-is.  We don't want to create multiple proxies for a single command since they are resource intensive.  Instead I think we should just fix implicit remoting to create proxy function names without file extensions.",
+      "created_at": "2019-02-05T23:43:46Z",
+      "updated_at": "2019-02-05T23:43:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> This a bug in implicit remoting.\r\n\r\nYes, that's why I created this issue.\r\n\r\n> I was just pointing out that command discovery returns the name plus extension, implicit remoting relies on command discovery and probably uses the name as-is\r\n\r\nThat was my guess too.\r\n\r\n> We don't want to create multiple proxies for a single command since they are resource intensive.\r\n\r\n_If_ we have to choose, I agree that the extension-_less_ name is the name to choose (`Get-Foo` rather than `Get-Foo.ps1`).\r\n\r\nBut in what way is simply also creating a `.ps1` _alias_  - the equivalent of `Set-Alias Get-Foo.ps1 Get-Foo`  - resource-intensive?\r\nOr are you thinking of the scenario where _all_ remote commands, across all command types, are proxied?\r\n\r\nAs an aside: proxying _scripts_ is probably not the typical use case anyway, though with a blanket import they'd be included.\r\n\r\nAgain, this is about implicit remoting _transparently_ working as if the proxied commands were local.\r\n\r\n\r\n",
+      "created_at": "2019-02-06T02:41:31Z",
+      "updated_at": "2019-02-06T02:42:12Z"
+    }
+  ],
+  "created_at": "2019-02-02T03:30:00Z",
+  "number": 8813,
+  "state": "open",
+  "title": "Implicit remoting (Import-PSSession/Export-PSSession): proxy functions for external scripts are unexpectedly defined with \".ps1\" as part of the name",
+  "updated_at": "2019-02-06T02:42:12Z"
+}

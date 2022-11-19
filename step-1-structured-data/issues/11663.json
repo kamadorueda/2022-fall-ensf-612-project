@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11663",
+  "author": "whitequill",
+  "body": "## The Issue\r\nI'm pretty sure this was just an oversight but, when you run the _Measure-Command_ it measures its own speed of time it takes to run plus the time it took to run the command within its brackets. I don't think this was intentional\r\n\r\nAn exmaple is:\r\n```\r\nMeasure-Command {$null = $(1..10000)}\r\nTotalMilliseconds : 7.0217\r\n```\r\nbut if you look at how long the Measure-Command to run by its self:\r\n```\r\nMeasure-Command {}\r\nTotalMilliseconds : 6.8096\r\n```\r\nWhich would mean the number desired by the user would be from the following command:\r\n```\r\n(Measure-Command {$null = $(1..10000)}) - (Measure-Command{})\r\nTotalMilliseconds : 0.461\r\n```\r\nAs can be seen from the pastebin link: [Measure-Command powershell](https://pastebin.com/Wi3HsLKt) it doesn't always have the same run time if you want to konw why I didn't just give a Total-milliseconds isn't equal to 7.0217 - 6.8096\r\n\r\n## Solution\r\nVery simple solution.  Calculate it differently so that you know how long your command is taking to run and not how long your command is running plus the Measure-Command command-let cause that isn't what the programmer using Powershell wants.\r\nImpliment something like this: `(Measure-Command {$null = $(1..10000)}) - (Measure-Command{})` but, in the Powerhshell source because you can't be sure how long the Measure-Command will run for.\r\nIt could run for anywhere between 8.2262 milliseconds and 5.9224 milliseconds.  So something that will accurately show long your code is running would be good.\r\n\r\n",
+  "closed_at": "2020-02-03T00:00:18Z",
+  "comments": [
+    {
+      "author": "whitequill",
+      "author_association": "NONE",
+      "body": "To check how this works run `Measure-Command {}` 8 or 10 times with no command in the brackets to be measured. It measures its self.",
+      "created_at": "2020-01-22T23:06:35Z",
+      "updated_at": "2020-01-22T23:07:01Z"
+    },
+    {
+      "author": "whitequill",
+      "author_association": "NONE",
+      "body": "No. I've not checked if this is how the Measure-Command works Powershell 7.\r\nI've only checked in Powershell 6.",
+      "created_at": "2020-01-22T23:30:44Z",
+      "updated_at": "2020-01-22T23:31:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "See the cmdlet implementation:\r\nhttps://github.com/PowerShell/PowerShell/blob/12425f24c0c896661a715445647e26e74050d01d/src/Microsoft.PowerShell.Commands.Utility/commands/utility/TimeExpressionCommand.cs#L61-L71\r\n\r\nAs you see the cmdlet doesn't measure itself.",
+      "created_at": "2020-01-23T06:26:13Z",
+      "updated_at": "2020-01-23T06:26:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@whitequill, in PowerShell there is inherent, non-trivial overhead in invoking even just `{}` (an empty script block), and that's what you see.\r\n\r\nGenerally, `Measure-Command` measures _wall-clock_ time of executions, which means that it is susceptible to how busy your system is overall.\r\nIt is _not_ a high-resolution profiling tool that measures just the given code's CPU time.\r\n\r\nPragmatically speaking, it makes sense to ensure that your system is not too busy with other tasks and to [average _multiple_ runs](https://gist.github.com/mklement0/9e1f13978620b09ab2d15da5535d1b27) of your code to get a more realistic sense of execution time, but note that caching and JIT compilation can then distort the results.\r\n\r\nIn short (but perhaps people better versed in performance measurement and with a deeper knowledge of PowerShell can chime in; @SeeminglyScience?): \r\n\r\nDon't look to a scripting language for consistent, predictable performance; in the context of PowerShell, `Measure-Command`'s current behavior seems adequate.\r\n\r\nHowever, there is one notable pitfall that predictably makes `Measure-Command` report _longer_ execution times:\r\n\r\n* It executes the given script block in the _caller's_ scope rather than in a _child_ scope, which slows down execution - see #8911; you can work around this by using a nested script-block call with `& { ... }` [update: it takes many local-variable accesses for this to make a difference, though - see next comment]\r\n",
+      "created_at": "2020-01-23T17:48:17Z",
+      "updated_at": "2020-01-23T20:48:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Don't look to a scripting language for consistent, predictable performance; in the context of PowerShell, `Measure-Command`'s current behavior seems adequate.\r\n\r\nMore specifically a lot of PowerShell is dynamically resolved (commands, methods, types, basically everything) so the engine has a *ton* of different caches for these results.  Often the first run of anything will be slower than subsequent runs.  On top of that, in most cases every script block is interpreted for a certain number of runs before it's compiled into CIL byte code.  That portion of code will be slower until it is finally compiled.  I don't know off the top of my head if the new tiered JIT compilation applies to dynamic methods, but if it does that's *another* layer of eventual optimization.\r\n\r\n`Measure-Command` can give you a very rough idea but that's about it.  It's not impossible for the engine to support more reliable performance profiling, but even then it won't be as simple as `Measure-Command`.  Understanding a snippets *real* performance at various points in it's lifetime will likely be a rather involved task, even more so then something like `BenchmarkDotNet`.\r\n\r\n> However, there is one notable pitfall that predictably makes `Measure-Command` report _longer_ execution times:\r\n> \r\n> * It executes the given script block in the _caller's_ scope rather than in a _child_ scope, which slows down execution - see #8911; you can work around this by using a nested script-block call with `& { ... }`\r\n\r\nYeah.  Though it's worth mentioning that it's unlikely to manifest in OP's example.  Typically the difference is around local variable access. Even then it needs quite a few accesses (like 10k+) to even be measurable iirc.  It *mostly* affects folks trying to measure micro benchmarks with an artificially inflated scale.  It's real easy to accidentally leave in some locals in one test that completely throw off the results.",
+      "created_at": "2020-01-23T18:04:47Z",
+      "updated_at": "2020-01-23T18:11:13Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-02-03T00:00:17Z",
+      "updated_at": "2020-02-03T00:00:17Z"
+    }
+  ],
+  "created_at": "2020-01-22T23:05:06Z",
+  "number": 11663,
+  "state": "closed",
+  "title": "Measure-Command does not measure its self",
+  "updated_at": "2020-02-03T00:00:18Z"
+}

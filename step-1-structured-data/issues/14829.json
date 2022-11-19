@@ -1,0 +1,27 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14829",
+  "author": "mklement0",
+  "body": "Note: \r\n\r\n* The problem occurs if the the array elements are invisibly `[psobject]`-wrapped, as happens when you create an array via a `Write-Output` call, for instance.\r\n\r\n* As such, it is another manifestation of #5579.\r\n\r\n`Array.Sort()` is just _one_ manifestation: any .NET method call with an `array` / `object[]`-typed array argument that relies on seeing the true array element types rather than their incidental `[psobject]` wrappers will behave unexpectedly from the user's perspective.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n# OK, with array constructed *by an expression*.\r\n$a = \"b\", \"\u00e4\", \"a\"; [Array]::Sort($a, [StringComparer]::Ordinal)\r\n$a -join ' ' | Should -Be \"a b \u00e4\"  # OK - non-ASCII character \u00e4 comes LAST in ordinal sorting.\r\n\r\n# !! BROKEN, with array constructed via Write-Output, resulting in\r\n# !! individually [psobject]-wrapped strings.\r\n$a = Write-Output \"b\", \"\u00e4\", \"a\"; [Array]::Sort($a, [StringComparer]::Ordinal)\r\n$a -join ' ' | Should -Be \"a b \u00e4\"  # !! BROKEN - outputs \"a \u00e4 b\" instead\r\n```\r\n\r\n## Expected behavior\r\n\r\nBoth tests should succeed, as it shouldn't matter how the array is constructed.\r\n\r\n## Actual behavior\r\n\r\nThe 2nd test fails:\r\n\r\n```none\r\nExpected strings to be the same, but they were different. String lengths are both 5. Strings differ at index 2. \r\nExpected: 'a b \u00e4' But was:  'a \u00e4 b'\r\n```\r\n\r\nThat is, the string-comparer argument was effectively ignored, because the `.Sort()` method saw `psobject` instances, not _strings_.\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.2.0-preview.3\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "This may just need to be documented.  I'm not sure what the binder can really do here other than iterate `object[]` arrays looking for `PSObject`'s to replace with the underlying object. Plus nested arrays, other complex objects like hashtable, etc. Gets even more complicated (though also more unlikely) with collections like `ReadOnlyCollection<object>`.\r\n\r\nThis is also one of the few situations where autonull can leak into a dotnet method.",
+      "created_at": "2021-02-17T17:34:36Z",
+      "updated_at": "2021-02-17T17:35:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience. I agree that trying to fix the problem in the binder is not the right place (and that documentation is called for, for old PowerShell versions alone).\r\n\r\nThe larger question is if we can eliminate the `[psobject]` wrapping that automatically happens when _compiled_ cmdlets (only) write to the pipeline, with `.WriteObject()` - I don't know if these wrappers are ever _needed_, but as this example and the other ones in  #5579 show, they certainly cause subtle bugs - and no one should be _relying_ on them, given that they're implementation details.\r\n\r\nCompiled cmdlet:\r\n\r\n```powershell\r\nAdd-Type @'\r\nusing System.Management.Automation;\r\n[Cmdlet(\"Get\", \"Foo\")]\r\npublic class GetFooCmdlet : PSCmdlet {\r\n  protected override void ProcessRecord() {\r\n    WriteObject(42);\r\n  }\r\n}\r\n'@ -PassThru | % Assembly | Import-Module\r\n\r\n(Get-Foo) -is [psobject] # -> $true - the [int] instance was [psobject] wrapped\r\n```\r\n\r\nPowerShell code:\r\n\r\n```powershell\r\nfunction Get-Foo { 42 }\r\n\r\n(Get-Foo) -is [psobject] # -> $false - NO [psobject] wrapper\r\n```\r\n\r\n",
+      "created_at": "2021-02-17T18:36:02Z",
+      "updated_at": "2021-02-17T18:36:53Z"
+    }
+  ],
+  "created_at": "2021-02-17T16:16:05Z",
+  "number": 14829,
+  "state": "open",
+  "title": "Array.Sort method call situationally ignores string-comparer argument",
+  "updated_at": "2021-02-19T00:52:50Z"
+}

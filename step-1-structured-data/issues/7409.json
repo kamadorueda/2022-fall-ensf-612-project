@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7409",
+  "author": "powercode",
+  "body": "As of pwsh 6.1, preview-4, we have quadratic performance when the number of unique values -> n.\r\n\r\nBy gathering the input first, sorting it, and then only each new value to the last group, we can come much closer to `n * log(n)` instead of `n * n`.\r\n\r\nI have a prototype with the following perf measurements:\r\n\r\nCount| Unique| OldImpl | newImpl | Speedup | Command\r\n------| ---------|--------- | ----------| ----------|-----------\r\n10689| 8220 | 00:00:06.81 | 00:00:00.23|  29,1 | $allItemsInPowerShellSrcTree \\| group {[io.path]::GetFileName($_)}\r\n1690765 |3761|00:02:30.34 | 00:00:22.32 |  6,7 | $u \\| group\r\n\r\nwhere `$u` is a dataset of string values out of which 3700 is unique.\r\n\r\nThe only downside I have seen is that the both the order of the output objects are different, ~~and so is the order within the groups~~.\r\n\r\nIs that part of the public contract?\r\n~~Is it worth a PR?~~ ",
+  "closed_at": "2018-08-09T19:11:07Z",
+  "comments": [
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I submitted my implementation since I figured it is easier to reason about and review the change when it is more concrete.",
+      "created_at": "2018-07-30T20:19:07Z",
+      "updated_at": "2018-07-30T20:19:07Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Changed the sorting to a stable sort. \r\nNow it is only the order of the `GroupInfo`s that are changed, but not the objects in `GroupInfo.Group`.",
+      "created_at": "2018-07-30T23:02:38Z",
+      "updated_at": "2018-07-30T23:02:38Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "How does it handles?\r\n\r\n```powershell\r\n'007', 7 | group\r\n#vs\r\n7, '007' | group\r\n```",
+      "created_at": "2018-08-01T18:55:17Z",
+      "updated_at": "2018-08-01T18:55:17Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@PetSerAl , I like how you think! I just made a special case when the types differ, and fall back to the slower algorithm.  \r\n\r\nUpdate:\r\nI maintain the behavior of windows powershell.\r\n```\r\nPS> '007', 7 | group\r\n\r\nCount Name                      Group\r\n----- ----                      -----\r\n    1 007                       {007}\r\n    1 7                         {7}\r\n\r\n\r\nPS> '007', 7 | group\r\n\r\nCount Name                      Group\r\n----- ----                      -----\r\n    2 7                         {7, 007}\r\n```",
+      "created_at": "2018-08-01T19:45:27Z",
+      "updated_at": "2018-08-01T22:44:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  Although users should not rely on the order, they could be broken by this if they wanted the first group.  We agreed that this change should be taken and the impact of someone dependent on previous behavior is low.",
+      "created_at": "2018-08-01T22:12:49Z",
+      "updated_at": "2018-08-01T22:12:49Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "![image](https://user-images.githubusercontent.com/3505151/43556575-bebb7dbe-9600-11e8-8957-7459ce679280.png)\r\n\r\nPerformance graph - before is the seven column to the left, showing the quadratic nature of the number of groups.\r\n\r\nThe others are from this PR.",
+      "created_at": "2018-08-02T01:06:57Z",
+      "updated_at": "2018-08-02T07:36:55Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@dfinke  Of course, `Export-Excel` was used to generate the graphs! Kudos!",
+      "created_at": "2018-08-03T07:29:18Z",
+      "updated_at": "2018-08-03T07:29:18Z"
+    },
+    {
+      "author": "fourpastmidnight",
+      "author_association": "NONE",
+      "body": "Well, I was just about to file a new issue about this, because this impacted me. Here's what I was going to file:\r\n\r\nIn PowerShell 5.x and below, the `Group-Object` cmdlet does not sort the groups by the property used to group the objects. In PowerShell 6.1, `Group-Object` is sorting the groups by the property used to group the objects.\r\n\r\nI ran into this as an issue while implementing some changes in Pester. The results of tests are grouped by Contexts (for Gherkin style tests), and the result of the Context (e.g. passed, failed, etc.) is determined from the results of the individual steps that form the members of the group. There are unit tests which check that the results are grouped according to the Context status. The check uses an array of expected context names for a given result status, which is compared with the context names coming from the Pester TestResult object. This object uses the `Group-Object` cmdlet to perform that sorting. As a consequence, on PowerShell 6.1, these unit tests are broken because the results are not in the same order as the expected array results.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n[PSCustomObject]@{ Key = 'z'; Value = 'z' },\r\n[PSCustomObject]@{ Key = 'y'; Value = 'y' },\r\n[PSCustomObject]@{ Key = 'b'; Value = 'b' },\r\n[PSCustomObject]@{ Key = 'a'; Value = 'a' } |\r\n    Group-Object -Property Key\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nCount Name Group\r\n----- ---- -----\r\n    1 z    {@{Key=z; Value=z}}\r\n    1 y    {@{Key=y; Value=y}}\r\n    1 b    {@{Key=b; Value=b}}\r\n    1 a    {@{Key=a; Value=a}}\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nCount Name Group\r\n----- ---- -----\r\n    1 a    {@{Key=a; Value=a}}\r\n    1 b    {@{Key=b; Value=b}}\r\n    1 y    {@{Key=y; Value=y}}\r\n    1 z    {@{Key=z; Value=z}}\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+      "created_at": "2019-04-04T04:00:53Z",
+      "updated_at": "2019-04-04T04:00:53Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Conceivably, you could refactor your test to take this into account, no?\r\n\r\n`$Groups.Name | Sort | Should -Be ($Items.Key | Sort)`",
+      "created_at": "2019-04-04T04:11:36Z",
+      "updated_at": "2019-04-04T04:12:01Z"
+    },
+    {
+      "author": "fourpastmidnight",
+      "author_association": "NONE",
+      "body": "That thought occurred to me. What I wasn't sure about was whether or not the order of the names of the scenarios as reported in the test results object was important. Because ~~that~~ what you said would be the simplest solution and is the first one I thought of.",
+      "created_at": "2019-04-04T04:24:08Z",
+      "updated_at": "2019-04-04T04:24:33Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@fourpastmidnight See Steves comment above. This is a breaking change, in that it changes the order of the output, but it was deemed to be worth it for the perf improvements.",
+      "created_at": "2019-04-05T08:08:16Z",
+      "updated_at": "2019-04-05T08:08:16Z"
+    },
+    {
+      "author": "fourpastmidnight",
+      "author_association": "NONE",
+      "body": "I saw that. That is a dramatic improvement! There is, however, no mention of this breaking change in the documentation on docs.microsoft.com. This is a fairly significant change. In most cases, people were probably already piping the results to `Sort-Object` or something equivalent. But I\u2019m sure there are others like me who View this cmdlet as another Linq-like PS \u201coperator\u201d and that it would simply stream over the results, preserving the order of the results. I have to remember it\u2019s like Linq, it\u2019s not Linq.\n\nAnyway, I managed to find another way to accomplish what I was trying to do which did not necessitate the use of `Group-Object`, thereby avoiding the issue entirely.\n\nThank you for replying to me in the first place on this closed issue. I appreciate your time and consideration.\n\n\nSent from my Windows 10 phone\n\nFrom: Staffan Gustafsson\nSent: Friday, April 5, 2019 4:08\nTo: PowerShell/PowerShell\nCc: Craig E. Shea; Mention\nSubject: Re: [PowerShell/PowerShell] Improve performance of Group-Object(#7409)\n\n@fourpastmidnight See Steves comment above. This is a breaking change, in that it changes the order of the output, but it was deemed to be worth it for the perf improvements.\n\u2014\nYou are receiving this because you were mentioned.\nReply to this email directly, view it on GitHub, or mute the thread.\n\n",
+      "created_at": "2019-04-05T10:17:11Z",
+      "updated_at": "2019-04-05T10:17:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@powercode have we created a docs issue for it? It is a notable change and should definitely be mentioned in the help for the cmdlet.",
+      "created_at": "2019-04-05T10:31:05Z",
+      "updated_at": "2019-04-05T10:31:05Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Created https://github.com/MicrosoftDocs/PowerShell-Docs/issues/4121",
+      "created_at": "2019-04-05T16:32:33Z",
+      "updated_at": "2019-04-05T16:32:33Z"
+    }
+  ],
+  "created_at": "2018-07-30T19:39:16Z",
+  "number": 7409,
+  "state": "closed",
+  "title": "Improve performance of Group-Object",
+  "updated_at": "2022-02-03T10:11:26Z"
+}

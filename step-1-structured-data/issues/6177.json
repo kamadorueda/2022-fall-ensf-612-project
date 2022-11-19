@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6177",
+  "author": "markekraus",
+  "body": "(This would also be nice to apply to `Invoke-RestMethod`, but the change needs to start with `ConvertFrom-Json`, IMO)\r\n\r\nI have been doing a lot of work recently in C# where I'm deserializing JSON and YAML. One thing that I really like about C# is the ability to provide models to deserialize into. \r\n\r\nPSObjects are great and flexible, but when I'm working with a well defined endpoint in PowerShell, I find I'm often having to manually convert the deserialized JSON object to a strongly typed PowerShell class either by trying to type-cast the result (doesn't always work), through special constructors or factories, looping through the object, or manually deserializing with `Newtonsoft.Json.Converter`.\r\n\r\nWhat I'd like is for this be rolled into `ConfertFrom-Json`. ideally it would work like this\r\n\r\n```powershell\r\nclass MySubClass {\r\n    [String]$SubProperty1\r\n    [String]$SubProperty2\r\n\r\n    MySubClass() {}\r\n}\r\nclass MyClass {\r\n    [string]$Property1\r\n    [MySubClass[]]$Property2\r\n\r\n    MyClass(){}\r\n}\r\n\r\n$json = @'\r\n{\r\n    \"Property1\": \"value1\",\r\n    \"Property2\": [\r\n        {\r\n            \"SubProperty1\": \"value2\",\r\n            \"SubProperty2\": \"value3\"\r\n        },\r\n        {\r\n            \"SubProperty1\": \"value4\",\r\n            \"SubProperty2\": \"value5\"\r\n        }\r\n    ]\r\n}\r\n'@\r\n\r\n$result = $json | ConvertFrom-Json -ModelType [MyClass]\r\n```\r\n\r\nIt would essentially do this:\r\n\r\n```powershell\r\n$result = [Newtonsoft.Json.JsonConvert]::DeserializeObject($json,[MyClass])\r\n```\r\n\r\nWith the goal being this passes:\r\n\r\n```powershell\r\nDescribe \"Result\" {\r\n    It \"should be strongly typed\" {\r\n        $result | should -BeOfType [MyClass]\r\n        $result.Property2 | should -BeOfType [MySubClass]\r\n    }\r\n    It \"Should have correct values\" {\r\n        $result.Property1 | should -BeExactly \"value1\"\r\n        $result.Property2[0].SubProperty1 | should -BeExactly \"value2\"\r\n        $result.Property2[0].SubProperty2 | should -BeExactly \"value3\"\r\n        $result.Property2[1].SubProperty1 | should -BeExactly \"value4\"\r\n        $result.Property2[1].SubProperty2 | should -BeExactly \"value5\"\r\n    }\r\n}\r\n```\r\nresult:\r\n\r\n```none\r\nDescribing Result\r\n  [+] should be strongly typed 68ms\r\n  [+] Should have correct values 19ms\r\n```\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "We already support casting from PSObject to a concrete type so try this:\r\n`$result = [MyClass] ($json | ConvertFrom-Json) `\r\nIt should do what you want.",
+      "created_at": "2018-03-08T20:57:35Z",
+      "updated_at": "2018-03-08T20:57:35Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I run into performance problems when deserializing into PSObject. \r\n400Mb takes 10 minuts and 10Gb, and lots of GC.\r\n\r\nThat seems to be done more efficiently when deserializing to a known type.\r\n",
+      "created_at": "2018-03-08T23:00:09Z",
+      "updated_at": "2018-03-08T23:00:09Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay As I mentioned, type casting doesn't always work. If you have  a constructor that accepts a `PSObject` then you cannot simply type case a `convertfrom-json` results because the constructor will be called. \r\n\r\n```powershell\r\nClass MyClass {\r\n    [string]$Property1 = 'default1'\r\n    [string]$Property2 = 'default2'\r\n    MyClass([PSObject]$Foo) {\r\n        $this.Property1 = $Foo.Bar\r\n        $this.Property2 = $Foo.Baz\r\n    }\r\n}\r\n\r\nClass MyClass2 {\r\n    [string]$Property1 = 'default1'\r\n    [string]$Property2 = 'default2'\r\n    MyClass() {}\r\n}\r\n\r\n$Json = @'\r\n{\r\n    \"Property1\": \"json1\",\r\n    \"Property2\": \"json2\"\r\n}\r\n'@\r\n\r\nDescribe \"Type casting a ConvertFrom-Json result\" {\r\n    It \"Works when a PSObject constructor is present\" {\r\n        $result = [MyClass] ($json | ConvertFrom-Json)\r\n\r\n        $result.Property1 | Should -BeExactly \"json1\"\r\n        $result.Property2 | Should -BeExactly \"json2\"\r\n    }\r\n\r\n    It \"Works when a PSObject constructor is not present\" {\r\n        $result = [MyClass2] ($json | ConvertFrom-Json)\r\n\r\n        $result.Property1 | Should -BeExactly \"json1\"\r\n        $result.Property2 | Should -BeExactly \"json2\"\r\n    }\r\n}\r\n```\r\n\r\nresults:\r\n\r\n```none\r\nDescribing Type casting a ConvertFrom-Json result\r\n  [-] Works when a PSObject constructor is present 39ms\r\n    Expected strings to be the same, but they were different.\r\n    Expected length: 5\r\n    Actual length:   0\r\n    Strings differ at index 0.\r\n    Expected: 'json1'\r\n    But was:  ''\r\n    -----------^\r\n    5:         $result.Property1 | Should -BeExactly \"json1\"\r\n  [+] Works when a PSObject constructor is not present 26ms\r\n```\r\n\r\nI find I often need PSObject constructors because I'm working with outputs from cmdlets and such where the author has chosen PSObjects instead of classes for the output type.  \r\n\r\nThis also breaks when a nested object type also has a PSObject constructor. However, Newtonsoft does work:\r\n\r\n\r\n```powershell\r\nclass MyNestedClass {\r\n    [string]$NestedProperty = 'NestedDefault'\r\n    MyNestedClass ([PSObject]$Foo) {\r\n        $this.NestedProperty = $Foo.Bar\r\n    }\r\n}\r\n\r\nClass MyClass {\r\n    [String]$Property = 'Propertydeafult'\r\n    [MyNestedClass[]]$NestedObjects\r\n    MyClass () {}\r\n}\r\n\r\n$json = @'\r\n{\r\n    \"Property\": \"value\",\r\n    \"NestedObjects\": [\r\n        {\r\n            \"NestedProperty\": \"NestedValue1\"\r\n        },\r\n        {\r\n            \"NestedProperty\": \"NestedValue2\"\r\n        }\r\n    ]\r\n}\r\n'@\r\n\r\nDescribe \"Type casting a ConvertFrom-Json result\" {\r\n    it \"Works with nested objects that have a PSObject constructor\" {\r\n        $Result = [MyClass] ($json | ConvertFrom-Json)\r\n        $Result.NestedObjects.Count | Should -Be 2\r\n        $Result.NestedObjects[0].NestedProperty | Should -BeExactly \"NestedValue1\"\r\n        $Result.NestedObjects[1].NestedProperty | Should -BeExactly \"NestedValue2\"\r\n    }\r\n}\r\n\r\nDescribe \"Newtonsoft Class Model\" {\r\n    it \"Works with nested objects that have a PSObject constructor\" {\r\n        $Result = [Newtonsoft.Json.JsonConvert]::DeserializeObject($json,[MyClass])\r\n        $Result.NestedObjects.Count | Should -Be 2\r\n        $Result.NestedObjects[0].NestedProperty | Should -BeExactly \"NestedValue1\"\r\n        $Result.NestedObjects[1].NestedProperty | Should -BeExactly \"NestedValue2\"\r\n    }\r\n}\r\n```\r\n\r\nresult:\r\n\r\n```none\r\nDescribing Type casting a ConvertFrom-Json result\r\n  [-] Works with nested objects that have a PSObject constructor 52ms\r\n    Expected strings to be the same, but they were different.\r\n    Expected length: 12\r\n    Actual length:   0\r\n    Strings differ at index 0.\r\n    Expected: 'NestedValue1'\r\n    But was:  ''\r\n    -----------^\r\n    5:         $Result.NestedObjects[0].NestedProperty | Should -BeExactly \"NestedValue1\"\r\n\r\nDescribing Newtonsoft Class Model\r\n  [+] Works with nested objects that have a PSObject constructor 25ms\r\n```\r\n\r\n",
+      "created_at": "2018-03-09T03:34:01Z",
+      "updated_at": "2018-03-09T03:34:01Z"
+    },
+    {
+      "author": "strawgate",
+      "author_association": "CONTRIBUTOR",
+      "body": "The performance difference for me is considerable -- in my tests using convertfrom-json -ashashtable results in memory usage about 10x the size of the json but using a class and \"[Newtonsoft.Json.JsonConvert]::DeserializeObject\" results in about memory usage about 2x the size of the json string.\r\n\r\nIf ConvertFrom-Json could take an object declaration that would be awesome!",
+      "created_at": "2018-10-25T04:40:47Z",
+      "updated_at": "2018-10-25T04:40:47Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Seems fine to support an optional parameter.  Perhaps just call it `-TypeName`?",
+      "created_at": "2018-10-25T19:18:34Z",
+      "updated_at": "2018-10-25T19:18:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'd be more inclined to go with something like `-AsType` perhaps?\n\n```powershell\n$JsonData | ConvertFrom-Json -AsType MyType\n```",
+      "created_at": "2018-10-25T20:15:28Z",
+      "updated_at": "2018-10-25T20:15:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ".Net Core 3.0 gets System.Text.Json https://github.com/dotnet/corefx/issues/33115\r\nPlan there is to get new fast implementation. We could consider using it in the repo and create feedbacks to enhance System.Text.Json while it is under active development. ",
+      "created_at": "2019-01-12T09:38:57Z",
+      "updated_at": "2019-01-12T09:53:32Z"
+    },
+    {
+      "author": "InteXX",
+      "author_association": "NONE",
+      "body": "I second this:\r\n\r\n    $JsonData | ConvertFrom-Json -AsType MyType",
+      "created_at": "2019-02-22T04:27:25Z",
+      "updated_at": "2019-02-22T04:27:25Z"
+    },
+    {
+      "author": "rondefreitas",
+      "author_association": "NONE",
+      "body": "I'll chime in here, too, that this use case would be a great feature add",
+      "created_at": "2019-11-04T18:27:04Z",
+      "updated_at": "2019-11-04T18:27:04Z"
+    }
+  ],
+  "created_at": "2018-02-17T18:23:06Z",
+  "number": 6177,
+  "state": "open",
+  "title": "ConvertFrom-Json Should  Support Type Models",
+  "updated_at": "2020-07-20T22:26:22Z"
+}

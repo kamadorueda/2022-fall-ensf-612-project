@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15173",
+  "author": "rjmholt",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```csharp\r\n[Cmdlet(VerbsLifecycle.Invoke, \"Example\")]\r\npublic class InvokeScriptCommand : PSCmdlet\r\n{\r\n    [Parameter]\r\n    public SwitchParameter Async { get; set; }\r\n\r\n    protected override void EndProcessing()\r\n    {\r\n        using (var powershell = PowerShell.Create())\r\n        {\r\n            powershell.AddScript(\"1;2;3;sleep 10;4;5;6\");\r\n\r\n            Task<IList<PSObject>> task = null;\r\n            if (Async)\r\n            {\r\n                task = RunAsync(powershell);\r\n            }\r\n            else\r\n            {\r\n                task = Run(powershell);\r\n            }\r\n\r\n            Thread.Sleep(2000);\r\n\r\n            powershell.Stop();\r\n\r\n            foreach (PSObject result in task.GetAwaiter().GetResult())\r\n            {\r\n                Console.WriteLine(result);\r\n            }\r\n        }\r\n    }\r\n\r\n    private Task<IList<PSObject>> RunAsync(PowerShell powershell)\r\n    {\r\n            return powershell.InvokeAsync()\r\n                .ContinueWith(psTask =>\r\n                {\r\n                    return (IList<PSObject>)psTask.Result;\r\n                });\r\n    }\r\n\r\n    private Task<IList<PSObject>> Run(PowerShell powershell) => Task.Run(() => (IList<PSObject>)powershell.Invoke());\r\n}\r\n```\r\n\r\n```powershell\r\n> Invoke-Example -Async\r\nInvoke-Example: One or more errors occurred. (The pipeline has been stopped.)\r\n\r\n> Invoke-Example\r\n1\r\n2\r\n3\r\n```\r\n\r\n## Expected behavior\r\n\r\nBoth the async and sync executions should do the same thing.\r\n\r\n## Actual behavior\r\n\r\nThe sync execution returns a partial result and the async execution throws a `PipelineStoppedException`.\r\n\r\n~~What's more, when a `PSDataCollection<PSObject>` is passed into the `InvokeAsync()` call, no results are ever inserted and the `DataAdding` and `DataAdded` events are never fired.~~ I passed my collection to the `input` parameter; passing it to the `output` parameter works...\r\n\r\n## Environment data\r\n\r\nThis is with the PowerShell 7.2.0-preview.4 (both as a standalone app with the SDK and as a cmdlet with the exe).\r\n",
+  "closed_at": "2021-06-03T19:27:42Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "`PowerShell.Invoke` handles `PowerShell.Stop` in the same way as how <kbd>Ctrl+c</kbd> is handled in PowerShell console: the `PipelineStoppedException` is ignored [when the pipeline was stopped](https://github.com/PowerShell/PowerShell/blob/49288e4289dc46a28bac79ff89257e744ff55a25/src/System.Management.Automation/engine/hostifaces/pipelinebase.cs#L398-L401).\r\n\r\nThe api `PowerShell.Invoke` is used as the _primary pipeline_ for many interactive hosts that are built on top of PowerShell packages (e.g. powershell sub-kernel in .NET interactive). For such a host, it's important to act similarly to the PowerShell console, including how <kbd>Ctrl+c</kbd> is handled (the implementation of which would be very likely just calling `PowerShell.Stop`). From this perspective, it seems reasonable for `PowerShell.Invoke` to behave exactly the same as a PowerShell console `LocalPipeline`.\r\n\r\n`PowerShell.InvokeAsync` ( wrapper over `PowerShell.BeginInvoke/EndInvoke`) is for advanced asynchronous scenarios. I think throwing `PipelineStoppedException` makes perfect sense for this API, as I need to know whether my task succeeded or failed, and for what reason if it failed.\r\n\r\nWe probably cannot afford any breaking changes in either of these 2 APIs. I think what we can do is to add a `<remark>` section to the XML document for those 2 APIs, to describe their behaviors regarding to dealing with `Stop`.\r\n\r\n--------------------------------------------\r\n\r\n> when a `PSDataCollection<PSObject>` is passed into the `InvokeAsync()` call, no results are ever inserted and the `DataAdding` and `DataAdded` events are never fired. Am I missing something?\r\n\r\nThe `System.Management.Automation.PSDataCollection[TOutput] output` parameter seems to work as expected from the below snippet. This is with `7.2.0-preview.4`. Am I missing something?\r\n\r\n```\r\nPS:1> $ps = [powershell]::Create()\r\nPS:2> $out = [System.Management.Automation.PSDataCollection[psobject]]::new()\r\nPS:3> $ps.AddScript(\"1;2;3;sleep 90;4;5;6\") > $null\r\nPS:4> $a = $ps.InvokeAsync([System.Management.Automation.PSDataCollection[psobject]]$null, $out); sleep 2; $ps.Stop()\r\nPS:5> $out\r\n1\r\n2\r\n3\r\nPS:6>\r\n```",
+      "created_at": "2021-04-11T06:20:32Z",
+      "updated_at": "2021-04-11T06:22:40Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks @daxian-dbw this is exactly the information I was looking for.\r\n\r\nI've realised my original issue statement has a flaw in it where I didn't use the `PSDataCollection` properly (used as the wrong argument), so will update that. Passing the collection in properly works.\r\n\r\nBut I think the `remarks` addition would be useful",
+      "created_at": "2021-04-13T19:43:52Z",
+      "updated_at": "2021-04-13T19:46:55Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@rjmholt Since you are going to submit the XML doc PR, I will assign this issue to you :)\r\nNote that, you may need to update the XML document for `PowerShell.EndInvoke` as well, it's essentially what `PowerShell.InvokeAsync` does.",
+      "created_at": "2021-04-29T17:54:01Z",
+      "updated_at": "2021-04-29T17:54:01Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #15324, which has now been successfully released as `v7.2.0-preview.7`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.7)\n",
+      "created_at": "2021-06-17T16:57:57Z",
+      "updated_at": "2021-06-17T16:57:57Z"
+    }
+  ],
+  "created_at": "2021-04-06T17:41:50Z",
+  "number": 15173,
+  "state": "closed",
+  "title": "PowerShell.Stop() behaviour causes very different results between PowerShell.Invoke() and PowerShell.InvokeAsync()",
+  "updated_at": "2021-06-17T16:57:57Z"
+}

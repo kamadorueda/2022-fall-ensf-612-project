@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3581",
+  "author": "lzybkr",
+  "body": "It is currently not possible to implement a cmdlet like `ForEach-Object` or `Measure-Command` outside of PowerShell because there is no api support for invoking a script block instance in the callers scope - or dot sourcing.\r\n\r\nThe workaround is quite expensive - it looks something like:\r\n\r\n```C#\r\nvoid InvokeInCurrentScope(ScriptBlock sb)\r\n{\r\n    var ps = PowerShell.Create(RunspaceMode.CurrentRunspace);\r\n    ps.AddScript(sb.ToString());\r\n    ps.Invoke();\r\n}\r\n```\r\n\r\nThis is expensive we must reparse the script block.\r\n\r\nThere are a couple possible fixes, maybe we do both:\r\n\r\n* `ScriptBlock.Invoke` (and family) should expose this [parameter](https://github.com/PowerShell/PowerShell/blob/06020f34e556171b5ebd88155c3ff14e2cc1f5d8/src/System.Management.Automation/engine/lang/scriptblock.cs#L916) in a public api\r\n* Add a new api or overload to the `PowerShell.Add*` family of commands, something like `AddScriptBlock`, or maybe just a new overload on `AddCommand`.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Have you looked at `$executioncontext.InvokeCommand.InvokeScript($false, {$x=3.14}, @(), @())`\r\nOne of the signatures for InvokeScript is\r\n`System.Collections.ObjectModel.Collection[psobject] InvokeScript(bool useLocalScope, scriptblock scriptBlock, System.Collections.IList input, Params System.Object[] args)`\r\nThis should do what you want.",
+      "created_at": "2017-04-18T18:49:05Z",
+      "updated_at": "2017-04-18T18:49:05Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Removed the enhancement/Up-for-grabs tags as there is already an API that does this. ",
+      "created_at": "2017-04-18T18:53:06Z",
+      "updated_at": "2017-04-18T18:53:06Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It looks like that api covers most scenarios - but I vaguely recall a scenario, maybe LINQ filter expressions or something - where you have a script block, but maybe not have easy access to the execution context.",
+      "created_at": "2017-04-18T18:55:55Z",
+      "updated_at": "2017-04-18T18:55:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "What said `InvokeScript` overload doesn't cover is the ability to **relay the current pipeline input object via automatic variable `$_`**, which is what's needed to be on par with how cmdlets such as `Where-Object` and `ForEach-Object` invoke script-block arguments.\r\n\r\n@PetSerAl came up with a robust workaround, but it's cumbersome and far from obvious: it uses an aux. `ForEach-Object` call to invoke the script block with the object to bind to `$_` passed via `-InputObject`.\r\n\r\nHere's an example of what currently works, but it would certainly be nice to have a more direct way of achieving this:\r\n\r\n```powershell\r\nAdd-Type @'\r\n  using System.Management.Automation;\r\n\r\n  [Cmdlet(\"Get\", \"Foo\")]\r\n  public class GetFooCmdlet : PSCmdlet {\r\n\r\n    [Parameter(ValueFromPipeline=true)]\r\n    public object InputObject { get; set; }\r\n\r\n    [Parameter(Position=0)]\r\n    public ScriptBlock ScriptBlock { get; set; }\r\n\r\n    private PowerShell _ps = null;\r\n\r\n    protected override void BeginProcessing() {\r\n      // Create a PS instance in the current runspace with a ForEach-Object invocation.\r\n      _ps = PowerShell.Create(RunspaceMode.CurrentRunspace).AddCommand(\"ForEach-Object\");\r\n    }\r\n\r\n    protected override void ProcessRecord() {\r\n      _ps.Commands.Commands[0].Parameters.Clear(); // clear previous parameters\r\n      // Add the script block and the current pipeline input object as parameters for the ForEach-Object call.\r\n      // ForEach-Object takes care of setting $_ in the scope of the target script block (passed to -Process), via\r\n      // -InputObject.\r\n      WriteObject(\r\n        _ps.AddParameter(\"Process\", ScriptBlock).AddParameter(\"InputObject\", InputObject).Invoke()\r\n      );\r\n    }\r\n\r\n  }\r\n'@ -PassThru | % Assembly | Import-Module\r\n\r\n# Define a local variable.\r\n$var = 42\r\n\r\n# Invoke the cmdlet with pipeline input and a scriptblock that references the\r\n# latter as well as local variable $var\r\n@{ Name = 'hi' }, @{ Name = 'ho' } | get-foo { $_.Name; ++$var } # -> 'hi', 'ho'\r\n# See if $var was changed.\r\n$var # -> 44 - successfully modified, because the scriptblock was \"dot-sourced\".\r\n```\r\n\r\nIt's actually easier to do this in PowerShell code, given that you can call `ForEach-Object` directly there - see [this SO answer](https://stackoverflow.com/a/53327851/45375).\r\n\r\nBy contrast, it's **easier to invoke a script block in a _child_ scope of the origin scope with pipeline input relayed as `$_`**, the way that delay-bind script blocks and script blocks inside calculated properties do )though [it's unclear if that is actually by design](https://github.com/PowerShell/PowerShell/issues/7157)) - see next comment.\r\n\r\n\r\n",
+      "created_at": "2018-11-18T00:04:27Z",
+      "updated_at": "2019-01-23T15:50:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Invoking a caller-scope-bound script block in a _child_ scope - as delay-bind script blocks and calculated properties do - with the current pipeline input object relayed as `$_` looks like this (using PS code, with the script block stored in `$ScriptBock`, and the current pipeline input object in `$InputObject`):\r\n\r\n```powershell\r\n$ScriptBlock.InvokeWithContext(\r\n        $null, # extra functions to define\r\n        [psvariable]::new('_', $InputObject) # define $_\r\n      )\r\n```\r\n\r\nTo do the same _directly in the caller's scope_ - as `Where-Object` and `ForEach-Object` do - we'd need a new [`.InvokeWithContext()`](https://github.com/PowerShell/PowerShell/blob/0c2a8911d632069b63ec780afbbe527459cf4660/src/System.Management.Automation/engine/lang/scriptblock.cs#L434) overload that has a `useLocalScope` parameter too, as `.InvokeScript()` already does.\r\n\r\n```powershell\r\n$ScriptBlock.InvokeWithContext(\r\n        $false, # WISHFUL THINKING: opt into not creating a child scope.\r\n        $null, # extra functions to define\r\n        [psvariable]::new('_', $InputObject) # define $_\r\n      )\r\n```\r\n",
+      "created_at": "2019-01-23T15:47:38Z",
+      "updated_at": "2019-01-23T15:47:38Z"
+    }
+  ],
+  "created_at": "2017-04-17T16:32:55Z",
+  "number": 3581,
+  "state": "open",
+  "title": "Add API support for dot sourcing a ScriptBlock",
+  "updated_at": "2019-01-23T15:50:01Z"
+}

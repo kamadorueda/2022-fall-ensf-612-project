@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14267",
+  "author": "035",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\nDefine the following function in C and compile as a DLL:\r\n```c\r\n__declspec(dllexport) int Process()\r\n{\r\n    return 42;\r\n}\r\n```\r\n\r\nRun the following in PowerShell with the path to the DLL in the DllImport:\r\n```powershell\r\n$type=Add-Type -MemberDefinition @'\r\n[DllImport(\"C:\\\\PathToRepro.dll\")]\r\npublic static extern int Process();\r\n'@ -Name TestProcess -PassThru\r\n\r\n$type::Process()\r\n```\r\n\r\n## Expected behavior\r\n\r\nFunction returns `42`.\r\n\r\n## Actual behavior\r\n\r\nThe following error occurs:\r\n`The result type 'System.Int32' of the dynamic binding produced by the object with type 'System.Management.Automation.PSObject' for the binder 'PSInvokeMember: static Process ver:0 args:0 constraints:<>' is not compatible with the result type 'System.Object' expected by the call site.`\r\n\r\nChanging the name of the function to something else such as `Process2()` works as expected.\r\n\r\nI was not able to reproduce this when using a C# program instead of PowerShell.\r\n\r\n## Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.20231\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I guess PowerShell is not designed to call directly native dll-s. I suggest to wrap in C# code.",
+      "created_at": "2020-11-26T05:32:44Z",
+      "updated_at": "2020-11-26T05:32:44Z"
+    },
+    {
+      "author": "035",
+      "author_association": "NONE",
+      "body": "From the PowerShell documentation ([link](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/add-type?view=powershell-7.1#parameters)), it sounds like the `-MemberDefinition` parameter should support this. As I mentioned, this error only happens if the function is named `Process`. It appears to work correctly for other function names.",
+      "created_at": "2020-11-30T17:14:53Z",
+      "updated_at": "2020-11-30T17:14:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell Extended Type System defines extensions for System.Diagnostics.Process type and I guess PowerShell binding catches this. So you could try either wrap in C# code or put the code in _custom_ namespace.",
+      "created_at": "2020-11-30T17:41:04Z",
+      "updated_at": "2020-11-30T17:41:04Z"
+    },
+    {
+      "author": "035",
+      "author_association": "NONE",
+      "body": "How do I wrap in C# code? I tried the following, but it gives the same error:\r\n```powershell\r\n$typeDefinition=@\"\r\nusing System;\r\nusing System.Runtime.InteropServices;\r\n\r\nnamespace Sample{\r\n    public static class SampleClass\r\n    {\r\n        [DllImport(\"C:\\\\PathToRepro.dll\")]\r\n        public static extern int Process();\r\n    }\r\n}\r\n\"@\r\n\r\nAdd-Type -TypeDefinition $typeDefinition\r\n\r\n[Sample.SampleClass]::Process()\r\n```\r\n\r\nSetting the `-Namespace` parameter to `Add-Type` does not appear to make a difference either.",
+      "created_at": "2020-11-30T18:35:07Z",
+      "updated_at": "2020-11-30T18:35:07Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Looks like it's any static method named either `Process`, or `End` (incidentally, not `Begin` because it has a void return) without arguments that returns a value type.\r\n\r\nEasier repro:\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition 'public class Test { public static int Process() => 10; }'\r\n[Test]::Process()\r\n```\r\n\r\nI would guess that it's caused by the special casing here:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/db94377b3a69511280d329e64375475f6d7513b8/src/System.Management.Automation/engine/runtime/Binding/Binders.cs#L6915-L6927\r\n\r\nIt's not immediately obvious *how* that's happening, but it sure seems like it is.\r\n\r\n/cc @daxian-dbw you might find this interesting.  Looks like the binder is somehow returning `true` here and exiting early, skipping the cast to `object` right afterwards.",
+      "created_at": "2020-11-30T19:03:58Z",
+      "updated_at": "2020-11-30T19:03:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Since no workaround works I set `Issue-Bug`.",
+      "created_at": "2020-12-01T02:55:26Z",
+      "updated_at": "2020-12-01T02:55:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience From your example `Begin` should work the same?",
+      "created_at": "2020-12-01T02:56:13Z",
+      "updated_at": "2020-12-01T02:56:13Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Since no workaround works I set `Issue-Bug`.\r\n\r\nReflection or an intermediate C# method with a different name can serve as a workaround.  Definitely a bug though.\r\n\r\n> @SeeminglyScience From your example `Begin` should work the same?\r\n\r\nSo because the method `SteppablePipeline.Begin` has a void return, the expression generated will be something like `{ target.Begin(); return null }`. That skips the whole \"this call site should return object but doesn't box the int\" business.",
+      "created_at": "2020-12-01T03:02:12Z",
+      "updated_at": "2020-12-01T03:02:12Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Oh also probably a better repro:\r\n\r\n```powershell\r\nclass Test {\r\n    static [int] Process() {\r\n        return 10\r\n    }\r\n}\r\n\r\n[Test]::Process()\r\n```",
+      "created_at": "2020-12-01T03:04:04Z",
+      "updated_at": "2020-12-01T03:04:04Z"
+    }
+  ],
+  "created_at": "2020-11-26T00:55:09Z",
+  "number": 14267,
+  "state": "open",
+  "title": "Cannot P/Invoke a function named \"Process()\"",
+  "updated_at": "2020-12-01T03:04:04Z"
+}

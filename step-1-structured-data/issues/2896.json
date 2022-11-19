@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2896",
+  "author": "aburlak",
+  "body": "<!--\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](../docs/FAQ.md).\r\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\r\n- Fill out the following repro template\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n1. Install Windows Server Nano (10.0.14393)\r\n2. Connect to the server using PS Remoting, then use PowerShell Core (the built-in version) to download a file, e.g. try to download .NET Core 1.1 ZIP package:\r\n\r\nInvoke-Webrequest -Uri 'https://go.microsoft.com/fwlink/?LinkID=835028' -OutFile C:\\netcore11.zip -MaximumRedirection 10\r\n\r\nExpected behavior\r\n-----------------\r\nFile is downloaded, HTTP 302 Redirect returned by go.microsoft.com is handled properly.\r\n\r\nActual behavior\r\n---------------\r\nThe following error occurs:\r\n`invoke-webrequest : Response status code does not indicate success: 302 (Moved Temporarily).` \r\nAnd there is no workaround, because the thrown exception is a HttpRequestException thrown by EnsureSuccessStatusCode(), which loses all header information (so, unable even to access the Location header).\r\n\r\nIssue is still present in the master branch:\r\nhttps://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/CoreCLR/WebRequestPSCmdlet.CoreClr.cs#L352\r\n**EnsureSuccessStatusCode()** should not be used, as it doesn't support redirects, and it also obfuscates the exception, making it impossible to access the returned headers/body even if the exception is caught.\r\n\r\nEnvironment data\r\n----------------\r\n```\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nBuildVersion                   10.0.14393.1000\r\nSerializationVersion           1.1.0.1\r\nPSVersion                      5.1.14393.1000\r\nPSEdition                      Core\r\nWSManStackVersion              3.0\r\nCLRVersion\r\n\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "aburlak",
+      "author_association": "NONE",
+      "body": "After some debugging, it looks like the root cause is that .NET Core's HttpClientHandler silently refuses to follow HTTPS-to-HTTP redirects.\r\n\r\nHowever, there should be some way to at least look at the underlying response headers - currently, only a generic string description of the error is provided in the caught Exception (in desktop PowerShell - it is possible to retrieve the headers).\r\n",
+      "created_at": "2016-12-16T11:47:39Z",
+      "updated_at": "2016-12-16T11:47:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Perhaps we should add a `-AllowRedirectToHTTPfromHTTPS` type switch or just output a warning message",
+      "created_at": "2017-03-15T19:38:55Z",
+      "updated_at": "2017-03-15T19:38:55Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "This repros with alpha.17 on Ubuntu16 so not Nano specific",
+      "created_at": "2017-03-15T19:39:30Z",
+      "updated_at": "2017-03-15T19:39:30Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee suggests `-allowInsecureRedirect`",
+      "created_at": "2017-03-15T23:49:17Z",
+      "updated_at": "2017-03-15T23:49:17Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus interested in taking this one :)",
+      "created_at": "2018-01-31T05:28:05Z",
+      "updated_at": "2018-01-31T05:28:05Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT I'll  add it to my list. Is this a priority for 6.1.0? ",
+      "created_at": "2018-01-31T09:24:11Z",
+      "updated_at": "2018-01-31T09:24:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@markekraus no, just when you can get around to it.  Priority can change if more community members upvote, though :)",
+      "created_at": "2018-01-31T18:50:49Z",
+      "updated_at": "2018-01-31T18:50:49Z"
+    },
+    {
+      "author": "fcabralpacheco",
+      "author_association": "NONE",
+      "body": "Possible workaround.\r\nWorks in PowerShell Core 6.0.1 (Linux) and PowerShell 5.\r\n```powershell\r\nfunction Get-RedirectedUrl() {\r\n  param(\r\n    [Parameter(Mandatory = $true, Position = 0)]\r\n    [uri] $url,\r\n    [Parameter(Position = 1)]\r\n    [Microsoft.PowerShell.Commands.WebRequestSession] $session = $null\r\n  )\r\n\r\n  $request_url = $url\r\n  $retry = $false\r\n\r\n  do {\r\n    try {\r\n      $response = Invoke-WebRequest -Method Head -WebSession $session -Uri $request_url\r\n\r\n      if($response.BaseResponse.ResponseUri -ne $null)\r\n      {\r\n        # PowerShell 5\r\n        $result = $response.BaseResponse.ResponseUri.AbsoluteUri\r\n      } elseif ($response.BaseResponse.RequestMessage.RequestUri -ne $null) {\r\n        # PowerShell Core\r\n        $result = $response.BaseResponse.RequestMessage.RequestUri.AbsoluteUri\r\n      }\r\n\r\n      $retry = $false\r\n    } catch {\r\n      if(($_.Exception.GetType() -match \"HttpResponseException\") -and\r\n        ($_.Exception -match \"302\"))\r\n      {\r\n        $request_url = $_.Exception.Response.Headers.Location.AbsoluteUri\r\n        $retry = $true\r\n      } else {\r\n        throw $_\r\n      }\r\n    }  \r\n  } while($retry)\r\n\r\n  return $result\r\n}\r\n\r\n$url = Get-RedirectedUrl \"https://go.microsoft.com/fwlink/?LinkID=835028\"\r\n\r\nInvoke-Webrequest -Uri $url -OutFile C:\\netcore11.zip \r\n```\r\nNote: Exception type checking works better in this way. Prevent errors in PowerShell 5 (non-existent type).",
+      "created_at": "2018-02-15T02:47:42Z",
+      "updated_at": "2018-02-15T02:49:50Z"
+    },
+    {
+      "author": "thezim",
+      "author_association": "CONTRIBUTOR",
+      "body": "This is more than HTTP to HTTPS. This repros as well.\r\n\r\n```powershell\r\nGet-Command -Name New-Item | Select-Object HelpUri                                                                  \r\n\r\nHelpUri                                       \r\n-------                                       \r\nhttps://go.microsoft.com/fwlink/?LinkID=113353\r\n\r\n\r\nInvoke-WebRequest -Uri (Get-Command New-Item).HelpUri \r\n```",
+      "created_at": "2018-02-18T21:48:40Z",
+      "updated_at": "2018-02-18T21:48:40Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@thezim It's the same problem..\r\n\r\n```powershell\r\nInvoke-WebRequest -Uri (Get-Command New-Item).HelpUri \r\n$error[0].Exception.Response.Headers.Location.AbsoluteUri\r\n```\r\n\r\nresult: `http://technet.microsoft.com/library/hh849795.aspx`\r\n\r\nthe problem is when an HTTPS uri redirects to an HTTP (no-S) uri.",
+      "created_at": "2018-02-18T23:04:08Z",
+      "updated_at": "2018-02-18T23:04:08Z"
+    },
+    {
+      "author": "xied75",
+      "author_association": "NONE",
+      "body": "@fcabralpacheco The code snippet looks great but it doesn't seem to work in Windows Nano Container.",
+      "created_at": "2018-07-19T13:37:37Z",
+      "updated_at": "2018-07-19T13:37:37Z"
+    },
+    {
+      "author": "anderssonjohan",
+      "author_association": "NONE",
+      "body": "I stumbled across this issue when I discovered my script using System.Net.WebClient worked on pwsh but not on Windows. On Windows, or in Windows Powershell, you'll get a 401 Unauthorized because WebClient follows redirects without adding Authorization headers. \r\n\r\n```\r\nSystem.Management.Automation.MethodInvocationException: Exception calling \"UploadString\" with \"3\" argument(s): \"The remote server returned an error: (401) Unauthorized\r\n```\r\n\r\nBut this was not the case with pwsh 6.0.0. It did not fail at all.\r\n\r\nTo fix the issue, I switched to Invoke-RestMethod:\r\n\r\n```\r\nInvoke-RestMethod -Uri $url -MaximumRedirection 0 -Method $method -Body $json -Headers $headers\r\n```\r\n\r\nNow the script worked fine on Windows Powershell but pwsh 6.0.0 now failed with the very same 401 Unauthorized response. \r\n\r\n```\r\nMicrosoft.PowerShell.Commands.HttpResponseException: Response status code does not indicate success: 401 (Unauthorized).\r\n   at System.Management.Automation.MshCommandRuntime.ThrowTerminatingError(ErrorRecord errorRecord)\r\n```\r\n\r\nThat means, it followed the redirect even though I used `-MaximumRedirection 0`.\r\nUpgraded to pwsh 6.0.4, same issue in that version.\r\n\r\nInstalled pwsh-preview (6.1.0-preview.4) and now got the same exception but for the redirect response.\r\n\r\n```\r\nMicrosoft.PowerShell.Commands.HttpResponseException: Response status code does not indicate success: 303 (See Other).\r\n   at System.Management.Automation.MshCommandRuntime.ThrowTerminatingError(ErrorRecord errorRecord)\r\n```\r\n\r\nConclusion:\r\n\r\n|      | Windows Powershell | pwsh 6.0.0-6.0.4 | pwsh 6.1.0 preview |\r\n|----|----|----|----|\r\n| WebClient.UploadString | Follows redirect without auth headers | Follows redirect with auth, no error | Follows redirect with auth, no error |\r\n| Invoke-RestMethod -MaximumRedirection 0 | No follow, no error | Follows without auth, throws 401 | No follow, throws 303 |\r\n\r\nGah, these differences makes it so hard to write something that works/can be tested on all our platforms.",
+      "created_at": "2018-08-15T18:58:38Z",
+      "updated_at": "2018-08-15T19:00:35Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@anderssonjohan that appears to be a different issue. The issue here is when an HTTPS site redirects to an HTTP site, regardless of the presence or lack of auth headers. Would you be so kind as to open a new issue for that, please?",
+      "created_at": "2018-08-15T23:41:25Z",
+      "updated_at": "2018-08-15T23:41:25Z"
+    },
+    {
+      "author": "anderssonjohan",
+      "author_association": "NONE",
+      "body": "@markekraus Thanks! Sure, I'll do that. It seemed related to me and I didn't want to add duplicate issues.",
+      "created_at": "2018-08-16T10:11:17Z",
+      "updated_at": "2018-08-16T10:11:17Z"
+    },
+    {
+      "author": "ghost",
+      "author_association": "NONE",
+      "body": "This issue is present in ps7 but not the ps bundled with windows. ",
+      "created_at": "2019-10-02T04:12:11Z",
+      "updated_at": "2019-10-02T04:12:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@CarlGustavAlbertDwarfsteinYung WinPS uses a different HTTP client from .NET Framework that could be argued is doing the insecure thing.  .NET Core has a new HTTP client that rejects this and we'd have to code around that.",
+      "created_at": "2019-10-03T20:26:33Z",
+      "updated_at": "2019-10-03T20:26:33Z"
+    },
+    {
+      "author": "ghost",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT  Hi thank you for your reply. As far as i can undestand from what I read the issue is that PS expects a standardized HTTP implementation but in reality there is no standard. TSeems like PS gives a 302 Found for every redirect. The standard added 303 and 307 that is expected in response to 302. Mozilla recommends using 302 sparingly because every browser uses their own system for redirects. Of course I am not an expert in this project so I may be completely wrong.=",
+      "created_at": "2019-10-03T20:45:45Z",
+      "updated_at": "2019-10-03T20:46:17Z"
+    },
+    {
+      "author": "tsteven4",
+      "author_association": "NONE",
+      "body": "In the mean time:\r\nC:\\Windows\\System32\\curl -L -o outfile \"https://example.com/somefile\"\n\n<blockquote><div><strong><a href=\"https://example.com/somefile\">Example Domain</a></strong></div></blockquote>",
+      "created_at": "2021-01-04T00:08:33Z",
+      "updated_at": "2021-01-04T00:08:35Z"
+    },
+    {
+      "author": "mkht",
+      "author_association": "NONE",
+      "body": "This issue was a major obstacle for me when I migrated from PS5 to PS7.\r\nI hope it will be addressed as soon as possible.",
+      "created_at": "2021-02-07T18:25:45Z",
+      "updated_at": "2021-02-07T18:25:45Z"
+    }
+  ],
+  "created_at": "2016-12-16T06:28:35Z",
+  "number": 2896,
+  "state": "open",
+  "title": "Invoke-WebRequest / Invoke-RestMethod fails to follow HTTP redirects from HTTPS",
+  "updated_at": "2022-11-13T01:05:41Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6729",
+  "author": "mklement0",
+  "body": "<sup>Follow-up from #6714</sup>\r\n\r\nCurrently, `Set-Content` writes to whatever existing files match a wildcard pattern passed to its (implied) `-Path` parameter.\r\n\r\nFor instance, the following will overwrite _all_ existing `*.txt` files in the current directory:\r\n\r\n```powershell\r\n'hi' | Set-Content *.txt # !! Overwrites ALL *.txt files\r\n```\r\n\r\nThis behavior is risky and should be changed to match the more sensible behavior of other output-to-file cmdlets such as `Out-File` (and therefore the `>` / `>>` operators), which generate an _error_ if the wildcard expression resolves to more than 1 file.\r\n\r\nIt is worth examining _all_ output-to-file cmdlets on this occasion.\r\n\r\nTechnically, this is a breaking change, but presumably one that falls into [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.2 on macOS 10.13.4\r\nPowerShell Core v6.0.2 on Ubuntu 16.04.4 LTS\r\nPowerShell Core v6.0.2 on Microsoft Windows 10 Pro (64-bit; Version 1709, OS Build: 16299.371)\r\nWindows PowerShell v5.1.16299.251 on Microsoft Windows 10 Pro (64-bit; Version 1709, OS Build: 16299.371)\r\n```\r\n",
+  "closed_at": "2021-12-03T09:00:40Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Assuming they knew about it, I easily can see people using this to (re)initialize a set of file so I don't think it's really a bucket 3 change. Consider that\r\n```\r\n'hi' | Set-Content *.txt\r\n```\r\nis certainly much pithier than \r\n```\r\nforeach ($f in dir *.txt) { \"hi\" | set-content $f } \r\n```",
+      "created_at": "2018-04-25T19:50:03Z",
+      "updated_at": "2018-04-25T19:50:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, as with any breaking change that takes away functionality there is a risk that people have relied on it.\r\n\r\nMy _guess_ is that, given that the behavior is (a) surprising to begin with and (b) is not present in `Out-File` / `>`, it's unlikely, but it's just a guess.\r\n\r\nAs for the pithiness; not quite as concise as the original, but a reasonable substitute, in my opinion, given the benefits of taking away the risky behavior:\r\n\r\n```powershell\r\n'hi' | Set-Content (Get-Item *.txt)\r\n```\r\n\r\nNote that, due to #6057, `(Get-Item *.txt).PSPath` should currently be used for full robustness.\r\n",
+      "created_at": "2018-04-25T19:59:54Z",
+      "updated_at": "2018-04-25T20:44:55Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Based on\r\n```\r\n'hi' | Set-Content (Get-Item *.txt)\r\n```\r\nyour issue is not what I thought it was. It appears that you still want `Set-Content` to be able to write identical content to multiple files. Is this the case? ",
+      "created_at": "2018-04-26T00:44:56Z",
+      "updated_at": "2018-04-26T00:44:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It appears that you still want Set-Content to be able to write identical content to multiple files. Is this the case?\r\n\r\nYes, if you pass an _array_ of _literal_ file paths to `-Path` / `-LiteralPath`, which to me unambiguously signals the intent.\r\n\r\n_No change need there_, because these parameters are already typed `[string[]]`.\r\n\r\nBy contrast, the _wildcard_-based way of targeting multiple file is the fraught behavior, which I think should be eliminated.\r\n\r\nI used the `'hi' | Set-Content (Get-Item *.txt)` example to demonstrate that someone who truly wants to target multiple files will still be able to do so, even once the wildcard-based method is taken away.\r\n\r\nNow you could ask what should happen if an _array_ is passed to `-Path` (possibly implicitly) and at least one _element_ of that array is a wildcard expression?\r\n\r\nFor simplicity, my vote is for disallowing _any_ wildcard expression that matches more than 1 file, whether stand-alone or as part of an array.\r\n\r\nTo summarize, the desired behavior is:\r\n\r\n* You can pass one or more _literal_ paths to `-LiteralPath`.\r\n\r\n* You can pass one or more  literal paths or wildcard patterns - in any combination - to `-Path`, as long as no single wildcard pattern matches more than 1 file.\r\n",
+      "created_at": "2018-04-26T01:58:00Z",
+      "updated_at": "2018-04-26T01:58:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This seems like the sort of thing that should be the default, but able to be worked around. You've provided one workaround, but consider perhaps that we could also allow the `-Force` parameter to bypass this restriction. In other words:\r\n```powershell\r\n# This doesn't work:\r\n\"blank\" | Set-Content -Path \"*.txt\"\r\n\r\n# But this does\r\n\"blank\" | Set-Content -Path \"*.txt\" -Force\r\n```",
+      "created_at": "2018-04-26T15:26:49Z",
+      "updated_at": "2018-04-26T15:26:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32: \r\n\r\nHaving the ability be _opt-in_ is definitely preferable, but note that we'd be adding meaning to the existing use of `-Force` (\"Forces the cmdlet to set the contents of a file, even if the file is read-only.\")\r\n\r\nAlso, you could argue that we'd have to implement the same thing for _all_ output-to-file cmdlets (`Out-File`, `Export-Csv`, ...)\r\n\r\nOn the other hand, as I've just realized, `Set-Content` already _is_ special in that at least at first glance it appears to be the only one that supports an _array_ of output filenames.\r\n",
+      "created_at": "2018-04-26T15:51:55Z",
+      "updated_at": "2018-04-26T17:17:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think we could remove the dangerous behavior. In File System Provider V2 at least. And follow to one principle for all cmdlet - target path parameter should always be LiteralPath. (We already did this for web cmdlets and Out-File is under question too #9475.)",
+      "created_at": "2021-12-01T11:22:54Z",
+      "updated_at": "2021-12-01T11:23:12Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee looked at this and we compared it to behavior in `zsh` and `bash`.  It seems that `zsh` does support redirection to multiple files matching the wildcard while `bash` complains that the destination is ambiguous.  Also given that there seems to be legitimate cases where you want to initialize multiple files to the same content, then we think this is not a bucket 3 breaking change.  Also, if `-WhatIf` is used with `Set-Content` it does inform you of what was matched and would be written.  As noted, `Out-File` restricts to matching a single file so we have a bit of inconsistency between `Out-File` and `Set-Content`, but those two cmdlets don't have to be identical otherwise they'd be a single cmdlet.  We believe this is `By Design`",
+      "created_at": "2021-12-01T23:57:58Z",
+      "updated_at": "2021-12-01T23:57:58Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> As noted, `Out-File` restricts to matching a single file so we have a bit of inconsistency between `Out-File` and `Set-Content`, but those two cmdlets don't have to be identical otherwise they'd be a single cmdlet. We believe this is `By Design`\r\n\r\n@SteveL-MSFT Please clarify. Out-File (and >,>>) uses `-FilePath` by default. This works like `-Path` with globbing but with returning only one path. And question is should we switch the default to LiteralPath in all scenarios (if we get path from pipeline we already bind to LiteralPath by PSPath).",
+      "created_at": "2021-12-02T03:47:02Z",
+      "updated_at": "2021-12-04T17:26:51Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as by-design and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-12-03T09:00:39Z",
+      "updated_at": "2021-12-03T09:00:39Z"
+    }
+  ],
+  "created_at": "2018-04-25T16:50:52Z",
+  "number": 6729,
+  "state": "closed",
+  "title": "Set-Content should not allow writing to multiple files using wildcards",
+  "updated_at": "2021-12-04T17:26:51Z"
+}

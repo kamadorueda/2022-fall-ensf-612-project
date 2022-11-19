@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6567",
+  "author": "jazzdelightsme",
+  "body": "This repro\u2019s on 5.1 and 6. The problem is that if I have a DynamicObject that has a dynamic property \u201cFoo\u201d, things like `$obj.Foo` work, but `Select-Object -ExpandProperty Foo` do not.\r\n\r\n<!--\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\n- Windows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://github.com/PowerShell/PowerShell/blob/master/docs/KNOWNISSUES.md).\r\n- Fill out the following repro template:\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nAdd-Type @\"\r\nusing System;\r\nusing System.Collections.Generic;\r\nusing System.Dynamic;\r\n\r\npublic class MyDynamicObject : DynamicObject\r\n{\r\n    public override IEnumerable<string> GetDynamicMemberNames()\r\n    {\r\n        return new string[] { \"Foo\" };\r\n    }\r\n\r\n    public override bool TryGetMember( GetMemberBinder binder, out object result )\r\n    {\r\n        result = null;\r\n        bool succeeded = false;\r\n\r\n        if( binder.Name == \"Foo\" )\r\n        {\r\n            result = 123;\r\n            succeeded = true;\r\n        }\r\n\r\n        return succeeded;\r\n    }\r\n}\r\n\"@\r\n\r\n$myObj = [MyDynamicObject]::new()\r\n\r\n$myObj.Foo                                  # <-- works\r\n$myObj | %{ $_.Foo }                        # <-- works\r\n$myObj | Select-Object -ExpandProperty Foo  # <-- DOES NOT WORK\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nThe last three lines should all work (yield 123).\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nThe Select-Object statement throws. (\"Select-Object : Property \"Foo\" cannot be found.\")\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.1.0-preview.1\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2018-06-13T06:48:35Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "This is not specific to `select`. For example:\r\n```\r\nPS[1] (459) > $myObj | foreach { $_.Foo }\r\n123\r\nPS[1] (460) > $myObj | foreach Foo\r\nPS[1] (461) >\r\n```\r\nIt looks like we aren't handling `DynamicObject` in the `PSObject` wrapper.  `Foo` doesn't show up as a property:\r\n```\r\nPS[1] (467) > $myObj.PSObject.Properties\r\nPS[1] (468) >\r\n```",
+      "created_at": "2018-04-05T01:09:06Z",
+      "updated_at": "2018-04-05T01:09:06Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "The original title was a bit confusing given that PowerShell, from V3 on, uses the DLR extensively. I've updated it to more accurately reflect what I think the problem is. @jazzdelightsme - are you ok with the updated title?",
+      "created_at": "2018-04-05T18:06:26Z",
+      "updated_at": "2018-04-05T18:06:26Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sure. Thank you!",
+      "created_at": "2018-04-05T19:02:27Z",
+      "updated_at": "2018-04-05T19:02:27Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "`PSDynamicMember` appears to be a mostly-useless stub: the `Value` getter/setters just throw, and it doesn't even hold a reference to the owning object. It seems like the solution will involve teaching this thing how to get a value... first I suppose we need to be able to determine if the \"Foo\" member even *is* a property or not (maybe it's a method). Then, if it's a property, we have to figure out if it is settable and/or gettable. @LzyBkr / @BrucePay, is that possible with some DLR-fu? \r\n\r\nLooking at the DLR stuff is ... intimidating. It's hard to tell where to grab on first. Any hints?\r\n",
+      "created_at": "2018-04-18T16:11:09Z",
+      "updated_at": "2018-04-18T16:11:09Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "`PSDynamicMember` exists just for `Get-Member` - and the results of `Get-Member` don't reference an owning object.\r\n\r\nI believe this is the [code](https://github.com/PowerShell/PowerShell/blob/c05f1ec3f34d0565ac83e41dec938465c78652fc/src/System.Management.Automation/engine/MshObject.cs#L2196) that is supposed to cover your scenario. It was likely tested (I don't typically write code like that without testing) so I'm not sure why it doesn't work - but I'd start there.",
+      "created_at": "2018-04-19T00:08:45Z",
+      "updated_at": "2018-04-19T00:08:45Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks @LzyBkr!\r\n\r\nI believe that code *does* in fact work. That's why things like `$myObj.Foo` work: PSObject dynamically binds the member access, and all is well.\r\n\r\nBut for `Select-Object -ExpandProperty`, on the other hand... that code does not come into play.\r\n\r\nWhen using wildcards (like `$myObj | select -exp *Foo*`), [`DotNetAdapter.AddAllDynamicMembers`](https://github.com/PowerShell/PowerShell/blob/da40c6efb787c7800103d02dae0b768d51032d9b/src/System.Management.Automation/engine/CoreAdapter.cs#L3474) correctly finds the \"Foo\" member, and adds a `PSDynamicMember` to the collection, so the [`Match`](https://github.com/PowerShell/PowerShell/blob/c05f1ec3f34d0565ac83e41dec938465c78652fc/src/System.Management.Automation/engine/MshMemberInfo.cs#L5033) method, when it calls `GetIntegratedMembers`, has the \"Foo\" member in the list.\r\n\r\nHowever, the `Match` method is instructed to only return members of type `Properties` or `PropertySet` (as specified by [`MshExpression.ResolveNames(PSObject, bool)`](https://github.com/PowerShell/PowerShell/blob/c05f1ec3f34d0565ac83e41dec938465c78652fc/src/System.Management.Automation/FormatAndOutput/common/Utilities/Mshexpression.cs#L126)), but the \"Foo\" member is a `Dynamic`, so it gets filtered out.\r\n\r\nFor the non-wildcard case (like `$myObj | select -exp Foo`), `ResolveNames` just looks for `target.Members[_stringValue]` (where `_stringValue` is \"Foo\"), and dynamic members don't seem to show up in that `PSMemberInfoIntegratingCollection`.\r\n\r\nIf dynamic members were to be exposed to `ResolveNames` (via `Members.Match` or `Members`[string indexer], though... perhaps things could work. But wouldn't `PSDynamicMember` would have to built up a bit, for that to work? And I'm not sure if PSDynamicMember can be taught to do what it needs to do.\r\n\r\nIf that's not the right approach... then what will\r\n[`MshExpression.GetValue`](https://github.com/PowerShell/PowerShell/blob/c05f1ec3f34d0565ac83e41dec938465c78652fc/src/System.Management.Automation/FormatAndOutput/common/Utilities/Mshexpression.cs#L228) do? (if the dynamic member does not show up in `Properties`?)\r\n\r\n",
+      "created_at": "2018-04-19T02:11:41Z",
+      "updated_at": "2018-04-19T02:11:41Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Ah, of course. That's the problem then. The `PSObject` pseudo-reflection like api **can't** work for dynamic objects, at least not in general.\r\n\r\nThe `GetDynamicMemberNames` api that a dynamic object implements is not a contract. For example, a dynamic object could synthesize a property just by trying to access it - essentially giving the object infinite members. The primary use case for the api is a debugger, or in PowerShell's case, `Get-Member` - in other words - for a somewhat improved UI, but nothing more.\r\n\r\nI believe the right fix is to use a dynamic site in the same way that PowerShell does for the `$obj.member` syntax.\r\n\r\nThis problem affects `Select-Object`, `ForEach-Object`, `Sort-Object`, `Measure-Object`, `Where-Object`, `Format-List`, `Format-Table` and maybe more.\r\n\r\nIt would seem this scenario is a corner case - it has never worked and this is the first report I've seen. That said, fixing it has a nice benefit - performance should improve even when not using dynamic objects.\r\n\r\nA fix does need to be careful though - some of those commands accept wildcards for property names. It might be best to keep the existing code for any use of wildcards.",
+      "created_at": "2018-04-19T14:13:44Z",
+      "updated_at": "2018-04-19T14:13:44Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "Okay, it may be beyond my ken, but I'll buy you lunch, @LzyBkr, if you are willing to talk me through what you think the \"right\" change would look like...",
+      "created_at": "2018-04-26T00:53:47Z",
+      "updated_at": "2018-04-26T00:53:47Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "No need to buy me lunch, but I'm happy to chat.\r\n\r\nTo get you started - you can find similar code [here](https://github.com/PowerShell/PowerShell/blob/63c0d8d783b8127b611ac32cabd730ecd46eca4e/src/System.Management.Automation/engine/ShellVariable.cs#L725).\r\n\r\nThe difference is - you'll use `PSGetMemberBinder.Get(\"PropertyName\")`. It really does just boil down to a couple of lines of code - creating the call site with the right binder, then invoking the delegate for that site.\r\n",
+      "created_at": "2018-04-26T01:53:45Z",
+      "updated_at": "2018-04-26T01:53:45Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "I came up with an PoC (see [here](https://github.com/jazzdelightsme/PowerShell/commit/2a3e54b08e866d1cdaee40c20d39f8e1b8fd8cf7)) that seems to work well, but it *only* addresses `Select-Object`--not other things like `Where-Object`.\r\n\r\nNext I'll try pushing the solution down a bit further, into the `.Members` collection itself.",
+      "created_at": "2018-04-27T15:54:22Z",
+      "updated_at": "2018-04-27T15:54:36Z"
+    }
+  ],
+  "created_at": "2018-04-05T00:49:55Z",
+  "number": 6567,
+  "state": "closed",
+  "title": "The PSObject implementation does not handle classes derived from DynamicObject properly",
+  "updated_at": "2018-06-20T06:12:04Z"
+}

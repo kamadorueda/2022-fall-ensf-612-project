@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2864",
+  "author": "powercode",
+  "body": "As a step on the way to realize #2226, I think we should start with adding a conversion from PSMethodInfo to System.Func.\r\n\r\nToday, we have to do something like this:\r\n```powershell\r\nClass MyClass {\r\n      \r\n    [int] Add47([int] $value) {    \r\n      return 47 + $value\r\n    }\r\n            \r\n    [int] DoStuff([System.Collections.Generic.IEnumerable[int]] $collection) {\r\n        # ugly\r\n        $func = $this.GetType().GetMethod(\"Add47\").CreateDelegate([Func[int,int]], $this)\r\n        return [Linq.Enumerable]::Sum($collection, $func)\r\n    }\r\n}\r\n```\r\n\r\nI would like to express that as:\r\n```powershell\r\nClass MyClass {    \r\n    [int] Add47([int] $value) {    \r\n      return 47 + $value\r\n    }\r\n            \r\n    [int] DoStuff([System.Collections.Generic.IEnumerable[int]] $collection) {\r\n        return [Linq.Enumerable]::Sum($collection, $this.Add47)\r\n    }\r\n}\r\n```\r\n\r\nWhat is the right place to do this?",
+  "closed_at": "2018-03-08T17:55:15Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Yeah, that seems right to me.\r\n\r\nI'd start [here](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/LanguagePrimitives.cs#L4590), if you need more pointers after that, just ask.",
+      "created_at": "2016-12-09T18:32:59Z",
+      "updated_at": "2016-12-09T18:32:59Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@PowerShellTeam Please assign to me",
+      "created_at": "2016-12-09T19:10:42Z",
+      "updated_at": "2016-12-09T19:10:42Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr I have the conversion working, but I guess I have to hook it in somehow when making the calls. \r\n\r\nCan you give me another pointer? \r\n\r\n```powershell\r\nclass N {\r\n    static [int] Twice([int] $a) { return 2 * $a }\r\n\r\n    static [int] Sum([int[]] $values){\r\n        return [System.Linq.Enumerable]::Sum($values, [N]::Twice)\r\n    }\r\n}\r\n$twice =[Func[int,int]] [N]::Twice\r\n$twice.Invoke(2)\r\n[N]::Sum(1..10)\r\n```\r\n```\r\nCannot find an overload for \"Sum\" and the argument count: \"2\".\r\nAt line:5 char:16\r\n+         return [System.Linq.Enumerable]::Sum($values, [N]::Twice)\r\n+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [], MethodException\r\n    + FullyQualifiedErrorId : MethodCountCouldNotFindBest\r\n```",
+      "created_at": "2016-12-10T11:34:37Z",
+      "updated_at": "2016-12-10T11:34:37Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I end up with the following expressions\r\n```\r\n.Try {\r\n    .Block() {\r\n        .Block() {\r\n            .Default(System.Void);\r\n            .Dynamic PipelineWriter(\r\n                .Dynamic Call Sum(\r\n                    .Constant<System.Type>(System.Linq.Enumerable),\r\n                    .Call System.Management.Automation.VariableOps.GetVariableValue(\r\n                        .Constant<System.Management.Automation.VariablePath>(values),\r\n                        $context,\r\n                        .Constant<System.Management.Automation.Language.VariableExpressionAst>($values)),\r\n                    .Dynamic GetMember Twice(.Constant<System.Type>(N))),\r\n                $funcContext._outputPipe,\r\n                $context)\r\n        };\r\n        $context.QuestionMarkVariableValue = True;\r\n        .Default(System.Void)\r\n    }\r\n} \r\n```\r\nWhat should I try to achieve instead of \r\n```.Dynamic GetMember Twice(.Constant<System.Type>(N))),``` ?\r\n\r\nShould that be \r\n```.Dynamic Convert System.Func`2[System.Int32,System.Int32](.Dynamic GetMember Twice(.Constant<System.Type>(N)))),``` ?\r\n\r\nIn that case, I have to look at the signature of the called method and have some criterion for when to insert a conversion. ",
+      "created_at": "2016-12-10T13:17:53Z",
+      "updated_at": "2016-12-10T16:25:46Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Just to be clear: \r\n```powershell\r\n# this works\r\n[System.Linq.Enumerable]::Sum($values, [Func[int,int]][N]::Twice)\r\n# but this doesn't\r\n[System.Linq.Enumerable]::Sum($values, [N]::Twice)\r\n```",
+      "created_at": "2016-12-10T13:36:50Z",
+      "updated_at": "2016-12-10T13:36:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is a parameter binding. Try debug [here](https://github.com/PowerShell/PowerShell/blob/8abb6c3a94d304af0dd7611c865b1b2ec6460113/src/System.Management.Automation/engine/CoreAdapter.cs#L1419). If I found the right place, then most likely the cause of the problem in wrong ConversionRank.\r\n",
+      "created_at": "2016-12-10T15:49:17Z",
+      "updated_at": "2016-12-10T15:49:17Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I see - [type inference](https://github.com/PowerShell/PowerShell/blob/8abb6c3a94d304af0dd7611c865b1b2ec6460113/src/System.Management.Automation/engine/CoreAdapter.cs#L5015) might failing.",
+      "created_at": "2016-12-10T18:00:56Z",
+      "updated_at": "2016-12-10T18:00:56Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Yes it is. Unifying of parameters. Thx.",
+      "created_at": "2016-12-10T20:35:41Z",
+      "updated_at": "2016-12-10T20:35:41Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "https://github.com/PowerShell/PowerShell/pull/5287\r\n",
+      "created_at": "2018-03-08T17:55:15Z",
+      "updated_at": "2018-03-08T17:55:15Z"
+    }
+  ],
+  "created_at": "2016-12-09T10:43:00Z",
+  "number": 2864,
+  "state": "closed",
+  "title": "Add conversion from PSMethodInfo to delegate/Func<> ",
+  "updated_at": "2018-03-12T05:39:35Z"
+}

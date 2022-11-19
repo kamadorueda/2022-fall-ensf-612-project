@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/1794",
+  "author": "ferventcoder",
+  "body": "I at first attributed this to an issue with #1629, but that appears not to be the case here. I plan to dig in a bit but wanted to make you aware of it.\n## Steps to reproduce\n1. Ensure Puppet is installed.\n2. Clone https://github.com/puppetlabs/puppetlabs-powershell and apply the patch shown below. https://github.com/puppetlabs/puppetlabs-powershell\n3. Create the following manifest and save it as powershell_osx.pp:\n   \n   ``` puppet\n   exec {'osx':\n     command     => 'Write-Output \"Hello from OSX\"',\n     logoutput  => true,\n     provider    => 'powershell',\n   }\n   ```\n4. Run `puppet apply path/to/powershell_osx.pp`.\n#### PowerShell Module patch\n\n``` patch\ndiff --git a/lib/puppet/provider/exec/powershell.rb b/lib/puppet/provider/exec/powershell.rb\nindex b59d03a..5faa381 100644\n--- a/lib/puppet/provider/exec/powershell.rb\n+++ b/lib/puppet/provider/exec/powershell.rb\n@@ -2,13 +2,14 @@ require 'puppet/provider/exec'\n require File.join(File.dirname(__FILE__), '../../../puppet_x/puppetlabs/powershell/powershell_manager')\n\n Puppet::Type.type(:exec).provide :powershell, :parent => Puppet::Provider::Exec do\n-  confine :operatingsystem => :windows\n\n   commands :powershell =>\n     if File.exists?(\"#{ENV['SYSTEMROOT']}\\\\sysnative\\\\WindowsPowershell\\\\v1.0\\\\powershell.exe\")\n       \"#{ENV['SYSTEMROOT']}\\\\sysnative\\\\WindowsPowershell\\\\v1.0\\\\powershell.exe\"\n     elsif File.exists?(\"#{ENV['SYSTEMROOT']}\\\\system32\\\\WindowsPowershell\\\\v1.0\\\\powershell.exe\")\n       \"#{ENV['SYSTEMROOT']}\\\\system32\\\\WindowsPowershell\\\\v1.0\\\\powershell.exe\"\n+    elsif File.exists?('/usr/local/bin/powershell')\n+      '/usr/local/bin/powershell'\n     else\n       'powershell.exe'\n     end\n@@ -55,7 +56,7 @@ Puppet::Type.type(:exec).provide :powershell, :parent => Puppet::Provider::Exec\n\n   def run(command, check = false)\n     if !PuppetX::PowerShell::PowerShellManager.supported?\n-      self.class.upgrade_message\n+      self.class.upgrade_message if Puppet::Util::Platform.windows?\n       write_script(command) do |native_path|\n         # Ideally, we could keep a handle open on the temp file in this\n         # process (to prevent TOCTOU attacks), and execute powershell\n@@ -65,7 +66,11 @@ Puppet::Type.type(:exec).provide :powershell, :parent => Puppet::Provider::Exec\n         # we redirect powershell's stdin to read from the file. Current\n         # versions of Windows use per-user temp directories with strong\n         # permissions, but I'd rather not make (poor) assumptions.\n-        return super(\"cmd.exe /c \\\"\\\"#{native_path(command(:powershell))}\\\" #{legacy_args} -Command - < \\\"#{native_path}\\\"\\\"\", check)\n+        if Puppet::Util::Platform.windows?\n+          return super(\"cmd.exe /c \\\"\\\"#{native_path(command(:powershell))}\\\" #{legacy_args} -Command - < \\\"#{native_path}\\\"\\\"\", check)\n+        else\n+          return super(\"sh -c \\\"#{native_path(command(:powershell))} #{posix_args} -Command - < #{native_path}\\\"\", check)\n+        end\n       end\n     else\n       result = ps_manager.execute(command)\n@@ -116,4 +122,10 @@ Puppet::Type.type(:exec).provide :powershell, :parent => Puppet::Provider::Exec\n   def legacy_args\n     '-NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass'\n   end\n+\n+  def posix_args\n+    # ExecutionPolicy is a known issue right now\n+    # https://github.com/PowerShell/PowerShell/blob/a6e10e4d3a863f21b01712fe57e00916a9cc06b9/docs/KNOWNISSUES.md#executionpolicy-unavailable-on-non-windows-platforms\n+    '-NoProfile -NonInteractive -NoLogo'\n+  end\n end\n```\n## Expected behavior\n\nIt works properly.\n\n``` sh\nrob@skylight $ sh -c \"/usr/local/bin/powershell -NoProfile -NonInteractive -NoLogo -Command - < /var/folders/pg/45bzltkn4wg8kqpllxgzcjcr0000gp/T/puppet-powershell20160813-36623-2801se.ps1\"\nHello from OSX\n```\n## Actual behavior\n\n``` sh\nDebug: Exec[osx](provider=powershell): Executing 'sh -c \"/usr/local/bin/powershell -NoProfile -NonInteractive -NoLogo -Command - < /var/folders/pg/45bzltkn4wg8kqpllxgzcjcr0000gp/T/puppet-powershell20160813-36623-2801se.ps1\"'\nDebug: Executing: 'sh -c \"/usr/local/bin/powershell -NoProfile -NonInteractive -NoLogo -Command - < /var/folders/pg/45bzltkn4wg8kqpllxgzcjcr0000gp/T/puppet-powershell20160813-36623-2801se.ps1\"'\nNotice: /Stage[main]/Main/Exec[osx]/returns:\nNotice: /Stage[main]/Main/Exec[osx]/returns: Unhandled Exception: System.Reflection.TargetInvocationException: Exception has been thrown by the target of an invocation. ---> System.TypeInitializationException: The type initializer for 'System.Management.Automation.Utils' threw an exception. ---> System.ArgumentNullException: Value cannot be null.\nNotice: /Stage[main]/Main/Exec[osx]/returns: Parameter name: path1\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.IO.Path.Combine(String path1, String path2, String path3)\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Management.Automation.Platform.SelectProductNameForDirectory(XDG_Type dirpath)\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Management.Automation.Utils..cctor()\nNotice: /Stage[main]/Main/Exec[osx]/returns:    --- End of inner exception stack trace ---\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Management.Automation.Runspaces.EarlyStartup.<>c.<Init>b__0_0()\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Management.Automation.Runspaces.InitialSessionState.CreateDefault2()\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Threading.Tasks.Task.Execute()\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at Microsoft.PowerShell.UnmanagedPSEntry.Start(String consoleFilePath, String[] args, Int32 argc)\nNotice: /Stage[main]/Main/Exec[osx]/returns:    --- End of inner exception stack trace ---\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.RuntimeMethodHandle.InvokeMethod(Object target, Object[] arguments, Signature sig, Boolean constructor)\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Reflection.RuntimeMethodInfo.UnsafeInvokeInternal(Object obj, Object[] parameters, Object[] arguments)\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Reflection.RuntimeMethodInfo.Invoke(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at System.Management.Automation.PowerShellAssemblyLoadContextInitializer.InitializeAndCallEntryMethod(String basePaths, AssemblyName entryAssemblyName, String entryTypeName, String entryMethodName, Object[] args)\nNotice: /Stage[main]/Main/Exec[osx]/returns:    at Microsoft.PowerShell.ManagedPSEntry.Main(String[] args)\nNotice: /Stage[main]/Main/Exec[osx]/returns: sh: line 1: 36962 Abort trap: 6           /usr/local/bin/powershell -NoProfile -NonInteractive -NoLogo -Command - < /var/folders/pg/45bzltkn4wg8kqpllxgzcjcr0000gp/T/puppet-powershell20160813-36623-2801se.ps1\nError: Write-Output \"Hello from OSX\" returned 134 instead of one of [0]\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util/errors.rb:106:in `fail'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/type/exec.rb:160:in `sync'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction/resource_harness.rb:214:in `sync'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction/resource_harness.rb:139:in `sync_if_needed'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction/resource_harness.rb:89:in `block in perform_changes'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction/resource_harness.rb:88:in `each'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction/resource_harness.rb:88:in `perform_changes'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction/resource_harness.rb:20:in `evaluate'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction.rb:207:in `apply'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction.rb:223:in `eval_resource'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction.rb:150:in `call'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction.rb:150:in `block (2 levels) in evaluate'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util.rb:292:in `block in thinmark'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/2.1.0/benchmark.rb:294:in `realtime'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util.rb:291:in `thinmark'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction.rb:150:in `block in evaluate'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/graph/relationship_graph.rb:118:in `traverse'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction.rb:141:in `evaluate'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/resource/catalog.rb:202:in `block in apply'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util/log.rb:153:in `with_destination'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/transaction/report.rb:107:in `as_logging_destination'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/resource/catalog.rb:201:in `apply'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/configurer.rb:119:in `block in apply_catalog'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util.rb:129:in `block in benchmark'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/2.1.0/benchmark.rb:294:in `realtime'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util.rb:128:in `benchmark'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/configurer.rb:118:in `apply_catalog'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/configurer.rb:232:in `run_internal'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/configurer.rb:134:in `block in run'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/context.rb:65:in `override'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet.rb:240:in `override'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/configurer.rb:133:in `run'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/application/apply.rb:347:in `apply_catalog'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/application/apply.rb:274:in `block in main'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/context.rb:65:in `override'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet.rb:240:in `override'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/application/apply.rb:225:in `main'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/application/apply.rb:170:in `run_command'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/application.rb:344:in `block in run'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util.rb:446:in `exit_on_fail'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/application.rb:344:in `run'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util/command_line.rb:128:in `run'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/lib/puppet/util/command_line.rb:72:in `execute'\n/opt/boxen/rbenv/versions/2.1.5/lib/ruby/gems/2.1.0/gems/puppet-4.3.2/bin/puppet:5:in `<top (required)>'\n/opt/boxen/rbenv/versions/2.1.5/bin/puppet:23:in `load'\n/opt/boxen/rbenv/versions/2.1.5/bin/puppet:23:in `<main>'\nError: /Stage[main]/Main/Exec[osx]/returns: change from notrun to 0 failed: Write-Output \"Hello from OSX\" returned 134 instead of one of [0]\nDebug: Class[Main]: Resource is being skipped, unscheduling all events\nDebug: Stage[main]: Resource is being skipped, unscheduling all events\nDebug: Finishing transaction 70161951724820\nDebug: Storing state\nDebug: Stored state in 0.00 seconds\nNotice: Applied catalog in 1.04 seconds\nDebug: Applying settings catalog for sections reporting, metrics\nDebug: Finishing transaction 70162003194900\nDebug: Received report to process from skylight.local\nDebug: Evicting cache entry for environment 'production'\nDebug: Caching environment 'production' (ttl = 0 sec)\nDebug: Processing report from skylight.local with processor Puppet::Reports::Store\n```\n\nRunning it outside of Ruby works fine:\n\n``` sh\nrob@skylight $ sh -c \"/usr/local/bin/powershell -NoProfile -NonInteractive -NoLogo -Command - < /var/folders/pg/45bzltkn4wg8kqpllxgzcjcr0000gp/T/puppet-powershell20160813-36623-2801se.ps1\"\nHello from OSX\n```\n## Environment data\n\n``` powershell\n> $PSVersionTable\nName                           Value\n----                           -----\nPSVersion                      6.0.0-alpha\nPSEdition                      Core\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\nBuildVersion                   3.0.0.0\nGitCommitId                    v6.0.0-alpha.8\nCLRVersion\nWSManStackVersion              3.0\nPSRemotingProtocolVersion      2.3\nSerializationVersion           1.1.0.1\n```\n",
+  "closed_at": "2017-04-10T15:56:58Z",
+  "comments": [
+    {
+      "author": "ferventcoder",
+      "author_association": "NONE",
+      "body": "@vors added more to the description.\n",
+      "created_at": "2016-08-13T16:12:39Z",
+      "updated_at": "2016-08-13T16:12:39Z"
+    },
+    {
+      "author": "ferventcoder",
+      "author_association": "NONE",
+      "body": "Also, it's possible that it has something to do with Puppet redirecting output to a file.\n",
+      "created_at": "2016-08-13T16:13:50Z",
+      "updated_at": "2016-08-13T16:13:50Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "Good catch!\n\nLooks like the problem is in this code\nhttps://github.com/PowerShell/PowerShell/blob/9ab60d66213b6f8da3c7543414740d9946f5780b/src/System.Management.Automation/CoreCLR/CorePsPlatform.cs#L236\n\n``` csharp\nstring xdgConfigHomeDefault = Path.Combine(System.Environment.GetEnvironmentVariable(\"HOME\"), \".config\", \"powershell\");\nstring xdgDataHomeDefault = Path.Combine(System.Environment.GetEnvironmentVariable(\"HOME\"), \".local\", \"share\", \"powershell\");\nstring xdgModuleDefault = Path.Combine(xdgDataHomeDefault, \"Modules\");\nstring xdgCacheDefault = Path.Combine(System.Environment.GetEnvironmentVariable(\"HOME\"), \".cache\", \"powershell\");\n```\n\nIt's possible that env variable `HOME` is not defined, when PS executed from some non-standard environment. We should add logic to handle it gracefully.\n\ncc @ealexjordan \n",
+      "created_at": "2016-08-13T16:16:31Z",
+      "updated_at": "2016-08-13T16:18:23Z"
+    },
+    {
+      "author": "ferventcoder",
+      "author_association": "NONE",
+      "body": "It's likely this is Linux as well, I just haven't tested it on another platform yet.\n",
+      "created_at": "2016-08-13T16:21:00Z",
+      "updated_at": "2016-08-13T16:21:00Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "@ferventcoder It makes my ridiculously happy that you tried this. I used to be a Puppet master myself :smile: \n",
+      "created_at": "2016-08-17T22:20:41Z",
+      "updated_at": "2016-08-17T22:28:09Z"
+    },
+    {
+      "author": "erwinwildenburg",
+      "author_association": "NONE",
+      "body": "The same happens when running from .NET Core on Windows.",
+      "created_at": "2016-11-28T14:01:57Z",
+      "updated_at": "2016-11-28T14:01:57Z"
+    },
+    {
+      "author": "HemantMahawar",
+      "author_association": "CONTRIBUTOR",
+      "body": "Might be related to #3011 that @SteveL-MSFT  is looking into. ",
+      "created_at": "2017-02-14T00:16:21Z",
+      "updated_at": "2017-02-14T00:16:21Z"
+    },
+    {
+      "author": "glennsarti",
+      "author_association": "NONE",
+      "body": "This is still an issue on 6.0.0-alpha17\r\n",
+      "created_at": "2017-03-27T20:31:06Z",
+      "updated_at": "2017-03-27T20:31:06Z"
+    },
+    {
+      "author": "glennsarti",
+      "author_association": "NONE",
+      "body": "Confirmed. Puppet is running the PowerShell script without the `HOME` env var (not sure why yet, will look into it)",
+      "created_at": "2017-03-27T20:35:09Z",
+      "updated_at": "2017-03-27T20:35:09Z"
+    },
+    {
+      "author": "glennsarti",
+      "author_association": "NONE",
+      "body": "Oh...The Exec type strips all user related environment variables prior to invocation i.e. `HOME`",
+      "created_at": "2017-03-27T20:43:57Z",
+      "updated_at": "2017-03-27T20:43:57Z"
+    },
+    {
+      "author": "glennsarti",
+      "author_association": "NONE",
+      "body": "This should've been resolved with https://github.com/PowerShell/PowerShell/commit/a2687bfb59eadd3cd46c697de54607a37e50f834 ",
+      "created_at": "2017-03-27T20:56:40Z",
+      "updated_at": "2017-03-27T20:56:40Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "This is similar to that issue, but that change didn't fix this particular issue.  I can repro this easily by `unset HOME` and trying to start powershell.  I'll investigate this.",
+      "created_at": "2017-03-27T21:07:06Z",
+      "updated_at": "2017-03-27T21:07:06Z"
+    }
+  ],
+  "created_at": "2016-08-13T15:55:32Z",
+  "number": 1794,
+  "state": "closed",
+  "title": "Running from Ruby (Puppet) fails - OSX",
+  "updated_at": "2017-04-10T15:56:58Z"
+}

@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13577",
+  "author": "jborean93",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nCurrently there is a [hardcoded check](https://github.com/PowerShell/PowerShell/blob/d8f8f0a8bcbadb357f9eaafbb797278ebe07d7cc/src/System.Management.Automation/engine/remoting/fanin/WSManTransportManager.cs#L1549-L1553) that makes sure `-SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck)` is set when a HTTPS connection is made on WSMan on non-Windows hosts. This is because the OMI library that is shipped with PowerShell does not implement any certificate validation making the user be explicit that they know no validation is happening.\r\n\r\nI've got a fork of the OMI libraries that [implements HTTPS validation](https://github.com/jborean93/omi/pull/8) and I'm struggling to define the default behaviour and potentially ways of integrating it into PowerShell making it a better end user experience.\r\n\r\nRight now the behaviour in that PR is to enable HTTPS validation by default even though PowerShell requires you to use the `-SkipCACheck -SkipCNCheck` session options when creating the connection. To actually opt out of validation the env vars `OMI_SKIP_CA_CHECK` and `OMI_SKIP_CN_CHECK` do the same as the the `-Skip*Check` options. This is not ideal for a few reasons\r\n\r\n+ End users still need to have `-SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck)` when creating the session\r\n+ It's somewhat confusing as the options contradict with what the library does\r\n+ Env vars set in .NET on non-Windows aren't actually set in the process, so doing `$env:OMI_SKIP_CA_CHECK = '1'` in PowerShell won't reflect in the unmanaged code\r\n    + You either need to set the env vars when you start the process or PInvoke to call `setenv` or `unsetenv` directly\r\n\r\nI decided to enable verification by default because that's what should be done for HTTPS connections and I see it as the easiest way of potentially integrating it into PowerShell. The change hasn't been merged yet so I'm happy to hear any other suggestions.\r\n\r\n## Proposed technical implementation details (optional)\r\n\r\nMy overall goal is that when using the OMI fork I have the requirement of setting the skip options is dropped and once that is done the skip options are actually passed down into the OMI library and it works just like it does on Windows. For that to occur I believe the check needs to move out of this repo and down into https://github.com/PowerShell/psl-omi-provider. That library can then have some check to see if the default OMI library is present or whether my fork is used and act accordingly.\r\n\r\nWhat I'm hoping to get out of this issue is just a general viewpoint from the PowerShell team and whether they would be open to moving this check and potentially even guidance on how to get `psl-omi-provider` to see the upstream fork is used and drop the check that makes sure the SSL checks are skipped.",
+  "closed_at": "2020-10-17T00:43:18Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps @PaulHigin could comment this.",
+      "created_at": "2020-09-07T07:33:52Z",
+      "updated_at": "2020-09-07T07:33:52Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Tiny bump, I'm hoping to merge my PR sometime soon and hoping to get any feedback from the PowerShell team before I paint myself in a corner.",
+      "created_at": "2020-09-09T19:40:43Z",
+      "updated_at": "2020-09-09T19:40:43Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Sorry for the delay.  If cert check is always performed then I agree that the `skipCA skipCN` checks in PowerShell can be removed.\r\n\r\nI am not sure what needs to happen to get these changes into the omi provider release branch, so I'll mark this for committee review.\r\n\r\n/cc @SteveL-MSFT  ",
+      "created_at": "2020-09-09T19:48:52Z",
+      "updated_at": "2020-09-09T19:48:52Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin the trouble is the cert checks are only being done in my custom fork of the OMI lib and not the one distributed by PowerShell. I'm just looking to find a way to somehow make the skip checks conditional based on the underlying library that is used. For that to happen the check would most likely have to be moved to https://github.com/PowerShell/psl-omi-provider as that's the most likely place that can detect what OMI lib is currently loaded.\r\n\r\nMy main question is if I was to raise a PR there would it even be looked at or would it be rejected. Both are perfectly fine responses I just want to know if I should actually spend the effort to get it done or just go my own way.\n\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/11524380?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/psl-omi-provider\">PowerShell/psl-omi-provider</a></strong></div><div>PSRP Linux support library. Contribute to PowerShell/psl-omi-provider development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2020-09-09T19:52:18Z",
+      "updated_at": "2020-09-09T19:52:20Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  Our future direction is to make remote transports pluggable into PowerShell.  When enabled, this means that @jborean93 could have a WSMan transport module published to PSGallery that users can install if they need WSMan support.  For now, we consider the WSMan support that is already included as deprecated and would not be accepting PRs but do appreciate the work Jordan is doing to maintain WSMan support.  We would be open to making a small change in the interim to detect if the version of psl-omi-provider supports performing the server cert check and if so, then the cmdlet client won't enforce use of the skip switches with HTTPS.",
+      "created_at": "2020-09-16T22:46:26Z",
+      "updated_at": "2020-09-16T22:46:26Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Thansk @SteveL-MSFT (and the committee) for looking into this. After having a brief look at the code I think I can see a way to check whether HTTPS validation is available. PowerShell could potentially call [WSManGetSessionOptionAsDword](https://github.com/PowerShell/psl-omi-provider/blob/59ab42f3bc769b1aa31c1181e3a97ea3e1b1c96e/src/Client.c#L589-L615) with the options `WSMAN_OPTION_SKIP_CA_CHECK` and `WSMAN_OPTION_SKIP_CN_CHECK`. Currently the `libpsrpclient` that implements this function for Linux would return `MI_RESULT_NOT_SUPPORTED`. If `libpsrpclient` was updated to support passing those flags through it would mean it is aware that the underlying OMI library supports HTTPS or not and will pass through the options correctly to ignore the certs.\r\n\r\nOne final question, would the PowerShell team be willing to accept the change(s) in https://github.com/PowerShell/psl-omi-provider or is this something I would also have to fork and compile myself to include the changes?\n\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/11524380?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/psl-omi-provider\">PowerShell/psl-omi-provider</a></strong></div><div>PSRP Linux support library. Contribute to PowerShell/psl-omi-provider development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2020-09-17T10:40:48Z",
+      "updated_at": "2020-09-17T10:40:50Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "With https://github.com/PowerShell/PowerShell/pull/13786 being merged I feel like this issue has been fixed as best as it can. I've also created a [2.0.0](https://github.com/jborean93/omi/releases/tag/v2.0.0-pwsh) release which contains the updated `mi` and `psrpclient` libraries that will read the session options when using pwsh 7.2.0 or newer. For existing versions it will still continue to validate the cert and require the env vars to disable but at least there is a way forward for the future.\r\n\r\nFinally I've also published the changes in a module called [PSWSMan](https://www.powershellgallery.com/packages/PSWSMan/2.0.0) on the gallery. For non-Windows users who wish to use this fork they can just run the following as root\r\n\r\n```pwsh\r\nInstall-Module -Name PSWSMan -Scope AllUsers\r\nInstall-WSMan\r\n```\r\n\r\nThis will install my forked copies of `libpsrpclient` and `libmi` for the distribution they are on. The `PSWSMan` module also contains a few other helper functions to disable cert verification globally as well as set up a trusted CA certificate for HTTPS. People can update that module as new changes come in and install the latest ones for their Linux distribution.",
+      "created_at": "2020-10-17T00:43:18Z",
+      "updated_at": "2020-10-17T00:43:18Z"
+    }
+  ],
+  "created_at": "2020-09-04T19:32:50Z",
+  "number": 13577,
+  "state": "closed",
+  "title": "HTTPS Verification for WSMan on Linux",
+  "updated_at": "2020-10-17T15:26:04Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13074",
+  "author": "Voriaz",
+  "body": "When using Invoke-Command with a command containing \"cert:\" the console output is disabled\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nInvoke-Command -ComputerName mycomputer.local -Credential $creds -ScriptBlock {Set-Location cert: ; Write-Host \"Hello !\"}\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\nConcole should print: \"Hello!\"\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nConsole print nothing\r\n```\r\n\r\n## Environment data\r\n\r\n```powershell\r\nPS C:\\> Invoke-Command -ComputerName mycomputer.local -Credential $creds -ScriptBlock {$psversiontable}\r\n\r\nName                           Value\r\n----                           -----\r\nWSManStackVersion              3.0\r\nSerializationVersion           1.1.0.1\r\nPSRemotingProtocolVersion      2.3\r\nPSEdition                      Core\r\nOS                             Microsoft Windows 10.0.17763\r\nPSVersion                      7.1.0-preview.3\r\nGitCommitId                    7.1.0-preview.3\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\n\r\nPS C:\\> $psversiontable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.17763.1007\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.17763.1007\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```\r\n\r\nI've tested with different commands : ls, dir, sl, Get-ChildItem. ans it is same error.\r\nWhen using ps 5.1 on remote server, it is working normaly.\r\n\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "Works here:\r\n\r\n```powershell\r\nPS C:\\Foo>  Invoke-Command -ComputerName cookham1 -ScriptBlock {Set-Location cert: ; Write-Host \"Hello !\"}\r\nHello !\r\n```",
+      "created_at": "2020-07-01T15:33:51Z",
+      "updated_at": "2020-07-01T15:33:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I can not reproduce too.",
+      "created_at": "2020-07-02T11:18:28Z",
+      "updated_at": "2020-07-02T11:18:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Interestingly it looks like @Voriaz is remoting _from_ Windows PowerShell _to_ pwsh. I'd be suspecting a bug in 5.1, but if there is one I don't imagine it will be able to be fixed.",
+      "created_at": "2020-07-02T11:32:39Z",
+      "updated_at": "2020-07-02T11:32:39Z"
+    },
+    {
+      "author": "Voriaz",
+      "author_association": "NONE",
+      "body": "I'm remoting from powershell 5.1 to pwsh 7. I've also tried from pwsh to pwsh and it is the same. So, I think the bug is not in 5.1 but in 7.",
+      "created_at": "2020-07-02T16:51:52Z",
+      "updated_at": "2020-07-02T16:51:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Could you please comment the issue?",
+      "created_at": "2020-07-02T17:38:19Z",
+      "updated_at": "2020-07-02T17:38:19Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @anmenaga \r\n\r\nI am able to repro this and it is not a regression but a result of module compatibility, implicit remote module loading.\r\nThe `Set-Location cert:` command requires the PowerShell certificate module, which is not compatible with PS6+, and so is loaded through Andrew's module implicit remoting.\r\n\r\n`Invoke-Command -cn . -config PowerShell.7-preview { Set-Location cert: ; Write-Host \"Hello!\" }`\r\n\r\nWhen this (implicit remote module loading) is done within a remote session, the implicit remoting code (I think through the steppable pipeline object) changes the execution context host reference from the running **command** serverhost to the **runspace** serverhost.  `Write-Host` uses the serverhost to send a host invocation command back to the client, which then performs the Write-Host to console.\r\n\r\nA remote running command should always use the command serverhost for client host callbacks, and using the runspace serverhost introduces a race condition.  Basically, the remote command completes before the runspace `Write-Host` message arrives on the client, and so Invoke-Command closes the session before it can be processed.  This can be seen by adding a delay to the script to get the expected output.\r\n\r\n```powershell\r\nInvoke-Command -cn . -config PowerShell.7-preview { Set-Location cert: ; Write-Host \"Hello!\" ; sleep 1 }\r\nHello!\r\n```\r\n\r\nI don't think it is worth trying to fix since it is a rare case and there are workarounds.  One workaround is to create a persisted session instead of an implicit session.\r\n\r\n```powershell\r\n$session = New-PSSession -cn . -config PowerShell.7-preview\r\nInvoke-Command -session $session { Set-Location cert: ; Write-Host \"Hello!\" }\r\nHello!\r\n$session | Remove-PSSession\r\n```\r\n",
+      "created_at": "2020-07-02T22:50:24Z",
+      "updated_at": "2020-07-02T22:50:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Thanks for deep explanations!\r\n\r\n> I don't think it is worth trying to fix since it is a rare case and there are workarounds.\r\n\r\nWhile PowerShell Core loads modules with the compatibility feature such issue can be raised.\r\nAt the very least, we could add this to the documentation (a workaround with creating an explicit session, or maybe it is possible to create a warning for the user at run time).\r\n",
+      "created_at": "2020-07-03T03:49:02Z",
+      "updated_at": "2020-07-03T03:49:02Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "I would like this fixed one day, but as you say it's a rare case. So at a minimum, can we make sure this is documented along with the workaround?  And maybe leave this issue open and leave it for a rainy day to fix sometime in the future?",
+      "created_at": "2020-07-03T11:26:35Z",
+      "updated_at": "2020-07-03T11:52:13Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "With compatibility feature enabled it is not a rare case. :-(",
+      "created_at": "2020-07-03T11:46:29Z",
+      "updated_at": "2020-07-03T11:46:29Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "medium-rare? \r\n\r\nI still think it low priority to fix in PowerShell. The real solution is to have all modules not need compatibility and to work natively. ",
+      "created_at": "2020-07-03T11:51:52Z",
+      "updated_at": "2020-07-03T11:54:15Z"
+    }
+  ],
+  "created_at": "2020-07-01T14:11:46Z",
+  "number": 13074,
+  "state": "open",
+  "title": "\"cert:\" disables output when used with Invoke-Command",
+  "updated_at": "2020-07-03T11:54:15Z"
+}

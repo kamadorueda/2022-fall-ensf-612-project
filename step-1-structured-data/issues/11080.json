@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11080",
+  "author": "iUnknwn",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n```\r\n$ErrorActionPreference = \"Stop\"\r\n\r\n# launch process with the appropriate args. \r\n$p = [System.Diagnostics.Process]::new() \r\n$p.StartInfo.FileName = \"notepad.exe\" \r\n$p.StartInfo.Arguments = $null \r\n$p.EnableRaisingEvents = $true \r\n$p.Start()\r\n\r\n# create a task completion source\r\n$tcs = [System.Threading.Tasks.TaskCompletionSource[bool]]::new()\r\n\r\n# bundle the process object and the task completion source into \r\n# a single input object\r\n$inputObj = New-Object psobject -Property @{tcs = $tcs; p = $p}\r\n\r\n$job = Start-ThreadJob -InputObject $inputObj -ScriptBlock {\r\n    $input.p.WaitForExit()\r\n    $input.tcs.SetResult($true)\r\n}\r\n\r\n# wait for the program to exit \r\n$processTask = $tcs.Task\r\n\r\n# this deadlocks\r\n$processTask.Wait()\r\n\r\n```\r\n\r\n# Expected behavior\r\n\r\n```\r\nThe task completion event to fire after the program closes.\r\n\r\n```\r\n\r\n# Actual behavior\r\nThe following error is visible if you close the program and read the output from the job:\r\n\r\n```\r\nYou cannot call a method on a null-valued expression.\r\nAt line:3 char:5\r\n+     $input.tcs.SetResult($true)\r\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (:) [], RuntimeException\r\n+ FullyQualifiedErrorId : InvokeMethodOnNull\r\n\r\n```\r\n\r\n# Environment data\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.3\r\nPSEdition                      Core\r\nGitCommitId                    6.2.3\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n\r\nAs a side note, passing the task completion source directly (not wrapping it in an object), does appear to work (though then you can't wait on the process). ",
+  "closed_at": "2020-05-09T00:00:11Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "You should use ArgumentList to send arguments",
+      "created_at": "2019-11-15T12:25:49Z",
+      "updated_at": "2019-11-15T12:25:49Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@iUnknwn `$input` is an enumerator.  After the first time you use it the enumeration is completed so when you call it the second time it is empty.  Use `$_` or `$PSItem` instead, or the `ArgumentList` parameter as @iSazonov suggested.\r\n\r\nIf you really want to stick with `$input` you could call `$input.Reset()` between uses, but the other options will better serve your use case.",
+      "created_at": "2019-11-15T12:47:14Z",
+      "updated_at": "2019-11-15T13:50:13Z"
+    },
+    {
+      "author": "iUnknwn",
+      "author_association": "NONE",
+      "body": "This looks like a potential documentation bug for Start-ThreadJob then, since `ArgumentList` clearly says it's only to be used with a script file (not a script block). I'll open a new issue.\r\n\r\nManually manipulating the iterator works, as does using ArgumentList. However, it doesn't look like `$PSItem` is populated in the script block. Is this expected?\r\n\r\n```\r\n$job = Start-ThreadJob -InputObject $inputObj -ScriptBlock {\r\n    echo $PSItem #outputs nothing\r\n    $PSItem.p.WaitForExit() #fails with null valued expression\r\n    $PSItem.tcs.SetResult($true) #fails with null valued expression.\r\n}\r\n```",
+      "created_at": "2019-11-15T20:21:04Z",
+      "updated_at": "2019-11-15T20:21:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  However, it doesn't look like $PSItem is populated in the script block. Is this expected?\r\n\r\n@PaulHigin Is it by-design?",
+      "created_at": "2019-11-16T10:58:28Z",
+      "updated_at": "2019-11-16T10:58:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, I think it is; the documentation even states for the `-InputObject` parameter:\r\n\r\n> In the value of the ScriptBlock parameter, use the `$Input` automatic variable to represent the input objects.\r\n\r\nWhile something like `1, 2 | Start-ThreadJob { ... }` (implicit `-InputObject` use) _looks like_ a per-input-object script-block-invocation scenario such as `1, 2 | ForEach-Object { $_ + 1 }` (`$_` being short for `$PSItem`), it isn't:\r\n\r\nIn the  `Start-ThreadJob` scenario (as with `Start-Job`, the CLI, and `Invoke-Command` - with or without remoting), the script block is only invoked _once_, in  a different runspace (which is in a different thread in the same process for `Start-ThreadJob`, and in a different process for the other scenarios); it is like invoking the script block with `& ` without input from a pipeline in the target runspace, and in a stand-alone invocation such as `& { $PSItem }`  `$PSItem` isn't defined.\r\n\r\nInstead, such an invoked-once script block needs to use a _nested_ pipeline with explicit use of `$Input` in order to access and enumerate the input objects (or move through the iterator manually, but that's obviously cumbersome).\r\n\r\nTo adapt the example above:\r\n\r\n```powershell\r\nPS> 1, 2 | Start-ThreadJob { $input | ForEach-Object { $_ + 1 } } | Receive-Job -Wait -AutoRemove\r\n3\r\n4\r\n```\r\n\r\n@SeeminglyScience: Curiously, calling `$input.Reset()` in these scenarios _fails_, unlike with intra-runspace use of `$input`; in the cross-runspace scenarios, the type of `$input` seems to change from `System.Collections.ArrayList+ArrayListEnumeratorSimple` to `System.Management.Automation.Runspaces.PipelineReader<object>` (the object returned from the internal `.GetReadEnumerator()` method).\r\n\r\nThis smells like a bug, right?\r\n\r\nRepro (Windows, using \"loopback remoting\"):\r\n\r\n```powershell\r\n1, 2 | Invoke-Command -ComputerName . { $input; $input.reset() }\r\n1\r\n2\r\nException calling \"Reset\" with \"0\" argument(s): \"Specified method is not supported.\"\r\n```\r\n\r\n",
+      "created_at": "2019-11-17T19:49:47Z",
+      "updated_at": "2019-11-17T19:49:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I think it is;\r\n\r\n@mklement0 In the case PowerShell shouldn't be silent and throw on $PSItem, yes?",
+      "created_at": "2019-11-18T03:08:05Z",
+      "updated_at": "2019-11-18T03:08:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just like with local use, it does complain, but only with `Set-StrictMode -Version 1` or higher (note that, curiously, `$PSItem` is  translated to `$_` in the error message):\r\n\r\n```powershell\r\nPS> 1, 2 | Invoke-Command { Set-StrictMode -Version 1; $PSItem } -ComputerName .\r\nThe variable '$_' cannot be retrieved because it has not been set\r\n```\r\n\r\n---\r\n\r\nTaking a step back:\r\n\r\nWhile documented, the current behavior is both non-obvious and cumbersome.\r\n\r\nPiping objects in job / remoting scenarios isn't common, but perhaps that's owed to the above.\r\n\r\nEspecially in the context of the CLI the behavior is unexpected, as I've pointed out in #9497\r\n\r\nHowever, changing the behavior for script blocks passed to jobs and remoting commands to per-input-object invocation with `$_` / `$PSItem` bound would be a breaking change, because `$Input` would then turn into an effective alias of `$_` instead of representing _all_ input:\r\n\r\n```powershell\r\n# Currently: 1 invocation, explicit use of $input, which represents all input.\r\nPS>  1, 2 | Invoke-Command -ComputerName . { $input | % { '!' + $_ } }\r\n!1\r\n!2\r\n```\r\n\r\nIf we changed to per-input-object execution, we could more conveniently write:\r\n\r\n```powershell\r\n# With the change: 2 invocations, $_ usable.\r\nPS>  1, 2 | Invoke-Command -ComputerName . { '!' + $_ }\r\n!1\r\n!2\r\n```\r\n\r\nHowever, the semantics of `$input` would change:\r\n\r\n```powershell\r\n# Currently: 1 invocation, explicit use of $input, which represents all input.\r\nPS>  1, 2 | Invoke-Command -ComputerName . { $input | % { '!' + $_ }; 'after' }\r\n!1\r\n!2\r\nafter\r\n```\r\n\r\nWith per-input-object execution, you'd get:\r\n\r\n```powershell\r\n# With the change: 2 invocations, and $input is now the same as $_\r\nPS>  1, 2 | Invoke-Command -ComputerName . { $input | % { '!' + $_ }; 'after' }\r\n!1\r\nafter\r\n!2\r\nafter\r\n```\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-11-18T16:36:51Z",
+      "updated_at": "2019-11-18T16:39:15Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-05-09T00:00:09Z",
+      "updated_at": "2020-05-09T00:00:09Z"
+    }
+  ],
+  "created_at": "2019-11-15T02:39:17Z",
+  "number": 11080,
+  "state": "closed",
+  "title": "C# TaskCompletionSource is null when used as part of a PSObject InputObject to Start-ThreadJob",
+  "updated_at": "2020-05-09T00:00:11Z"
+}

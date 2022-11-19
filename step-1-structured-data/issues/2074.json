@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2074",
+  "author": "Lindmeier",
+  "body": "<!--\n\nIf it is a bug report:\n- make sure you are able to repro it on the latest released version. \nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\n- Search the existing issues.\n- Refer to the [FAQ](../docs/FAQ.md).\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\n- Fill out the following repro template\n\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\n-->\n## The Issue\n\nI am trying to create a PowerShell-Project with my own custom PowerShell-Classes. \nI use explicit type defintion for all attributes of my custom classes. For all integrated .Net-Classes there is now problem, but for other classes (for example external dll) it does not work.\nIt seems like, that you have to create a Wrapper script which loads the dll / Imports the module and afterwards starts the actual script project (with custom classes) by dotsourcing.\n\nUnfortunately this workaround (Wrapper-Script) does not work out in my scenario --> A automation / orchestration engine only accepts one script...\n\nSo is there a way to fix this? The Parser should not throw an error, as you declare (using statement) that you will use classes out of this namespace. If there is something wrong with the class itself.. .this should be a runtime exception, or am I wrong?\n## Steps to reproduce\n\n``` powershell\nusing namespace Microsft.ActiveDirectory.Management\n#These two do not work, too \n#using module ActiveDirectory\n#Import-Module ActiveDirectory\n\nclass Test\n{\n    [Microsoft.ActiveDirectory.Management.ADDomain] $domain;\n\n}\n ...\n```\n## Expected behavior\n\nno Error Message\n## Actual behavior\n\n``` powershell\nAt line:9 char:6\n+     [Microsoft.ActiveDirectory.Management.ADDomain] $domain;\n+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nUnable to find type [Microsoft.ActiveDirectory.Management.ADDomain].\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\n    + FullyQualifiedErrorId : TypeNotFound\n```\n## In this case  with an integrated .NET class it perfectly works.\n\n``` powershell\nusing namespace System.DirectoryServices.ActiveDirectory \n\nClass Test \n{ \n    [Domain] $dom = [Domain]::GetCurrentDomain() \n} \n```\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I believe we implemented 'using assembly' specifically for this use case\n",
+      "created_at": "2016-10-28T18:56:52Z",
+      "updated_at": "2016-10-28T18:56:52Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "According to @lzybkr, `using assembly` is meant for this, but it has not been implemented for this use case yet. ",
+      "created_at": "2017-02-16T00:42:55Z",
+      "updated_at": "2017-02-16T00:42:55Z"
+    },
+    {
+      "author": "dpurge",
+      "author_association": "NONE",
+      "body": "Same problem here in DSC resource (classes are recomended way to implement them, I heard)\r\n\r\nI have tried to \"Add-Type -AssemblyName System.IO.Compression.FileSystem\" before class definition and inside class method and also \"using namespace System.IO.Compression\" before defining the class, but none of these worked.\r\n\r\nA workaround was to dot-source an external script file in class method where Add-Type worked as usual.",
+      "created_at": "2018-10-09T16:17:57Z",
+      "updated_at": "2018-10-09T16:17:57Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@dpurge Yes the PowerShell class has to be parsed after the type is added. So having the class in the same file as the `Add-Type` won't work (because the whole file, including the class, is read before the `Add-Type` is executed).\r\n\r\nPutting the class into an external file will work because it delays reading the class until script execution time.\r\n\r\nSee also: https://github.com/PowerShell/PowerShell/issues/6652.\r\n\r\nTo fix this particular issue, the plan is to allow `using assembly`, which will read DLL metadata safely (i.e. without loading it) at parse-time. However this is a large work item.",
+      "created_at": "2018-10-09T18:25:20Z",
+      "updated_at": "2018-10-09T18:25:20Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt correct me if I'm wrong, but my understanding is that in order for this to work then at least the following would need to be done:\r\n\r\n1. Classes would need to be defined with `MetadataBuilder` instead of the `System.Reflection.Emit` API's\r\n1. Not yet loaded assemblies specified by `using assembly` would need to be analyzed via a `MetadataReader` *if* classes are defined in the file\r\n\r\nHas there been any discussion on if this would even be accepted as a contribution?  As you know, code that utilizes those API's would be exponentially more complex than the current code.\r\n\r\nI'd like to take on at some point if no one beats me to it, but I'm unsure if it would be considered worth maintaining.",
+      "created_at": "2019-05-22T12:24:55Z",
+      "updated_at": "2019-05-22T12:24:55Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience - Using `MetadataReader` was my original plan when I introduced `using assembly` - I even wanted to use it for command analysis to avoid loading assemblies.\r\n\r\nI can't comment on `MetadataBuilder`. I thought `Reflection.Emit` was up to the task, but I could easily be mistaken. One important aspect of defining types though - it should ideally be done in a collectible assembly.",
+      "created_at": "2019-05-22T17:33:19Z",
+      "updated_at": "2019-05-22T17:33:19Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Using `MetadataReader` was my original plan when I introduced `using assembly` - I even wanted to use it for command analysis to avoid loading assemblies.\r\n\r\nYes! I've been on and off working on a metadata only version of `CmdletInfo` for that \ud83d\ude42 \r\n\r\n> I can't comment on `MetadataBuilder`. I thought `Reflection.Emit` was up to the task, but I could easily be mistaken.\r\n\r\nIt is as long as we can load the assembly prior to actually defining the type which should be doable.  Now that I think about it, I think I started down that path because I wanted the exceptions `TypeBuilder.CreateType()` throws, but at parse time.  `MetadataBuilder` doesn't really do any validation though, so any of that logic would need to be written from scratch utilizing `MetadataReader` anyway.\r\n\r\n> One important aspect of defining types though - it should ideally be done in a collectible assembly.\r\n\r\nAh yeah, `MetadataBuilder` is out then.  I thought they weren't collectible for some reason.\r\n\r\nShould be a lot less complicated with just `MetadataReader` then.  Thanks @lzybkr!",
+      "created_at": "2019-05-22T18:34:30Z",
+      "updated_at": "2019-05-22T18:34:30Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Just while I'm compiling some information in this area on this...\r\n\r\nHere's where `using assembly` is acted on:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/7d5c86949f2468cc9320ece7234607f52590b3fb/src/System.Management.Automation/engine/parser/Compiler.cs#L2701\r\n\r\nHere's where that `LoadAssembly()` call goes:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/7d5c86949f2468cc9320ece7234607f52590b3fb/src/System.Management.Automation/engine/parser/Compiler.cs#L2761-L2799",
+      "created_at": "2020-01-29T01:01:35Z",
+      "updated_at": "2020-01-29T01:01:35Z"
+    }
+  ],
+  "created_at": "2016-08-26T09:49:14Z",
+  "number": 2074,
+  "state": "open",
+  "title": "Using external types / classes in Custom PowerShell Classes (v5) results in Parsing Error",
+  "updated_at": "2020-01-29T01:01:35Z"
+}

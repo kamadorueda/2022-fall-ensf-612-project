@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8977",
+  "author": "mklement0",
+  "body": "To be clear: the optimization in question is rarely needed in real life, but it may matter when processing large data sets.\r\n\r\nNote: \r\n* The repro commands use `-match`, but the same applies to `-replace` - although the potential performance win seems to be much smaller with `-replace`.\r\n\r\n* **The relevant source-code locations even hint at required performance improvements**; e.g.:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/81d37fcb84c812e077c79623d8a1a6416207b196/src/System.Management.Automation/engine/parser/Compiler.cs#L5160-L5165\r\n\r\n# Steps to reproduce\r\n\r\nNote: The commands are enclosed in `& { ... }` to ensure that they're run in a child scope, so as to rule out the effects from #8911.\r\n\r\n```powershell\r\n# -match with string-literal regex\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  & {\r\n    foreach ($s in , 'foo' * 1e6) { $s -match 'f?(o)' }\r\n  }\r\n}).TotalSeconds\r\n\r\n# -match with precompiled [regex]\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  & {\r\n    $re = [Regex]::new('f?(o)', 'Compiled, IgnoreCase, CultureInvariant')\r\n    foreach ($s in , 'foo' * 1e6) { $s -match $re }\r\n  }\r\n}).TotalSeconds\r\n\r\n# precompiled [regex] with .Match()\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  & {\r\n    $re = [Regex]::new('f?(o)', 'Compiled, IgnoreCase, CultureInvariant')\r\n    foreach ($s in , 'foo' * 1e6) { $re.Match($s).Success }\r\n  }\r\n}).TotalSeconds\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe 2nd and 3rd commands should exhibit comparable performance and should both be noticeably faster than the 1st command, due to use of a precompiled `[regex]` instance.\r\n\r\n# Actual behavior\r\n\r\nSample timings on macOS 10.14.3\r\n\r\n```powershell \r\n4.3153778   # string-literal regex with -match\r\n3.6992489   # precompiled regex with -match \r\n0.4902724   # precompiled regex with .Match()\r\n```\r\n\r\nThat is, while **using a precompiled `[regex]` with its `.Match()` method cut execution time almost to 1/10th**, using `-match` only provided a modest speed increase.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core v6.2.0-preview.4 on macOS 10.14.2\r\nPowerShell Core v6.2.0-preview.4 on Ubuntu 18.04.1 LTS\r\nPowerShell Core v6.2.0-preview.4 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\nWindows PowerShell v5.1.17134.407 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\n```\r\n",
+  "closed_at": "2019-02-26T16:54:14Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think the second and third examples will ever be comparable.  The main difference iirc is that the `-match` operator will always build a hashtable and save it to `$matches`.\r\n\r\nIt'd be nice if `$matches` could be generated on demand, like a new `PSVariable` implementation that builds the hashtable in the `Value` getter (assuming it hasn't already been set externally)  Not sure how feasible (or worth it) that is.",
+      "created_at": "2019-02-26T03:36:36Z",
+      "updated_at": "2019-02-26T03:36:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point about the extra effort required to construct the `$Matches` hashtable, @SeeminglyScience, but do you think that alone explains _how much_ slower `-match` is (a factor of almost 8)?\r\n(And your suggestion of populating `$Matches` only on demand is also worth considering).\r\n\r\nWhat is the `// TODO: replace this with faster code` source-code comment trying to tell us?",
+      "created_at": "2019-02-26T04:03:44Z",
+      "updated_at": "2019-02-26T04:17:25Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> do you think that alone explains _how much_ slower `-match` is (a factor of almost 8)?\r\n\r\nAt that scale yeah it wouldn't surprise me.  That's *a whole lot* of unused hashtables. You could always comment out that code and see if it's closer.\r\n\r\n> What is the `// TODO: replace this with faster code` source-code comment trying to tell us?\r\n\r\nI would guess that you wouldn't see any performance benefits for this scenario in that snippet.  The loop will already be fully compiled after a certain number of loops (I think somewhere around 32 loops?) Keep in mind that the same message is also above the expression creation for `-like` and `-join` (probably more as well)",
+      "created_at": "2019-02-26T04:22:43Z",
+      "updated_at": "2019-02-26T04:23:13Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What optimization do you ask? You do manual optimization by moving regex creation out of cycle. Such automatic optimization would be in c# compiler but not in PowerShell. Or do you want always compile regex? Perhaps we could use static regex and benefit from .Net Core cache for regex.",
+      "created_at": "2019-02-26T05:04:04Z",
+      "updated_at": "2019-02-26T05:04:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Your hunch was correct, @SeeminglyScience: it is the `$Matches` construction that is the major factor in the slow-down (it's even easy to verify that without source-code changes, by wrapping the LHS into an array: `, $s -match $re`, which bypasses `$Matches`); it also explains why `-replace` is much less affected.\r\n\r\nWith `$Matches` out of the picture, the slow-down goes from about 8-fold down to about 30% in my tests, which is much more reasonable.\r\n\r\nI definitely like the idea of on-demand construction of `$Matches` - though I doubt that anyone cares enough to pursue this.\r\n\r\n@iSazonov: Based on the initial benchmarks, I wrongly concluded that precompiled regexes weren't used as-is, but they are.\r\n\r\nIf you use a string-literal regex with `switch`, the static `[regex]::Match()` is called in every iteration, but in .NET Core the automatic caching of compiled-behind-the-scenes regexes is quite efficient, so that using a precompiled regex yields only a modest speed improvement (it's much more pronounced in Windows PowerShell).\r\n\r\nAnyway, I'll close this, but I'll create a new, generic issue as a reminder that there may be performance gains to be had across the board by addressing  the `// TODO: replace this with faster code` comments.\r\n",
+      "created_at": "2019-02-26T16:54:14Z",
+      "updated_at": "2019-02-26T16:54:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I remember Jason comment for me that we could remove the TODO comments because perhaps there does not exist direct and simple performance optimizations. So I think no need create new meta issue for this. Make sense to create new tracking issue for \"on-demand construction of $Matches\".",
+      "created_at": "2019-02-26T17:40:29Z",
+      "updated_at": "2019-02-26T17:40:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Oops! Too late: #8989 - but I'll update the issue with your comments.",
+      "created_at": "2019-02-26T18:13:53Z",
+      "updated_at": "2019-02-26T18:13:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\n> Make sense to create new tracking issue for \"on-demand construction of $Matches\".\r\n\r\nAfter mulling this over some more, I'm no longer convinced it is a worthwhile effort, so I'll let it go (though, obviously, feel free to pick it up yourself).",
+      "created_at": "2019-02-26T19:16:32Z",
+      "updated_at": "2019-02-26T19:16:32Z"
+    }
+  ],
+  "created_at": "2019-02-25T17:31:47Z",
+  "number": 8977,
+  "state": "closed",
+  "title": "Performance optimization: make -match and -replace take better advantage of predefined/precompiled [regex] instances",
+  "updated_at": "2019-02-27T15:52:52Z"
+}

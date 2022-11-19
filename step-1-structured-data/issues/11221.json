@@ -1,0 +1,160 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11221",
+  "author": "heaths",
+  "body": "# Steps to reproduce\r\n\r\n```powershell\r\n# Contrived example; imagine a pipelined collection of a lot of large objects.\r\nget-childitem c:\\ -recurse -ea silentlycontinue | select-object Name -unique\r\n```\r\n\r\n# Expected behavior\r\nItems with a unique name are output immediately to the host.\r\n\r\n# Actual behavior\r\nItems are buffered and require a large amount of memory and a ridiculous amount of time.\r\n\r\n# Reason\r\nPassing `-Unique` creates a `List<T>` to store all items, and performance is O(n^2) based on [this source](https://github.com/PowerShell/PowerShell/blob/d67ee7aee3cf4e25fcd750e5f576054b0361a031/src/Microsoft.PowerShell.Commands.Utility/commands/utility/Select-Object.cs#L617). Instead, you could instead create a key based on properties selected or some other heuristic. In fact, using that same `ObjectCommandComparer`, you could probably even use its `GetHashCode` (if implemented properly). I have been using [my own Select-Unique](https://gist.github.com/heaths/3358559) for years quite successfully. It has O(n) performance and uses very little memory. Its key algorithm is roughly copied from what `Group-Object` does.\r\n\r\nI had to write this when I was trying to filter unique items in a huge graph of objects. In that particular case, `Select-Object -Unique` ended up throwing an `OutOfMemoryException`. My version didn't and was much faster to use even on smaller data sets.\r\n\r\n# Environment data\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.3\r\nPSEdition                      Core\r\nGitCommitId                    6.2.3\r\nOS                             Microsoft Windows 10.0.18362 \r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u0393\u00c7\u00aa}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2022-08-25T05:01:21Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@heaths Thanks for raising the issue! Have you plans to contribute?",
+      "created_at": "2019-12-01T17:07:40Z",
+      "updated_at": "2019-12-01T17:07:40Z"
+    },
+    {
+      "author": "heaths",
+      "author_association": "CONTRIBUTOR",
+      "body": "I was thinking about it. I need to see what the test suite is like. This is an oft-used cmdlet so the bar is extremely high.",
+      "created_at": "2019-12-01T19:28:26Z",
+      "updated_at": "2019-12-01T19:28:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, the cmdlet is complex and sensitive. If you see any gaps in tests we could discuss and add new ones. \r\nMy concern is about switching from generated comparer to string keys. Perhaps @lzybkr and @KirkMunro could add more info.",
+      "created_at": "2019-12-02T04:47:32Z",
+      "updated_at": "2019-12-02T04:47:32Z"
+    },
+    {
+      "author": "heaths",
+      "author_association": "CONTRIBUTOR",
+      "body": "A generated comparer could still work if it implements or works like `IEqualityComparer<T>`, which can still be used for maps. A string key in my implementation was a quick and simple little hack that has so far worked, but it doesn't get nearly the use `select-object` does.",
+      "created_at": "2019-12-03T01:23:04Z",
+      "updated_at": "2019-12-03T01:23:04Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "I just noticed the same behavior: **`Select-Object -Unique`** stalls the pipeline for no reason:\r\n\r\n```PowerShell\r\n1,2,3,1,4 | ForEach-Object {Write-Host 'In:' $_; $_} |\r\nSelect-Object -Unique | ForEach-Object {Write-Host 'Out:' $_}\r\nIn: 1\r\nIn: 2\r\nIn: 3\r\nIn: 1\r\nIn: 4\r\nOut: 1\r\nOut: 2\r\nOut: 3\r\nOut: 4\r\n```\r\n\r\nWhere I would expect it to return in this order:\r\n```PowerShell\r\nIn: 1\r\nOut: 1\r\nIn: 2\r\nOut: 2\r\nIn: 3\r\nOut: 3\r\nIn: 1\r\nIn: 4\r\nOut: 4\r\n```\r\n\r\nRelated to StackOverflow question: [Which way is better in PowerShell and why](https://stackoverflow.com/q/61322502/1701026)",
+      "created_at": "2020-04-21T18:27:54Z",
+      "updated_at": "2020-04-21T18:31:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@iRon7 It is easy to implement. Do you want pull PR?\r\n\r\nAlso we could cache a comparer in the code - while we get objects with the same type from pipeline we will get a perf win.",
+      "created_at": "2020-04-22T05:57:28Z",
+      "updated_at": "2020-04-22T05:57:28Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@iSazonov, I think I might say that I some knowledge of PowerShell itself and programming in general, but I am still learning C# and haven't pulled any PR so far. I am afraid this is above my head.\r\nAnyways, I am happy to investigate this a little deeper presuming that the first step for me is to get familiar with the processes behind this: see e.g. if I can compile a new `Select-Object` and run the related tests.\r\nCan you point me to a general instruction of what processes I should follow?",
+      "created_at": "2020-04-22T10:10:13Z",
+      "updated_at": "2020-04-25T10:33:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@iRon7 \r\n>  I am still learning C#\r\n\r\nI started from level zero. I liked C # and I was looking for a project where I could benefit. I chose this project because it is a high-quality code and the best experts. In these conditions, training is happening rapidly. I started by monitoring PRs. This provided an understanding of the process, style and key points. When you try to understand changes in a PR, it educates great. After that, you begin code review and commenting. You can spend it 5 minutes or an hour a day for your pleasure. Then you can try to prepare the environment and compile the project. But first you have to read documents in the repo. They can be outdated and you can update them in your first PRs to get experience with contributing process and git. This is my experience.\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-04-22T13:24:49Z",
+      "updated_at": "2020-04-22T13:24:49Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@iRon7 I'd start from here: https://github.com/PowerShell/PowerShell/blob/master/README.md#building-the-repository\r\n\r\nOnce you can get it built, you can find most common commands in the `src` folder, sorted into subfolders based on which module they're part of. I believe `Select-Object` is in `Microsoft.PowerShell.Utility` so you should be able to find it in that folder. _Most_ commands are named `VerbNounCommand` so I'd start looking for `SelectObjectCommand`, but there are some exceptions, so you might just want to search for `SelectObject` and see where that gets you. \r\n\r\nYou can sometimes find things searching the PS cmdlet name in full `Select-Object`, but that will typically only appear in documentation comments more than anything, so you might have trouble finding things using that.\r\n\r\nIf you're not used to C#, @iSazonov's suggestions will help a lot when it comes to getting familiar with it, but equally I'd say tinkering around with a cmdlet or two would also be a great way to get a feel for things.\r\n\r\n---\r\n\r\nOn the most recent aspect of this issue specifically, where Select-Object seems to be waiting until the end of the pipeline to send off output when using `-Unique`, I'd think you can remedy that by simply outputting each object in `ProcessRecord`. It'll most likely be adding each unique object to some cached collection that it uses to ensure each object is unique, so you can build off of that by just outputting objects as they're added to the collection. Once that's working, just remember to remove the output in `EndProcessing` that most likely occurs when using `-Unique`, so you don't duplicate the output.\r\n\r\n<blockquote><img src=\"https://repository-images.githubusercontent.com/49609581/96590180-07d7-11ea-89b1-2f719dc4bb9c\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShell\">PowerShell/PowerShell</a></strong></div><div>PowerShell for every system! Contribute to PowerShell/PowerShell development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2020-04-22T13:54:40Z",
+      "updated_at": "2020-04-22T13:54:54Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@iSazonov, @vexx32, thanks for sharing your experience (I have hidden my previous comment).\r\nIndeed, the [Contributing to PowerShell](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md) document was right in front of me but I simply overlooked it. It cascades to several other documents, some of them I am already familiar with, others not. As stated, I need to do some more investigation before I can grab this PR and need to start with some easier ones, like [Rule for the use of the command: [ScriptBlock]::Create `#1454`](https://github.com/PowerShell/PSScriptAnalyzer/issues/1454.).\r\nMy goal is to eventually pick this one up, but it might take quiet a while, therefore I do not want prevent anybody else to do so if it get any urgency.",
+      "created_at": "2020-04-25T10:41:06Z",
+      "updated_at": "2020-04-25T12:15:38Z"
+    },
+    {
+      "author": "GraphiteWingedBird",
+      "author_association": "NONE",
+      "body": "This is the closest issue I could find instead of opening a new one. Not only is `Select-Object` slower than it should be, but there is no documentation regarding the fact that the `Unique` switch is applied to output *AFTER* other parameters have been applied. Therefore if the input collection has more items than you're asking to be returned as output, the final number isn't guaranteed. To me this feels backward and the workaround of using two instances of `Select-Object` as shown below is inherently slow due to how it is implemented. See [PowerShell Select-Object: Using -Unique with First/Last/Skip/Index](https://stackoverflow.com/a/69577421/15243610) for additional details.\r\n\r\n**Recommendation:** Update documentation for how `Unique` interacts with `-First` / `-Last` / `-Skip` / `-Index` / `-SkipIndex` / `-SkipLast` parameters\r\n\r\n**If possible:** Change how `Select-Object` is implemented. I don't know exactly what this would look like, but using the pipeline is an advantage in my mind, yet whenever I'm working with large data sets I find myself avoiding the pipeline syntax in scripts. This is another example that I'll be using a workaround in a script instead of the pipeline\r\n\r\nAs an example of where documentation would be helpful, consider the following which I expected to return 3 unique items:\r\n\r\n```powershell\r\nPS > 1, 1, 2, 2, 3, 3, 4, 4, 5, 5 | Select-Object -Unique -First 3\r\n1\r\n2\r\n```\r\nA quick workaround is to use a second call to `Select-Object` to first get the `Unique` items and then select the `First` number. This approach is 1) Slow due to how `Select-Object` is implemented, and 2) undocumented as far as I can tell\r\n\r\n```powershell\r\nPS > 1, 1, 2, 2, 3, 3, 4, 4, 5, 5 | Select-Object -Unique | Select-Object -First 3\r\n1\r\n2\r\n3\r\n```",
+      "created_at": "2021-10-15T12:39:37Z",
+      "updated_at": "2021-10-15T12:39:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> **Recommendation:** Update documentation for how `Unique` interacts with `-First` / `-Last` / `-Skip` / `-Index` / `-SkipIndex` / `-SkipLast` parameters\r\n\r\nFeel free to open new issue in https://github.com/MicrosoftDocs/PowerShell-Docs\n\n<blockquote><img src=\"https://repository-images.githubusercontent.com/44411511/850abe80-7ca6-11e9-886f-a1b13b275ae0\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/MicrosoftDocs/PowerShell-Docs\">GitHub - MicrosoftDocs/PowerShell-Docs: The official PowerShell documentation sources</a></strong></div><div>The official PowerShell documentation sources. Contribute to MicrosoftDocs/PowerShell-Docs development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2021-10-15T15:58:12Z",
+      "updated_at": "2021-10-15T15:58:14Z"
+    },
+    {
+      "author": "GraphiteWingedBird",
+      "author_association": "NONE",
+      "body": "> > **Recommendation:** Update documentation for how `Unique` interacts with `-First` / `-Last` / `-Skip` / `-Index` / `-SkipIndex` / `-SkipLast` parameters\r\n> \r\n> Feel free to open new issue in https://github.com/MicrosoftDocs/PowerShell-Docs\r\n\r\n[Clarify that `-Unique` is applied to the output selected by `Select-Object`'s other arguments](https://github.com/MicrosoftDocs/PowerShell-Docs/issues/8224#issue-1027595387)\n\n<blockquote><img src=\"https://repository-images.githubusercontent.com/44411511/850abe80-7ca6-11e9-886f-a1b13b275ae0\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/MicrosoftDocs/PowerShell-Docs\">GitHub - MicrosoftDocs/PowerShell-Docs: The official PowerShell documentation sources</a></strong></div><div>The official PowerShell documentation sources. Contribute to MicrosoftDocs/PowerShell-Docs development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2021-10-15T19:12:33Z",
+      "updated_at": "2021-10-15T19:12:35Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@GraphiteWingedBird,\r\n\r\n> **If possible:** Change how `Select-Object` is implemented.\r\n\r\nIf there is any expectation to change the `Select-Object` cmdlet to your expectation (which to my opinion does indeed make more sense), I recommend you to open a new (bug report) issue. As your issue differs from the original issue in the fact that is will be a [breaking change](https://en.wiktionary.org/wiki/breaking_change).",
+      "created_at": "2021-10-16T15:30:37Z",
+      "updated_at": "2021-10-16T15:30:37Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@vexx32,\r\n\r\n> I'd start from here ...\r\n\r\nThanks for the heads up, but I think I need to be fair in saying that it is to far outside my comfortzone and there are to many other things within (comfortzone) were I also like to contribute. Besides, I started with a new job this month. Meaning, that you should count on me for implementing this as it will probably never happen.",
+      "created_at": "2021-10-17T11:00:05Z",
+      "updated_at": "2021-10-17T11:00:05Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "Just a quick (PowerShell) alternative for selecting objects with a specific unique property that respects the pipeline (meaning faster and less exhaustive):\r\n\r\n```PowerShell\r\n$HashSet = [System.Collections.Generic.HashSet[String]]::new()\r\nget-childitem . -recurse |Where-Object { $HashSet.Add($_.Name) }\r\n```\r\n\r\n",
+      "created_at": "2021-12-02T13:49:05Z",
+      "updated_at": "2021-12-02T13:49:05Z"
+    },
+    {
+      "author": "GraphiteWingedBird",
+      "author_association": "NONE",
+      "body": "Solid example @iRon7 - there are a few other examples including a LINQ solution on [Stackoverflow here](https://stackoverflow.com/a/69577421/15243610).\r\n\r\nIf anyone happens here and wants to use a `HashSet` or some alternative thereof, here are a few other examples or variations depending on your mood.\r\n\r\nIt should also be noted that for string comparisons, `Select-Object` is unexpectedly case-sensitive: [Select-Object -unique is inconsistently case sensitive](https://github.com/PowerShell/PowerShell/issues/12059)\r\n\r\nOnto an example or two - consider the fact that `Where-Object` is just a special implementation of `ForEach-Object` that returns the pipeline object if it is true, especially if you're using a script block instead of a comparison statement. With this in mind - it is somewhat clunky to explicitly return `$_`, but you can use `ForEach-Object` and create your `HashSet` in the `-Begin` block. _However_, due to [issue #7930](https://github.com/PowerShell/PowerShell/issues/7930), you cannot free-up memory by removing the `HashSet` in an `-End` block.\r\n```pwsh\r\n#iRon7's example using case insensitive string comparisons\r\n$HashSet = [System.Collections.Generic.HashSet[String]]::New([StringComparer]::InvariantCultureIgnoreCase)\r\nGet-ChildItem . -Recurse | Where-Object { $HashSet.Add($_.Name) }\r\n\r\n#Swapping Where-Object to ForEach-Object\r\nGet-ChildItem . -Recurse | ForEach-Object -Begin { $HashSet = [System.Collections.Generic.HashSet[String]]::New([StringComparer]::InvariantCultureIgnoreCase) } -Process { If ($HashSet.Add($_.Name)) { $_ } }\r\n\r\n#Getting wild with a direct invocation to script blocks instead of ForEach-Object\r\nGet-ChildItem . -Recurse | . { begin { $HashSet = [System.Collections.Generic.HashSet[String]]::New([StringComparer]::InvariantCultureIgnoreCase) } process { If ($HashSet.Add($_.Name)) { $_ } } }\r\n```\r\n\r\nDefinitely worth checking out [this blog](https://powershell.one/tricks/performance/pipeline) and [Issue #10982](https://github.com/PowerShell/PowerShell/issues/10982) on why the last example might be speedy.\r\n\r\nOverall, the contrived example using `Get-ChildItem` probably isn't the most realistic scenario - but `Select-Object` definitely has a few problems that have been noted:\r\n\r\n- `-Unique` is applied after other switches which means you might not get the total number of results you're expecting\r\n- `Select-Object`'s case sensitivity isn't consistent and the opposite of what you would expect (and get with `Sort-Object`)",
+      "created_at": "2021-12-02T16:37:08Z",
+      "updated_at": "2021-12-02T16:37:08Z"
+    },
+    {
+      "author": "ImportTaste",
+      "author_association": "NONE",
+      "body": "> ```powershell\r\n> #Getting wild with a direct invocation to script blocks instead of ForEach-Object\r\n> Get-ChildItem . -Recurse | . { begin { $HashSet = [System.Collections.Generic.HashSet[String]]::New([StringComparer]::InvariantCultureIgnoreCase) } process { If ($HashSet.Add($_.Name)) { $_ } } }\r\n> ```\r\n> \r\n> Definitely worth checking out [this blog](https://powershell.one/tricks/performance/pipeline) and [Issue #10982](https://github.com/PowerShell/PowerShell/issues/10982) on why the last example might be speedy.\r\n\r\nThe blog suggests that the `&` call operator is faster than using dot sourcing, is there a reason you went with that instead? Or was it just an oversight?",
+      "created_at": "2022-01-01T19:03:43Z",
+      "updated_at": "2022-01-01T19:03:43Z"
+    },
+    {
+      "author": "GraphiteWingedBird",
+      "author_association": "NONE",
+      "body": "In this weird example, using `&` might have been better, but in general dot-sourcing would be more akin to a translation of what `ForEach-Object` is doing. Since we don't care about the value of `$HashSet` and would eventually want to free up the memory there, the call operator would have made sense.\r\n\r\nI'm not sure I recall the blog comparing dot-sourcing to the call operator, as they're different operations; but should be comparable in performance. The simple difference is easy to see with something like:\r\n\r\n```\r\n1..5 | . { begin { $FirstVal = $_ ; \"First Value was $($FirstVal)\" } process { \"Current number is: $($_)\" } } | Select-Object -First 2\r\n\r\n1..5 | & { begin { $FirstVal = $_ ; \"First Value was $($FirstVal)\" } process { \"Current number is: $($_)\" } } | Select-Object -First 2\r\n```\r\n\r\nGive each of those a whirl and check $FirstVal when you're done. For me, I'm often updating a variable (hashtable, custom object, anything really) within the `ForEach` loop structure and I need that variable beyond a pipeline one-liner, so dot-sourcing works well a lot of the time and is a more direct translation of what `ForEach-Object` is doing",
+      "created_at": "2022-01-02T13:19:12Z",
+      "updated_at": "2022-01-02T13:19:12Z"
+    },
+    {
+      "author": "dkaszews",
+      "author_association": "CONTRIBUTOR",
+      "body": "Duplicate of https://github.com/PowerShell/PowerShell/issues/7707",
+      "created_at": "2022-08-23T19:08:28Z",
+      "updated_at": "2022-08-23T19:08:28Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as duplicate and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-08-25T05:01:20Z",
+      "updated_at": "2022-08-25T05:01:20Z"
+    }
+  ],
+  "created_at": "2019-11-30T17:15:11Z",
+  "number": 11221,
+  "state": "closed",
+  "title": "Select-Object -Unique is unnecessary slow and exhaustive",
+  "updated_at": "2022-08-25T05:29:13Z"
+}

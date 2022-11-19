@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5390",
+  "author": "sdecker",
+  "body": "The steps to reproduce is difficult but we have wasted multiple man days chasing issues with Import-Module/Import-LocalizedData with servers running En-GB culture. We've seen it with smbshare and powershell.archive. An example of the issue is captured in https://github.com/PowerShell/PowerShell/issues/4180. While that bug was closed and the user told to file a bug in the Archive specific location the ultimate issue is with Import-LocalizedData or Import-Module. If a language specific localization is not found it MUST NOT fail to load the module. ",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The problem is that `import-module` doesn\u2019t know why the psm1 script failed, only that an error was thrown.  The issue is in the module.  I\u2019ll submit a PR to fix Archive module",
+      "created_at": "2017-11-09T06:10:10Z",
+      "updated_at": "2017-11-09T06:10:10Z"
+    },
+    {
+      "author": "sdecker",
+      "author_association": "NONE",
+      "body": "We've also seen this in the SmbShare. I'm sure we saw it with another module but it was a while ago and I'm having trouble finding. This has moved from an anomaly to a recurring problem. How is this not a Import-LocalizedData bug? Why is it throwing instead of warning?",
+      "created_at": "2017-11-09T15:16:44Z",
+      "updated_at": "2017-11-09T15:16:44Z"
+    },
+    {
+      "author": "sdecker",
+      "author_association": "NONE",
+      "body": "Another way to put this. Adding a work around to the Archive module is fixing the symptom not the disease. ",
+      "created_at": "2017-11-09T15:26:40Z",
+      "updated_at": "2017-11-09T15:26:40Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I gotta agree with @sdecker on this, @SteveL-MSFT -- if `Import-LocalizedData` _ever_ throws because the user is in a culture that the author hasn't thought of, that's makes `Import-LocalizedData` **_HARMFUL_** ...\r\n\r\nThe design of the module is that it has the *fallback* strings in a data section, and it's trying to call `Import-LocalizedData` to load *better* strings if they're available. Is that not the way `Import-LocalizedData` works?",
+      "created_at": "2017-11-09T16:15:44Z",
+      "updated_at": "2017-11-09T16:17:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I've updated the title to focus on `Import-LocalizedData`.  I'm open to discussing having some fallback capability to `Import-LocalizedData`.  ",
+      "created_at": "2017-11-09T18:02:19Z",
+      "updated_at": "2017-11-09T18:02:19Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "As I see it, the problem is two things:\r\n\r\n1. Import-LocalizedData writes an error when it can't find a localization\r\n2. Even benign errors break module dependency\r\n\r\nIf a module calls `Import-LocalizedData` _without suppressing the **inevitable** error_, that doesn't techincally stop the module from being imported and used. As a result, of _TWENTY THREE_ modules in $PSHome\\Modules which use Import-LocalizedData (on my Windows 10, PS5.1 system) **only two** use `-ErrorAction` to suppress the errors.  I don't know how many of these modules are actually localized, but if there's a betting pool, I'm taking ZERO.\r\n\r\nThis is a problem because if _another_ module or script specifies a dependency on any of these modules (e.g. via `RequiredModules` in the manifest or via `#requires -module` or just by calling `Import-Module -ErrorAction Stop` ... then those modules or scripts **break** whenever they are used in a locale that isn't explicitly localized.\r\n\r\nThe only reason I can think of that this hasn't come up before is that module authors basically never document their dependency on \"in the box\" modules, and nobody but Microsoft bothers to localize at all...\r\n\r\nIf I just use a cmdlet from a module with a localization problem, you'll see the localization error from the autoloading, but the cmdlet will run and produce results with no problems. It's only when I put the module in my RequiredModules or use a `#requires` that it causes a terminating error.",
+      "created_at": "2017-11-09T23:34:23Z",
+      "updated_at": "2017-11-09T23:34:23Z"
+    },
+    {
+      "author": "sdecker",
+      "author_association": "NONE",
+      "body": "My suggestion is that if it does not find a specific culture folder it throws a warning and does not terminate.",
+      "created_at": "2017-11-09T23:39:32Z",
+      "updated_at": "2017-11-09T23:39:32Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I should note that many of these modules (e.g.  Appx, BitLocker, etc) don't even have the fallback data section _in the file_ -- @sdecker has been lucky so far, Archive and SmbShare module do have default values in a data section, so this localization error isn't fatal to the module _except_ when the module import happens when `ErrorActionPreference` is set to Stop.  For these other modules like Appx and Bitlocker, the Import-LocalizedData failure will result in **further errors** whenever anything tries to access that LocalizedData.\r\n\r\nClearly Microsoft isn't setting a good example for how to localize modules, so there should be no surprise that nobody else is doing it.\r\n\r\nFrom my perspective, the most immediate change that would help would be for the help to be changed to highlight the fact that **when** the localization files are missing it **will** produce an error, and that the caller **really must decide how to handle that** and do _something_.  \r\n\r\nA single useful example should show _the right way_ to do it, combining the default data in _Example 5_ and error handling! Perhaps the example could turn the error into a warning that English messages will be used instead...",
+      "created_at": "2017-11-09T23:50:52Z",
+      "updated_at": "2017-11-09T23:50:52Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "If you want my 2c on a better long-term design for Import-LocalizedData:\r\n\r\n#### Make a Import-LocalizedStringData which:\r\n1. Doesn't have a `SupportedCommand` parameter\r\n2. Expects the file to have *just* the content that ConvertFrom-StringData supports\r\n3. Guarantees the output is a `[dictionary[string,string]]` rather than a hashtable\r\n\r\nString dictionaries are clearly the main use case for localization, the other features of Import-LocalizedData aren't generally used for translation, and they make it more complicated to use for it's **primary** purpose: almost every use of Import-LocalizedData has an internal ConvertFrom-StringData which would be unnecessary with Import-LocalizedStringData.\r\n\r\n4. Requires a `DefaultData` string dictionary parameter\r\n5. Guarantees that the output will have a value for every string in the DefaultData parameter\r\n\r\nThis would ensure that the command never needs to produce an error -- it can fall back to the DefaultData -- it would also allow _partial_ localizations to use the default strings for untranslated content.\r\n\r\n6. Has a fallback folder for localizations that is user-editable (e.g. in AppData or ~\\.config)\r\n7. Respects a PreferenceVariable for whether or not to generate a language file in the user location is no localized data is found for the current culture\r\n\r\nThis would allow knowledgeable users to easily produce translations for themselves, without waiting for Microsoft to get around to supporting UK English \ud83d\ude09 ",
+      "created_at": "2017-11-10T00:14:44Z",
+      "updated_at": "2017-11-10T00:14:44Z"
+    },
+    {
+      "author": "FriedrichWeinmann",
+      "author_association": "NONE",
+      "body": "Totally agree. This has been awkward for a long time and caused plenty of issues so far. Great write-up for a solution.",
+      "created_at": "2017-11-10T00:26:37Z",
+      "updated_at": "2017-11-10T00:26:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul I like your proposal and something we can look into for 6.1.0.  If we go that route, then we wouldn't make any changes to Import-LocalizedData.",
+      "created_at": "2017-11-10T01:12:59Z",
+      "updated_at": "2017-11-10T01:12:59Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed @SteveL-MSFT, given the varied uses of `Import-LocalizedData` [like mine](https://github.com/PoshCode/Configuration/blob/master/Source/Metadata.psm1#L326) for non-localization, and my count of the modules in `$PSHome` that wouldn't work _even if you made it warn_ instead of error -- I'd be reluctant to change it much -- especially to suppress an error which can already be suppressed with `-ErrorAction`\r\n\r\nFocus on improving the documentation, and on fixing whatever testing process is allowing you to release \"localized\" modules that crash on anything other than en-US -- and of course, on fixing the actual modules.  For now, I'm at the point where it's clearly problematic for us to add a dependency on any module that's localized.  \r\n\r\n## We currently work around the Archive module bug like this:\r\n\r\n```posh\r\nfunction DoNothing {}\r\nSet-Alias Import-LocalizedData DoNothing\r\nImport-Module Microsoft.PowerShell.Archive\r\nRemove-Alias Import-LocalizedData\r\nRemove-Item function:DoNothing\r\n```\r\n\r\nAlthough we could, arguably, use `$PSDefaultParameterValues` to force en-US instead (which might work for some of these other modules) ...",
+      "created_at": "2017-11-10T04:28:16Z",
+      "updated_at": "2017-11-10T04:28:16Z"
+    }
+  ],
+  "created_at": "2017-11-09T03:34:02Z",
+  "number": 5390,
+  "state": "open",
+  "title": "Add Import-LocalizedStringData cmdlet",
+  "updated_at": "2017-11-10T06:11:46Z"
+}

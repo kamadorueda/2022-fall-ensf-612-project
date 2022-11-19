@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8012",
+  "author": "KirkMunro",
+  "body": "If you create a Runspace and want to use OpenAsync to open that runspace asynchronously, while not continuing on to other code until the runspace opened _and_ initialized, it's not possible to do so. If instead of invoking OpenAsync, you invoke Open, that API won't return until after the runspace is both open and initialized with the initial session state.\r\n\r\nSteps to reproduce\r\n------------------\r\nhttps://stackoverflow.com/questions/17712240/why-does-runspace-openasync-ignore-initialsessionstate\r\n\r\nExpected behavior\r\n-----------------\r\nThere must be a way to use OpenAsync with an event handler that triggers TaskCompletionSource<>.TrySetResult once the initialization is complete.\r\n\r\nActual behavior\r\n---------------\r\nThis is not possible today.\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "The problem identified in this issue is the positioning of [this block of code](https://github.com/PowerShell/PowerShell/blob/53e6ec6eadc2f363fc671e96b34ade4dda3fe8eb/src/System.Management.Automation/engine/hostifaces/LocalConnection.cs#L681-L705).\r\n\r\nWhen a caller invokes Runspace.Open(), control is not returned back to the caller until that block of code has completed execution. Technically there's still an issue with this because the runspace enters the RunspaceState.Opened state and is assigned the RunspaceAvailability.Ready availability _before_ the session state is loaded, but it's less apparent with synchronous invocation.\r\n\r\nWhen a caller invokes Runspace.OpenAsync() instead, the only means they have of knowing when the runspace is ready are the Runspace.StateChanged and Runspace.AvailabilityChanged event handlers. As indicated in the previous paragraph, these events are raised prematurely ([line 677](https://github.com/PowerShell/PowerShell/blob/53e6ec6eadc2f363fc671e96b34ade4dda3fe8eb/src/System.Management.Automation/engine/hostifaces/LocalConnection.cs#L677)), before the initial session state is loaded (which can take some time).\r\n\r\n@iSazonov Can you please put this issue in front of the PowerShell Team and ask them what they would like done here? The way I see it there are a few options:\r\n\r\n1. Move the line that raises the events _after_ the initial session state is loaded.\r\n1. Have the runspace enter a busy state while the initial session state is loaded and then a ready state once the initial session state has finished loading (thus having two events fired).\r\n1. Have additional events added indicating when a runspace begins and finishes loading the initial session state, and then mark the runspace as ready again once the initial session state is finished loading (new events fired, returning to the expected state before completion).\r\n\r\nI think the cleanest approach (and most accurate) is the first of these options.",
+      "created_at": "2018-10-12T17:48:55Z",
+      "updated_at": "2018-10-12T17:49:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay @lzybkr Could you please clarify the OpenAsync behavior? Is it by design or a bug?",
+      "created_at": "2018-10-15T04:02:53Z",
+      "updated_at": "2018-10-15T04:02:53Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just FYI, I found a workaround, but I'm not sure it's a reliable one, and still feels like a design flaw or a bug to me.\r\n\r\nThe workaround is to add an event handler to the Runspace instance AvailabilityChanged member, and in the event handler monitor for the 2nd time that the runspace enters the Available state. In my case, my initial session state is only being used to identify a module I want loaded, so when the runspace is opened asynchronously, it becomes available after the initial work to open the runspace completes, then enters a busy state while the module loads, and then becomes available again once the module has finished loading.\r\n\r\nThe reason this isn't reliable is because the number of events you would need to skip would change depending on the number of things you were loading into the runspace as part of the initial session state, which is why I would like to instead submit a PR that corrects this so that you can simply be notified once the runspace is actually ready (created and initial session state processed), assuming you agree with whatever change should be made.",
+      "created_at": "2018-10-15T14:45:04Z",
+      "updated_at": "2018-10-16T14:25:22Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @SteveL-MSFT ",
+      "created_at": "2018-10-16T04:19:42Z",
+      "updated_at": "2018-10-16T04:19:42Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Technically, the runspace is Opened, but if InitialSessionState is not complete it's limited.  I wonder if it's better to add a new state `Ready` after ISS is complete instead of changing current behavior.  cc @BrucePay @daxian-dbw ",
+      "created_at": "2018-10-18T01:46:56Z",
+      "updated_at": "2018-10-18T01:46:56Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've been thinking about this issue a lot since I posted the questions/thoughts earlier, and it's a challenging one to fix. I don't think that setting the runspace state to Opened can be deferred until post initialSessionState setup, because logic in PowerShell requires that a runspace state be opened before commands can be invoked, so it's a chicken and egg problem because initialSessionState may contain startup scripts that need the runspace state to be Opened. At the same time, technically the current behavior could be seen as broken because you could receive an event indicating that the runspace is open/available and start doing work while the initial session state starts deploying, and I don't know what would happen with that.\r\n\r\n@SteveL-MSFT: A new state of Ready also comes with challenges, as it would have to be added to checks for Opened throughout the system, and external tools may break if they are depending on checking for an Opened state.\r\n\r\nMy most recent thinking on this has been a new enumeration (named something like RunspaceSessionState, to match the InitialSessionState naming, with None, Initializing and Initialized as values) combined with an additional event handler, that would only be used if a runspace was being loaded with an initial session state. That would cover all bases, allowing the existing logic that depends on RunspaceState.Opened to work as it does now, while providing an enumeration for developers who are deploying an initial session state and want to be notified when that deployment has finished. I believe that is a risk-free approach that makes sense with what is being done while opening the door to another PR I will put in place once this issue is properly addressed, allowing OpenAsync to truly function like modern async methods, returning a task so that it can be properly awaited regardless of what you are doing in your runspace.\r\n\r\nLooking forward to your thoughts on this one (ideally soon, I'd really like to jump on this quickly before I go on vacation, but I understand that folks are travelling to/from the Asia PS conference right now, so my expectations are set accordingly).",
+      "created_at": "2018-10-18T14:39:37Z",
+      "updated_at": "2018-10-18T14:44:56Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee agrees that for OpenAsync() the client should know when the RunSpace is available to be used.  The problem today is that the RunSpace becomes Available and module loading starts so it becomes Busy immediately before becoming Available again.  Given the current code, major work would be needed to support this because it was not initially designed to have initialization scripts.  We welcome any RFC to propose a solution to this problem.",
+      "created_at": "2019-01-23T23:48:42Z",
+      "updated_at": "2019-01-23T23:48:42Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "This issue just came up again, this time for remote runspaces. When you launch a remote runspace, if you wait for the runspace to be in an `Opened` state, and then immediately start invoking APIs against that remote runspace, such as MS-PSRDP APIs, the remote runspace may not (intermittent, depends on timing) be ready to receive those requests. The end result is a hang that can take 30 minutes before it times out. This is another example where asynchronous processing of runspaces when they are first launched can cause issues, depending on what is done after the runspace enters the `Opened` state.\r\n\r\nI'm happy to write up an RFC if that's really necessary, but would like to hash out some ideas here first, since you have more historic background and knowledge behind this, and the right solution for this is not that obvious. \r\n\r\nA few points that are worth calling out up front:\r\n\r\n- Extending `RunspaceState` and `RunspacePoolState` to include a `Ready` state (or any other lifecycle state for that matter) may break existing tools and should be avoided.\r\n- What external tooling really needs to know is when they can invoke PowerShell commands against the runspace, and they can't know that without knowing whether or not a runspace's initialization is complete.\r\n\r\nMaybe all that is needed is the addition of an `Initialized` public property on both `Runspace` and `RunspacePool` classes that is set to true once the initialization is complete, along with a corresponding `InitializedChanged` event handler so that async tools could do their work once a runspace has initialized rather than once a runspace has opened.\r\n\r\nAs an alternative, we could have a `PSReadiness` enumeration that has values of `None`, `Initialized`, `Available`, `Busy`. This enumeration would be exposed via a property with the same name on `Runspace` and `RunspacePool`, would have event handlers to allow tool builders to monitor for changes, and internally it would not enter `Available` or `Busy` states until initialization was complete, allowing tools to know with confidence when a `Runspace`/`RunspacePool`  will allow PowerShell to be invoked against it via the SDK.\r\n\r\nBoth of these approaches are relatively simple, additive and non-breaking. Existing tools can update to whatever we go with to support stable approach to async processing of runspaces when they are ready to do so, and new tools have something that would work for them from the start.\r\n\r\nPlease share your thoughts when you have time @BrucePay and @daxian-dbw.",
+      "created_at": "2019-08-12T16:48:41Z",
+      "updated_at": "2019-08-12T16:48:41Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@KirkMunro FYI - we're updating our RFC guidance to recommend discussing design ideas as issues first and coming to some general agreement before taking the time to author an RFC",
+      "created_at": "2019-08-13T16:23:39Z",
+      "updated_at": "2019-08-13T16:23:39Z"
+    }
+  ],
+  "created_at": "2018-10-12T16:15:08Z",
+  "number": 8012,
+  "state": "open",
+  "title": "Impossible to open Runspace using OpenAsync and return after initial session state is loaded",
+  "updated_at": "2019-08-13T16:23:40Z"
+}

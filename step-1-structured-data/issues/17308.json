@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17308",
+  "author": "Sjark",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\nWe are parsing multiple powershell scripts in parallel using Parser.ParseInput but are having issues with perf when the scrips being parsed includes multiple [ordered] attributes/types.\r\n\r\nThe parser starts to use 100% cpu, and it takes a long time for the parsing to complete.\r\n\r\n[Repro here](https://github.com/Sjark/PowershellParsingIssue)\r\n\r\nThe console app above has 2 identical powershell scripts included, the only difference is that on of them has a bunch of [ordered] before the hashtable assignments.\r\n\r\nThe one without [ordered] completes almost instantly, while the one with [ordered] takes some time and uses a lot of cpu.\r\n\r\n### Expected behavior\r\n\r\n```console\r\nParsing to complete in about the same time with both scripts.\r\n```\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\nParsing takes a lot longer and uses a lot more resources when the script includes [ordered].\r\n```\r\n\r\n\r\n### Error details\r\n\r\nThe error seems to be related to `LookForTypeInAssemblies` method within the TypeResolver.cs:68\r\n\r\nEvery time it finds a [ordered] in the script it goes through all loaded assemblies to try and find the matching type, but since [ordered] is not actually a type (just a helper for creating `System.Collections.Specialized.OrderedDictionary`) the method returns null, and will search again the next time it finds an [ordered] attribute.\r\n\r\nI think there should either be a cache for types that did not match any assemblies, so that it doesn't have to look through the same assemblies for the same type multiple times, or there should be a special case for [ordered] so that it does not even try to search through the assemblies for it.\r\n\r\n\r\n### Environment data\r\n\r\n```powershell\r\nWe are using nuget package: System.Management.Automation version 7.2.3\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n_No response_",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "My general understanding is that `[ordered]` is one of the standard type accelerators, so it should be resolved almost immediately in terms of type lookup. Also, it's not even a real type, afaik it's just a parser trick to tell PowerShell to build the resulting dictionary completely differently (since if it was built the normal way and _then_ cast, the resulting dictionary would not retain the original order in the script).\r\n\r\nFlagging this for WG-Engine to have a look at.",
+      "created_at": "2022-05-11T23:05:52Z",
+      "updated_at": "2022-05-11T23:05:52Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Believe it or not, there's no actual type accelerator associated. I would have thought that the compiler would skip type resolution for it though, since it doesn't actually use the resolution at all.\r\n\r\nAdding a type accelerator to `OrderedDictionary` would likely solve this problem, and also ease a ton of confusion around this pseudo keyword",
+      "created_at": "2022-05-12T15:07:43Z",
+      "updated_at": "2022-05-12T15:07:43Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Oh, yeah? Interesting. I would also have expected it to simply skip the type resolution completely, since it's... not intended to be a type in itself. \ud83e\udd14 \r\n\r\nEven if you define a type called `[ordered]` in the current session, it still doesn't get _used_ for an `[ordered]@{ ... }` expression, so it's very odd to me that type lookup would ever be implicated. For example:\r\n\r\n```ps1\r\nPS> class ordered {ordered([hashtable]$d) { }}\r\nPS> $a = [ordered]@{ a = 1; b = 2 }\r\nPS> $a\r\n\r\nName                           Value\r\n----                           -----\r\na                              1\r\nb                              2\r\n\r\nPS> $a.GetType().FullName\r\nSystem.Collections.Specialized.OrderedDictionary\r\n```\r\n\r\nAlso... a type simply named \"ordered\" is actually _unusable_ because of how the parser handles `[ordered]`:\r\n\r\n```ps1\r\nPS> $b = [ordered]$a\r\nParserError:\r\nLine |\r\n   1 |  $b = [ordered]$a\r\n     |      ~~~~~~~~~~~\r\n     | The ordered attribute can be specified only on a hash literal node.\r\n```\r\n\r\nSo it's... really weird... that `[ordered]` in this position does _any_ type lookups whatsoever.\r\n\r\nSidenote: you _can_ use a type named `[ordered]` with `-as` (`$a -as [ordered]`), but it's entirely unusable for a direct cast.",
+      "created_at": "2022-05-12T17:56:33Z",
+      "updated_at": "2022-05-12T18:11:06Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I think there are 2 problems worth discussing here:\r\n1. `[ordered]` is treated as a special attribute solely for the syntax `[ordered] + <literal hash table>`. Is that something we want to change?\r\n2. more generally, shall we optimize the parser to not keep attempting to resolve a type name when it cannot be resolved?\r\n\r\nThere could be another repro for this issue: I'm using the type name `[sometypename]` in my script at tons of places, but the type is not available until at run time -- a call to `Add-Type` or `Import-Module` will load the assembly containing that type. Parsing the script will experience the same slowness.",
+      "created_at": "2022-05-12T18:22:53Z",
+      "updated_at": "2022-05-12T18:22:53Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I think there are 2 problems worth discussing here:\r\n> \r\n> 1. `[ordered]` is treated as a special attribute solely for the syntax `[ordered] + <literal hash table>`. Is that something we want to change?\r\n\r\nI think it would be reasonable to make it an actual type accelerator and have fall back logic like we already do for `[pscustomobject]`. Maybe not fall back as that might lead to confusion that we already face with `[pscustomobject]` outside of compiler recognized scenarios. But we can at least make it resolvable.\r\n\r\n> 2. more generally, shall we optimize the parser to not keep attempting to resolve a type name when it cannot be resolved?\r\n> \r\n> There could be another repro for this issue: I'm using the type name `[sometypename]` in my script at tons of places, but the type is not available until at run time -- a call to `Add-Type` or `Import-Module` will load the assembly containing that type. Parsing the script will experience the same slowness.\r\n\r\nI think the second part answers the first part here \ud83d\ude41. We can't actually know if a type will *never* be resolvable.\r\n\r\nThat said, I'm not really sure why type resolution isn't done lazily outside of classes. Does the parser really care what the true type is?\r\n\r\n",
+      "created_at": "2022-05-12T19:48:08Z",
+      "updated_at": "2022-05-12T19:48:08Z"
+    },
+    {
+      "author": "Sjark",
+      "author_association": "NONE",
+      "body": "> Believe it or not, there's no actual type accelerator associated. I would have thought that the compiler would skip type resolution for it though, since it doesn't actually use the resolution at all.\r\n> \r\n> Adding a type accelerator to `OrderedDictionary` would likely solve this problem, and also ease a ton of confusion around this pseudo keyword\r\n\r\nWould a type accelerator be able to initialize the OrderedDictionary, then add the items of the hashtable?\r\n\r\nJust replacing `[ordered]` with `[System.Collections.Specialized.OrderedDictionary]` works fine with empty hashtable `@{ }`, but if the hashtable contains multiple properties, it will fail to cast the hashtable to OrderedDictionary",
+      "created_at": "2022-05-12T19:51:06Z",
+      "updated_at": "2022-05-12T19:51:06Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Would a type accelerator be able to initialize the OrderedDictionary, then add the items of the hashtable?\r\n\r\nIt wouldn't change runtime behavior of anything that currently works. It just makes the type resolvable. The compiler specifically checks for the literal text `ordered`, and doesn't actually try to resolve it (unlike the parser apparently).",
+      "created_at": "2022-05-12T19:56:07Z",
+      "updated_at": "2022-05-12T19:56:07Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> I think the second part answers the first part here \ud83d\ude41. We can't actually know if a type will never be resolvable.\r\n\r\nBut can we know if a type will never be resolvable at parsing time only? What would cause new types available at parsing time? PowerShell classes are already taken care of when resolving symbols, and `using module/assembly` can only appear at the beginning of a script.",
+      "created_at": "2022-05-12T20:03:39Z",
+      "updated_at": "2022-05-12T20:03:39Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "WG-Engine discussed this one today (5/12/2022).\r\n> 1. `[ordered]` is treated as a special attribute solely for the syntax `[ordered] + <literal hash table>`. Is that something we want to change?\r\n> 2. more generally, shall we optimize the parser to not keep attempting to resolve a type name when it cannot be resolved?\r\n\r\n~To the 1st question, we think it's a good idea to make `[ordered]` a true type accelerator for `[System.Collections.Specialized.OrderedDictionary]` and remove the parser code that restricts `[ordered]` to only be used before a literal Hashtable. We believe this will help making the `[ordered]` type less special and more consistent with `[pscustomobject]`.~ Addressed by https://github.com/PowerShell/PowerShell/pull/17804\r\n\r\nTo the 2nd question, the same performance degradation would happen to another non-resolvable type name in the script, so it would be nice to resolve this perf issue in the root -- not looking up a non-resolvable type name multiple times during parse would provide a significant boost to performance.",
+      "created_at": "2022-05-12T22:00:57Z",
+      "updated_at": "2022-08-03T18:11:19Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "#17328 was merged to mitigate the perf issue regarding `[ordered]` specifically:\r\n> This alone cuts the wallclock time for parsing `[ordered]@{}` compared to `[nonexisting]@{}` by 45-50%:",
+      "created_at": "2022-05-17T16:55:35Z",
+      "updated_at": "2022-05-17T16:55:35Z"
+    },
+    {
+      "author": "Sjark",
+      "author_association": "NONE",
+      "body": "Thanks for the quick fix. I guess this will be included in the next version of System.Management.Automation package (7.2.5)? If so, do you have any target date for that release?",
+      "created_at": "2022-05-17T21:58:29Z",
+      "updated_at": "2022-05-17T21:58:29Z"
+    }
+  ],
+  "created_at": "2022-05-11T07:37:18Z",
+  "number": 17308,
+  "state": "open",
+  "title": "High cpu usage when parsing scripts that include [ordered]",
+  "updated_at": "2022-08-03T18:11:19Z"
+}

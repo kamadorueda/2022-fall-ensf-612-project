@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10408",
+  "author": "KirkMunro",
+  "body": "This is related to a longstanding issue with PowerShell that recently was brought up in a discussion on [PowerShell/PowerShell-RFC#215](https://github.com/PowerShell/PowerShell-RFC/pull/215).\r\n\r\nConsider the following 10 object types:\r\n\r\n`System.Management.Automation.DebugRecord`\r\n`System.Management.Automation.InformationRecord`\r\n`System.Management.Automation.VerboseRecord`\r\n`System.Management.Automation.WarningRecord`\r\n`Deserialized.System.Management.Automation.DebugRecord`\r\n`Deserialized.System.Management.Automation.VerboseRecord`\r\n`Deserialized.System.Management.Automation.WarningRecord`\r\n`System.Exception`\r\n`System.Management.Automation.ErrorRecord`\r\n`System.Management.Automation.ScriptBlock`\r\n\r\nWhen you are working with any of those types as _captured data_ (i.e. not as data that is streamed something other than standard output, but as something that you captured in a variable and are outputting in your terminal), if you pipe an instance of any of those types to `Format-Table`, `Format-List`, `Format-Wide`, or `Format-Custom`, you will still be presented with their default (custom) format unless you use the `-Force` parameter that is common to the `Format-*` cmdlets.\r\n\r\nThis behaviour, which has been in PowerShell since version 1, is unexpected. If you pipe data to a specific `Format-*` cmdlet, you expect that data to be shown in that format without having to `-Force` it.\r\n\r\nThe problem with `OutOfBand` is that the way PowerShell is programmed today, the `-Force` parameter is required to override the `OutOfBand` default output for a given type. That behaviour is the crux of this issue.\r\n\r\nI'm currently investigating what can be done, if anything, to allow these types to use the requested format without requiring `-Force`.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nfunction Test-FormatScriptBlock {\r\n    [CmdletBinding()]\r\n    param()\r\n    Write-Verbose -Verbose -Message 'This function outputs a bunch of OutOfBand types.'\r\n    {Write-Output 'This is a script block'}\r\n    Write-Warning 'This might not function quite the way you think'\r\n    Get-Process -Id 1234321231\r\n    Write-Debug -Debug -Message 'Debugging is fun!'\r\n    {'This is another script block'}\r\n}\r\n\r\nfunction Test-FormatError {\r\n    [CmdletBinding()]\r\n    param()\r\n    Get-Item -LiteralPath DoesNotExist -ErrorVariable myError -ErrorAction SilentlyContinue\r\n    Write-Information -MessageData 'This outputs an error.' -InformationAction Continue\r\n    $myError\r\n    Write-Information -MessageData 'All done.' -InformationAction Continue\r\n}\r\n\r\nTest-FormatScriptBlock | Format-List *\r\nTest-FormatError | Format-List *\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nVERBOSE: This function outputs a bunch of OutOfBand types.\r\n\r\nAttributes      : {}\r\nFile            :\r\nIsFilter        : False\r\nIsConfiguration : False\r\nModule          :\r\nStartPosition   : System.Management.Automation.PSToken\r\nDebuggerHidden  : False\r\nId              : 012350e3-0d0f-4922-b9f2-eef17544e2a3\r\nAst             : {Write-Output 'This is a script block'}\r\n\r\nWARNING: This might not function quite the way you think\r\nGet-Process : Cannot find a process with the process identifier 1234321231.\r\nAt line:7 char:5\r\n+     Get-Process -Id 1234321231\r\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (1234321231:Int32) [Get-Process], ProcessCommandException\r\n+ FullyQualifiedErrorId : NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand\r\n\r\nDEBUG: Debugging is fun!\r\nAttributes      : {}\r\nFile            :\r\nIsFilter        : False\r\nIsConfiguration : False\r\nModule          :\r\nStartPosition   : System.Management.Automation.PSToken\r\nDebuggerHidden  : False\r\nId              : 3af7b1c9-ba29-4155-87cd-925f9108f53b\r\nAst             : {'This is another script block'}\r\n\r\nThis outputs an error.\r\n\r\nPSMessageDetails      :\r\nException             : System.Management.Automation.ItemNotFoundException: Cannot find path 'DoesNotExist' because it does not exist.\r\n                           at System.Management.Automation.LocationGlobber.ResolveDriveQualifiedPath(String path, CmdletProviderContext context, Boolean allowNonexistingPaths, CmdletProvider& providerInstance) in\r\n                        C:\\Users\\poshoholic\\source\\repos\\PowerShell\\src\\System.Management.Automation\\namespaces\\LocationGlobber.cs:line 559\r\n                           at System.Management.Automation.LocationGlobber.GetGlobbedMonadPathsFromMonadPath(String path, Boolean allowNonexistingPaths, CmdletProviderContext context, CmdletProvider& providerInstance) in\r\n                        C:\\Users\\poshoholic\\source\\repos\\PowerShell\\src\\System.Management.Automation\\namespaces\\LocationGlobber.cs:line 218\r\n                           at System.Management.Automation.LocationGlobber.GetGlobbedProviderPathsFromMonadPath(String path, Boolean allowNonexistingPaths, CmdletProviderContext context, ProviderInfo& provider, CmdletProvider&\r\n                        providerInstance) in C:\\Users\\poshoholic\\source\\repos\\PowerShell\\src\\System.Management.Automation\\namespaces\\LocationGlobber.cs:line 779\r\n                           at System.Management.Automation.SessionStateInternal.GetItem(String[] paths, CmdletProviderContext context) in\r\n                        C:\\Users\\poshoholic\\source\\repos\\PowerShell\\src\\System.Management.Automation\\engine\\SessionStateItem.cs:line 130\r\n                           at System.Management.Automation.ItemCmdletProviderIntrinsics.Get(String path, CmdletProviderContext context) in\r\n                        C:\\Users\\poshoholic\\source\\repos\\PowerShell\\src\\System.Management.Automation\\engine\\ItemCmdletProviderInterfaces.cs:line 202\r\n                           at Microsoft.PowerShell.Commands.GetItemCommand.ProcessRecord() in C:\\Users\\poshoholic\\source\\repos\\PowerShell\\src\\Microsoft.PowerShell.Commands.Management\\commands\\management\\Navigation.cs:line 1969\r\nTargetObject          : DoesNotExist\r\nCategoryInfo          : ObjectNotFound: (DoesNotExist:String) [Get-Item], ItemNotFoundException\r\nFullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetItemCommand\r\nErrorDetails          :\r\nInvocationInfo        : System.Management.Automation.InvocationInfo\r\nScriptStackTrace      : at Test-FormatError, <No file>: line 4\r\n                        at <ScriptBlock>, <No file>: line 1\r\nPipelineIterationInfo : {0, 1}\r\n\r\nAll done.\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nVERBOSE: This function outputs a bunch of OutOfBand types.\r\nWrite-Output 'This is a script block'\r\nWARNING: This might not function quite the way you think\r\nGet-Process : Cannot find a process with the process identifier 1234321231.\r\nAt line:7 char:5\r\n+     Get-Process -Id 1234321231\r\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (1234321231:Int32) [Get-Process], ProcessCommandException\r\n+ FullyQualifiedErrorId : NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand\r\n\r\nDEBUG: Debugging is fun!\r\n'This is another script block'\r\n\r\nThis outputs an error.\r\nGet-Item : Cannot find path 'DoesNotExist' because it does not exist.\r\nAt line:4 char:5\r\n+     Get-Item -LiteralPath DoesNotExist -ErrorVariable myError -ErrorA ...\r\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : ObjectNotFound: (DoesNotExist:String) [Get-Item], ItemNotFoundException\r\n+ FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetItemCommand\r\n\r\nAll done.\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.2\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.2-70-g8234fbb04b437748b6782e9c45b0026c374ef12d\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @BrucePay @JamesWTruher ",
+      "created_at": "2019-08-22T20:12:10Z",
+      "updated_at": "2019-08-22T20:12:10Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Of all the 10 types listed above, one question keeps coming back to me: why `System.Management.Automation.ScriptBlock`?\r\n\r\nI understand why script blocks would have a custom format, so that you could see their contents as string by default. But what I don't understand is why the custom `scriptblock` format would be configured with `outOfBand: true`.\r\n\r\nAll of the other 9 types are related to non-standard output stream information, where you want the data to be shown using the custom format so that it can render properly even when in the middle of other data being output by a script or function. That makes sense, and it looks we can preserve that behavior while allowing stored objects of those types to be formatted the way users want them formatted. But `scriptblock` is the oddball in this set of types, so if you can share details or background explaining why it's configured with `outOfBand: true`, that would be useful information to know.",
+      "created_at": "2019-08-23T01:27:29Z",
+      "updated_at": "2019-08-23T01:27:29Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "FYI, I have opened PR #10430 early as a work in progress to solicit feedback on the approach I've started taking to resolve this issue in an expected way.\r\n\r\nIt would only be breaking if someone was piping some data of these types that was captured from standard output to a `Format-*` command without `-Force` and then converting that to string with `Out-String` and doing something with the string, but that's an obscure scenario.\r\n\r\nInitial tests with this approach have been very positive.",
+      "created_at": "2019-08-23T01:45:54Z",
+      "updated_at": "2019-08-23T15:18:17Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@KirkMunro How are you thinking about handling this? OutOfBand is required so that error, etc. objects and can be mixed in a stream with other objects and everything gets rendered correctly and efficiently.",
+      "created_at": "2019-08-27T20:44:28Z",
+      "updated_at": "2019-08-27T20:44:28Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Does that really apply when you're piping to a `Format-*` command? Typically that'll be `Format-Table` or `Format-List` in a lot of cases, and if you have an error object in that same output stream as other things... I'd still want the `Format-*` command to, well, do its job. That's why it's being passed to a format command in the first place; if I wanted errors to still render as errors, I'd leave them in the error stream?\r\n\r\nIf it's in a stream with other things, it's probably been deliberately put there to some extent, since error objects typically don't end up in the output stream on their own. \ud83d\ude42 ",
+      "created_at": "2019-08-27T20:48:53Z",
+      "updated_at": "2019-08-27T20:50:27Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay If you have a look at PR #10430 you'll see how I was going to handle it. I'd like to clean up that code a little and add Pester tests, but it already deals with this the best way I could come up with so far, which is to check the stream that an out of band object comes from.\r\n\r\nTesting with that makes me feel confident that it's the right solution. Out of band objects in the standard output stream respect `Format-*` cmdlets, while those in error, warning, etc.streams use their persistent default output.\r\n\r\nOne thing I was considering as well was to remove the out of band flag for `scriptblock` unless someone identifies why it needs a persistent out of band format. That one doesn't make much sense to me.",
+      "created_at": "2019-08-27T21:52:58Z",
+      "updated_at": "2019-08-27T21:54:39Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I think I'd be annoyed if the formatting depended on the stream. That would make redirection via `2>&1` quite surprising IMO.\r\n\r\nI'd always assumed `outOfBand` was designed to ignore the ambient format for a heterogeneous collection of objects, e.g.\r\n\r\n```powershell\r\n& { ps -Id $pid; $error[0]; ps -Id $pid } | Format-Table\r\n```\r\n\r\nIf my assumption is correct, I do wonder if `outOfBand` even needs to exist. I can imagine some heuristics would be sufficient to give the same capability of `outOfBand` - I mean it should be obvious that certain formats simply don't make sense for random types.",
+      "created_at": "2019-08-28T00:51:03Z",
+      "updated_at": "2019-08-28T00:51:03Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Tbh I'd be _expecting_ redirecting errors to standard output to change their display. Why would it still show up as an error (doubly so if I'm passing it to a Format-* cmdlet) when I've asked it to mosey on over to the standard output stream? That request by its very nature is saying \"put all the errors in my output stream\" and is probably being done because I want to look at the object, not the red-on-black formatting?",
+      "created_at": "2019-08-28T00:54:48Z",
+      "updated_at": "2019-08-28T00:54:48Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Think of log files - the text won't be red obviously, but why should the text be formatted differently?",
+      "created_at": "2019-08-28T01:29:51Z",
+      "updated_at": "2019-08-28T01:29:51Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'll need to check tomorrow, but I believe my PR still respects OOB persistent formatting, even with redirection in play. I'll need to double check when I'm back in my office tomorrow though.",
+      "created_at": "2019-08-28T01:42:16Z",
+      "updated_at": "2019-08-28T01:42:16Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also @lzybkr outOfBand is hard-coded for the 10 types listed above, and set dynamically for others based on the current format shape, IIRC. That seems to back up your suspicion, but what happens if you Invoke a command and pipe that to `Format-Table`, and the command generates an error and no output. Without a format shape in use, and without outOfBand on ErrorRecord, the error would be formatted as a table, which wouldn't be great for end users.",
+      "created_at": "2019-08-28T01:48:41Z",
+      "updated_at": "2019-08-28T01:48:41Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just to confirm, as I suggested yesterday, by checking which stream the object came from (which is different from the stream that the object will be rendered in it seems), any persistent, hard-coded `outOfBand` formats are still respected when redirection is in play in my PR.\r\n\r\n@vexx32 Redirection shouldn't change formatting of non-standard output messages IMHO, for the reasons already identified by @lzybkr, such as capturing output into a log file, which is the main intent of redirection anyway. If you want to capture errors to look at them in a specific way, you wouldn't want to do that as part of a single command because PowerShell formatting doesn't handle incompatible heterogeneous types very well for anything but `Format-List` (which is the format it falls back to when it discovers an object that is not a value type or a string that doesn't support the current view). Instead you should use `-ErrorVariable` to capture errors in a command so that you can format them a certain way independent of the command you invoked that produced those errors.",
+      "created_at": "2019-08-28T19:07:00Z",
+      "updated_at": "2019-08-28T19:12:50Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Further testing shows that using `outOfBand` on `scriptblock` tightens up the formatting. Without it, you end up with an extra leading and trailing blank line. I think that's the only advantage to having OOB on the `scriptblock` type, so I'll be leaving it there.",
+      "created_at": "2019-08-28T23:10:12Z",
+      "updated_at": "2019-08-28T23:10:12Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I finished writing up a bunch of Pester tests for out of band formatting and added them to the PR today. With that and the earlier refactoring work complete, it's now ready for review, so if you're inclined to want to have a closer look at this and share feedback on what I've done, please visit #10430 and take a look.",
+      "created_at": "2019-09-10T17:01:38Z",
+      "updated_at": "2019-09-10T17:01:38Z"
+    }
+  ],
+  "created_at": "2019-08-21T23:41:14Z",
+  "number": 10408,
+  "state": "open",
+  "title": "`OutOfBand` custom format definitions require `-Force` when using `Format-*` cmdlets",
+  "updated_at": "2019-09-10T17:01:38Z"
+}

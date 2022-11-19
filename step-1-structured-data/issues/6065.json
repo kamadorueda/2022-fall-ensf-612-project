@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6065",
+  "author": "nutjob4life",
+  "body": "I'm attempting to access a web service using `Invoke-WebRequest` that has the following interaction:\r\n\r\n1. You first GET a URL, passing an HTTP Basic auth header.\r\n2. The server passes back a 302 redirection with both a `Set-Cookie` and a `Location` header.\r\n3. You then GET *that* URL from the `Location` header, passing in the `Cookie` you got in step 2.\r\n\r\nNormally this works fine with `/usr/bin/curl` passing in the `--user`, `--cookie-jar`, and `--location` options. However, PowerShell's `Invoke-WebRequest` discards any cookies as soon as it sees the 302 redirection. I've tested this with PowerShell on Windows and macOS.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```\r\n$uri = \"https://host/api\"\r\n$username = \"username\"\r\n$password = \"password\"\r\n$pair = \"${username}:${password}\"\r\n$bytes = [System.Text.Encoding]::ASCII.GetBytes($pair)\r\n$base64 = [System.Convert]::ToBase64String($bytes)\r\n$basicAuth = \"Basic $base64\"\r\n$headers = @{ Authorization = $basicAuth }\r\nInvoke-WebRequest -Uri $uri -Headers $headers -OutFile \"output.dat\" -SessionVariable cookie_jar\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n(Expressed in terms of HTTP traffic.)\r\n\r\n```\r\n> GET /api HTTP/1.1\r\n> Host: host\r\n> Authorization: Basic base64dataHere===\r\n> \r\n< HTTP/1.1 302 Found\r\n< Set-Cookie: specialCookie=someOpaqueData123; Max-Age=3600; Path=/download; secure\r\n< Location: https://host/download?parameter=2700fa40-15c4-46b5-9a4f-73ef534c1889\r\n> GET /download?parameter=2700fa40-15c4-46b5-9a4f-73ef534c1889 HTTP/1.1\r\n> Host: host\r\n> Authorization: Basic base64dataHere===\r\n> Cookie: specialCookie=someOpaqueData123\r\n> \r\n< HTTP/1.1 200 OK\r\n< Content-Disposition: attachment; filename=\"yourdata.dat\"\r\n< Content-Type: application/octet-stream\r\n< Content-Length: 372959765\r\n...\r\n```\r\nActual behavior\r\n---------------\r\n\r\n```\r\n> GET /api HTTP/1.1\r\n> Host: host\r\n> Authorization: Basic base64dataHere===\r\n> \r\n< HTTP/1.1 302 Found\r\n< Set-Cookie: specialCookie=someOpaqueData123; Max-Age=3600; Path=/download; secure\r\n< Location: https://host/download?parameter=2700fa40-15c4-46b5-9a4f-73ef534c1889\r\n> GET /download?parameter=2700fa40-15c4-46b5-9a4f-73ef534c1889 HTTP/1.1\r\n> Host: host\r\n> Authorization: Basic base64dataHere===\r\n> \r\n< HTTP/1.1 401 Unauthorized\r\n< Content-Type: text/plain\r\n<\r\n< specialCookie not found\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```\r\nPSVersion                      6.0.1                                                                                   \r\nPSEdition                      Core                                                                                    \r\nGitCommitId                    v6.0.1                                                                                  \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                                                                 \r\nPSRemotingProtocolVersion      2.3                                                                                     \r\nSerializationVersion           1.1.0.1                                                                                 \r\nWSManStackVersion              3.0                                                                                     \r\n```\r\n\r\n\r\n",
+  "closed_at": "2018-03-27T21:52:20Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hmm I'd have to craft an endpoint to reproduce this. I suspect it is due to our striping of authorization headers on redirect. Rather than letting HttpClient handle the redirect, we handle it manual to prevent authorization headers from being sent. i suspect that when we do that, somehow the cookies are not being set on the cookie container.",
+      "created_at": "2018-01-29T23:35:15Z",
+      "updated_at": "2018-01-29T23:35:15Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "After creating a custom endpoint, I am not able to reproduce this issue. \r\n\r\nUpon further checking the code, we are setting the `HttpClientHandler.CookieContainer` to the `WebSession.Cookies` every time we build the request.\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/bd865280f36ea127414395d724cff1c778ddba73/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/Common/WebRequestPSCmdlet.Common.cs#L898\r\n\r\nI'm using this simple ASP.NET app https://github.com/markekraus/RedirectCookieAuth/\r\n\r\nthen in PowerShell 6.0.1:\r\n\r\n```powershell\r\n$uri = 'http://localhost:5000/api/Redirect'\r\n$username = \"username\"\r\n$password = \"password\"\r\n$pair = \"${username}:${password}\"\r\n$bytes = [System.Text.Encoding]::ASCII.GetBytes($pair)\r\n$base64 = [System.Convert]::ToBase64String($bytes)\r\n$basicAuth = \"Basic $base64\"\r\n$headers = @{ Authorization = $basicAuth }\r\nInvoke-WebRequest -Uri $uri -Headers $headers -OutFile \"c:\\temp\\output.json\" -SessionVariable cookie_jar\r\nGet-Content \"c:\\temp\\output.json\" | ConvertFrom-Json | ConvertTo-Json\r\n``` \r\n\r\nresult:\r\n\r\n```json\r\n{\r\n  \"args\": {},\r\n  \"origin\": \"::1\",\r\n  \"headers\": {\r\n    \"Cookie\": \"special=test123\",\r\n    \"Host\": \"localhost:5000\",\r\n    \"Connection\": \"Keep-Alive\",\r\n    \"User-Agent\": \"Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.16299; en-US) PowerShell/6.0.1\"\r\n  },\r\n  \"method\": \"GET\",\r\n  \"url\": \"http://localhost:5000/api/Get/\"\r\n}\r\n```\r\n\r\nBasically, `http://localhost:5000/api/Redirect` sets the `special` cookie to `test123` then redirects to `http://localhost:5000/api/Get/` which then spits out the details of the request, including the headers. You can see in the headers collection the `Cookie` request header shows the `special=test123` value.",
+      "created_at": "2018-01-30T00:35:06Z",
+      "updated_at": "2018-01-30T00:35:06Z"
+    },
+    {
+      "author": "nutjob4life",
+      "author_association": "NONE",
+      "body": "Thanks @markekraus. Something else must be going on in my environment.\r\n",
+      "created_at": "2018-03-27T21:52:20Z",
+      "updated_at": "2018-03-27T21:52:20Z"
+    },
+    {
+      "author": "trir262",
+      "author_association": "NONE",
+      "body": "Hello, I stumbled on this issue and can provide more context: if I submit a request with an Authentication header to a non IIS webserver, and the web server does not return a cookie, the subsequent request fails because the Authentication header is now missing, causing a http 401 (access denied).\r\nA workaround is to use the MaximumRedirection option: \r\n`invoke-webrequest -method get -uri \"-host_stripped-\" -MaximumRedirection 0 -erroraction silentlycontinue -errorvariable redirecterror` \r\nand use the Location value to create a new request (with Authentication header) until I no longer receive HTTP 301 or HTTP 302 and then return the final result.\r\n\r\nHere is an example of the requests on our server:\r\nFirst request\r\nGET https://-host_stripped-.com/api/device HTTP/1.1\r\nAuthorization: Basic -stripped-\r\nUser-Agent: Mozilla/5.0 (Windows NT; Windows NT 10.0; nl-BE) WindowsPowerShell/5.1.15063.936\r\nContent-Type: application/json; charset=utf-8\r\nHost: -host_stripped-.com\r\n\r\nFirst response\r\nHTTP/1.1 302 Found\r\nServer: nginx\r\nDate: Wed, 18 Apr 2018 22:44:35 GMT\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nLocation: /api/device?limit=100\r\nCache-Control: private, no-cache, must-revalidate, no-store, max-age=0, post-check=0, pre-check=0\r\nX-status-message: device index requires a limit\r\nX-status-code: FOUND\r\nVary: Accept-Encoding\r\nStrict-Transport-Security: max-age=157680000\r\nContent-Length: 3121\r\n----json file---\r\n\r\nSecond request, append previous 'Location' value in uri\r\nGET https://-host_stripped-.com/api/device?limit=100 HTTP/1.1\r\nAuthorization: Basic -stripped-\r\nUser-Agent: Mozilla/5.0 (Windows NT; Windows NT 10.0; nl-BE) WindowsPowerShell/5.1.15063.936\r\nContent-Type: application/json; charset=utf-8\r\nHost: -host_stripped_.com\r\n\r\nSecond response\r\nHTTP/1.1 200 OK\r\nServer: nginx\r\nDate: Wed, 18 Apr 2018 23:02:11 GMT\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nCache-Control: private, no-cache, must-revalidate, no-store, max-age=0, post-check=0, pre-check=0\r\nX-status-message: device index found with 5052 resources.\r\nX-status-code: OK\r\nVary: Accept-Encoding\r\nStrict-Transport-Security: max-age=157680000\r\nContent-Length: 9290\r\n--json file---\r\n",
+      "created_at": "2018-04-18T23:09:39Z",
+      "updated_at": "2018-04-18T23:09:39Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@trir262 When the web endpoint redirects and you supply and authorization header, you need to use the `-PreserveAuthorizationOnRedirect` switch or else the Authorization header will be stripped as a security measure.\r\n\r\nWorking example:\r\n\r\n```powershell\r\nInvoke-WebRequest -Uri 'https://httpbin.org/redirect-to?url=https://httpbin.org/basic-auth/user/passwd' -Header @{Authorization = 'Basic dXNlcjpwYXNzd2Q=' } -PreserveAuthorizationOnRedirect\r\n```\r\n\r\nThis 302 redirects to an authentication endpoint and preserves the Authorization header. Issuing the same command without `-PreserveAuthorizationOnRedirect` will result in a 401 response.\r\n\r\n\r\n\r\n[More Info.](https://get-powershellblog.blogspot.com/2017/12/powershell-core-web-cmdlets-in-depth_24.html#L17)",
+      "created_at": "2018-04-19T00:07:04Z",
+      "updated_at": "2018-04-19T00:07:04Z"
+    },
+    {
+      "author": "trir262",
+      "author_association": "NONE",
+      "body": "Thank you @markekraus ! This option is indeed what I was looking for. Unfortunately 5.1 does not have this.\r\nApologies for the confusion.",
+      "created_at": "2018-04-19T05:41:51Z",
+      "updated_at": "2018-04-19T06:23:45Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@trir262 Correct. This is a new feature added in PowerShell 6.0.0. If this is an impacting issue for you in 5.1, I would suggest opening a [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell) or perhaps voting on an existing one.",
+      "created_at": "2018-04-19T09:10:47Z",
+      "updated_at": "2018-04-19T09:10:47Z"
+    }
+  ],
+  "created_at": "2018-01-29T22:02:49Z",
+  "number": 6065,
+  "state": "closed",
+  "title": "Invoke-WebRequest discards cookies on HTTP 30x redirects",
+  "updated_at": "2018-04-19T09:10:48Z"
+}

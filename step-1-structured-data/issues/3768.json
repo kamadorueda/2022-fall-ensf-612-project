@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3768",
+  "author": "Jaykul",
+  "body": "When you use try/catch and handle an exception, it still shows up in the global `$Error`, and _more importantly_, in the ErrorVariable.\r\n\r\nIs there any way to actually prevent handled exceptions from leaking into the ErrorVariable? Is there any way for a caller to determine that they are **not,** in fact, errors, but expected results that were dealt with by the function?  That is, how does a caller distinguish the errors that matter?\r\n\r\nConsider a simple example:\r\n\r\n```posh\r\nfunction Count-Parameters {\r\n    [CmdletBinding()]\r\n    param([Parameter(ValueFromRemainingArguments)]$Parameters)\r\n    try {\r\n        $Parameters.FasterMethod()\r\n    } catch {\r\n        $Parameters.Count\r\n    }\r\n}\r\n\r\n$Count = Count-Parameters # Everything is fine\r\n\r\n$Count = Count-Parameters This One Has Four # Still fine\r\n\r\n# But then my paranoid \"best practice\" fanatic does something like this:\r\n$Count = Count-Parameters -ErrorVariable noCount\r\nif(!$Count -and $NoCount) { \r\n   Write-Warning $noCount\r\n}\r\n```\r\n\r\nHow can I stop the error variable from containing these things that I explicitly handled?",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good catch (accidental pun). \r\n\r\nNote that another quirk comes into play here: `-ErrorVariable` _always_ returns a `[System.Collections.ArrayList]` instance, so that you'd have to use `Write-Warning $noCount[0]`, whereas `Write-Warning $noCount` would actually break, even though only _1_ error is returned:\r\n\r\n    Write-Warning : Cannot convert 'System.Collections.ArrayList' to the type 'System.String' required by parameter 'Message'. Specified method is not supported.`\r\n\r\n`-OutVariable`, `-InformationVariable`, and `-WarningVariable` exhibit the same behavior - see #3773.\r\n",
+      "created_at": "2017-05-12T14:22:42Z",
+      "updated_at": "2017-05-12T15:30:05Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "$Error was originally conceived as a running log of **all** errors that happened in your script, including exceptions that were caught or when ErrorAction was set to SilentlyContinue The goal was primarily for forensics analysis after your script had been run. (Note: this goal of recording all errors was muted somewhat by the introduction of -ErrorAction ignore where the error isn't written into the  error variable.)",
+      "created_at": "2017-05-16T20:42:29Z",
+      "updated_at": "2017-05-16T20:42:29Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Perhaps a non-breaking change is we could add a `IsHandled` property to ErrorRecord to help filter?",
+      "created_at": "2017-05-16T22:46:06Z",
+      "updated_at": "2017-05-16T22:46:06Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay and the -ErrorVariable _must_ mirror that? I mean, I'm ok with everything being in $Error ...\r\n\r\n@SteveL-MSFT I guess that would at least give us a way ... \r\n\r\nRight now I do not think there is a way to hide errors, and _also_ tell whether or not a command was successful.",
+      "created_at": "2017-05-16T23:27:26Z",
+      "updated_at": "2017-05-16T23:27:26Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "The @PowerShell/powershell-committee had a very interesting conversation around this,  it's difficult to know which way we should go with this. \r\n\r\nCould you explain in more detail why this is important to you? Is it simply that you're trying to drill the error variable down to zero as you test your code and try to catch all exceptions? ",
+      "created_at": "2017-05-24T23:43:29Z",
+      "updated_at": "2017-05-24T23:46:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I obviously can't speak for @Jaykul, but here's my 0.0178236 EUR (using today's exchange rate):\r\n\r\nThere are two conceivable scenarios (not mutually exclusive):\r\n\r\n* (a) I want to know if _any_ non-terminating error occurred when the cmdlet / advanced function ran - in other words: if the cmdlet / advanced function _fully succeeded_.\r\n\r\n* (b) I want to _examine the specific non-terminating errors emitted_, if any, when the cmdlet / advanced function ran.\r\n\r\n(a), even though it _should_ be covered by automatic variable `$?`, is currently not a _reliable_ option (pet peeve alert), because:\r\n   * an incidentally involved _expression_ can override `$?` - see #3359\r\n   * an advanced function that issues non-terminating errors with `Write-Error` typically still reports `$?` as true - see #3629\r\n\r\n(b) is currently not a _reliable_ option, because examining the `-ErrorVariable`-assigned variable or the added-since-before-invocation `$Error` entries may contain _false positives_ in the form of _intentionally caught_ exceptions that should be considered an _implementation detail_ of the cmdlet / advanced function invoked - that's _this_ issue's complaint.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-05-25T00:58:33Z",
+      "updated_at": "2017-05-25T01:01:51Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this (@BrucePay was absent from discussion) and agreed this change where `-errorvariable` only contains unhandled errors makes sense",
+      "created_at": "2017-05-31T23:18:25Z",
+      "updated_at": "2017-05-31T23:18:25Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "There are some related data points here that are worth highlighting as part of this discussion before breaking them out into their own issues.\r\n\r\nIt seems some other use cases surrounding error handling are resulting in confusion as well. For example, if you invoke PowerShell using the ```System.Management.Automation.PowerShell``` class, and if you handle the errors in the command you invoke by indicating that they should be ignored, ```S.M.A.PowerShell``` will still set HadErrors to true. Here is a code sample illustrating the problem:\r\n\r\n```PowerShell\r\n$ps = [PowerShell]::Create()\r\n$ps.AddCommand('Get-Service').AddParameter('Name','Invalid').AddParameter('ErrorAction',[System.Management.Automation.ActionPreference]::Ignore) > $null\r\n$ps.Invoke()\r\n$ps.HadErrors # returns $true; expectation is that this would return false since the command was configured to ignore errors\r\n```\r\n\r\nYou can see the same behaviour via direct command invocation in PowerShell:\r\n\r\n```PowerShell\r\nGet-Service -Name Invalid -ErrorAction Ignore\r\n$? # returns $false; shouldn't this return $true?\r\n```\r\n\r\nIn both of these cases, ```-ErrorAction Ignore``` is being used to tell PowerShell that the error can be completely ignored. Why then, do both ```$?``` and ```$ps.HadErrors``` indicate the error? Technically there was an error, but it is being handled/treated like it is not an error, so I believe in both of these cases ```$?``` and ```$ps.HadErrors``` should have values indicating that there wasn't an error. Thoughts?",
+      "created_at": "2017-06-27T20:27:33Z",
+      "updated_at": "2017-06-27T20:28:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT:\r\n\r\nJust to clarify: does that mean that caught errors will be absent from `-ErrorVariable` _and_ `$Error` (which I think makes sense), or only the former?\r\n\r\nNote that if such errors are still recorded in `$Error`, the implication is that the for-_non-terminating_-errors-only `-ErrorAction Ignore` construct will have no counterpart for _terminating errors_.\r\n\r\n",
+      "created_at": "2017-08-14T18:27:07Z",
+      "updated_at": "2017-08-14T18:27:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KirkMunro:\r\n\r\nI'm also inclined to think that `$?` and `.HadErrors` should reflect `$True` with `-ErrorAction Ignore`, given that someone who really needs to know whether a error occurred has the option of using `-ErrorAction SilentlyContinue -ErrorVariable ev` and then inspecting `$ev`.\r\n\r\nGiven that terminating errors (those that can be caught with `try` / `catch`) aren't affected by `-ErrorAction`, however, can I suggest you open a new issue?\r\n\r\nOn a side note: `try { 1 / 0 } catch {}; $?` also yields `$False`, due to the exception triggered by `1 / 0` setting `$?` to `$False` and the `catch` block being empty.",
+      "created_at": "2017-08-14T18:49:58Z",
+      "updated_at": "2017-08-14T18:49:58Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I think you're confusing the use case. \r\n\r\nAre you suggesting that it's ok that an application that uses the PowerShell class to invoke scripts for automation would need to **inject script wrappers** around scripts provided by end-users just to be able to tell _whether or not they succeeded_?",
+      "created_at": "2017-08-18T03:32:07Z",
+      "updated_at": "2017-08-18T03:32:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Jaykul:\r\n\r\nWe _are_ talking about a different use case  - at least based on how error handling currently works, where `-ErrorAction` truly only applies to _non-terminating_ errors, as opposed to _terminating_ errors (both script- and statement-terminating), which are the _only_ ones that `try` / `catch` can catch  - which is why I suggested creating a new issue.\r\n\r\nApart from that, I don't understand what you're asking.",
+      "created_at": "2017-08-18T03:50:19Z",
+      "updated_at": "2017-08-18T03:50:19Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 That's really thin. If someone really wants to know if an error occurred when -ErrorAction Ignore is used, they should write their own script that doesn't use -ErrorAction Ignore. Give me a real world use case where someone would want to know if a benign error occurred in a command or script they invoked. You shouldn't care about that when you invoke a command, because at the moment you are invoking that command you are placing your trust that the author of that command will properly let you know if there was an error that you should care about. If you don't trust that, then you shouldn't be invoking that specific command.\r\n\r\nThe whole point of -ErrorAction Ignore is to suppress errors. Suppression is of little use for scripts invoked via S.M.A.PowerShell if the invoker has to ignore .HadErrors and check the Errors collection every time (which will be empty). In fact, I'd wager that there are probably many C# binaries out there where PowerShell is invoked from C# with S.M.A.PowerShell that are buggy right now because they rely on .HadErrors identifying whether or not there were actually errors.\r\n\r\nI will log a separate issue for the .HadErrors/$? issue.",
+      "created_at": "2017-08-18T14:05:49Z",
+      "updated_at": "2017-08-18T14:05:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I will log a separate issue for the .HadErrors/$? issue.\r\n\r\nGreat, thanks.\r\n\r\nOther than that, I don't see a disagreement, unless I misunderstood your original comment. You do _not_ want `$?` and `.HadErrors` to reflect `$False` if `-ErrorAction Ignore` is used, correct? I agree.\r\n\r\nNote that I was talking about _SilentlyContinue_, not _Ignore_, in the - definitely exotic - alternative scenario I described.\r\n",
+      "created_at": "2017-08-18T14:30:33Z",
+      "updated_at": "2017-08-18T14:30:33Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 Whoops, you're right, I misread your previous reply. We're on the same page then.",
+      "created_at": "2017-08-18T14:36:32Z",
+      "updated_at": "2017-08-18T14:36:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Jaykul: While I'm still unclear on what you were asking, perhaps I can clarify on my end:\r\n\r\nRe logging in `$Error` / `-ErrorVariable`:\r\n\r\nMy concern fits into the larger issue of the existing, longstanding dichotomy with respect to how non-terminating vs. terminating errors must be handled  - see  [Our Error Handling, Ourselves - time to fully understand and properly document PowerShell's error handling](https://github.com/PowerShell/PowerShell-Docs/issues/1583).\r\n\r\nAs @BrucePay has pointed out, `-ErrorAction Ignore` already is a departure from the unconditionally-log-all-exceptions-in-`$Error` behavior, but is currently only available for _non-terminating errors_ (e.g., `Get-Item /NoSuchPath -ErrorAction -Ignore`). \r\n\r\nAs stated,  `-ErrorAction Ignore` has no effect on a (statement)-_terminating_ error such as `Get-Item -NoSuchParam -ErrorAction Ignore` (a distinction that strikes me as problematic, especially that using the `$ErrorActionPreference` _preference variable does_ apply to terminating errors, but it's probably way too late to change that).\r\n\r\nHere's what `-ErrorAction Ignore` combined with `-ErrorVariable` currently does:\r\n\r\n```powershell\r\n> $Error.Clear(); Get-Item /NoSuchPath -ErrorAction Ignore -ErrorVariable ev; $Error.Count; \"[$ev]\"\r\n0  # nothing was written to $Error\r\n[] # nothing was captured in $ev\r\n```\r\n\r\nYour proposal at least _in part_ asks for the _analogous_ behavior with respect to handling _terminating_ errors, which must be done with `Try`/ `Catch`.\r\n\r\nIt is the _in part_ aspect that I find problematic:\r\n\r\nFor symmetry, conceiving of `Try`/ `Catch` as the `-ErrorAction Ignore` counterpart - or, more accurately, a _superset_ of it - makes sense to me.\r\n\r\nIf we _only_ suppress filling the `-ErrorVariable` variable while continuing to log to `$Error`, we don't have that symmetry:\r\n\r\n```powershell\r\n> $Error.Clear(); Invoke-Command { try {1 / 0} catch{} } -ErrorVariable ev; $Error.Count; \"[$ev]\"\r\n1  # $Error was still written to, unlike with -ErrorAction Ignore\r\n[] # in the future: $ev was not assigned to\r\n```\r\n \r\nHence my suggestion to not only suppress assigning to the `-ErrorVariable` variable, but to also suppress logging to `$Error`.\r\n\r\n---\r\n\r\nRe `$?` / `.HadErrors`:\r\n\r\n@KirkMunro  then took a step back to bring up a conceptually related issue, arguing that `-ErrorAction Ignore` - again: applicable to _non-terminating_ errors only - should indicate _success_, given the explicitly signaled intent to _ignore_ errors - similar to how `Try` / `Catch` can be conceived of.\r\n\r\nMy aside re `try { 1 / 0 } catch {}; $?` was meant to show that in the terminating-error realm checking `$?` after `try` / `catch` is virtually pointless, because what `$?` is set to depends on whether the `catch` block happens to be empty (`$False`) or not (whatever statement happens to execute last in the `catch` block determines the value of `$?`).\r\n\r\nTaking another step back: `$?` is problematic in other contexts too:\r\n\r\n* [Automatic $? variable is reset to $True when a command is enclosed in parentheses - make $? only reflect command status, not expression status](https://github.com/PowerShell/PowerShell/issues/3359)\r\n\r\n* [Write-Error in a function doesn't set $? to $False (doesn't set the execution status to indicate a non-terminating error) in the caller's scope](https://github.com/PowerShell/PowerShell/issues/3629)\r\n\r\n",
+      "created_at": "2017-08-18T16:53:50Z",
+      "updated_at": "2017-09-12T22:37:02Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think we're in agreement.\r\n\r\nMy request is focused on ErrorVariable only because I was focused on error detection in a script. \r\n\r\nThat is, I wasn't concerned with `PowerShell.Invoke` or any of the rest of this ;-)\r\n\r\nIn general, I think it's useless to check `$Error` _in scripts_ because it's persistent through a whole session, and you don't normally care about errors that happened before your code. Of course, there are lots of ways (not least `-ErrorAction SilentlyContinue`) that errors show up in `$Error` and the user doesn't care, but since you're not normally using it, it doesn't matter the same way ErrorVariable does.\r\n\r\nFor what it's worth, I would agree that exceptions that are handled in a catch could be left out of `$Error` as well as `ErrorVariable`...",
+      "created_at": "2017-08-20T04:55:13Z",
+      "updated_at": "2017-08-20T04:55:13Z"
+    }
+  ],
+  "created_at": "2017-05-12T02:43:20Z",
+  "number": 3768,
+  "state": "open",
+  "title": "Why do handled exceptions show in ErrorVariable?",
+  "updated_at": "2017-09-12T22:37:02Z"
+}

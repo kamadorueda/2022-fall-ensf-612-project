@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7945",
+  "author": "ciranor",
+  "body": "With the release of 6.1.0, it appears to not always use a proxy on Linux or OSX, specifically when trying to run \"Connect-AzureRmAccount\". If I downgrade to 6.0.4 on Linux or OSX, it works. On Windows, the Connect-AzureRmAccount correctly uses the system defined proxy.\r\n\r\nI'm assuming it's a PowerShell 6.1.0 issue and not a AzureRM.Netcore issue.\r\n\r\nThe version of AzureRM.Netcore is current (0.13.1)\r\n\r\nRunning tcpdump in the background, I can see that under powershell 6.1.0 it only tries to open direct sockets to port 443 out on the internet; under powershell 6.0.4 it instead correctly talks to my corporate proxy. The proxy is defined via the environment variables HTTP_PROXY and HTTPS_PROXY. \r\n\r\nIf I run \"Invoke-WebRequest\" instead, under 6.0.4, it picks up the HTTPS_PROXY env var and uses it without needing a -Proxy argument. Under 6.1.0 it doesn't use the env vars, and requires the -Proxy argument.\r\n\r\nI've tested and reproduced this on both Linux (CentOS 7.5) and OSX (10.13.6).\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n[simon@simon-base7-01 (devkvm) ~]$ export HTTP_PROXY=http://webproxy:3128/\r\n[simon@simon-base7-01 (devkvm) ~]$ export HTTPS_PROXY=http://webproxy:3128/\r\n[simon@simon-base7-01 (devkvm) ~]$ pwsh\r\nPowerShell v6.0.4\r\nCopyright (c) Microsoft Corporation. All rights reserved.\r\n\r\nhttps://aka.ms/pscore6-docs\r\nType 'help' to get help.\r\n\r\nPS /home/simon> Connect-AzureRmAccount\r\nWARNING: To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code XXXX to authenticate.\r\n^C[simon@simon-base7-01 (devkvm) ~]$ sudo rpm -U /home/simon/powershell-6.1.0-1.rhel.7.x86_64.rpm\r\n[simon@simon-base7-01 (devkvm) ~]$ pwsh\r\nPowerShell 6.1.0\r\nCopyright (c) Microsoft Corporation. All rights reserved.\r\n\r\nhttps://aka.ms/pscore6-docs\r\nType 'help' to get help.\r\n\r\nPS /home/simon> Connect-AzureRmAccount\r\nConnect-AzureRmAccount : Connection refused: Connection refused\r\nAt line:1 char:1\r\n+ Connect-AzureRmAccount\r\n+ ~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : CloseError: (:) [Connect-AzureRmAccount], AadAuthenticationFailedException\r\n+ FullyQualifiedErrorId : Microsoft.Azure.Commands.Profile.ConnectAzureRmAccountCommand\r\n\r\nPS /home/simon>\r\n\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\n\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\n\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n\r\n```powershell\r\nPS /home/simon> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Linux 3.10.0-693.17.1.el7.x86_64 #1 SMP Thu Jan 25 20:13:58 UTC 2018\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nPS /home/simon> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.4\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.4\r\nOS                             Linux 3.10.0-693.17.1.el7.x86_64 #1 SMP Thu Jan 25 20:13:58 UTC 2018\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2018-10-06T00:37:47Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@markekraus Could you please comment the Issue?",
+      "created_at": "2018-10-05T03:39:47Z",
+      "updated_at": "2018-10-05T03:39:47Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm not entirely sure, but this looks like a regression in corefx. dotnet/corefx#28088 changes the way the environment variables are handled. if I'm understanding this correctly, it looks like they will get incorrect URIs for HTTPS_PROXY. `GetUriFromString()` is striping the string of `http://` but not `https://` and then later they depend on `:` being at the end of the host.",
+      "created_at": "2018-10-05T11:02:43Z",
+      "updated_at": "2018-10-05T11:02:43Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "ok.. looks like it is a regression but not the one I thought.\r\n\r\n```powershell\r\n$assembly = [System.Net.Http.HttpClientHandler].Assembly\r\n$class = $assembly.GetType('System.Net.Http.HttpEnvironmentProxy')\r\n$method = $class.GetMethod('TryCreate')\r\n$proxy = [System.Net.WebProxy]::new()\r\n$env:HTTPS_PROXY = 'http://webproxy:3128/'\r\n$method.Invoke($null, @($proxy))\r\n```\r\n\r\nShould be `True` but is `False`.\r\n\r\nbut, if you remove the trailing `/` from the proxy it works:\r\n\r\n```powershell\r\n$assembly = [System.Net.Http.HttpClientHandler].Assembly\r\n$class = $assembly.GetType('System.Net.Http.HttpEnvironmentProxy')\r\n$method = $class.GetMethod('TryCreate')\r\n$proxy = [System.Net.WebProxy]::new()\r\n# No trailing slash\r\n$env:HTTPS_PROXY = 'http://webproxy:3128'\r\n$method.Invoke($null, @($proxy))\r\n```\r\n\r\n@ciranor as a work around, set your env vars without the trailing slash.\r\n\r\nWe will need to open an issue with corefx.",
+      "created_at": "2018-10-05T11:55:48Z",
+      "updated_at": "2018-10-05T11:55:48Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Created dotnet/corefx#32635",
+      "created_at": "2018-10-05T12:08:13Z",
+      "updated_at": "2018-10-05T12:08:13Z"
+    },
+    {
+      "author": "ciranor",
+      "author_association": "NONE",
+      "body": "Yes, I can confirm that by removing the trailing slash, Invoke-WebRequest and Connect-AzureRMAccount both work under 6.1.0.\r\n\r\nCheers.",
+      "created_at": "2018-10-05T12:42:56Z",
+      "updated_at": "2018-10-05T12:42:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@markekraus Could you test with latest build? Currently we moved to .Net Core 2.1.5 and CoreFX fix is there. \r\nI can not run your repo script - `$class = $assembly.GetType('System.Net.Http.HttpEnvironmentProxy')` is empty.",
+      "created_at": "2018-10-05T15:13:21Z",
+      "updated_at": "2018-10-05T15:19:16Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov `System.Net.Http.HttpEnvironmentProxy` is only available on Linux and macOS. \r\n\r\nI was able to build the latest on ubuntu and confirmed it is fixed with the move to .NET Core 2.1.5",
+      "created_at": "2018-10-06T00:37:46Z",
+      "updated_at": "2018-10-06T00:37:46Z"
+    }
+  ],
+  "created_at": "2018-10-04T17:44:23Z",
+  "number": 7945,
+  "state": "closed",
+  "title": "Proxy not being used on Linux/Mac under 6.1.0",
+  "updated_at": "2018-10-06T00:38:20Z"
+}

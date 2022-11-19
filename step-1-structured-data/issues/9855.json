@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9855",
+  "author": "KirkMunro",
+  "body": "If you have a script module that generates a terminating error, the error message shown to users does not indicate that the error came from `Import-Module`. Instead it simply shows the script module internals. This is inappropriate for users who may not have authored that script module.\r\n\r\nIf you have a function in a script module that generates a terminating error, and you invoke that function when the module is not loaded, the module will load, the terminating error will not be shown to end users at all, and the function will run. The suppression of the terminating error in this scenario needs to be corrected so that users see the error came from Import-Module which was implicitly invoked by invoking the command while auto-loading is enabled.\r\n\r\n**Note:** This issue is closely related to the problem with terminating error handling in PowerShell (for which [a collection of RFCs have been submitted as a PR](https://github.com/PowerShell/PowerShell-RFC/pull/187)). Terminating error handling aside, this issue focuses on how Import-Module does a poor job of reporting errors, sometimes not even reporting them at all.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n$moduleName = 'ModuleErrorHandlingTest'\r\n$modulePath = Join-Path -Path $([Environment]::GetFolderPath('MyDocuments')) -ChildPath PowerShell/Modules/${moduleName}\r\nNew-Item -Path $modulePath -ItemType Directory -Force > $null\r\n$nmmParameters = @{\r\n    Path = \"${modulePath}/${moduleName}.psd1\"\r\n    RootModule = \"./${moduleName}.psm1\"\r\n    FunctionsToExport = @('Test-ErrorHandling')\r\n}\r\nNew-ModuleManifest @nmmParameters\r\n$scriptModulePath = Join-Path -Path $modulePath -ChildPath \"${moduleName}.psm1\"\r\nNew-Item -Path $scriptModulePath -ItemType File | Set-Content -Encoding UTF8 -Value @'\r\n    1/0 # Oops!\r\n    function Test-ErrorHandling {\r\n        [cmdletBinding()]\r\n        param()\r\n        'Error handling output'\r\n    }\r\n'@\r\n\r\n# This next command generates an error while loading the module, but the module still\r\n# loads, and the error message does not tell the user that it came from Import-Module\r\n# nor does it tell the user which module was being loaded when the error occurred.\r\nImport-Module $moduleName\r\nRemove-Module $moduleName\r\n\r\n# This next command generates an error while implicitly loading a module, but the error\r\n# is silenced and the module loads anyway so the end user has no idea that something\r\n# happened.\r\nTest-ErrorHandling\r\nRemove-Module $moduleName\r\nRemove-Item -LiteralPath $modulePath -Recurse -Force\r\n```\r\n\r\n# Expected behavior\r\n\r\nNote the differences in the actual error text that are shown in what should be expected when a module is loaded over what is actually shown below this code block.\r\n\r\n```none\r\nImport-Module: Unexpected error while importing ModuleErrorHandlingTest module. Attempted to divide by zero.\r\nAt line:23 char:1\r\n+ Import-Module $moduleName\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [], RuntimeException\r\n+ FullyQualifiedErrorId : RuntimeException\r\n\r\nImport-Module: Unexpected error while implicitly importing ModuleErrorHandlingTest module. Attempted to divide by zero.\r\nAt line:29 char:1\r\n+ Test-ErrorHandling\r\n+ ~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [], RuntimeException\r\n+ FullyQualifiedErrorId : RuntimeException\r\n\r\nError handling output\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nAttempted to divide by zero.\r\nAt C:\\Users\\kirka\\OneDrive\\Documents\\PowerShell\\Modules\\ModuleErrorHandlingTest\\ModuleErrorHandlingTest.psm1:1 char:5\r\n+     1/0 # Oops!\r\n+     ~~~\r\n+ CategoryInfo          : NotSpecified: (:) [], RuntimeException\r\n+ FullyQualifiedErrorId : RuntimeException\r\n\r\nError handling output\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.2.0\r\nPSEdition                      Core\r\nGitCommitId                    6.2.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KirkMunro \r\n\r\nSo you are suggesting that `Import-Module` should catch all exceptions and wrap them in a `PSModuleImportErrorException` ?\r\n\r\nNote: IMHO the module author should be dealing explicitly with errors and providing an appropriate experience for the end user rather than simply relying on the PowerShell runtime to take care of error handling and presentation.\r\n",
+      "created_at": "2019-06-10T18:22:34Z",
+      "updated_at": "2019-06-10T18:22:34Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@bpayette Something like that.\r\n\r\n1. I think module authors should deal with all errors (but they don't necessarily do that because they aren't forced to do so).\r\n1. I think users should not see internals from modules that they likely didn't create if `Import-Module` fails (but they do because of how it handles errors).\r\n1. I think the PowerShell runtime should not silence errors from dynamically loaded modules.\r\n\r\nIn my mind this means two things:\r\n\r\n1. Providing better handling of errors in `Import-Module` so that...\r\n    * ...unexpected errors from module loading clearly identify the source of the error (the loading of the module), allowing end users to decide what action to take (chuck the module because it's crap, contact the author, something else...).\r\n    * ...errors that occur from implicit module loading are made visible to end users.\r\n1. Beyond making the source of errors more visible to end users, get momentum/acceptance and implementation on at least some of [this collection of RFCs that are in a PR right now](https://github.com/PowerShell/PowerShell-RFC/pull/187) -- specifically on the one to do with terminating error handling, so that we can have terminating errors that actually terminate.\r\n\r\nMy goal here isn't to help module authors be lazy. It's to help end users identify where problems actually come from so that they can decide an appropriate course of action if an error occurs during module load.\r\n",
+      "created_at": "2019-06-10T18:46:34Z",
+      "updated_at": "2019-06-11T12:47:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Is the issue only for Import-Module, or other module cmdlets too, or module behavior in common?",
+      "created_at": "2019-06-11T10:43:40Z",
+      "updated_at": "2019-06-11T10:43:40Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I haven't stepped through the code while reproducing the error, but as far as I know this is only in `Import-Module`. The errors I have issue with occur while processing a psm1 file, which I don't believe is done anywhere outside of that cmdlet.",
+      "created_at": "2019-06-11T12:55:01Z",
+      "updated_at": "2019-06-11T12:55:01Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "I'm agree. A little enhancement around module's error is a good thing !",
+      "created_at": "2019-06-11T13:58:25Z",
+      "updated_at": "2019-06-11T13:58:25Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hey @KirkMunro \r\n\r\nFirst - kudos for trying to take on this problem. It's bugged me for years.\r\n\r\n> I think users should not see internals from modules that they likely didn't create if Import-Module fails (but they do because of how it handles errors).\r\n\r\nHmm ... in your \"expected output\" example, you're still showing the line/line number in the module where the error occurred. I assume you intend that it should show the line where `Import-Module` was called (or `using module` or `#requires` for that matter)?\r\n\r\nWRT terminating errors, you can mostly get the behaviour you want simply by putting `trap { break }` at the top level of your module but what you can't do is create a `RuntimeException` and then set the `InvocationInfo` property so it points to where you want. If you trap/catch and then throw a new error it will report the `throw` line, not the original line. Having a way to \"point\" an error message to the appropriate location would make it possible for the script/module author to provide a much better error experience.\r\n\r\nAlso note that overarching problem doesn't just apply to modules. Scripts and functions have exactly the same problem. A user calling a script shouldn't be exposed to the internals of the script (at least not by default)\r\n\r\n> My goal here isn't to help module authors be lazy. \r\n\r\nI totally get that. A big part of the problem is that script/function/module authors _can_ be \"lazy\" about error handling and get an end-user error experience. Not ideal certainly but \"free\". For compiled-cmdlet authors, error handling isn't free so they need to put some thought into it.\r\n ",
+      "created_at": "2019-06-12T00:16:46Z",
+      "updated_at": "2019-06-12T00:16:46Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I assume you intend that it should show the line where Import-Module was called (or using module or #requires for that matter)?\r\n\r\nCorrect. I created that output via a quick copy-paste-modify. It should show the line where the error occurred from the eyes of the end user (explicit import via `Import-Module`, `using module`, or `#requires`, or implicit import via invocation of a command that is in a module that has not been imported yet). I'll update the expected output in my post accordingly.\r\n\r\nInteresting point on how `RuntimeException` instances could be configured with a specific `InvocationInfo`. I'm stepping through some of the code related to this to see how it works, and will keep this idea in mind.\r\n\r\n> Scripts and functions have exactly the same problem. A user calling a script shouldn't be exposed to the internals of the script (at least not by default)\r\n\r\n@bpayette: You mean scripts and functions that have the `CmdletBinding` attribute, not all scripts and functions, right? If so, I agree. :wink:\r\n\r\nMy line in the sand on this is `CmdletBinding`. If a script or function uses `CmdletBinding`, then the intent of that script or function is to be treated like a command, which is different than simple scripts or basic functions that are more often consumed by the author or a team, maybe shared as example code to be modified, but not shared as a finished product for end users to use as a black box. In scripts or functions that use `CmdletBinding`, I believe they should behave as much like a cmdlet as possible, not showing internals to people who invoke them.",
+      "created_at": "2019-06-12T14:53:01Z",
+      "updated_at": "2019-06-12T15:10:59Z"
+    },
+    {
+      "author": "metablaster",
+      "author_association": "NONE",
+      "body": "If your example module dot sources an external script that otherwise fails to be dot sourced then you will see no error.\r\n\r\n`Import-Module` won't report an error in this case, but if you manually dot source said script the error is shown.\r\n\r\nThat's pretty much **unexpected behavior** which I encountered today so upvoting this.",
+      "created_at": "2020-12-13T23:33:33Z",
+      "updated_at": "2020-12-13T23:33:33Z"
+    }
+  ],
+  "created_at": "2019-06-07T19:50:38Z",
+  "number": 9855,
+  "state": "open",
+  "title": "Import-Module does not properly report errors to users",
+  "updated_at": "2020-12-13T23:33:33Z"
+}

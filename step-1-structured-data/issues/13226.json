@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13226",
+  "author": "mklement0",
+  "body": "\r\nNote that the error only occurs if the executable path passed to `&` is a _UNC_ path.\r\n\r\n## Steps to reproduce\r\n\r\nRun on Windows, from an _elevated_ console (due to use of \"loopback remoting\"):\r\n\r\n```powershell\r\n{ $ErrorActionPreference='Stop'; Invoke-Command -ComputerName . { & '\\\\foo\\bar' } } |\r\n  Should -Throw -ErrorId CommandNotFoundException\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe test should pass.\r\n\r\n## Actual behavior\r\n\r\nThe test fails:\r\n\r\n```none\r\nExpected an exception, with FullyQualifiedErrorId 'CommandNotFoundException' to be thrown, but the FullyQualifiedErrorId was 'RuntimeException'\r\n```\r\n\r\nInstead of  the expected `&: The term '\\\\foo\\bar' is not recognized as the name of a cmdlet, function, script file, or operable program.` message, the nondescript `RuntimeException: An error occurred while creating the pipeline.` is reported.\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.5\r\n```\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Loop in @PaulHigin for insights.",
+      "created_at": "2020-07-22T18:26:16Z",
+      "updated_at": "2020-07-22T18:26:16Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is by design.  Invoke-Command returns a RemoteException that wraps the original CommandNotFoundException as the serialized remote exception.  The ActionPreferenceStopException wraps it yet again.  You can see the original exception by:\r\n\r\n```powershell\r\n$err = Get-Error\r\n$err.ErrorRecord.Exception.SerializedRemoteException\r\n```",
+      "created_at": "2020-07-22T20:17:34Z",
+      "updated_at": "2020-07-22T20:17:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin. Yes the original error is wrapped, but it normally - sensibly - still presents _like the original error_.\r\n\r\nAs stated, the nondescript wrapping only happens _if the executable path happens to be a UNC path_.\r\n\r\nContrast the behavior demonstrated in the OP (UNC path) with a local (non-existent) path:\r\n\r\n```powershell\r\n# OK:\r\nPS>  Invoke-Command -ComputerName . { & 'c:\\foo\\bar' }\r\nObjectNotFound: The term 'c:\\foo\\bar' is not recognized as the name of a cmdlet, function, script file, \r\nor operable program. \r\n```",
+      "created_at": "2020-07-22T21:07:03Z",
+      "updated_at": "2020-07-22T21:07:03Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "More equivalently it would be:\r\n```powershell\r\nInvoke-Command -ComputerName . { & 'c:\\foo\\bar' } -ErrorAction Stop\r\nObjectNotFound: The term 'c:\\foo\\bar' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n\r\n$err = Get-Error\r\n$err.ErrorRecord.FullyQualifiedErrorId\r\nCommandNotFoundException\r\n```\r\nThe problem is that in one case an ErrorRecord is returned and the other a RuntimeException, and seems to be how ErrorAction throws a terminating error.  This appears not be related to Invoke-Command since I can get the same results with this:\r\n\r\n```powershell\r\n& { $ErrorActionPreference = \"Stop\"; & 'c:\\foo\\bar' }\r\n$err = Get-Error\r\n$err.ErrorRecord.FullyQualifiedErrorId\r\nCommandNotFoundException\r\n```",
+      "created_at": "2020-07-22T21:37:55Z",
+      "updated_at": "2020-07-22T21:37:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The only reason I brought `-ErrorAction Stop` into the mix was for the sake of the Pester test, so let's leave it out of the picture.\r\n\r\nTo recapitulate the original concern:\r\n\r\nIf a non-UNC path yields the expected error message on the caller's side:\r\n\r\n```powershell\r\n# OK\r\nPS>  Invoke-Command -ComputerName . { & 'c:\\foo\\bar' }\r\nObjectNotFound: The term 'c:\\foo\\bar' is not recognized as the name of a cmdlet, function, script file, \r\nor operable program. \r\n```\r\n\r\nthen I see no reason why a UNC path should act differently, given that in local, direct invocation the two scenarios yield the _same_ error message:\r\n\r\n```powershell\r\n# !! Unexpectedly yields nondescript error.\r\nPS>  Invoke-Command -ComputerName . { & '\\\\foo\\bar' }\r\nRuntimeException: An error occurred while creating the pipeline.\r\n```\r\n\r\n",
+      "created_at": "2020-07-23T02:35:10Z",
+      "updated_at": "2020-07-23T02:35:10Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm, I don't see that behavior with my latest local build of 7.1.0-preview.5.  I get the same RemoteErrorRecord error object in each case you show above.  I get the RuntimeException object only if I use `-ErrorAction Stop` or set `$ErrorActionPreference = 'Stop'` as shown in by above examples.",
+      "created_at": "2020-07-23T16:21:09Z",
+      "updated_at": "2020-07-23T16:21:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I just tried again in a loaded-without-profiles elevated preview-5 session with `$ErrorActionPreference` at its default (`Continue`), and I can reliably reproduce the symptom (on Windows 10 version 1909, but I presume that doesn't matter):\r\n\r\n```powershell\r\nPS> icm -cn . { & C:\\no\\such }; '---'; icm -cn . { & \\\\no\\such }\r\n\r\nObjectNotFound: The term 'C:\\no\\such' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n---\r\nRuntimeException: An error occurred while creating the pipeline.\r\n```\r\n",
+      "created_at": "2020-07-25T13:56:09Z",
+      "updated_at": "2020-07-25T13:56:09Z"
+    }
+  ],
+  "created_at": "2020-07-21T14:18:50Z",
+  "number": 13226,
+  "state": "open",
+  "title": "Invoke-Command: calling a program via a UNC path in a remote session results in the wrong error being reported",
+  "updated_at": "2020-07-25T13:56:09Z"
+}

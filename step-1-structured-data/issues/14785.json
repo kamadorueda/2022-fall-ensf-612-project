@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14785",
+  "author": "microlaser",
+  "body": "<!--\n\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\n\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\n\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- Search the existing issues.\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\n\n-->\n\n## Steps to reproduce\n\n```powershell\nIf you run the command select-string -context and filter it with a pipe it will not let you run select-string -context again after the pipe.  This seems counter intuitive and if you could filter like that it would be useful \n```\n\n## Expected behavior\n\nApplication of a second text filter \n\n```\n\n## Actual behavior\n\nI am told it is not allowed \n\n```\n\n## Environment data\n\n<!-- provide the output of $PSVersionTable -->\n\n5.1.18362.1171\nDesktop \n\n```\n",
+  "closed_at": "2021-02-22T19:14:48Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To be clear up front: You likely won't see improvements in _Windows PowerShell_  - please note that this repo is only for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\nIn a pinch, you can pipe to `Out-String -Stream` before piping to the 2nd `Select-String` call, but note that this will retain the formatting artifacts, notably the `>` before the matching line and a space before the context lines.\r\n\r\n---\r\n\r\nThere are two related issues:\r\n\r\n* `Select-Object -Context ... | Select-Object ...` causes the context information in the first command's output objects to be quietly ignored by the second command.\r\n\r\n* Additionally, `Select-Object -Context ... | Select-Object -Context ...`, i.e. using `-Context` with _both_ commands causes the `-Context` parameter to also be ignored by the 2nd command, accompanied by warning `The option \"Context\" is not valid when searching results that are piped from Select-String output.`\r\n\r\nI can't speak to the original design intent, but the behavior seems unhelpful.\r\n\r\nThe code at https://github.com/PowerShell/PowerShell/blob/ac560d8d320f3ba72e525825be2c64d9c5abdf2c/src/Microsoft.PowerShell.Commands.Utility/commands/utility/MatchString.cs#L1740-L1757\r\n\r\n* suggests that only looking at the `.Line` property of  incoming `Microsoft.PowerShell.Commands.MatchInfo`  instance - instead of also considering `.PreContext` and `.PostContext` -  is intentional.\r\n\r\n* additionally restricting the use of `-Context` in the _receiving_ command seems curious, however: perhaps this was a _logic error_, where the actual intent was solely to warn about the _incoming_ context information getting ignored?\r\n\r\n---\r\n\r\nA similar issue arose in combination with the `-Raw` switch (not available in Windows PowerShell), which outputs just the matching _lines_ rather than `Microsoft.PowerShell.Commands.MatchInfo` objects:\r\n\r\nHere too the intuitive expectation is that combining `-Raw` with `-Context` should also output the context lines, which isn't the case either, unfortunately, as reported in #14350.\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-02-12T20:35:18Z",
+      "updated_at": "2021-02-15T19:17:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S., @microlaser, can you please give your issue a meaningful title, for better discoverability?",
+      "created_at": "2021-02-12T20:36:05Z",
+      "updated_at": "2021-02-12T20:36:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I realized I misinterpreted the current behavior and design intent, so here's the hopefully correct summary, based on https://github.com/PowerShell/PowerShell/blob/ac560d8d320f3ba72e525825be2c64d9c5abdf2c/src/Microsoft.PowerShell.Commands.Utility/commands/utility/MatchString.cs#L1740-L1757 and experimenting with commands:\r\n\r\n* By (debatable) design, when `Select-String` receives input from _another_ `Select-String` call, it acts as a filter on the `Microsoft.PowerShell.Commands.MatchInfo` _objects_ received as input rather than on the _text content_ they represent:\r\n\r\n  * The filtering is solely based on the `.Line` property value of the input objects, not also on the lines contained in the `.Context` property, if present.\r\n\r\n  * Due to this match-info-_object_-filtering approach, the receiving `Select-String` call doesn't support a `-Context` argument itself  so it is ignored, but a warning is issued.\r\n    * While context resulting from a `-Context` argument passed to the _sending_ `Select-String` _is_ passed through - if the `.Line` property value matches the filter - there is a _display bug_, in that the context lines passed through do not show up in the formatted output anymore; e.g.:\r\n\r\n         * `1..5 | Select-String 3 -Context 1 | Select-String 3` outputs just `> 3`, not `  2\\n> 3\\n  4`, as the original command would; the problem is connected to the `.Context.DisplayPreContext` and `.Context.DisplayPostContext` values not getting preserved on filtering.\r\n\r\n---\r\n\r\nThe upshot is:\r\n\r\n* The current behavior when chaining `Select-String` calls is unhelpful, in two respects:\r\n\r\n  * It doesn't consider context lines when filtering in the receiving `Select-String` command.\r\n  * The receiving `Select-String` command doesn't support `-Context` (your original complaint).\r\n\r\n---\r\n\r\nWhat _would_ be helpful if receiving `Select-String` calls solely operated on the _strings_ represented by the input objects, notably _including_ the context lines, but _without duplicates_ from overlapping contexts - as you currently already see in the _formatted_ output from non-chained calls (formatting markup aside).\r\n\r\nA similar issue arose in combination with the `-Raw` switch (not available in Windows PowerShell; its purpose is to output just the matching _lines_ (text) rather than `Microsoft.PowerShell.Commands.MatchInfo` objects):\r\n\r\nHere too the intuitive expectation is that combining `-Raw` with `-Context` should also output the context lines without duplicates, which isn't the case either, unfortunately, as reported in #14350.\r\n\r\n---\r\n\r\nTo me, these changes would undoubtedly be helpful, but at least in the non-`-Raw` case they do amount to a _breaking change_, so the question is whether it is an _acceptable_ breaking change, namely one that falls into [bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area).\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-02-15T19:17:14Z",
+      "updated_at": "2021-02-19T12:56:16Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@mklement0 Can you please move your comment to a new issue with a meaning title and repro steps? I will close this one given that the PR title and description are not helpful.",
+      "created_at": "2021-02-19T01:11:53Z",
+      "updated_at": "2021-02-19T01:12:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw, please see #14850",
+      "created_at": "2021-02-19T02:24:42Z",
+      "updated_at": "2021-02-19T02:24:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw, given that the current behavior is (mostly) by design (but somewhat unhelpful), the new issues is of type \"Issue-Enhancement\", not a bug report. I have added sample commands that demonstrate the unhelpful behavior, however (in the context of the current behavior there is also a small bug, but fixing that will be moot, if the behavior is more fundamentally revised).\r\n",
+      "created_at": "2021-02-19T13:00:12Z",
+      "updated_at": "2021-02-20T02:03:29Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Thank you @mklement0!",
+      "created_at": "2021-02-22T19:14:48Z",
+      "updated_at": "2021-02-22T19:14:48Z"
+    }
+  ],
+  "created_at": "2021-02-12T18:48:22Z",
+  "number": 14785,
+  "state": "closed",
+  "title": "My bug report",
+  "updated_at": "2021-02-22T19:25:42Z"
+}

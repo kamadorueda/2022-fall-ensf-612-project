@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2268",
+  "author": "Jaykul",
+  "body": "On PowerShell 5.1 and 6 we're able to control the encoding of the pipe redirection operators so we can get UTF8 encoding when we redirect to file, however, using variable syntax and assignment does not work.\n## Steps to reproduce\n\nSetting (or appending) the content using variable notation and = or += doesn't respect any of the encoding settings.\n\n``` posh\nPS C:\\Users\\Jaykul> ${C:gear.txt} = \"$([char]0x263C)\"\nPS C:\\Users\\Jaykul> gc .\\gear.txt -Raw -Encoding Byte | % { \"{0:x2} \" -f $_ }\n3f 0d 0a\nPS C:\\Users\\Jaykul> ${C:gear.txt}\n?\n```\n## Expected behavior\n\nIt should work the same way that pipe redirection works:\n\n``` posh\nPS C:\\Users\\Jaykul> [char]0x263C > gear.txt\nPS C:\\Users\\Jaykul> ${C:gear.txt}\n\u263c\nPS C:\\Users\\Jaykul> gc .\\gear.txt -Raw -Encoding Byte | % { \"{0:x2} \" -f $_ }\nff fe 3c 26 0d 00 0a 00\n```\n\nIn PS 5.1 and 6, I can change the default to UTF8, and it encodes it that way:\n\n``` posh\nPS C:\\Users\\Jaykul> $PSDefaultParameterValues[\"Out-File:Encoding\"] = \"utf8\"\nPS C:\\Users\\Jaykul> [char]0x263C > gear.txt\nPS C:\\Users\\Jaykul> gc .\\gear.txt -Raw -Encoding Byte | % { \"{0:x2} \" -f $_ }\nef bb bf e2 98 bc 0d 0a\n```\n## Actual behavior\n\nNeither the DefaultParameterValues for Out-File/Set-Content/Add-Content, nor the `$OutputEncoding` are respected ...\n## Environment data\n\n<!-- provide the output of $PSVersionTable -->\n\n``` powershell\n> $PSVersionTable\n\nName                           Value\n----                           -----\nPSRemotingProtocolVersion      2.3\nSerializationVersion           1.1.0.1\nGitCommitId                    v6.0.0-alpha.9\nBuildVersion                   3.0.0.0\nPSEdition                      Core\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\nPSVersion                      6.0.0-alpha\nWSManStackVersion              3.0\nCLRVersion\n```\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm curious why you think it's worth changing (improving?) this obscure syntax.\n\nI did notice that a curious performance difference though, which does suggest changing the implementation to use a cmdlet _could_ have some value:\n\n```\n#153 PS> $x = \"a\"*100mb\n#154 PS> measure-command { $x > .\\foo.txt }\n\n0.843s\n\n#155 PS> measure-command { ${.\\foo.txt} = $x }\n\n1.443s\n```\n",
+      "created_at": "2016-09-15T17:40:35Z",
+      "updated_at": "2016-09-15T17:40:35Z"
+    },
+    {
+      "author": "kilasuit",
+      "author_association": "COLLABORATOR",
+      "body": "It was brought up in the community Slack last night and I agree its obscure but it should really just be a different way of performing file redirection.\n",
+      "created_at": "2016-09-15T21:36:17Z",
+      "updated_at": "2016-09-15T21:36:17Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "File redirection is currently limited to writing files. Variable assignment can do much more.\n\nSo by that logic, should file redirection support everything that variable assignment does? I'd say probably not.\n",
+      "created_at": "2016-09-15T21:49:07Z",
+      "updated_at": "2016-09-15T21:49:07Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm not bothered about whether it's done via cmdlet or not, as long as there is _some way_ to control the encoding when necessary. And honestly, I _personally_ only want control over the encoding because I want consistency -- I filed this because someone on slack asked if there was a way and didn't want to file it themselves when I observed there was no mechanism.\n\nI think the syntax is particularly useful (and therefore worth improving with an encoding setting).\n- `+=` doesn't inject line breaks the way `>>` does\n- I can append to the last line, rather than a new line\n- I can control whether the linebreaks are `\\r\\n` or `\\n`\n- I can _get_ content with the same syntax\n- I can cast the data, modify it, and put it back...\n\nI don't need encoding for this, but consider this as a simple example of the usefulness of the syntax. Keeping a persistent counter on disk:\n\n``` posh\n(++[int]${C:counter})\n```\n",
+      "created_at": "2016-09-16T00:41:07Z",
+      "updated_at": "2016-09-16T00:41:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Intriguing, but the syntax indeed needs rescuing from obscurity: neither `Get-Help about_Variables` nor `Get-Help about_Scopes` mention it.\r\n\r\nAt the very least, given that it still works on Windows, it should work on Unix too, which appears not be the case as of v6-alpha16:\r\n\r\n```powershell\r\nPS> Set-Location $HOME; ${/:foo.txt} = 'bar'\r\nAccess to the path '/:foo.txt' is denied.\r\n...\r\n```\r\n\r\nNote that using `/:` as the namespace modifier is the analog to how the feature works on Windows: you use the _name of a PowerShell drive_ as the prefix. (More on that below.)\r\n\r\n@lzybkr: That's why ` ${.\\foo.txt}` in your snippet doesn't actually create a file, but creates a regular variable literally named `.\\foo.txt`, so your performance comparison doesn't apply (its results are surprising, but that's a moot point); try `${.\\foo.txt} = 'bar'; Get-Variable '.\\foo.txt'`.\r\n\r\n---\r\n\r\nThe PowerShell in Action, 2nd Edition book calls the feature _namespace variable notation_ and explains it as follows (emphasis added):\r\n\r\n> Along with the scope modifiers, the **namespace notation lets you get at any of the resources surfaced in PowerShell as drives.** For example, to get at the environment variables, you use the env namespace:\r\n> [...]\r\n> Using variable notation to access a file can be startling at first, but it\u2019s a logical consequence of the unified data model in PowerShell. **Because things like variables and functions are available as drives, things such as drives are also available using the variable notation. In effect, this is an application of the Model-View-Controller (MVC) pattern.** Each type of data store (file system, variables, Registry, and so forth) is a \u201cmodel.\u201d The PowerShell provider infrastructure acts as the controller, and there are (by default) two views: the \u201cfile system\u201d navigation view and the variable view. The user is free to choose and use the view most suitable to the task at hand.\r\n\r\nThis tells us that expression such as `$env:PATH` are an application of this technique - and probably the only application that is widely in use, without general awareness of the underlying mechanism.\r\n\r\nIn practice, as of v5.1, only the following drive providers support namespace notation:\r\n\r\n* `Environment (Env:)`\r\n* `Function (Function:)`\r\n* `Alias (Alias:)`\r\n* `FileSystem (C:, ...)`\r\n* `Variable (variable:)`  - though virtually pointless, given that omitting the namespace accesses variables by default\r\n\r\nNotably, the following standard providers do not, with PowerShell complaining about `IContentCmdletProvider` not being implemented: `Registry`, `Certificate`, `WSMan`.\r\n\r\nThat is, only those providers that support the `IContentCmdletProvider` interface, i.e., getting and setting an item's _content_, (implicitly) support namespace variable notation ; e.g.:\r\n\r\n* `$env:HOME` is the same as `Get-Content env:HOME`\r\n* `$env:foo = 'bar'` is the same as `Set-Content env:foo bar`\r\n\r\n---\r\n\r\nPerhaps another interesting application is in-place updating of files - all operations happen in-memory, and the original file is directly updated, but note that _the default encoding is invariably applied_:\r\n\r\n```powershell\r\n${c:foo.txt} = 'hi'        # Write to file foo.txt.\r\n${c:foo.txt} = ${c:foo.txt} -replace 'i', '@' # Update foo.txt *in place*\r\n```\r\n\r\nIn addition to the noted inability to control the character encoding when writing to files with namespace notation, namespace notation's general limitation of only supporting _literal_ paths means that you're limited to targeting files with literal names / paths - either relative to the current location or with absolute paths.\r\n",
+      "created_at": "2017-03-02T19:34:27Z",
+      "updated_at": "2021-04-04T17:50:39Z"
+    }
+  ],
+  "created_at": "2016-09-15T03:50:15Z",
+  "number": 2268,
+  "state": "open",
+  "title": "Variable assigment to files ignores all encoding settings and uses ... ASCII?",
+  "updated_at": "2021-04-04T17:50:39Z"
+}

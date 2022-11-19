@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15279",
+  "author": "DanielSSilva",
+  "body": "```powershell\r\n$latestTag = git describe --tags --abbrev=0\r\ngit log $latestTag..HEAD --oneline\r\n```\r\n\r\n## Expected behavior\r\nGit log output such as \r\n```none\r\nac9ca9d (HEAD -> main, origin/main, origin/HEAD) added tree\r\n7834bff indentation\r\n```\r\n\r\n## Actual behavior\r\n```none\r\nnothing is returned \r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0-preview.3\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0-preview.3\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n## Additional info\r\n\r\nUsing \r\n```powershell\r\n{ echo $tag..HEAD }.Ast.EndBlock.Statements[0].PipelineElements[0].CommandElements\r\n\r\nStringConstantType : BareWord\r\nValue              : echo\r\nStaticType         : System.String\r\nExtent             : echo\r\nParent             : echo $tag..HEAD\r\n\r\nVariablePath : tag\r\nSplatted     : False\r\nStaticType   : System.Object\r\nExtent       : $tag\r\nParent       : echo $tag..HEAD\r\n\r\nStringConstantType : BareWord\r\nValue              : ..HEAD\r\nStaticType         : System.String\r\nExtent             : ..HEAD\r\nParent             : echo $tag..HEAD\r\n```\r\nIt's interpreting as two different parameters\r\nAs mentioned in [this Twitter thread](https://twitter.com/DanielSilv9/status/1384148636582379533), this can be solved by using double quotes like so\r\n```powershell\r\n git log \"$latestTag..HEAD\" --oneline\r\n```\r\n\r\n\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Does this work before 7.2.0-preview.3? In 7.1?",
+      "created_at": "2021-04-20T12:09:05Z",
+      "updated_at": "2021-04-20T12:09:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It's definitely surprising and unhelpful behavior that has been in place since v3 (in v2 you get a \"Missing property name after reference operator.\" error).\r\n\r\nJust to provide some background:\r\n\r\nAn argument that looks like a _property access_ is usually treated as such:\r\n\r\n```powershell\r\nPS> cmd /c echo $PSHOME.Length # with .HEAD, $null would result, and no argument would be passed.\r\n35  # e.g.\r\n```\r\n\r\nSeemingly, if what follows the first `.` isn't a syntactically valid property name, the argument is simply broken in two at the first `.` (and the variable reference is expanded and stringified _as a whole_), whereas it would make much more sense to implicitly treat the argument as an _expandable string_ (as if it were enclosed in `\"...\"`), which is what otherwise happens, e.g., with \r\n`cmd /c echo /$PSHOME..HEAD` (because the token doesn't start with `$`).\r\n\r\nThe rules around how unquoted compound tokens are parsed and sometimes broken up in argument mode are surprisingly complex, and there are other surprises - see #6467 and https://github.com/MicrosoftDocs/PowerShell-Docs/issues/3440#issuecomment-478206280\r\n\r\nYou've already stated the workaround - double-quoting - which is always a way to avoid ambiguity, but it would certainly be nice if that weren't necessary.\r\n\r\nThe change in behavior from v2 to v3 indicates that fallback behavior was deliberately introduced - it's just that the fallback chosen is unhelpful.",
+      "created_at": "2021-04-20T12:15:11Z",
+      "updated_at": "2021-04-20T12:18:02Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "With the new 7.2-preview.5 native command parameter binding tracing, the problem is that `git` is being sent the value of `$tag` and `..HEAD` as two parameters instead of one:\r\n\r\n```console\r\nPS> $tag = git describe --tags --abbrev=0\r\nPS> trace-command -Option ExecutionFlow -Name ParameterBinding -Expression { git log $tag..HEAD --oneline } -PSHost\r\nDEBUG: 2021-04-20 06:52:38.3359 ParameterBinding Information: 0 : BIND NAMED native application line args [/usr/bin/git]\r\nDEBUG: 2021-04-20 06:52:38.3468 ParameterBinding Information: 0 :     BIND cmd line arg [log] to position [0]\r\nDEBUG: 2021-04-20 06:52:38.3475 ParameterBinding Information: 0 :     BIND cmd line arg [v7.2.0-preview.5] to position [1]\r\nDEBUG: 2021-04-20 06:52:38.3475 ParameterBinding Information: 0 :     BIND cmd line arg [..HEAD] to position [2]\r\nDEBUG: 2021-04-20 06:52:38.3475 ParameterBinding Information: 0 :     BIND cmd line arg [--oneline] to position [3]\r\nDEBUG: 2021-04-20 06:52:38.4365 ParameterBinding Information: 0 : CALLING BeginProcessing\r\n```\r\n\r\nReplacing the variable with a literal shows what is expected:\r\n\r\n```console\r\nPS> trace-command -Option ExecutionFlow -Name ParameterBinding -Expression { git log v7.2.0-preview.5..HEAD --oneline } -PSHost\r\nDEBUG: 2021-04-20 06:53:39.0736 ParameterBinding Information: 0 : BIND NAMED native application line args [/usr/bin/git]\r\nDEBUG: 2021-04-20 06:53:39.0754 ParameterBinding Information: 0 :     BIND cmd line arg [log] to position [0]\r\nDEBUG: 2021-04-20 06:53:39.0755 ParameterBinding Information: 0 :     BIND cmd line arg [v7.2.0-preview.5..HEAD] to position [1]\r\nDEBUG: 2021-04-20 06:53:39.0762 ParameterBinding Information: 0 :     BIND cmd line arg [--oneline] to position [2]\r\nDEBUG: 2021-04-20 06:53:39.1816 ParameterBinding Information: 0 : CALLING BeginProcessing\r\n```\r\n",
+      "created_at": "2021-04-20T13:55:19Z",
+      "updated_at": "2021-04-20T13:55:50Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT The issue has existed since version 3 (as noted by @mklement0 above) and happens with any command (e.g. `$i = '10'; echo $i..HEAD`).\r\n\r\n@IISResetMe mentioned on twitter that it seems to occur at the tokenizer.  In argument mode the tokenizer doesn't correctly revert back to a single expandable string when it hits the second period and instead creates a variable token and a literal string token.",
+      "created_at": "2021-04-20T15:50:54Z",
+      "updated_at": "2021-04-20T15:50:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the clarification, @SeeminglyScience; indeed, the problem also happens in regular parameter binding, not just when calling native executables.\r\n\r\nGiven that a native executable happened to be the messenger, if you will, in this case, perhaps @SteveL-MSFT merely meant to showcase the new-in-preview.5 ability to also trace parameter binding when calling native executables, which is indeed good to know (though incidental here).\r\n\r\n",
+      "created_at": "2021-04-20T16:29:56Z",
+      "updated_at": "2021-04-20T16:29:56Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Given that a native executable happened to be the messenger, if you will, in this case, perhaps @SteveL-MSFT merely meant to showcase the new-in-preview.5 ability to also trace parameter binding when calling native executables, which is indeed good to know (though incidental here).\r\n\r\nAhh good point! Didn't know that was new, I definitely misread that.",
+      "created_at": "2021-04-20T16:34:25Z",
+      "updated_at": "2021-04-20T16:34:25Z"
+    }
+  ],
+  "created_at": "2021-04-20T08:10:13Z",
+  "number": 15279,
+  "state": "open",
+  "title": "Incorrect arg splitting when using .. syntax for git log",
+  "updated_at": "2021-05-11T17:54:09Z"
+}

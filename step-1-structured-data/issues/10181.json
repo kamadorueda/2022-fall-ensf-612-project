@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10181",
+  "author": "tobyscales",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n```\r\nFunction Get-SomeData {\r\n    Clear-Host\r\n    $somedata=\"somedata\"\r\n    return $somedata\r\n}\r\n\r\n$myData = Get-SomeData\r\n\r\n$myData[0]     # will clear the screen\r\n$myData[1]     # \"somedata\"\r\n$myData.Count  # will be 2\r\n\r\n```\r\n\r\n# Expected behavior\r\n\r\n```\r\nFunction should return a single value (\"somedata\")\r\n```\r\n\r\n# Actual behavior\r\n\r\n```\r\nFunction returns an array with the Clear-Host command as the first object\r\n\r\n```\r\n\r\n# Environment data\r\nVerified in:\r\n|Name|Value|\r\n|---|---|\r\n|PSVersion|6.2.0|\r\n|PSEdition|Core|\r\n|GitCommitId|6.2.0|\r\n|OS|Linux 4.15.0-47-generic #50-Ubuntu SMP Wed Mar 13 10:44:52 UTC 2019|\r\n|Platform|Unix|\r\n|PSCompatibleVersions|1.0 2.0 3.0 4.0 5.0 5.1.10032.0 6.2.0|\r\n|PSRemotingProtocolVersion|2.3|\r\n|SerializationVersion|1.1.0.1|\r\n|WSManStackVersion|3.0|\r\n",
+  "closed_at": "2019-10-03T03:51:08Z",
+  "comments": [
+    {
+      "author": "tobyscales",
+      "author_association": "NONE",
+      "body": "(BTW this works as expected in PSCore - Windows)",
+      "created_at": "2019-07-19T00:14:51Z",
+      "updated_at": "2019-07-19T00:14:51Z"
+    },
+    {
+      "author": "HumanEquivalentUnit",
+      "author_association": "CONTRIBUTOR",
+      "body": "`Clear-Host` on Linux [calls the native command `/usr/bin/clear`](https://github.com/SteveL-MSFT/PowerShell/blob/f254ea1cdd53b55a574932f344c8a4f2dd93ccba/src/System.Management.Automation/engine/InitialSessionState.cs#L4088), \r\n\r\n    // Porting note: non-Windows platforms use `clear`\r\n    return @\"\r\n    & (Get-Command -CommandType Application clear | Select-Object -First 1).Definition\r\n\r\nwhich works by outputting a string with ANSI escape codes:\r\n\r\n    <esc>[3;J<esc>[H<esc>[2J\r\n\r\nThey are: clear screen including scrollback, move cursor to top left corner, clear screen. [Source](http://man7.org/linux/man-pages/man4/console_codes.4.html).\r\n\r\n#8554 and #8603 and #8606 and #8609 are related issues, and it looks like there's some debate about whether it's PowerShell or .Net's responsibility, what the default bahviour should be, and how it should interact with \"clearing\" remote sessions or newly implemented hosts.\r\n\r\nAs a Linux-specific workaround, you could write that string (or the output of `clear`) to the host yourself:\r\n\r\n```\r\nFunction Get-SomeData {\r\n    $Host.UI.Write(\"`e[3;J`e[H`e[2J\")\r\n    $somedata=\"somedata\"\r\n    return $somedata\r\n}\r\n\r\n$myData = Get-SomeData\r\n```\r\n",
+      "created_at": "2019-07-28T01:22:40Z",
+      "updated_at": "2019-07-28T01:23:03Z"
+    },
+    {
+      "author": "tobyscales",
+      "author_association": "NONE",
+      "body": "Sure, I could also (as I've done) fork the logic:\r\n\r\n`if ($isLinux) { etc } `\r\n\r\n... but that kind of obviates the point of a cross-platform language, doesn't it? :)\r\n\r\nI think what's more concerning to me is why Clear-Host is messing with my variable stack. Whatever the subtle differences (clear screen, clear buffer+screen, etc) it definitely shouldn't be _returning a value_. \r\n\r\nBut that seems to be what's happening here.",
+      "created_at": "2019-07-31T20:18:01Z",
+      "updated_at": "2019-07-31T20:18:49Z"
+    },
+    {
+      "author": "tobyscales",
+      "author_association": "NONE",
+      "body": "Actually the more elegant fix, in case anyone runs across this, is simply:\r\n`$null = Clear-Host` \r\n\r\nWhich will clear the call stack so everything behaves as expected. But it's still code behaving badly.",
+      "created_at": "2019-07-31T20:38:41Z",
+      "updated_at": "2019-07-31T20:38:41Z"
+    },
+    {
+      "author": "HumanEquivalentUnit",
+      "author_association": "CONTRIBUTOR",
+      "body": "When I try that fix on Ubuntu 16, the screen is not cleared?\r\n\r\n> why Clear-Host is messing with my variable stack. Whatever the subtle differences (clear screen, clear buffer+screen, etc) it definitely shouldn't be returning a value.\r\n\r\nAll command output or free values anywhere in a PowerShell function become part of the return value of the function (that decision was taken to copy sh/bash/ksh/etc. behaviour). `Clear-Host` particularly returns a value because it wraps `/user/bin/clear` a native command which works by returning a value.\r\n\r\n`clear` doesn't clear the screen directly, it prints a string expecting the display terminal to clear itself. If you do something to block that, the screen doesn't clear and you get the string instead. The same thing happens in Bash; at a shell prompt:\r\n\r\n    clear                      # screen is cleared\r\n    clear 1>/tmp/test          # screen is not cleared, reset string written to file\r\n\r\n\r\n    result=`clear`             #screen is not cleared, output -> variable\r\n    echo $result               # screen is cleared.\r\n\r\n\r\n    function test { clear; echo \"123\"; }\r\n    test                       # screen is cleared and 123 is output\r\n    result=`test`              # screen is not cleared, no visible output\r\n    echo $result | wc -c       # result variable has 16 characters, not 3\r\n    16\r\n\r\n    echo $result               # screen is cleared, 123 is output\r\n\r\n> that kind of obviates the point of a cross-platform language, doesn't it? :)\r\n\r\nIt seems to behaves like the platform it's running on. Whether that's badly or not, depends on what behaviour you want \ud83e\udd14 ",
+      "created_at": "2019-08-01T20:58:40Z",
+      "updated_at": "2019-08-01T21:00:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think it should be a bug because script behavior varies between platforms.\r\n`Clear` command issues escapes and PowerShell intercepts this. Perhaps we could re-send by raw interface API.\r\n\r\n/cc @mklement0 ",
+      "created_at": "2019-10-02T12:19:01Z",
+      "updated_at": "2019-10-02T12:19:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I agree, @iSazonov. \r\n\r\n@HumanEquivalentUnit: True, but since PowerShell, unlike Bash, is able to distinguish between to-terminal output and success-stream output, the fix is to write directly to the terminal:\r\n\r\n`${function:Clear-Host}` prints the function definition, and on Unix-like platforms you get:\r\n\r\n```powershell\r\n& (Get-Command -CommandType Application clear | Select-Object -First 1).Definition\r\n```\r\n\r\nThe above writes implicitly to the success output stream, so wrapping it in `[Console]::Write()` fixes the problem:\r\n\r\n```powershell\r\nfunction Clear-Host {\r\n  [Console]::Write((\r\n    & (Get-Command -CommandType Application clear | Select-Object -First 1).Definition\r\n  ))\r\n}\r\n```\r\n\r\n`$host.UI.Write()` would work too and is arguably conceptually better, but since `/usr/bin/clear` is being called, the code is terminal (console)-specific anyway.\r\n\r\nTest:\r\n\r\n```powershell\r\n& { Clear-Host; 'hi' } | Should -Be 'hi'\r\n```\r\n\r\n(Note: In PowerShell Core 7.0.0-preview.4 I get a spurious `Suggestion [4,General]: The most similar commands are: New-Object, Tee-Object.` message the first time `Should` is run in the session, but this is unrelated and can be ignored).\r\n\r\n",
+      "created_at": "2019-10-02T12:57:13Z",
+      "updated_at": "2019-10-02T13:00:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Many thanks! I pulled PR with your suggestion.",
+      "created_at": "2019-10-02T13:37:02Z",
+      "updated_at": "2019-10-02T13:37:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the quick turnaround, @iSazonov.\r\n\r\nTaking a step back: By _unconditionally_ delegating to `/usr/bin/clear` on Unix-like platforms, we've actually already made `Clear-Host` _terminal_-specific, which means that it may malfunction / not do anything meaningful in other types of hosts.\r\n\r\nTo quote @BrucePay from one of the linked issues, at https://github.com/PowerShell/PowerShell/pull/8603#discussion_r246132597:\r\n\r\n> This isn't going to work for non-console hosts [...] and remoting. On those platforms, you still need to use the `$RawUI` portability APIs. A nice solution would be to actually add a new `RawUI.Clear()` API and then implement that using `Console.Clear()` in the console host but that may end up being a bunch of work...\r\n\r\nCase in point: If you currently execute `Clear-Host` in a remoting session connected to a Unix machine, it prints the following message to stderr (and does nothing else).\r\n\r\n```\r\nTERM environment variable not set.\r\n```\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-02T14:11:07Z",
+      "updated_at": "2019-10-02T14:11:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I see we have some issues with Clear-Host. but I still don't have the ability to test on Unix-s and can not grab this. (Although we could do `RawUI.Clear()` step by step).\r\n",
+      "created_at": "2019-10-02T14:18:47Z",
+      "updated_at": "2019-10-02T14:18:47Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #10681, which has now been successfully released as `v7.0.0-preview.5`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.5)\n",
+      "created_at": "2019-10-23T19:07:25Z",
+      "updated_at": "2019-10-23T19:07:25Z"
+    }
+  ],
+  "created_at": "2019-07-19T00:10:25Z",
+  "number": 10181,
+  "state": "closed",
+  "title": "PSCore: Linux - Clear-Host injects data into function return value",
+  "updated_at": "2019-11-11T11:20:15Z"
+}

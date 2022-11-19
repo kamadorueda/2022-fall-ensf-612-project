@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11045",
+  "author": "jackfalveyiv",
+  "body": "In my environment, we have created a custom Powershell script that runs on a scheduled interval.  The task does the following:\r\n - Uses an on-domain service account to run as a scheduled task on the destination server (file server)\r\n - Uses an off-domain account on a remote DMZ server that has access to a particular custom log repository, with modify rights\r\n - Copies all files created in the past 14 days to a local folder, and deletes anything in the source directory older than 21 days\r\n - Logs how many files were moved to what directories in a custom log in the destination directory\r\n\r\nWhen setting up the script, we are consistently able to run it as designed, however we do encounter a strange set of errors on the source server.  First, here is the code:\r\n\r\n```\r\n$UserName = 'Service-Account'\r\n$Password = Get-Content 'C:\\CredFile' | ConvertTo-SecureString\r\n$ServiceCred = New-Object System.Management.Automation.PSCredential($UserName, $Password)\r\n$SourceIP = 'x.x.x.x'\r\n$SourceShare1 = 'SourceShare1'\r\n$SourceShare2 = 'SourceShare2'\r\n$DestPath1 = 'D:\\Path1\\'\r\n$DestPath2 = 'D:\\Path2\\\r\n$Log = 'D:\\Log.log'\r\n$LogDate = Get-Date\r\n$DaysBack = \"-21\"\r\n$DateToDelete = $LogDate.AddDays($Daysback)\r\n    Try\r\n    {\r\n    New-PSDrive -Name \"AppLogs\" -PSProvider \"FileSystem\" -Root \\\\$SourceIP\\$SourceShare1 -Credential $ServiceCred\r\n    $Files1 = Get-ChildItem AppLogs:\\* | Where-Object {$_.LastWriteTime -gt (Get-Date).AddDays(-14)} -Verbose\r\n    Copy-Item $Files1 -Destination $DestPath1 -ErrorAction Stop -Force -Verbose\r\n    Get-ChildItem -Path \\\\$SourceIP\\$SourceShare1\\* | Where-Object {$_.LastWriteTime -lt $DateToDelete } | Remove-Item -Recurse -Verbose\r\n    $Files1Count = $Files1.Count\r\n    \"$Files1Count files were written to $DestPath1 on $LogDate.\" | Out-File -FilePath $Log -Append\r\n    }\r\n    Catch\r\n    {\r\n    \"No files were written to $DestPath1 on $LogDate.\" | Out-File -FilePath $Log -Append\r\n    }\r\n    Try\r\n    {\r\n    New-PSDrive -Name \"IISLogs\" -PSProvider \"FileSystem\" -Root \\\\$SourceIP\\$SourceShare2 -Credential $ServiceCred\r\n    $Files2 = Get-ChildItem IISLogs:\\* | Where-Object {$_.LastWriteTime -gt (Get-Date).AddDays(-14)}\r\n    Copy-Item $Files2 -Destination $DestPath2 -ErrorAction Stop -Force -Verbose\r\n    Get-ChildItem -Path \\\\$SourceIP\\$SourceShare2\\* | Where-Object {$_.LastWriteTime -lt $DateToDelete } | Remove-Item -Recurse -Verbose\r\n    $Files2Count = $Files2.Count\r\n    \"$Files2Count files were written to $DestPath2 on $LogDate.\" | Out-File -FilePath $Log -Append\r\n    }\r\n    Catch\r\n    {\r\n    \"No files were written to $DestPath2 on $LogDate.\" | Out-File -FilePath $Log -Append\r\n    }\r\n\r\n    Remove-PSDrive -Name AppLogs -Verbose\r\n    Remove-PSDrive -Name IISLogs -Verbose\r\n```\r\n\r\nAs you can see, we use New-PSDrive to perform the drive mounting.  For some reason, on the off-domain machine (source) we get two errors consistently in the application logs, 4776 and 4625, indicating a NULL SID.  We have tested this and it only occurs at the New-PSDrive command, indicating to me that despite calling the off-domain credentials specifically to execute this task, Powershell is still passing the credentials of the account running the task first, failing, then using the correct credentials and executing as expected.  The strange thing about this error is that the error logging is returning a \"Unknown user name or bad password\" for the on-domain account we use to run the scheduled task, yet in the script we run New-PSDrive using the off-domain account only.  We do not understand why, despite the script expressly using separate credentials, that the destination machine still attempts to use credentials it is running the task as.  Despite these errors, the script executes successfully, as intended, despite these errors.\r\n\r\nFor the time being, we decided to create a mirrored local account on the destination server, which the task now runs as.  This has alleviated these errors completely, however we would rather not have mirrored local accounts.  Has anyone else encountered this situation, and if so is there a better way to approach it?",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@jackfalveyiv Please share $PSVersionTable",
+      "created_at": "2019-11-12T16:54:07Z",
+      "updated_at": "2019-11-12T16:54:07Z"
+    },
+    {
+      "author": "jackfalveyiv",
+      "author_association": "NONE",
+      "body": "```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.18362.145\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.18362.145\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```",
+      "created_at": "2019-11-12T17:56:00Z",
+      "updated_at": "2019-11-12T17:56:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@jackfalveyiv The repository is for PowerShell Core. You can report Windows PowerShell issues to UserVoice site or use Windows 10 feedback tool.\r\n\r\nIf you can reproduce the issue with latest PowerShell Core 7 build you can report in the repository.",
+      "created_at": "2019-11-12T18:05:32Z",
+      "updated_at": "2019-11-12T18:05:32Z"
+    },
+    {
+      "author": "jackfalveyiv",
+      "author_association": "NONE",
+      "body": "OK, after running the same code in Powershell Core 7 I am experiencing the same issue:\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.5\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.5\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+      "created_at": "2019-11-12T20:13:10Z",
+      "updated_at": "2019-11-12T20:13:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@jackfalveyiv Thanks for repo on PowerShell Core.\r\n\r\nDoes the script work well in interactive session?",
+      "created_at": "2019-11-13T04:36:40Z",
+      "updated_at": "2019-11-13T04:36:40Z"
+    },
+    {
+      "author": "jackfalveyiv",
+      "author_association": "NONE",
+      "body": "It does, and still generates the 4776 and 4625 errors.",
+      "created_at": "2019-11-13T13:45:34Z",
+      "updated_at": "2019-11-13T13:45:34Z"
+    },
+    {
+      "author": "jackfalveyiv",
+      "author_association": "NONE",
+      "body": "I didn't mention this before, but we did manage to narrow this down to the specific New-PSDrive cmdlet since posting this error.  Without any of the copying cmdlets or measurement of directories, executing New-PSDrive is triggering the errors.",
+      "created_at": "2019-11-13T13:48:39Z",
+      "updated_at": "2019-11-13T13:48:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We use P/Invoke https://docs.microsoft.com/en-us/windows/win32/api/winnetwk/nf-winnetwk-wnetaddconnection2a\r\nI guess this is a feature of this function.\r\n\r\n\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/win32/api/winnetwk/nf-winnetwk-wnetaddconnection2a\">WNetAddConnection2A function (winnetwk.h) - Win32 apps</a></strong></div><div>The WNetAddConnection2 function makes a connection to a network resource and can redirect a local device to the network resource.</div></blockquote>",
+      "created_at": "2019-11-13T17:24:30Z",
+      "updated_at": "2019-11-13T17:24:32Z"
+    },
+    {
+      "author": "MSIH",
+      "author_association": "NONE",
+      "body": "@iSazonov How do you use in Powershell. please provide an example. Thanks",
+      "created_at": "2020-05-17T12:47:40Z",
+      "updated_at": "2020-05-17T12:47:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@MSIH I did not understand your question.",
+      "created_at": "2020-05-17T17:08:10Z",
+      "updated_at": "2020-05-17T17:08:10Z"
+    },
+    {
+      "author": "emixam360",
+      "author_association": "NONE",
+      "body": "Hello\r\n\r\nI am facing the same issue with the New-PSDrive command.\r\nThe command is executed with success on a Workgroup Computer with a local account but using a Credential parameter from a domain account\r\n\r\n`\r\nNew-PSDrive -PSProvider FileSystem -Name 'REPORTS' -Root '\\\\SERVER.domain.local\\Data\\Reports' -Credential (get-credential)\r\n`\r\n\r\nEvents 4776 and 4625 are generated on the remote server with failed login from the local account.\r\n\r\n",
+      "created_at": "2020-06-18T14:13:23Z",
+      "updated_at": "2020-06-18T14:14:11Z"
+    }
+  ],
+  "created_at": "2019-11-12T14:44:13Z",
+  "number": 11045,
+  "state": "open",
+  "title": "Credential Failure on Off-Domain Boxes using New-PSDrive",
+  "updated_at": "2021-08-12T15:06:37Z"
+}

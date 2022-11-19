@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5746",
+  "author": "nightroman",
+  "body": "Runspace pools may cause memory leaks, at least in tested PowerShell v5, v6.\r\nPowerShell v2 does not have this issue.\r\n\r\nThe below script repeats a job infinitely in a loop. Run it and watch the\r\nprinted application handle counts and memory sizes. Stop scripts manually by\r\n<kbd>Ctrl+C</kbd> or close the PowerShell console.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n# This script uses [PowerShell] with runspace pools. Printed handle and memory\r\n# numbers grow over time. Stop manually by Ctrl+C or close the console.\r\n# Otherwise you may run out of memory.\r\n\r\nfor() {\r\n    $pool = [RunspaceFactory]::CreateRunspacePool(1, 2)\r\n    $pool.Open()\r\n\r\n    $ps1 = [PowerShell]::Create()\r\n    $ps1.RunspacePool = $pool\r\n\r\n    $job1 = $ps1.AddScript('Get-Date').BeginInvoke()\r\n    $null = $job1.AsyncWaitHandle.WaitOne()\r\n    $result = $ps1.EndInvoke($job1)\r\n\r\n    $ps1.Dispose()\r\n    $pool.Close()\r\n\r\n    $p = Get-Process -Id $PID\r\n    \"$result Handles: $($p.HandleCount) Memory: $($p.PrivateMemorySize64 / 1mb) mb\"\r\n}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nThe application used handle counts and memory sizes stay within reasonable ranges.\r\n\r\nActual behavior\r\n---------------\r\n\r\nThe application used handle counts and memory sizes grow over time,\r\npretty fast in this example due to leaks in the infinite loop.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.0-rc.2\r\nOS                             Microsoft Windows 10.0.15063\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.15063.786\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.15063.786\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```\r\n",
+  "closed_at": "2017-12-27T14:25:18Z",
+  "comments": [
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "Here is the similar script with runspaces but without runspace pools.\r\nIt has no obvious leaks in tested v6, v5, v2.\r\n\r\nThus, runspace pools look responsible for leaks.\r\n\r\n```powershell\r\n# This script uses [PowerShell] without runspace pools. Printed handle and\r\n# memory numbers stay within reasonable ranges. Stop manually by Ctrl+C or\r\n# close the console.\r\n\r\nfor() {\r\n\t$ps1 = [PowerShell]::Create()\r\n\r\n\t$job1 = $ps1.AddScript('Get-Date').BeginInvoke()\r\n\t$null = $job1.AsyncWaitHandle.WaitOne()\r\n\t$result = $ps1.EndInvoke($job1)\r\n\r\n\t$ps1.Dispose()\r\n\r\n\t$p = Get-Process -Id $PID\r\n\t\"$result Handles: $($p.HandleCount) Memory: $($p.PrivateMemorySize64 / 1mb) mb\"\r\n}\r\n```\r\n",
+      "created_at": "2017-12-26T18:29:53Z",
+      "updated_at": "2017-12-26T18:29:53Z"
+    },
+    {
+      "author": "potatoqualitee",
+      "author_association": "NONE",
+      "body": "Oh wow, interesting!",
+      "created_at": "2017-12-26T18:35:29Z",
+      "updated_at": "2017-12-26T18:35:29Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "In many cases, calling `Close()` or `Dispose()` amount to the same thing but not with a `RunspacePool`.  You need to call `Dispose()`.  Try this:\r\n\r\n```posh\r\nfor() {\r\n    $pool = [RunspaceFactory]::CreateRunspacePool(1, 2)\r\n    $pool.Open()\r\n\r\n    $ps1 = [PowerShell]::Create()\r\n    $ps1.RunspacePool = $pool\r\n\r\n    $job1 = $ps1.AddScript('Get-Date').BeginInvoke()\r\n    $null = $job1.AsyncWaitHandle.WaitOne()\r\n    $result = $ps1.EndInvoke($job1)\r\n\r\n    $ps1.Dispose()\r\n    $pool.Dispose()\r\n    $p = Get-Process -Id $PID\r\n    \"$result Handles: $($p.HandleCount) Memory: $($p.PrivateMemorySize64 / 1mb) mb\"\r\n    $p = $result = $null\r\n    [System.GC]::Collect()\r\n}\r\n```\r\nAlso, when testing for memory leaks I like to invoke the GC regularly to reduce potential confusion by observing garbage accruing (which will get collected at some later time).",
+      "created_at": "2017-12-26T19:07:26Z",
+      "updated_at": "2017-12-26T19:10:22Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "It's a very good news!\r\n\r\n> In many cases, calling Close() or Dispose() amount to the same thing but not with a RunspacePool. You need to call Dispose()\r\n\r\nIs this by design or a bug?\r\n",
+      "created_at": "2017-12-26T19:24:15Z",
+      "updated_at": "2017-12-26T19:24:15Z"
+    },
+    {
+      "author": "MaximoTrinidad",
+      "author_association": "NONE",
+      "body": "By the way!!  The initial sample code does shows memory leak in Windows 10 Insider Build 17046 when executing in Windows PowerShell 5.1.\r\n\r\n```\r\nPS [441] > $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.17046.1000\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.17046.1000\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n\r\n```",
+      "created_at": "2017-12-26T19:28:04Z",
+      "updated_at": "2017-12-26T19:28:04Z"
+    },
+    {
+      "author": "MaximoTrinidad",
+      "author_association": "NONE",
+      "body": "Good one @rkeithhill!  Thanks.",
+      "created_at": "2017-12-26T19:30:05Z",
+      "updated_at": "2017-12-26T19:30:05Z"
+    },
+    {
+      "author": "potatoqualitee",
+      "author_association": "NONE",
+      "body": "Unfortunately, I've experienced leaks with \r\n\r\n``` powershell \r\n$pool.Close() \r\n$pool.Dispose()\r\n```\r\n\r\nExecuting GC cleanup within the runspace scriptblock cleared it up but slowed things down dramatically.",
+      "created_at": "2017-12-26T19:32:15Z",
+      "updated_at": "2017-12-26T19:32:15Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "Also, the fact that v2 does not show leaks with the same code is interesting.",
+      "created_at": "2017-12-26T19:33:52Z",
+      "updated_at": "2017-12-26T19:33:52Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "@potatoqualitee I would not generally recommend putting GC collect calls in production code because that subverts the GC's (generally good) algorithms for when a GC is needed.  But for memory hoard detection, it is useful to eliminate the \"non-determinism\" of the GC.\r\n\r\nAlso, if you call `RunspacePool.Dispose()` it [internally calls](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/hostifaces/RunspacePoolInternal.cs#L830) `Close()` so there is no need to call `Close()` before `Dispose()` AFAICT.\r\n\r\n@nightroman \r\n> Is this by design or a bug?\r\n\r\nThe [design guidelines](https://docs.microsoft.com/en-us/dotnet/standard/design-guidelines/dispose-pattern) say this:\r\n\r\n> \u2713 CONSIDER providing method Close(), in addition to the Dispose(), if close is standard terminology in the area. \r\nWhen doing so, it is important that you make the Close implementation identical to Dispose and consider implementing the IDisposable.Dispose method explicitly. \r\n\r\nSince this is a \"guideline\" (CONSIDER vs DO or DO NOT), I wouldn't consider it a bug - bad form perhaps unless there is a way to re-open a closed RunspacePool but I don't see that functionality.\r\n\r\nP.S. Whenever I see \"DO or DO NOT\", I reflexively want to add \"there is no try\".  Hmm...",
+      "created_at": "2017-12-26T21:39:10Z",
+      "updated_at": "2017-12-26T21:39:10Z"
+    }
+  ],
+  "created_at": "2017-12-26T18:24:32Z",
+  "number": 5746,
+  "state": "closed",
+  "title": "Runspace pool memory leaks (v6, v5, no leaks in v2)",
+  "updated_at": "2017-12-27T14:25:18Z"
+}

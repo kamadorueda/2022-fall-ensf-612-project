@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4287",
+  "author": "mklement0",
+  "body": "Currently, `Start-Job`:\r\n\r\n* defaults to _different_, _fixed_ working directories on _different platforms_ (which is problematic in itself):\r\n   * `$HOME` on Unix (macOS, Linux)\r\n   * `$HOME\\Documents` on Windows\r\n\r\n* by contrast, using the newly-introduced Unix-like `... &` syntax defaults to the _current_ location; this discrepancy is problematic too [_update: but as designed_] - see #4267\r\n\r\nEither way, there is **no simple way to have the _caller_ set the working directory _explicitly_,** leading to such painful workarounds as in [this SO answer](https://stackoverflow.com/a/17388991/45375).\r\n\r\nThe proposed solution:\r\n\r\n```powershell\r\n# Wishful thinking\r\n> $jb = Start-Job -WorkingDirectory $PSHOME { \"Hi from $PWD.\" }; Receive-Job -AutoRemove -Wait $jb\r\nHi from C:\\Program Files\\PowerShell\\6.0.0-beta.4\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.4 on macOS 10.12.5\r\nPowerShell Core v6.0.0-beta.4 on Ubuntu 16.04.2 LTS\r\nPowerShell Core v6.0.0-beta.4 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.413 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2019-09-11T17:51:33Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If this gets added, then the language feature `&` should use it instead of how it is currently implemented.",
+      "created_at": "2017-07-25T21:37:20Z",
+      "updated_at": "2017-07-25T21:37:20Z"
+    },
+    {
+      "author": "Average-Bear",
+      "author_association": "NONE",
+      "body": "Would like to see Start-Job have -ThrottleLimit compatibility.",
+      "created_at": "2017-10-03T01:03:39Z",
+      "updated_at": "2017-10-03T01:03:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Average-Bear: I suggest you create a new issue (and provide a rationale for your request there).",
+      "created_at": "2017-10-03T01:32:53Z",
+      "updated_at": "2017-10-03T01:32:53Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "WorkingDirectory is a property specific to a *process* - and the fact that `Start-Job` spins up an out-of-process runspace seems to me an implementation detail, not something you would necessarily want to bring up to the level of abstraction that a `Job` provides. \r\n\r\nSeems like the kind of thing you would want to include in the initialization script, so I'd recommend just fixing #4530 so you can do:\r\n\r\n```\r\n$jb = Start-Job { \"Hi from $PWD.\" } -InitializationScript {Set-Location $using:PWD}; Receive-Job -AutoRemove -Wait $jb\r\n```\r\n\r\nrather than the currently super awkward:\r\n\r\n```\r\n$jb = Start-Job { \"Hi from $PWD.\" } -InitializationScript ([scriptblock]::Create(\"Set-Location $PWD\")); Receive-Job -AutoRemove -Wait $jb\r\n```",
+      "created_at": "2017-10-15T14:12:04Z",
+      "updated_at": "2017-10-15T14:12:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I consider `-InitializationScript {Set-Location $using:PWD}` awkward too.\r\n\r\nHaving a `-WorkingDirectory` is a matter of _convenience_ first and foremost, and it also provides symmetry with `Start-Process`.\r\n\r\nYou're running a script block / script _somewhere_, and it's helpful to have a simple way to control that somewhere.\r\n\r\nThis is especially true with the current behavior, where you - invisibly - run in a location _other than the current one_ (unlike when you use the new `&` operator on Unix - a regrettable discrepancy - see #4267).\r\n\r\n\r\nAs an aside, re implementation detail: Understanding the underpinnings of jobs is important, because users need to be aware that a separate process and remoting are involved to understand that  _deserialized_ objects are returned.\r\n\r\n",
+      "created_at": "2017-10-15T14:36:37Z",
+      "updated_at": "2017-10-15T14:36:37Z"
+    },
+    {
+      "author": "davinci26",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 @SteveL-MSFT \r\n\r\nI want to take a stab at this one and before deep diving into the implementation I wanted to see what you think about the following solutions:\r\n\r\n1. Quick Solution that respects the Job abstraction:\r\n\r\n```\r\n1. Get the working directory from the user.\r\n2. Verify that the directory exists\r\n3. Inject in the beginning of the script block that will be executed a 'Set-Location $UserSpecifiedWorkingDirectory'\r\n```\r\n\r\n2. Propagate the `$WorkingDirectory` variable all the way up to the `Job level` and specify the working directory there when the process starts\r\n\r\nWhat do you think? Do any of these approaches seem reasonable?\r\n\r\nDisclaimer: this is my first issue here so I might be missing something entirely",
+      "created_at": "2019-07-26T00:08:27Z",
+      "updated_at": "2019-07-26T00:08:27Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@davinci26 I wouldn't inject anything into the script block. That could result in some surprises if/when you debug a job (i.e. you should only see your job script when you debug a job, not extra stuff that your job script didn't include). Instead I'd just set the location when the runspace associated with the job is created, before the script block is run inside of it.",
+      "created_at": "2019-07-26T00:20:52Z",
+      "updated_at": "2019-07-26T00:20:52Z"
+    },
+    {
+      "author": "davinci26",
+      "author_association": "CONTRIBUTOR",
+      "body": "I took a deep dive at the codebase and I observed the following:\r\n\r\n#### Creating a new pipeline with a `Set-Location` and adding it to the operations list:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/bd6fdae73520931f0d27a29d6290e18761772141/src/System.Management.Automation/engine/remoting/commands/StartJob.cs#L610\r\n\r\nJust add this\r\n``` C#\r\nvar command = new Command(\"Set-Location\");\r\ncommand.Parameters.Add(\"LiteralPath\", this.WorkingDirectory);\r\nPipeline tempPipeline = remoteRunspace.CreatePipeline(command.ToString());\r\ntempPipeline.Commands.Add(command);\r\nIThrottleOperation locationOperation = new ExecutionCmdletHelperComputerName(remoteRunspace, tempPipeline);\r\nOperations.Add(locationOperation);\r\n``` \r\nIf you follow this approach then pwsh throws because the second `operation` in `Operations` is trying to open a runspace that is already open (see [here](https://github.com/PowerShell/PowerShell/blob/bd6fdae73520931f0d27a29d6290e18761772141/src/System.Management.Automation/engine/remoting/commands/PSRemotingCmdlet.cs#L3488))\r\n\r\nIs this the intended behaviour? Can we modify the logic when we try to open the remote the runspace to skip the opening if the runspace is already open.\r\n\r\n#### Adding a `Set-Location` command to the pipeline\r\n\r\nThis would require to either:\r\n\r\n1. Use the `CreatePipeline` function available in `PSRemotingCmdlets` and then insert the command in the beginning. Personally I am not a huge fan of this approach as it would be a bit slow.\r\n\r\n2. Modify the `CreatePipeline` function directly.\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/bd6fdae73520931f0d27a29d6290e18761772141/src/System.Management.Automation/engine/remoting/commands/PSRemotingCmdlet.cs#L1831 \r\n\r\nThis function is consumed by all `PSRemoteCmdlets`. Would the workingDirectory parameter make sense in all of them? Is this an overkill?\r\n\r\n#### Changing the working directory of the pwsh remote server:\r\n\r\n1. The command line argument `workingdirectory` does not work when the pwsh process runs in server mode (`-s` flag). \r\n2. The `InitializationScript` argument is passed to the process `startupInfo` as part of the arguments.\r\n\r\nIf we stick to the implementation of (1) & (2) I do not see how we could have a `workingDirectory` parameter for `Start-Job` that would be able to set the working directory also for the `InitializationScript`. Is this part of the requirement?\r\n\r\nEnabling (1) would allow us to implement the working directory fairly easily since we can add an additional command line argument to when the powershell server process instance is spawned.\r\n",
+      "created_at": "2019-07-28T18:32:12Z",
+      "updated_at": "2019-07-28T18:32:12Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #10324, which has now been successfully released as `v7.0.0-preview.4`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.4)\n",
+      "created_at": "2019-09-19T17:52:03Z",
+      "updated_at": "2019-09-19T17:52:03Z"
+    }
+  ],
+  "created_at": "2017-07-18T19:41:46Z",
+  "number": 4287,
+  "state": "closed",
+  "title": "Start-Job needs a -WorkingDirectory parameter",
+  "updated_at": "2019-09-19T17:52:03Z"
+}

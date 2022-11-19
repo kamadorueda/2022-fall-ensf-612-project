@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13348",
+  "author": "mklement0",
+  "body": "On Windows, hidden system junctions such as `\"$HOME\\My Documents\"` exist for compatibility with pre-Vista Windows versions - they simply redirect to the current well-known locations.\r\n\r\nIn a regular session, trying to get the items inside those junctions by design fails with an access-denied error, even in an elevated session.\r\n\r\nUnexpectedly, however, in a _remoting_ session the items _can_ be accessed.\r\n\r\nThis can lead to undesired duplicate processing of items.\r\n\r\n## Steps to reproduce\r\n\r\nRun on Windows, with elevation and remoting set up.\r\n\r\n```powershell\r\n# OK\r\n{ gci -ea stop -force \"$HOME\\My Documents\" } | Should -Throw -ExceptionType System.UnauthorizedAccessException\r\n\r\n# Unexpectedly does NOT throw\r\n{ icm -cn . -ConfigurationName PowerShell.7 { $res = gci -ea stop -force \"$HOME\\My Documents\"; $res.FullName | Out-Host } } | Should -Throw -ExceptionType System.UnauthorizedAccessException\r\n```\r\n\r\n## Expected behavior\r\n\r\nBoth test should succeed.\r\n\r\n## Actual behavior\r\n\r\nThe 2nd test fails, because accessing the items inside the hidden junction unexpectedly succeeds in the context of remoting.\r\n\r\n```none\r\n... # Out-Host output with item paths\r\nInvalidResult:\r\nLine |\r\n   1 | { icm -cn . { $res = gci -ea stop -force \"$HOME\\My Documents\"; $res.FullName | Out-Host } } | Should -Throw -ExceptionType System.UnauthorizedAccessException\r\n     | Expected an exception, with type [System.UnauthorizedAccessException] to be thrown, but no exception was thrown.\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.5\r\n```\r\n",
+  "closed_at": "2020-08-05T16:50:38Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Unexpectedly, however, in a remoting session the items can be accessed.\r\n\r\nWhat does gci return in second case?",
+      "created_at": "2020-08-04T17:56:43Z",
+      "updated_at": "2020-08-04T17:56:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The usual  (deserialized `FileSystemInfo` instances), because the code executing remotely seemingly has the required permissions to access these junctions, which locally running code doesn't (even as admin).\r\n\r\nI'm _guessing_ that the problem stems from the user impersonation in the remotely executing code being more privileged than necessary.\r\n",
+      "created_at": "2020-08-04T18:06:06Z",
+      "updated_at": "2020-08-04T18:06:06Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "This is probably due to a network logon having the `SeBackupPrivilege` enabled which allows you to bypass access checks when accessing items. An interactive logon has the privileges on the access token but they aren't enabled by default whereas a network logon enables all privileges. To see this in action just run `whoami.exe /priv`.\r\n\r\nIt sounds like the actual issue relates to https://github.com/PowerShell/PowerShell/issues/9126 where PowerShell follows a symlink/junction by default.",
+      "created_at": "2020-08-04T22:00:04Z",
+      "updated_at": "2020-08-04T22:03:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's a great pointer, @jborean93, thanks. \r\n\r\nNote that PowerShell Core _by default_ does _not_ follow symlinks or junctions: #9126 is about the very specific parameter combinations when it unexpectedly deviates from that default, which the code in the OP doesn't employ, however. \r\n",
+      "created_at": "2020-08-04T22:28:36Z",
+      "updated_at": "2020-08-04T22:28:36Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Ah yes sorry I see you are doing a gci on the junction itself in your example sorry I thought it was about how remoting would follow it not that it doesn't fail like it does when local. Still the `SeBackupPrivilege` would explain the difference in behaviour here.",
+      "created_at": "2020-08-04T23:16:44Z",
+      "updated_at": "2020-08-05T00:06:12Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "/cc @PaulHigin Given @jborean93's explanation (thanks!), would this issue be considered by design?",
+      "created_at": "2020-08-05T06:22:00Z",
+      "updated_at": "2020-08-05T06:22:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw\r\n\r\nWhile the specific command in the OP is definitely an exotic case (_explicit_ targeting of a hidden for-legacy-code-only junction), I am concerned that the underlying problem (for which we now have a _technical_ explanation, thanks to @jborean93) may have other, more problematic ramifications.\r\n\r\nIn general:\r\n\r\n* You don't want code to behave differently just because it happens to be running via remoting (leaving the loss of type fidelity on the _caller_ side aside).\r\n\r\n* You don't want code to run with different - and especially not _more_ - privileges, just because it happens to be running via remoting.\r\n",
+      "created_at": "2020-08-05T13:04:23Z",
+      "updated_at": "2020-08-05T13:04:23Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is not a PowerShell remoting issue, and as @jborean93 points out, a consequence of how the remote non-interactive log in session is created.  You get the same behavior, without running any of the PowerShell remoting stack, by running PowerShell directly in an SSH session:\r\n\r\n```powershell\r\nPS C:\\> ssh -l username@domain target1\r\nMicrosoft Windows [Version 10.0.18363.959]\r\n(c) 2019 Microsoft Corporation. All rights reserved.\r\n\r\ndomain\\username@target1 c:\\Users\\username>\r\ndomain\\username@target1 c:\\Users\\username>pwsh\r\nPS C:\\Users\\username>\r\nPS C:\\Users\\username> dir \"$home/My Documents\"\r\n\r\n    Directory: C:\\Users\\username\\My Documents\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n...\r\n```\r\n\r\nI don't know if this is a privilege issue for non-interactive sessions, but if it is then it needs to be addressed in SSH and WinRM.",
+      "created_at": "2020-08-05T16:31:26Z",
+      "updated_at": "2020-08-05T16:31:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for clarifying, @PaulHigin - I didn't know at what layer this behavior is implemented.\r\n\r\nLeaving SSH aside, does this mean that when PowerShell uses WinRM for its remoting it doesn't even have the _option_ to control this behavior?\r\n\r\n",
+      "created_at": "2020-08-05T16:41:49Z",
+      "updated_at": "2020-08-05T16:41:49Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, AFAIK this restriction is enforced by Windows based on how the log in session is created.  PowerShell, running within the session, has nothing to do with it.",
+      "created_at": "2020-08-05T16:47:13Z",
+      "updated_at": "2020-08-05T16:47:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @PaulHigin. I'm closing this.\r\n\r\nHowever, I think the behavior is problematic and, given that that it is part of the plumbing, has even wider ramifications than I feared.\r\n\r\nI won't personally pursue this outside of PowerShell, but I encourage someone from the team to do so.\r\n",
+      "created_at": "2020-08-05T16:50:38Z",
+      "updated_at": "2020-08-05T16:50:38Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Will do.  I'll contact the owners of WinRM and try to find out if this is expected.",
+      "created_at": "2020-08-05T16:58:24Z",
+      "updated_at": "2020-08-05T16:58:24Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "This wouldn't be something with WinRM or even SSH but just how Windows deals with a Network logon. You can see it in action by using my [PSAccessToken module](https://github.com/jborean93/PSAccessToken) (note this isn't released but just on GitHub).\r\n\r\n```powershell\r\n# PSAccessToken requires this\r\n# Install-Module PInvokeHelper -Scope CurrentUser\r\n\r\nImport-Module .\\PSAccessToken\\PSAccessToken\\PSAccessToken.psd1\r\n\r\nWrite-Output \"Interactive token details\"\r\nGet-TokenPrivileges\r\n\r\n$cred = Get-Credential\r\n$logon = Invoke-LogonUser -Credential $cred -LogonType Network\r\n\r\ntry {\r\n    Invoke-WithImpersonation -Token $logon.Token -ScriptBlock {\r\n        Write-Output \"Network token details\"\r\n        Get-TokenPrivileges\r\n    }\r\n} finally {\r\n    $logon.Token.Dispose()\r\n}\r\n```\r\n\r\nThis results in\r\n\r\n```\r\nInteractive token details\r\n\r\nName                                                     Attributes\r\n----                                                     ----------\r\nSeAssignPrimaryTokenPrivilege                              Disabled\r\nSeIncreaseQuotaPrivilege                                   Disabled\r\nSeSecurityPrivilege                                        Disabled\r\nSeTakeOwnershipPrivilege                                   Disabled\r\nSeLoadDriverPrivilege                                      Disabled\r\nSeSystemProfilePrivilege                                   Disabled\r\nSeSystemtimePrivilege                                      Disabled\r\nSeProfileSingleProcessPrivilege                            Disabled\r\nSeIncreaseBasePriorityPrivilege                            Disabled\r\nSeCreatePagefilePrivilege                                  Disabled\r\nSeBackupPrivilege                                          Disabled\r\nSeRestorePrivilege                                         Disabled\r\nSeShutdownPrivilege                                        Disabled\r\nSeDebugPrivilege                                            Enabled\r\nSeSystemEnvironmentPrivilege                               Disabled\r\nSeChangeNotifyPrivilege                   EnabledByDefault, Enabled\r\nSeRemoteShutdownPrivilege                                  Disabled\r\nSeUndockPrivilege                                          Disabled\r\nSeManageVolumePrivilege                                    Disabled\r\nSeImpersonatePrivilege                    EnabledByDefault, Enabled\r\nSeCreateGlobalPrivilege                   EnabledByDefault, Enabled\r\nSeIncreaseWorkingSetPrivilege                              Disabled\r\nSeTimeZonePrivilege                                        Disabled\r\nSeCreateSymbolicLinkPrivilege                              Disabled\r\nSeDelegateSessionUserImpersonatePrivilege                  Disabled\r\n\r\n\r\nNetwork token details\r\n\r\nSeAssignPrimaryTokenPrivilege             EnabledByDefault, Enabled\r\nSeIncreaseQuotaPrivilege                  EnabledByDefault, Enabled\r\nSeSecurityPrivilege                       EnabledByDefault, Enabled\r\nSeTakeOwnershipPrivilege                  EnabledByDefault, Enabled\r\nSeLoadDriverPrivilege                     EnabledByDefault, Enabled\r\nSeSystemProfilePrivilege                  EnabledByDefault, Enabled\r\nSeSystemtimePrivilege                     EnabledByDefault, Enabled\r\nSeProfileSingleProcessPrivilege           EnabledByDefault, Enabled\r\nSeIncreaseBasePriorityPrivilege           EnabledByDefault, Enabled\r\nSeCreatePagefilePrivilege                 EnabledByDefault, Enabled\r\nSeBackupPrivilege                         EnabledByDefault, Enabled\r\nSeRestorePrivilege                        EnabledByDefault, Enabled\r\nSeShutdownPrivilege                       EnabledByDefault, Enabled\r\nSeDebugPrivilege                          EnabledByDefault, Enabled\r\nSeSystemEnvironmentPrivilege              EnabledByDefault, Enabled\r\nSeChangeNotifyPrivilege                   EnabledByDefault, Enabled\r\nSeRemoteShutdownPrivilege                 EnabledByDefault, Enabled\r\nSeUndockPrivilege                         EnabledByDefault, Enabled\r\nSeManageVolumePrivilege                   EnabledByDefault, Enabled\r\nSeImpersonatePrivilege                    EnabledByDefault, Enabled\r\nSeCreateGlobalPrivilege                   EnabledByDefault, Enabled\r\nSeIncreaseWorkingSetPrivilege             EnabledByDefault, Enabled\r\nSeTimeZonePrivilege                       EnabledByDefault, Enabled\r\nSeCreateSymbolicLinkPrivilege             EnabledByDefault, Enabled\r\nSeDelegateSessionUserImpersonatePrivilege EnabledByDefault, Enabled\r\n```\r\n\r\nThis is fundamentally how Windows treats a network logon, it will create the access token with all the privileges assigned to that user and enable them all. WinRM and SSH are affected because it is creating a process based on the network logon token so they have those privileges enabled by default.\r\n\r\nMy guess as to why this happens is because network logon like services, like SMB, doesn't have a mechanism to adjust the token privileges from the client's perspective. This would cause havok on things like RPC commands over named pipes (over SMB) and even backup systems that rely on the `SeBackupPrivilege`/`SeRestorePrivilege` to read/write files on a network share without having explicit permission.",
+      "created_at": "2020-08-05T19:24:50Z",
+      "updated_at": "2020-08-05T19:24:50Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Right, that is what I meant about this being a WinRM/SSH issue, since they create Network log on sessions.  So this behavior is by design.",
+      "created_at": "2020-08-05T19:45:04Z",
+      "updated_at": "2020-08-05T19:45:04Z"
+    }
+  ],
+  "created_at": "2020-08-04T13:34:09Z",
+  "number": 13348,
+  "state": "closed",
+  "title": "In the context of remoting, Get-ChildItem can unexpectedly access the hidden system junctions",
+  "updated_at": "2020-08-05T21:06:10Z"
+}

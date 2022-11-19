@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10718",
+  "author": "mgeorgebrown89",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nMany REST API that consume JSON don't accept null values, and sometimes when dealing with PowerShell objects this is easier said than done, especially if you're using pre-build .NET stuff. It would be nice if there was a switch parameter on the cmdlet to ignore properties with null values in the JSON string output. \r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nI currently have a solution for this from [this](https://stackoverflow.com/questions/33038848/how-to-exclude-non-valued-object-properties-when-converting-to-json-in-powershel) thread, but I imagine I'm not the only with this issue, so this could be a nice solution. Given any PowerShell Object:\r\n\r\n    $PowerShellObject | ForEach-Object {\r\n\r\n        $NonEmptyProperties = $_.psobject.Properties | Where-Object {$null -ne $_.Value} | Select- \r\n       Object -ExpandProperty Name\r\n\r\n        # Convert object to JSON with only non-empty properties\r\n        $_ | Select-Object -Property $NonEmptyProperties | ConvertTo-Json\r\n    }",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It would be as simple as:\r\n```c#\r\nJsonSerializer _jsonWriter = new JsonSerializer {\r\n                                 NullValueHandling = NullValueHandling.Ignore\r\n                             };\r\n```\r\n",
+      "created_at": "2019-10-07T10:06:10Z",
+      "updated_at": "2019-10-07T10:06:10Z"
+    },
+    {
+      "author": "lpraz",
+      "author_association": "NONE",
+      "body": "I've been taking a look at this, and it doesn't seem like setting the NullValueHandling alone catches all nulls. For example, the following:\r\n```\r\n$object = @{\r\n  NotNullProperty = \"not-null\",\r\n  NullProperty = $null\r\n}\r\n```\r\nserializes to:\r\n```\r\n{\r\n  \"NotNullProperty\": \"not-null\",\r\n  \"NullProperty\": null\r\n}\r\n```\r\n\r\nI'm not sure if there's a bug in what I've written so far, or if LanguagePrimitives.IsNullLike should be involved somehow? Is there some other way of checking for $null (and others) that should be used by cmdlets?",
+      "created_at": "2019-10-09T01:55:36Z",
+      "updated_at": "2019-10-09T01:55:36Z"
+    },
+    {
+      "author": "mgeorgebrown89",
+      "author_association": "NONE",
+      "body": "I haven't looked into doing this in the C# class yet, but for a temporary fix, and in case someone else needs this functionality, here's what I've come up with (with help from some people on the PowerShell Slack):\r\n\r\n    function ConvertTo-NoNullsJson {\r\n        <#\r\n        .SYNOPSIS\r\n            Converts an object into JSON format without any null key value pairs.\r\n        .DESCRIPTION\r\n            This function takes a PowerShell Object and passes it to Remove-NullProperties.\r\n            This removes all the properties with null values, and outputs the JSON. \r\n            This is for use with APIs that don't like null values.\r\n        .PARAMETER InputObject\r\n            The object from which to remove null properties. \r\n        .PARAMETER Depth\r\n            An integer representing the level of objects to convert to JSON. This is the same of the ConvertTo-Json cmdlet.\r\n        .EXAMPLE\r\n            $SomeObject | ConvertTo-NoNullsJson -Depth 5\r\n        #>\r\n        [CmdletBinding()]\r\n        param(\r\n            [Parameter(ValueFromPipeline)]\r\n            [object]\r\n            $InputObject,\r\n\r\n            [int]\r\n            $Depth = 2\r\n        )\r\n        begin {\r\n            $list = [System.Collections.Generic.List[System.Object]]::new()\r\n        }\r\n        process {\r\n            $list.Add((Remove-NullProperties -InputObject $InputObject))\r\n        }\r\n        end {\r\n            $list | ConvertTo-Json -Depth $Depth\r\n        }\r\n    }\r\n\r\n_\r\n\r\n    function Remove-NullProperties {\r\n        <#\r\n        .SYNOPSIS\r\n            Removes null properties from an object.\r\n        .DESCRIPTION\r\n            This function recursively removes all null properties from a PowerShell object. \r\n        .PARAMETER InputObject\r\n            A PowerShell Object from which to remove null properties.\r\n        .EXAMPLE\r\n            $Object | Remove-NullProperties\r\n        #>\r\n        [CmdletBinding()]\r\n        param(\r\n            [Parameter(Mandatory, Position = 0, ValueFromPipeline)]\r\n            [object]\r\n            $InputObject\r\n        )\r\n        foreach ($object in $InputObject) {\r\n            if ($object -is [string] -or $object.GetType().IsPrimitive) {\r\n                $object\r\n                return\r\n            }\r\n        \r\n            $NewObject = @{ }\r\n            $PropertyList = $object.PSObject.Properties | Where-Object { $null -ne $_.Value }\r\n            foreach ($Property in $PropertyList) {\r\n                $NewObject[$Property.Name] = Remove-NullProperties $Property.Value\r\n            }\r\n            [PSCustomObject]$NewObject \r\n        } \r\n    }",
+      "created_at": "2019-10-11T19:03:36Z",
+      "updated_at": "2019-10-11T19:03:36Z"
+    },
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It would be as simple as:\r\n> \r\n> ```cs\r\n> JsonSerializer _jsonWriter = new JsonSerializer {\r\n>                                  NullValueHandling = NullValueHandling.Ignore\r\n>                              };\r\n> ```\r\n\r\n@iSazonov  Isn't it `JsonSerializerSettings` here ?",
+      "created_at": "2019-10-13T15:03:06Z",
+      "updated_at": "2019-10-13T15:03:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@kvprasoon https://www.newtonsoft.com/json/help/html/P_Newtonsoft_Json_JsonSerializer_NullValueHandling.htm\r\nYour case is also possible.\n\n<blockquote><img src=\"../icons/favicon.ico\" width=\"48\" align=\"right\"><div><strong><a href=\"https://www.newtonsoft.com/json/help/html/P_Newtonsoft_Json_JsonSerializer_NullValueHandling.htm\">JsonSerializer.NullValueHandling Property</a></strong></div><div>Gets or sets how null values are handled during serialization and deserialization. The default value is .</div></blockquote>",
+      "created_at": "2019-10-13T16:22:22Z",
+      "updated_at": "2019-10-13T16:22:24Z"
+    },
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "but it isn't working here...\r\n\r\nI tried hardcoding to ignore, and no way.\r\nhttps://github.com/kvprasoon/PowerShell/blob/jsonnull/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/JsonObject.cs#L479\r\n\r\n<blockquote><img src=\"https://avatars1.githubusercontent.com/u/12897753?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/kvprasoon/PowerShell\">kvprasoon/PowerShell</a></strong></div><div>PowerShell for every system! Contribute to kvprasoon/PowerShell development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2019-10-13T17:26:03Z",
+      "updated_at": "2019-10-13T17:32:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Sample in https://www.newtonsoft.com/json/help/html/T_Newtonsoft_Json_NullValueHandling.htm\r\nsays that this should work.\n\n<blockquote><img src=\"../icons/favicon.ico\" width=\"48\" align=\"right\"><div><strong><a href=\"https://www.newtonsoft.com/json/help/html/T_Newtonsoft_Json_NullValueHandling.htm\">NullValueHandling Enumeration</a></strong></div><div>Specifies null value handling options for the .</div></blockquote>",
+      "created_at": "2019-10-13T18:03:46Z",
+      "updated_at": "2019-10-13T18:03:47Z"
+    },
+    {
+      "author": "kvprasoon",
+      "author_association": "CONTRIBUTOR",
+      "body": "yeah, I followed that. May be a bug in it !",
+      "created_at": "2019-10-13T18:08:35Z",
+      "updated_at": "2019-10-13T18:08:35Z"
+    },
+    {
+      "author": "mdalepiane",
+      "author_association": "NONE",
+      "body": "@kvprasoon I took your changes and figured a way to work around this problem (hope that's ok). Here's my code: https://github.com/mdalepiane/PowerShell/blob/jsonnull/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/JsonObject.cs#L725\r\n\r\nWhat do you think of this approach?\n\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/1814942?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/mdalepiane/PowerShell\">mdalepiane/PowerShell</a></strong></div><div>PowerShell for every system! Contribute to mdalepiane/PowerShell development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2019-10-13T23:10:46Z",
+      "updated_at": "2019-10-13T23:10:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@mdalepiane I think you may want to move the null-value check to first thing in the loop there. That way, if you end up with a key that can't be cast to string properly (unlikely, but I suppose it can happen) which _also_ has a null value, it'll be ignored. If the value is null and you're ignoring null values, there's no reason to error out in the case that the key can't be serialized correctly -- even if it could, you'd be skipping it anyway.\r\n\r\nOtherwise... yeah, looks like it'd do the job. \ud83d\udc4d ",
+      "created_at": "2019-10-13T23:45:15Z",
+      "updated_at": "2019-10-13T23:45:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "https://github.com/JamesNK/Newtonsoft.Json/blob/23be46f665887c9be03faf7864ae98890ca08246/Src/Newtonsoft.Json.Tests/Documentation/SerializationTests.cs#L762-L806\r\n\r\nhttps://github.com/JamesNK/Newtonsoft.Json/blob/71564ceb161d180bcd04abbe777990468dc27840/Src/Newtonsoft.Json.Tests/Documentation/Samples/Serializer/NullValueHandlingIgnore.cs\r\n\r\nIt seem works.\r\n\r\n<blockquote><img src=\"https://avatars2.githubusercontent.com/u/303201?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/JamesNK/Newtonsoft.Json\">JamesNK/Newtonsoft.Json</a></strong></div><div>Json.NET is a popular high-performance JSON framework for .NET - JamesNK/Newtonsoft.Json</div></blockquote>",
+      "created_at": "2019-10-14T03:26:31Z",
+      "updated_at": "2019-10-14T03:32:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I'd prefer to get understanding why this does not work before fix.",
+      "created_at": "2019-10-14T03:47:45Z",
+      "updated_at": "2019-10-14T03:47:45Z"
+    },
+    {
+      "author": "mdalepiane",
+      "author_association": "NONE",
+      "body": "I've found an issue in Newtonsoft.Json repo ([#1997](https://github.com/JamesNK/Newtonsoft.Json/issues/1997)) that's exactly our problem here. It seems that NullValueHandling.Ignore is not yet supported for Dictionary objects. I'm looking at a fix for that too, but it might take a while to get merged and released.",
+      "created_at": "2019-10-15T05:32:46Z",
+      "updated_at": "2019-10-15T05:33:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mdalepiane Thanks for the investigation! I think we can use a workaround for the case. But I still expect that `NullValueHandling = NullValueHandling.Ignore` should be used to address other scenarious.\r\n",
+      "created_at": "2019-10-15T07:10:52Z",
+      "updated_at": "2019-10-15T07:10:52Z"
+    },
+    {
+      "author": "mdalepiane",
+      "author_association": "NONE",
+      "body": "@iSazonov while working on that I figured out there's a catch: when preprocessing the objects, before calling JsonConvert, we actually convert JObject and CustomObjects into dictionaries. So the workaround will have to be applied to those types too. You think this is still a way to go?",
+      "created_at": "2019-10-15T12:43:16Z",
+      "updated_at": "2019-10-15T12:43:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> You think this is still a way to go?\r\n\r\nYes, I'd expect a consistency. Please create tests for all cases.",
+      "created_at": "2019-10-15T13:19:35Z",
+      "updated_at": "2019-10-15T13:19:35Z"
+    },
+    {
+      "author": "mdalepiane",
+      "author_association": "NONE",
+      "body": "> Please create tests for all cases.\r\n\r\nDone! I added the following tests to cover all places where code was added:\r\n- TestDictionaryConvertToJsonWithIgnoreNullPropertiesFalse\r\n- TestDictionaryConvertToJsonWithIgnoreNullPropertiesTrue\r\n- TestObjectConvertToJsonWithIgnoreNullPropertiesFalse\r\n- TestObjectConvertToJsonWithIgnoreNullPropertiesTrue\r\n- TestJObjectConvertToJsonWithIgnoreNullPropertiesFalse\r\n- TestJObjectConvertToJsonWithIgnoreNullPropertiesTrue",
+      "created_at": "2019-10-15T13:29:42Z",
+      "updated_at": "2019-10-15T13:29:42Z"
+    },
+    {
+      "author": "ivan-sam",
+      "author_association": "NONE",
+      "body": "I tried to use workaround sample code posted by @mgeorgebrown89 to achieve the similar goal: get rid of null properties in json.\r\nHaving this json as an input (result of **az cli** invocation):\r\n```\r\n{\r\n      \"automatic\": true,\r\n      \"compositeIndexes\": null,\r\n      \"excludedPaths\": [\r\n        {\r\n          \"path\": \"/\\\"_etag\\\"/?\"\r\n        }\r\n      ],\r\n      \"includedPaths\": [\r\n        {\r\n          \"indexes\": null,\r\n          \"path\": \"/*\"\r\n        }\r\n      ],\r\n      \"indexingMode\": \"consistent\",\r\n      \"spatialIndexes\": null\r\n}\r\n```\r\nI passed it to external command line tool. The tool complained while deserializing the json that null values couldn't be assigned to properties. So I needed to strip properties with null values.\r\n\r\nProposed script didn't work for me because of the weird handling that powershell does to arrays.\r\nSo I modified it a bit to enforce array handling. Sharing together with the test case.\r\nBut, again, I'd love to see the feature built-in to the cmdlet to avoid these tricky workarounds.\r\n\r\n```\r\n# Original workaround functions - for the sake of demonstrating the issue\r\nfunction ConvertTo-NoNullsJson {\r\n    <#\r\n    .SYNOPSIS\r\n        Converts an object into JSON format without any null key value pairs.\r\n    .DESCRIPTION\r\n        This function takes a PowerShell Object and passes it to Remove-NullProperties.\r\n        This removes all the properties with null values, and outputs the JSON. \r\n        This is for use with APIs that don't like null values.\r\n    .PARAMETER InputObject\r\n        The object from which to remove null properties. \r\n    .PARAMETER Depth\r\n        An integer representing the level of objects to convert to JSON. This is the same of the ConvertTo-Json cmdlet.\r\n    .EXAMPLE\r\n        $SomeObject | ConvertTo-NoNullsJson -Depth 5\r\n    #>\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(ValueFromPipeline)]\r\n        [object]\r\n        $InputObject,\r\n\r\n        [int]\r\n        $Depth = 2\r\n    )\r\n    begin {\r\n        $list = [System.Collections.Generic.List[System.Object]]::new()\r\n    }\r\n    process {\r\n        $list.Add((Remove-NullProperties -InputObject $InputObject))\r\n    }\r\n    end {\r\n        $list | ConvertTo-Json -Depth $Depth\r\n    }\r\n}\r\n\r\n\r\nfunction Remove-NullProperties {\r\n    <#\r\n    .SYNOPSIS\r\n        Removes null properties from an object.\r\n    .DESCRIPTION\r\n        This function recursively removes all null properties from a PowerShell object. \r\n    .PARAMETER InputObject\r\n        A PowerShell Object from which to remove null properties.\r\n    .EXAMPLE\r\n        $Object | Remove-NullProperties\r\n    #>\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(Mandatory, Position = 0, ValueFromPipeline)]\r\n        [object]\r\n        $InputObject\r\n    )\r\n    foreach ($object in $InputObject) {\r\n        if ($object -is [string] -or $object.GetType().IsPrimitive) {\r\n            $object\r\n            return\r\n        }\r\n    \r\n        $NewObject = @{ }\r\n        $PropertyList = $object.PSObject.Properties | Where-Object { $null -ne $_.Value }\r\n        foreach ($Property in $PropertyList) {\r\n            $NewObject[$Property.Name] = Remove-NullProperties $Property.Value\r\n        }\r\n        [PSCustomObject]$NewObject \r\n    } \r\n}\r\n\r\n# Alternative implementation (limited to handle an object that was created via CreateFrom-Json)\r\nfunction Remove-NullPropertiesForObject([object] $InputObject)\r\n{\r\n    if ($InputObject -is [string] -or $InputObject.GetType().IsPrimitive) {\r\n        $InputObject\r\n        return\r\n    }\r\n\r\n    $NewObject = @{ }\r\n    $PropertyList = $InputObject.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.MemberType -eq 'NoteProperty' }\r\n    foreach ($Property in $PropertyList) {\r\n        if ($Property.Value -is [array]) {\r\n            $NewObject[$Property.Name] = @(Remove-NullPropertiesForArray($Property.Value))\r\n        }\r\n        else {\r\n            $NewObject[$Property.Name] = Remove-NullPropertiesForObject($Property.Value)\r\n        }\r\n    }\r\n    [PSCustomObject]$NewObject \r\n}\r\n\r\nfunction Remove-NullPropertiesForArray([array] $InputObject)\r\n{\r\n    [array]$r = @()\r\n    foreach ($item in $InputObject) {\r\n        if ($item -is [array]) {\r\n            $newItem = @(Remove-NullPropertiesForArray($item))\r\n        } else {\r\n            $newItem = Remove-NullPropertiesForObject($item)\r\n        }\r\n        \r\n        $r += $newItem\r\n    }\r\n    $r\r\n}\r\n\r\n$t = @'\r\n{\r\n      \"automatic\": true,\r\n      \"compositeIndexes\": null,\r\n      \"excludedPaths\": [\r\n        {\r\n          \"path\": \"/\\\"_etag\\\"/?\"\r\n        }\r\n      ],\r\n      \"includedPaths\": [\r\n        {\r\n          \"indexes\": null,\r\n          \"path\": \"/*\"\r\n        }\r\n      ],\r\n      \"indexingMode\": \"consistent\",\r\n      \"spatialIndexes\": null\r\n}\r\n'@\r\n\r\nWrite-Host Testing complex object case\r\nWrite-Host 1\r\n$t | ConvertFrom-Json | ConvertTo-NoNullsJson\r\nWrite-Host 2\r\nRemove-NullPropertiesForObject($t | ConvertFrom-Json) | ConvertTo-Json\r\n\r\n```\r\n\r\nAnd this is the output:\r\n```\r\nTesting complex object case\r\n1\r\n{\r\n    \"indexingMode\":  \"consistent\",\r\n    \"automatic\":  true,\r\n    \"includedPaths\":  {\r\n                          \"path\":  \"/*\"\r\n                      },\r\n    \"excludedPaths\":  {\r\n                          \"path\":  \"/\\\"_etag\\\"/?\"\r\n                      }\r\n}\r\n2\r\n{\r\n    \"indexingMode\":  \"consistent\",\r\n    \"automatic\":  true,\r\n    \"includedPaths\":  [\r\n                          {\r\n                              \"path\":  \"/*\"\r\n                          }\r\n                      ],\r\n    \"excludedPaths\":  [\r\n                          {\r\n                              \"path\":  \"/\\\"_etag\\\"/?\"\r\n                          }\r\n                      ]\r\n}\r\n```",
+      "created_at": "2021-02-03T15:17:53Z",
+      "updated_at": "2021-02-03T15:17:53Z"
+    },
+    {
+      "author": "Abhijit-Revamp",
+      "author_association": "NONE",
+      "body": "> > Please create tests for all cases.\r\n> \r\n> Done! I added the following tests to cover all places where code was added:\r\n> \r\n> * TestDictionaryConvertToJsonWithIgnoreNullPropertiesFalse\r\n> * TestDictionaryConvertToJsonWithIgnoreNullPropertiesTrue\r\n> * TestObjectConvertToJsonWithIgnoreNullPropertiesFalse\r\n> * TestObjectConvertToJsonWithIgnoreNullPropertiesTrue\r\n> * TestJObjectConvertToJsonWithIgnoreNullPropertiesFalse\r\n> * TestJObjectConvertToJsonWithIgnoreNullPropertiesTrue\r\n\r\nAny update on the feature request? Has been a while\r\n",
+      "created_at": "2021-08-12T09:22:54Z",
+      "updated_at": "2021-08-12T09:22:54Z"
+    }
+  ],
+  "created_at": "2019-10-06T02:33:01Z",
+  "number": 10718,
+  "state": "open",
+  "title": "Feature Request: IgnoreNullProperties switch on ConvertTo-Json",
+  "updated_at": "2021-08-12T09:22:54Z"
+}

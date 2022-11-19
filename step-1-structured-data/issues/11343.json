@@ -1,0 +1,216 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11343",
+  "author": "iSazonov",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nSummarize #3232 to get working _in the same way on all platforms_:\r\n\r\n`sudo Remove-Item foo.txt` where foo.txt is owned by root\r\n\r\n[See also](https://github.com/PowerShell/PowerShell/issues/3232#issuecomment-565936036)\r\n\r\nWe have two common scenario for sudo - run a native command and run a script.\r\n\r\n1. Run a native command\r\nThis can be easily implemented like:\r\n```powersherll\r\nStart-Process <nativecommand> -ArgumentList \u2026 -Credential $userCred -Wait\r\n```\r\nSide effect on Windows: new window will be opened because:\r\n- Windows does not allow elevate current process\r\n- Windows does not allow attach elevated process to current console\r\n [.Net Core](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.processstartinfo.createnowindow?view=netframework-4.8#remarks) (and I guess Windows API too) doesn't allow to run new process attached to the same console.\r\nSo we can not get elevated `Start-Process pwsh -NoNewWindow -Credential $cred`\r\n\r\n2. Run a script\r\n2.1. We could implement this as for native command:\r\n```powersherll\r\nStart-Process pwsh -ArgumentList \"-c\",\"<scriptblockstring>\" -Credential $userCred -Wait\r\n```\r\n\r\n2.2. We could implement this in most power way using PowerShell remoting:\r\n```powersherll\r\nInvoke-Command -ComputerName LocalHost -ScriptBlock <scriptblock> -Credential $userCred -ArgumentList ...\r\n```\r\n\r\n#### Current implementation proposal is 2.2.\r\nAlternative proposal - [start another pwsh process](https://github.com/PowerShell/PowerShell/issues/3232#issuecomment-500506716)\r\n\r\n#### Proposed name\r\n\r\n- __pssudo__ to avoid a conflict with Unix native sudo.\r\n- Invoke-AsUser\r\n\r\n#### Proposed UX behavior\r\n\r\n- interactively ask for credentials at first run\r\n- store credentials for a time and doesn't ask in follow runs\r\n\r\nIt is still not clear:\r\n- PowerShell remoting to localhost by default has disabled elevated accounts in WinRM loopback - how could we address this in the context sudo? Even if PowerShell remoting does not allow us to do sudo by default, we could implement it turned off by default or allow only for an interactive session.\r\n- PS sudo implementation should works over any transport - WinRM and SSH. But again there is a question about elevation in loopback -  regardless of a protocol, security should remain at the same level, which implies that SSH loopback should behave the same as for WinRM taking in account how Windows internals work but currently SSH loopback works (with manual connection).",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT @joeyaiello My current conclusion is that we have only single way to implement cross-planform sudo - using PowerShell remoting like @anmenaga implemented Windows Compatibility.\r\nWe gathered a lot of information in #3232 and now MSFT team could have been brainstorming to make a conclusion.\r\n",
+      "created_at": "2019-12-14T20:20:45Z",
+      "updated_at": "2019-12-14T20:20:45Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "This has been discussed on and off.\r\n\r\nThere are a few thoughts that I haven't seen in the other thread. Since that one is focused more on the UX, I'll do the dump on implementation here.\r\n\r\nBasically because PowerShell runs everything except for native commands in-process, this is very tricky.\r\n\r\nThere are essentially two options, both with significant drawbacks.\r\n\r\n1. `sudo` becomes an alias to a remote/subprocess invocation in PowerShell to an Administrator/root process, where it runs the given command and gives back the result. This works fine for native commands, but for cmdlets only gives back deserialised objects. It also means that to make things performant we basically need to set up a persistent remote root session to host those commands. The main drawback is then the deserialisation (`sudo` cmdlets work subtly differently from non-sudo), with the two other drawbacks of having to override `sudo` (makes sense, but not ideal) and having to manage the security boundary and lifetime of the administrator remote host.\r\n\r\n2. PowerShell itself becomes a `setuid` command and `sudo` works in process as a builtin (again we must override the util), becoming an administrator process when a `sudo` command is run. The major drawbacks here are (1) being a `setuid` command makes PowerShell quite dangerous and requires authentication to use in whatever scenario and (2) upgrading the entire process to root does not cater to the abstraction of runspaces or indeed any threading at all.\r\n\r\nGiven the two options, I really don't like either of them, but certainly think (2) is the more flawed and should be excluded at the outset.\r\n\r\nThis is just a braindump off the top of my head, so feel free to share, expand on or poke holes in implementation ideas here.",
+      "created_at": "2019-12-15T02:22:45Z",
+      "updated_at": "2019-12-15T02:23:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt If you continue your thinking you will finish on a kind (JEA?) of  \"PowerShell remoting\" as implementation like me.\r\n\r\n1. We should have the same UX on all platforms.\r\n- We can not use Process.Start() (or Start-Process) even for native commands because on Windows new windows will be opened.\r\n2. We should run script blocks that assumes having PowerShell context\r\n- We can not use single elevated process because we need to have per user/per session/per runspace/per scope powershell context",
+      "created_at": "2019-12-15T07:36:26Z",
+      "updated_at": "2019-12-15T07:36:26Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah I think we agree that the best path would be an implementation using a kind of \u201cremoting as security boundary\u201d architecture.\r\n\r\nThe part I don\u2019t like about it is the lifetime of the elevated session. If we spin a new one up every time, it could be terribly slow. If we keep one open indefinitely, it leaves open a large attack surface.\r\n\r\nAnyway, @jameswtruher @paulhigin @stevel-msft might have thoughts here",
+      "created_at": "2019-12-15T08:50:45Z",
+      "updated_at": "2019-12-15T08:50:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> If we spin a new one up every time, it could be terribly slow.\r\n\r\nYes, it is the same as \"ForEach -Parallel\" - it is slow for inappropriate scenarios but works great for target scenarios.\r\nI guess we get acceptable response time for interactive sessions (pwsh startup time is ~400 ms, with -NonInteractive it is less). For background, non-interactive scenarios I believe that using of pssudo is not right thing.",
+      "created_at": "2019-12-15T18:41:10Z",
+      "updated_at": "2019-12-15T18:41:10Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Sounds like we want `sudo` to be an entry point into a wider effort to allow offloading to and management of an elevated PowerShell worker process",
+      "created_at": "2019-12-15T19:50:12Z",
+      "updated_at": "2019-12-15T19:50:12Z"
+    },
+    {
+      "author": "gerardog",
+      "author_association": "NONE",
+      "body": "> Windows does not allow attach elevated process to current console\r\n.Net Core (and I guess Windows API too) doesn't allow to run new process attached to the same console.\r\n> So we can not get elevated Start-Process pwsh -NoNewWindow -Credential $cred\r\n\r\nSudo implementations in the wild resolve this by spawing a new hidden process, then using the AttachConsole Api to attach the elevated process to the non-elevated caller. Check [Luke Sampson's sudo.ps1](https://github.com/lukesampson/psutils/blob/master/sudo.ps1) implementation. This doesnt work if you want to redirect StdIn/StdOut. So on my own implementation [gsudo](https://github.com/gerardog/gsudo) (windows-only) I did a workaround for this scenario capturing StdIn/Out/Err and streaming via RPC to the non-elevated instance (when redirected, as in 'gsudo dir > somefile'.\r\n",
+      "created_at": "2020-01-13T18:20:32Z",
+      "updated_at": "2020-01-13T18:21:11Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Looks like @gerardog is willing to contribute his code to a cmdlet in PowerShell (for Windows).  We should discuss the cmdlet design first.  I'm ok with a `pssudo` alias, but the cmdlet still needs a verb-noun and adding a new parameterset to `Start-Process` might not be the way to go.",
+      "created_at": "2020-02-24T01:55:00Z",
+      "updated_at": "2020-02-24T01:55:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'd go for something like `Invoke-ElevatedCommand` perhaps?",
+      "created_at": "2020-02-24T04:31:57Z",
+      "updated_at": "2020-02-24T04:31:57Z"
+    },
+    {
+      "author": "gdoenlen",
+      "author_association": "NONE",
+      "body": "Is there any thought of an additional common parameter to elevate a cmdlet instead of a specific cmdlet that does it?",
+      "created_at": "2020-02-24T04:41:32Z",
+      "updated_at": "2020-02-24T04:41:32Z"
+    },
+    {
+      "author": "sba923",
+      "author_association": "CONTRIBUTOR",
+      "body": "The hidden elevated helper process should allow getting a close as possible to 'same UX on all platforms', shouldn't it? ",
+      "created_at": "2020-02-24T07:43:18Z",
+      "updated_at": "2020-02-24T07:43:18Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "We definitely want pipeline support and also between cmdlets and native tools to work as expected.  We could add a `-Elevated` type switch to `Invoke-Command` and have a wrapper `pssudo` function make use of that since PowerShell aliases are a bit limited today rather than having a separate cmdlet just for sudo-type operation.  We should also keep in mind that this should work on non-Windows as well where we would have to sudo the pwsh process and handle redirection.  The limitation of deserialized objects in the pipeline vs live objects is an acceptable limitation in my mind.",
+      "created_at": "2020-02-27T20:29:14Z",
+      "updated_at": "2020-02-27T20:29:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The limitation of deserialized objects in the pipeline vs live objects is an acceptable limitation in my mind.\r\n\r\nsudo scenario assumes executing \"a whole job\". So I guess the serialization may not be a problem because we must send/receive only data but not elevated methods .\r\n\r\nThinking about security I believe PSSudo implemented by remoting should allow only to connect to __local__ endpoint. (In the case we could use binary serialization for _data_)",
+      "created_at": "2020-02-27T21:02:20Z",
+      "updated_at": "2020-02-27T21:02:20Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This looks very cool to me, but I am unclear as to what the design will be.  Will it be based on remoting or @gerardog spawning a new process?  Should we have an RFC to discuss?  I would prefer not using remoting since it adds overhead.  The serialization system can be used outside of remoting.\r\n\r\nAlso I don't like the idea of using Invoke-Command since it has so many parameter sets already.  I would prefer a new cmdlet like 'Invoke-AsElevated'.\r\n\r\nI am more concerned than @SteveL-MSFT  about returning deserialized PSObjects, and I think it may trip up a lot of users, e.g.,\r\n\r\n```powershell\r\npsudo Get-Process \"pwsh\" | Foreach-Object { $_.Kill() }\r\n```",
+      "created_at": "2020-02-27T21:20:07Z",
+      "updated_at": "2020-02-27T21:20:07Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "I agree that this is very nice, but I'm trying to wrap my head around a cmdlet implementation. Would there be an issue with a cmdlet using dotnet core (rather than 4.7.1) due to the \"can't attach to the console\" notes above, or would that just dictate the specific implementation.",
+      "created_at": "2020-02-27T21:25:18Z",
+      "updated_at": "2020-02-27T21:25:18Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps we could find how implement \"process fork\" version on both platforms but it causes huge problems. 1. It is double work. 2. It is obviously impossible to get the same behavior on all platforms and as result 3. we will get many negative feedbacks (bug issues).\r\n\r\nIf we look .Net Core team experience they re-write some native code things on C# get same behavior on all platforms (ex., libcurl history).\r\nI would like to avoid different implementations for each platform\u044e\r\n\r\n> I am more concerned than @SteveL-MSFT about returning deserialized PSObjects, and I think it may trip up a lot of users, e.g.,\r\n> psudo Get-Process \"pwsh\" | Foreach-Object { $_.Kill() }\r\n\r\npssudo should accept a script block and execute it elevated.\r\n\r\n\r\n",
+      "created_at": "2020-02-28T15:15:36Z",
+      "updated_at": "2020-02-28T15:15:36Z"
+    },
+    {
+      "author": "gerardog",
+      "author_association": "NONE",
+      "body": "Yes, we need double implementations (unless the double code is moved to .Net Core):\r\n\r\nOn Unix/Linux\r\n* using `sudo` means an interactive password text prompt will appear. (IMHO the preferred, standard Unix way). The user can still opt-in to configure `sudoers` for silent elevation.\r\n* using `setuid` on a helper process would be an administrative nightmare: (configuration, controlling who can and can't use the `pssudo`, requiring root access during installation to set `setuid`...)\r\n\r\nOn Windows: \r\n* Correct me if I am wrong but elevation with user and password (no UAC popup) is not possible (shouldn't be, right, otherwise would be a UAC Bypass?), unless some change is done on WinRM/loopback, and I believe that is undesirable. (I would like to hear a word from Microsoft/PowerShell team about this). And then: Is it ok/desirable to just ask for user password on a console? \r\n* A simple `Start-Process -Verb RunAs` to launch the helper process will show one UAC pop-up. Given that Remote PS Sessions already can run as admin and (i think) we are targeting local system interactive sessions only, this looks acceptable to me.\r\n\r\nThat being said, starting the elevated session will be interactive (either text or UAC), so I wonder how people will be using elevation on scripts and handle the 'interactive step'. Probably providing an easy way to fail fast if the user refuses to elevate would be a good idea:  \r\n\r\n`Start-PSElevatedSession -NonInteractive` --> Test if the elevated session is already available. Provides a way to throw 'This script requires admin privileges'.\r\n\r\nI think Microsoft should update us here on a list of what is acceptable or not to do from a security **compliance** perspective. That is required to define the user experience specs first. The technical challenges should be addressed later (e.g. if we hypothetically can't launch an elevated process in the current console we can do a workaround to attach the non-elevated into the elevated one). This team can probably get help from other MS teams to find new ways to overcome those limitations.",
+      "created_at": "2020-02-28T18:25:23Z",
+      "updated_at": "2020-02-28T18:27:17Z"
+    },
+    {
+      "author": "agowa338",
+      "author_association": "NONE",
+      "body": "> Correct me if I am wrong but elevation with user and password (no UAC popup) is not possible (shouldn't be, right, otherwise would be a UAC Bypass?), unless some change is done on WinRM/loopback, and I believe that is undesirable. (I would like to hear a word from Microsoft/PowerShell team about this). And then: Is it ok/desirable to just ask for user password on a console?\r\n\r\nI want to point you towards this:\r\nhttps://github.com/PowerShell/PowerShell/issues/3232#issuecomment-565839733\r\nAs well as: https://github.com/PowerShell/Win32-OpenSSH/issues/1308#issuecomment-448430464\r\n\r\nKB4480116 introduced this limitation *only* for powershell, 3rd party libraries are **not** affected, therefore I'd say we should just undo that KB.",
+      "created_at": "2020-02-28T23:41:31Z",
+      "updated_at": "2020-02-28T23:54:16Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I spent some time reading through the various links.  This is great investigatory work.  AFAIK there is no way to bypass UAC other than disabling it system wide, so for Windows this will have to be part of the experience.  \r\n\r\nI don't immediately see a security issue with passing an elevated console through the un-elevated console, when it is the same user only elevated.  Only admin users can elevate.  I don't know about supporting a RunAs option, where alternate credentials would be passed in, and could be a security concern.  But in any case a full security review would have to be done on the final design.\r\n\r\nAt this point, I think an RFC document should be created that outlines the feature, user experience and different design approaches.",
+      "created_at": "2020-03-05T19:16:18Z",
+      "updated_at": "2020-03-05T19:16:18Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Only admin users can elevate. I don't know about supporting a RunAs option, where alternate credentials would be passed in, and could be a security concern.\r\n\r\nWorth noting that UAC can prompt for credentials depending on how [UAC: Behavior of the elevation prompt for standard users](https://docs.microsoft.com/en-us/windows/security/identity-protection/user-account-control/user-account-control-group-policy-and-registry-key-settings#user-account-control-behavior-of-the-elevation-prompt-for-standard-users) is configured.  It's pretty common to be configured as something other than \"Automatically deny elevation requests\".\r\n\r\n",
+      "created_at": "2020-03-05T19:49:15Z",
+      "updated_at": "2020-03-05T19:49:15Z"
+    },
+    {
+      "author": "agowa338",
+      "author_association": "NONE",
+      "body": "I don't see a problem by attaching an elevated command prompt to an non elevated one in general. Also the UAC is not a security feature. There are multiple ways to bypass it in a network. Even without credential delegation.\r\n1. Do powershell remoting from A to B.\r\n2. Create a scheduled task at B (you're full admin at B, even though you're invoker at A) that runs with Administrative rights and that connects back to A and performs your action...\r\n3. Wait for that scheduled task to be executed.\r\n\r\nOr simpler using a non standard winrm client to connect via loopback to it, as mentioned in one of the links I attached earlier.\r\n\r\nAlso another thing to consider: If there are two persons, one with a limited user account and the other with an administrative one, why should the 2nd person enter his credentials into a non trusted session of the first one? This is the only case where detaching the terminal really would change anything, but the 1st user could as well just intercept the keyboard using a hardware accessory.\r\n\r\n_of topic: He has physical access and regarding Microsoft security concepts it is game over, he could even get System rights by just applying windows updates, even if bitlocker disk encryption is on, yes that vulnerability is publicly known and Microsoft refused to patch it..._\r\n\r\nback to topic what are possible threads:\r\nFor the scenario where the user is compromised using e.g. (what is currently popular?) lets say Emoted, but it was not able to get system rights yet, what could it do? Right, it could connect to the command prompt running with the same user credentials in the same session. So if we attach the administrative one it could hijack the connection. *But* with that permissions if we spawn a new console/window it would just intercept the creation of that process and append some parameters to it so that the administrator is tricked into acknowledging it...\r\n\r\nNow see how unix systems handle these threads:\r\nProcesses with user rights cannot initiate communication with the sudo process (except for stdin) which is only attached to the terminal. Therefore the administrator has to check *before* he grants access using his credentials that:\r\n1. The sudo binary is not overwritten (or use full path)\r\n2. The Terminal, or more specific the terminal emulator software is trustworthy.\r\n3. The command that he wants to elevate is trustworthy.\r\n\r\nWhat was uac designed for regarding enterprises?\r\nFrom what I've read it was designed to help admins to \"not shoot them selves into the food that easily\", e.g. \"del /S /Q C:\\\" in the search bar... Basically it provides a kind of \"-Confirm\".\r\nAnd regarding private and/or standalone computers?\r\nIt just inadvertently helps to obey good security habits of two separate user accounts for non administrative and administrative tasks. For the advantage of having separate contexts at all, because most people just have used the administrative account for everything including browsing the internet and so on.\r\n\r\nI'd be totally fine with the attach to unprivileged process solution, as it provides the same guarantee uac currently does, but also for comandline applications. Also it is a feature that could be made to be disableable, like uac.\r\n\r\nBut anyway, we do not need to start from scratch for the security part, there is already something similar that we can hook onto its called *UIAccess* *Applications*: https://docs.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/user-account-control-allow-uiaccess-applications-to-prompt-for-elevation-without-using-the-secure-desktop\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/user-account-control-allow-uiaccess-applications-to-prompt-for-elevation-without-using-the-secure-desktop\">User Account Control Allow UIAccess applications to prompt for elevation without using the secure desktop (Windows 10) - Windows security</a></strong></div><div>Best practices and more for the policy setting, User Account Control Allow UIAccess applications to prompt for elevation without using the secure desktop.</div></blockquote>",
+      "created_at": "2020-03-05T20:37:45Z",
+      "updated_at": "2021-04-16T03:31:24Z"
+    },
+    {
+      "author": "minecraftchest1",
+      "author_association": "NONE",
+      "body": "> I don't see a problem by attaching an elevated command prompt to an non elevated one in general. Also the UAC is not a security feature. There are multiple ways to bypass it in a network. Even without credential delegation.\r\n> \r\n> 1. Do powershell remoting from A to B.\r\n> 2. Create a scheduled task at B (you're full admin at B, even though you're invoker at A) that runs with Administrative rights and that connects back to A and performs your action...\r\n> 3. Wait for that scheduled task to be executed.\r\n> \r\n> Or simpler using a non standard winrm client to connect via loopback to it, as mentioned in one of the links I attached earlier.\r\n> \r\n> Also another thing to consider: If there are two persons, one with a limited user account and the other with an administrative one, why should the 2nd person enter his credentials into a non trusted session of the first one? This is the only case where detaching the terminal really would change anything, but the 1st user could as well just intercept the keyboard using a hardware accessory.\r\n> \r\n> _of topic: He has physical access and regarding Microsoft security concepts it is game over, he could even get System rights by just applying windows updates, even if bitlocker disk encryption is on, yes that vulnerability is publicly known and Microsoft refused to patch it..._\r\n> \r\n> back to topic what are possible threads:\r\n> For the scenario where the user is compromised using e.g. (what is currently popular?) lets say Emoted, but it was not able to get system rights yet, what could it do? Right, it could connect to the command prompt running with the same user credentials in the same session. So if we attach the administrative one it could hijack the connection. _But_ with that permissions if we spawn a new console/window it would just intercept the creation of that process and append some parameters to it so that the administrator is tricked into acknowledging it...\r\n> \r\n> Now see how unix systems handle these threads:\r\n> Processes with user rights cannot initiate communication with the sudo process (except for stdin) which is only attached to the terminal. Therefore the administrator has to check _before_ he grants access using his credentials that:\r\n> \r\n> 1. The sudo binary is not overwritten (or use full path)\r\n> 2. The Terminal, or more specific the terminal emulator software is trustworthy.\r\n> 3. The command that he wants to elevate is trustworthy.\r\n> \r\n> What was uac designed for regarding enterprises?\r\n> From what I've read it was designed to help admins to \"not shoot them selves into the food that easily\", e.g. \"del /S /Q C:\" in the search bar... Basically it provides a kind of \"-WhatIf\".\r\n> And regarding private and/or standalone computers?\r\n> It just inadvertently helps to obey good security habits of two separate user accounts for non administrative and administrative tasks. For the advantage of having separate contexts at all, because most people just have used the administrative account for everything including browsing the internet and so on.\r\n> \r\n> I'd be totally fine with the attach to unprivileged process solution, as it provides the same guarantee uac currently does, but also for comandline applications. Also it is a feature that could be made to be disableable, like uac.\r\n> \r\n> But anyway, we do not need to start from scratch for the security part, there is already something similar that we can hook onto its called _UIAccess_ _Applications_: https://docs.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/user-account-control-allow-uiaccess-applications-to-prompt-for-elevation-without-using-the-secure-desktop\r\n> \r\n> > <img alt=\"\" width=\"48\" src=\"https://camo.githubusercontent.com/33f806df33d5e02f85f614b0b73745ce34fcf1ac/68747470733a2f2f646f63732e6d6963726f736f66742e636f6d2f656e2d75732f6d656469612f6c6f676f732f6c6f676f2d6d732d736f6369616c2e706e67\">**[User Account Control Allow UIAccess applications to prompt for elevation without using the secure desktop (Windows 10) - Windows security](https://docs.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/user-account-control-allow-uiaccess-applications-to-prompt-for-elevation-without-using-the-secure-desktop)**Best practices and more for the policy setting, User Account Control Allow UIAccess applications to prompt for elevation without using the secure desktop.\r\n\r\nSo, how does this enable us to elevate a running powershell session?\r\n\r\nThought. Is their a command we can run (such as \"Powershell /elevated /no-new-window) that would allow us to do the *nix  command su root to start an elevated sub-session?\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/user-account-control-allow-uiaccess-applications-to-prompt-for-elevation-without-using-the-secure-desktop\">User Account Control Allow UIAccess applications to prompt for elevation without using the secure desktop (Windows 10) - Windows security</a></strong></div><div>Best practices and more for the policy setting, User Account Control Allow UIAccess applications to prompt for elevation without using the secure desktop.</div></blockquote>",
+      "created_at": "2020-03-05T22:05:02Z",
+      "updated_at": "2020-03-05T22:05:04Z"
+    },
+    {
+      "author": "minecraftchest1",
+      "author_association": "NONE",
+      "body": "Reading about UAC elevating the current shell, what about creating a new subshell, elevating that shell, running the specified command, then exiting that shell.",
+      "created_at": "2021-04-13T00:31:08Z",
+      "updated_at": "2021-04-13T00:31:08Z"
+    },
+    {
+      "author": "agowa338",
+      "author_association": "NONE",
+      "body": "@minecraftchest1 UAC doesn't allow you to pass input into the new shell. You could only spawn a new window. Or alternatively you would need to go through e.g. IPC to let both processes talk to each other. It's not as simple as \"just spawning\" another shell.\r\n\r\n> So, how does this enable us to elevate a running powershell session?\r\n\r\nIt won't, I was talking about why UAC is **NOT** a security boundary and related security concerns...",
+      "created_at": "2021-04-16T03:25:15Z",
+      "updated_at": "2021-04-16T03:29:55Z"
+    },
+    {
+      "author": "minecraftchest1",
+      "author_association": "NONE",
+      "body": "So no matter how it gets done, it will require a modification to windows to do it cleanly?\n\n\n",
+      "created_at": "2021-04-16T14:58:37Z",
+      "updated_at": "2021-04-16T14:58:41Z"
+    },
+    {
+      "author": "agowa338",
+      "author_association": "NONE",
+      "body": "@minecraftchest1 The cleanest implementation would be an addition to windows internals it self. It would provide the most standardized way of handling this especially because this is a core functionality that not only PowerShell is looking for.\r\n\r\nBut that said there are different ways to implement it.\r\n1. The pipe based one I explained above.\r\n2. Create a service that either runs with LocalSystem privileges or with an user having SeTcbPrivilege (Act as part of the operating system) and that service than could perform the call to GetTokenInformation/SetTokenInformation with TokenLinkedToken (or even full impersonation) on behalf of the actual application and therefore bypass UAC (the official way) and elevating the already running application/thread (after checking permissions of course).\r\n\r\nEdit:\r\nAfter thinking a bit more about this. It doesn't work quite that easily as windows doesn't allow to change/overwrite the primary token of a process after it was launched (maaybe a kernel driver could do that though). But even that we could work around. But than we'd have two use cases:\r\n1. Elevating native applications\r\n2. Elevating PowerShell cmdlets/functions/Win32-Api-Calls/\u2026\r\n\r\nFor the 1st one we could just use:\r\n1. Invoker process calls \"sudo notepad.exe\"\r\n2. sudo creates a new but suspended process for notepad.exe and invokes an IPC call to the helper process (running with SeTcbPrivileges, SeDebugPrivilege, SeCreateTokenPrivilege and SeAssignPrimaryTokenPrivilege).\r\n3. The helper process than duplicates the token of the calling process checks its privileges according to predefined rules for elevation (like /etc/sudoers on linux) than either crafts a new one (if another user should be impersonated) or just uses the linked token (if the user is an administrator but the process is currently running as invoker).\r\n4. The helper process than injects the token into the suspended process using the token acquired in the previous step.\r\n5. The helper process than resumes the suspended process and returns control back to the caller.\r\n6. The sudo process now acts as a proxy in between the unprivileged and the privileged process and forwards stdin/stdout/stderr.\r\n\r\nFor the 2nd one we would have to do a bit more advanced handling:\r\n1. Modify the PSSession stuff in powershell to be an interface (e.g. so that *-PSSession is transport-agnostic and that anyone can implement new kinds of transportation).\r\n2. Create a new kind of PSSession (in addition to SSH and WinRM) that will connect two PowerShell processes one being elevated and the other one not.\r\n3. Call `sudo powershell-IPCSession.exe` (for details about what sudo does see above) in the background\r\n4. `powershell-IPCSession.exe` once started spawns a new powershell session and connects it to the named pipe created by the non privileged process.\r\n5. The non privileged process now can perform elevated actions within this session via the IPC pipe.",
+      "created_at": "2021-04-17T08:49:24Z",
+      "updated_at": "2021-04-17T11:05:42Z"
+    },
+    {
+      "author": "minecraftchest1",
+      "author_association": "NONE",
+      "body": "I understand. I shared this with the ReactOS project to ask what they could do. I personally don't have the patience to do things like this.",
+      "created_at": "2021-04-17T13:58:19Z",
+      "updated_at": "2021-04-17T13:58:19Z"
+    },
+    {
+      "author": "Akarinnnnn",
+      "author_association": "NONE",
+      "body": "I perfer to open UAC popup on Windows personally, just like the installers.\r\nIn my envisage, `pssudo` have following design:\r\n- Start an evaluated pwsh process by `sudo pwsh ...` or RunAs equalvent, and specify IPC channel, lifetime(if we have subsequent command to sudo), communication token(maybe not necessary), etc. on command line parameters. For example `sudo pwsh -SudoMode -SudoLifetime 5min -SudoToken 1234567890abcdef  -SudoIpcPipe pipename`\r\n- Send variables and command to elevated instance through IPC channel, and receive result.\r\n- Signal the elevated instance to exit, if subsequnt elevated commands are executed.",
+      "created_at": "2022-05-27T17:28:42Z",
+      "updated_at": "2022-05-27T17:29:14Z"
+    },
+    {
+      "author": "gerardog",
+      "author_association": "NONE",
+      "body": "Hi! just wanted to let you know that **`gsudo`** ships with an [**`Invoke-gsudo`**](https://gerardog.github.io/gsudo/docs/usage/powershell#invoke-gsudo-cmdlet) cmdlet to elevate like the `pssudo` proposal.\r\n\r\nIt runs a `ScriptBlock` on an elevated PS instance, so it is a different lexical scope: the `ScriptBlock` can't access your `$variables`, but you can use `$using:variable` to apply it\u00b4s serialized value. Pipeline inputs and outputs are automatically serialized and deserialized.\r\n\r\nExample usage from the [docs](https://gerardog.github.io/gsudo/docs/usage/powershell#invoke-gsudo-cmdlet).\r\n\r\n> ``` powershell\r\n> # Accepts pipeline input.\r\n> Get-process SpoolSv | Invoke-gsudo { Stop-Process -Force }\r\n> \r\n> # Variable usage\r\n> $folder = \"C:\\ProtectedFolder\"\r\n> Invoke-gsudo { Remove-Item $using:folder }\r\n> \r\n> # The result is serialized (PSObject) with properties.\r\n> (Invoke-gsudo { Get-ChildItem $using:folder }).LastWriteTime\r\n> ```\r\n> \r\n\r\n(The cmdlet is optional, you can still just prepend `gsudo` to [elevate a command string](https://gerardog.github.io/gsudo/docs/usage/powershell))\r\n\r\nSorry if I am spamming this thread. I thought that mentioning it here once was on-topic. My apologies if it's not.\r\nI created [this discussion](https://github.com/gerardog/gsudo/discussions/139) at gsudo's repo for anyone interested in discussing the cmdlet design, usage, troubleshooting, etc.",
+      "created_at": "2022-05-27T18:32:53Z",
+      "updated_at": "2022-05-27T18:41:10Z"
+    }
+  ],
+  "created_at": "2019-12-14T20:11:04Z",
+  "number": 11343,
+  "state": "open",
+  "title": "Support sudo <PowerShell cmdlet> 2",
+  "updated_at": "2022-05-27T18:41:10Z"
+}

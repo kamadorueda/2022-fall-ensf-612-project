@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9119",
+  "author": "mklement0",
+  "body": "`-Name` is a convenient switch to only output item _names_  (without `-Recurse`) or _relative paths_ (with `-Recurse`).\r\n\r\nGiven that only _string_ instances rather than `System.IO.File/DirectoryInfo` instances are output, one would expect `-Name` to speed things up (or at least not to slow things down); however, with `-Recurse` present, `-Name` _slows down_ the command noticeably.\r\n\r\n# Steps to reproduce (on Windows)\r\n\r\n```powershell\r\n# Warm up the cache\r\n$null = Get-ChildItem -Recurse 'C:\\Program Files' \r\n\r\n# Without -Name\r\n(Measure-Command { Get-ChildItem -Recurse 'C:\\Program Files' }).TotalSeconds\r\n\r\n# With -Name\r\n(Measure-Command { Get-ChildItem -Name -Recurse 'C:\\Program Files' }).TotalSeconds\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe command with `-Name` should be faster (or at least not slower).\r\n\r\n# Actual behavior\r\n\r\nSample timings:\r\n\r\n```none\r\n1.544098   # without -Name\r\n4.5759553  # with -Name\r\n```\r\n\r\nThat is, adding `-Name` made the command about 3 times _slower_.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 6.2.0-preview.4\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I expect #8995 will address this.",
+      "created_at": "2019-03-12T13:16:11Z",
+      "updated_at": "2019-03-12T13:16:11Z"
+    },
+    {
+      "author": "ericdching",
+      "author_association": "NONE",
+      "body": "It looks like this issue is more pronounced in Powershell 7.0.\r\n\r\nRunning the following command from a nodeJS project:\r\n```\r\nGet-ChildItem -Recurse -Name\r\n```\r\nReturns 12886 files.\r\n\r\n**PowerShell 6.2.3**\r\n\r\nWithout -Name\r\n\r\n```\r\nIsRunning Elapsed          ElapsedMilliseconds ElapsedTicks\r\n--------- -------          ------------------- ------------\r\n    False 00:00:00.7503959                 750    750395941\r\n```\r\n\r\nWith -Name\r\n\r\n```\r\nIsRunning Elapsed          ElapsedMilliseconds ElapsedTicks\r\n--------- -------          ------------------- ------------\r\n    False 00:00:01.3749722                1374   1374972263\r\n```\r\n\r\n**PowerShell 7.0.0-rc.1**\r\n\r\nWithout -Name\r\n```\r\nIsRunning Elapsed          ElapsedMilliseconds ElapsedTicks\r\n--------- -------          ------------------- ------------\r\n    False 00:00:00.6832990                 683    683299055\r\n```\r\n\r\nWith -Name\r\n\r\n```\r\nIsRunning Elapsed          ElapsedMilliseconds ElapsedTicks\r\n--------- -------          ------------------- ------------\r\n    False 00:00:09.0078861                9007   9007886141\r\n```\r\n\r\nI see similar results for both macOS and Windows.",
+      "created_at": "2020-01-02T17:23:57Z",
+      "updated_at": "2020-01-02T17:23:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I guess this perf regressions comes from https://github.com/PowerShell/PowerShell/pull/9250\r\nIf previously I thought Kaspersky AV slow down file operations, now I tested with Microsoft AV.\r\n![image](https://user-images.githubusercontent.com/22290914/71713470-b4340180-2e2b-11ea-8877-dae5ae19981c.png)\r\n\r\n/cc @SteveL-MSFT @daxian-dbw ",
+      "created_at": "2020-01-03T08:22:05Z",
+      "updated_at": "2020-01-03T08:22:47Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov that method should be called in all cases, and not just when `-Name` is used.  But if you're suggesting the difference between WinPS and PSCore is due to that, then I would agree.  Looking at the code, it special cases `-Recurse` with `-Name` and handles it itself.  So instead of relying on a .NET API, it goes though much more code to gather objects at each level and recurse.  In fact, this makes much slower than doing a `Select-Object` for equivalent output:\r\n\r\n```powershell\r\nPS> (Measure-Command { dir . -Recurse }).TotalMilliseconds\r\n277.7461\r\n[280.54ms] /Users/steve/repos/PowerShell [origin/master]\r\nPS> (Measure-Command { dir . -Recurse -Name }).TotalMilliseconds\r\n1397.9301\r\n[1.4s] /Users/steve/repos/PowerShell [origin/master]\r\nPS> (Measure-Command { dir . -Recurse | select fullname }).TotalMilliseconds\r\n449.8212\r\n```\r\n\r\nSeems like `-Name` could do that equivalent and would be faster.  Let me play with this.",
+      "created_at": "2020-01-07T20:52:51Z",
+      "updated_at": "2020-01-07T21:45:20Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Seems like we should expose an overload to `GetChildNames()` to accept recursion.  Then the FileSystemProvider can implement this and simply use `EnumerateFileSystemEntries()` to quickly return just the names.   In `SessionStateContainer.cs`, it would try the overload first, but not all providers implement it and fallback to current behavior.  Since this is not a mainline issue, not going to implement this for now.",
+      "created_at": "2020-01-07T22:56:25Z",
+      "updated_at": "2020-01-07T22:56:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> that method should be called in all cases, and not just when -Name is used. \r\n\r\n@SteveL-MSFT For `dir -Recurse` it is called 3 times for root directory, for `dir -Recurse -Name` - 3 times for every subdirectory for every level and 1 time for every file.",
+      "created_at": "2020-01-08T16:18:57Z",
+      "updated_at": "2020-01-08T16:19:34Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov yes, because when `-Recurse` and `-Name` is used together, the recursion is done outside of the `FileSystemProvider` so each call into the provider results in a call to `GetCorrectCasedPath()`.  However, there's actually a lot of other work happening because of the manual recursion than just that API call.  The `FileSystemProvider` can leverage the `EnumerateFileSystemEntries()` to just get the names, but the current interface doesn't expose such a call into the provider.",
+      "created_at": "2020-01-08T17:53:47Z",
+      "updated_at": "2020-01-08T17:53:47Z"
+    }
+  ],
+  "created_at": "2019-03-11T18:46:22Z",
+  "number": 9119,
+  "state": "open",
+  "title": "Performance problem: -Name slows down Get-ChildItem -Recurse",
+  "updated_at": "2021-11-29T17:23:49Z"
+}

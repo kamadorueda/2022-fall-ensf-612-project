@@ -1,0 +1,174 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12103",
+  "author": "jszabo98",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\nHere the maximum property is a double, while the input was an int64 or long.  A decimal (128-bit) input would also result in the maximum property being a double.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n1000000000000000 | measure-object -Maximum\r\n```\r\n\r\n# Expected behavior\r\n\r\n```none\r\nCount             : 1\r\nAverage           :\r\nSum               :\r\nMaximum           : 1000000000000000\r\nMinimum           :\r\nStandardDeviation :\r\nProperty          :\r\n```\r\n\r\n# Actual behavior\r\n\r\n```none\r\nCount             : 1\r\nAverage           :\r\nSum               :\r\nMaximum           : 1E+15\r\nMinimum           :\r\nStandardDeviation :\r\nProperty          :\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0\r\nOS                             Microsoft Windows 10.0.16299\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is a fact that we convert all input objects to Double. It is by-design and it is a compromise because in general we don't know object types in pipeline.",
+      "created_at": "2020-03-12T05:58:32Z",
+      "updated_at": "2020-03-12T05:58:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, I understand that there's no trivial solution, but the current behavior is clearly both surprising and unhelpful:\r\n\r\n```powershell\r\nPS> (10000000000000199 | Measure-Object -Sum).Sum\r\n1.00000000000002E+16\r\n```\r\n\r\nCasting to `[bigint]` shows that precision was lost; that is, _the summation doesn't work as intended, and you may not even notice_:\r\n\r\n```powershell\r\nPS> [bigint] (10000000000000199 | Measure-Object -Sum).Sum\r\n10000000000000200\r\n```",
+      "created_at": "2020-03-12T10:09:40Z",
+      "updated_at": "2020-03-12T10:09:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I understand that there's no trivial solution\r\n\r\nI can't think of anything better than explicit type conversion of input object (property) like -AsType [type].\r\n",
+      "created_at": "2020-03-12T10:31:00Z",
+      "updated_at": "2020-03-12T10:31:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`Get-Random` does some manual type figuring-out for numbers. It's plausible we could adopt a similar approach in Measure-Object, type the parameter as `object` and then verify the type is a supported one as it comes in.",
+      "created_at": "2020-03-12T15:10:27Z",
+      "updated_at": "2020-03-12T15:10:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed in principle, @vexx32, but note that it's not about _parameters_ in this case, but about the numeric types encountered in the input.\r\n\r\nI think we need something like the automatic type widening (promotion) found in PowerShell's number-literal parsing, where you start with the type of the first number type encountered in the input and widen as needed during processing:\r\n\r\nFor integer input types:\r\n\r\n`int` -> `long` -> `decimal` -> `double`\r\n\r\nEncountering a `[double]` (or the rarely used `[float]`) in the input would instantly switch to `[double]`. `-Average` and `-StandardDeviation` still have to output the _final result_ as a `[double]`.\r\n\r\nAs an aside: there's a troubling inconsistency between type-widening in _number-literal parsing_ and _calculations_ (in expressions that don't use _casts_):\r\n\r\n```powershell\r\n# A number literal that is beyond [long]::MaxValue is promoted to [decimal]\r\n# The number below is [long]::MaxValue + 1 (cast to [decimal] to see the precise value)\r\nPS> (9223372036854775808).GetType().Name\r\nDecimal\r\n```\r\n\r\n```powershell\r\n# Performing the equivalent as a *calculation* promotes to [double], \r\n# with loss of precision.\r\nPS> ([long]::MaxValue + 1).GetType().Name\r\nDouble # !!\r\n```\r\n\r\nThus, with implicit type conversions you may lose precision without realizing it; consider the difference between:\r\n\r\n```powershell\r\n# OK - LHS forced to [decimal] preserves [decimal]\r\nPS> [decimal] [long]::MaxValue +1\r\n9223372036854775808\r\n```\r\n\r\nand:\r\n\r\n```powershell\r\n# !! Implicit calculation coerces to [double] with precision loss, which the subsequent\r\n# !! [decimal] cast cannot recover.\r\nPS> [decimal] ([long]::MaxValue +1)\r\n9223372036854780000 # !! Loss of precision\r\n```\r\n\r\n@vexx32, @SeeminglyScience, any thoughts?\r\n\r\nObviously, changing fundamental behavior like that would be extremely fraught.",
+      "created_at": "2020-03-12T19:46:45Z",
+      "updated_at": "2020-03-12T19:46:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "My initial inclination is to avoid widening to double unless we get input that is either `float` or `double` and instead widen from `int64` to `BigInteger` as that'll get us more directly representative results. For `decimal` inputs, widening to `double` does make more sense, despite the loss of precision.\r\n\r\nA property like `Count` on Measure-Object, for example, could definitely stand to be `BigInteger` on the high end since a `double`-type Count isn't especially meaningful; all it gives you is a rough order of magnitude if you have enough objects. Other properties could, too, but it would be more dependent on the format the data is input in.\r\n\r\nAs for the inconsistencies between parsing and calculations -- I tend to think they should behave pretty similarly. Part of the trouble there is likely that .NET's default widening behaviours don't _quite_ match PowerShell's (at least where the parsing is concerned). Whether that should / could be addressed in a reasonable manner, I'm not sure. It would probably take a fair bit of tinkering around with LanguagePrimitives and the conversion methods there, plus I'm sure a good deal of manual work in the arithmetic operator binders.",
+      "created_at": "2020-03-13T00:18:36Z",
+      "updated_at": "2020-03-13T00:19:26Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "`Measure-Object` returns a specific type: `Microsoft.PowerShell.Commands.GenericMeasureInfo` which defines the fields as follows:\r\n```PowerShell\r\n  System.Nullable`1[System.Double] Average\r\n  System.Nullable`1[System.Double] Sum\r\n  System.Nullable`1[System.Double] Maximum\r\n  System.Nullable`1[System.Double] Minimum\r\n```\r\nThis is why everything comes out as double. \"Fixing\" this would require changing the type of the returned object and that would be a breaking change.\r\n",
+      "created_at": "2020-03-13T16:21:42Z",
+      "updated_at": "2020-03-13T16:21:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @bpayette, so - unfortunately - it would have to be an _opt-in enhancement_ via a parameter, say a `-AsAutoNumber` switch (just a first suggestion, struggling to come up with a good name), similar to what @iSazonov proposed, though the idea would be to not have to ask for a specific type and let the widening algorithm pick the appropriate type.\r\n\r\n@vexx32, agreed re `float` and `double` (in line with what I proposed), and also re `[bigint]`.\r\n\r\n---\r\n\r\nRe  for the inconsistencies between parsing and calculations: I think PowerShell's number-literal parsing is  fine (albeit different from C#'s); it's the calculation behavior of any-result-larger-than-[long]::MaxValue-becomes-a-[double] that I find troubling, but I'll take this topic elsewhere.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-03-13T19:38:36Z",
+      "updated_at": "2020-03-13T19:38:51Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "> I think PowerShell's number-literal parsing is fine\r\n\r\nGlad to hear it, I'd hate to have to rewrite it again \ud83d\ude02 ",
+      "created_at": "2020-03-13T19:40:42Z",
+      "updated_at": "2020-03-13T19:40:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> the idea would be to not have to ask for a specific type and let the widening algorithm pick the appropriate type\r\n\r\nI do not think this is reliable. Also it complicates too the code. I think in real scenarios long type is enough.",
+      "created_at": "2020-03-13T20:35:42Z",
+      "updated_at": "2020-03-13T20:35:42Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I do not think this is reliable. \r\n\r\nIn what way would it not be reliable?\r\n\r\n>  I think in real scenarios long type is enough.\r\n> I think in real scenarios long type is enough.\r\n\r\nSee https://stackoverflow.com/a/60609025/45375, for example.\r\n\r\nThe inputs _are_ `[long]`s, but the invariable conversion to `[double]` causes loss of precision for `[long]`s beyond `9007199254740991`, which is particularly insidious in this case, given that you'd never expect `-Maximum` to _modify the value_:\r\n\r\n```powershell\r\nPS> [bigint] (132273694413991065 | Measure-Object -Maximum).Maximum\r\n132273694413991072  # !! Different number, to lossy conversion to [double]\r\n```\r\n\r\n(Strictly speaking, no _widening_ is required in this case - only _preservation_ of the input type).\r\n\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/60598648/how-to-prevent-powershells-measure-object-cmdlet-from-truncating-your-data\">How to prevent PowerShell's Measure-Object cmdlet from truncating your data?</a></strong></div><div>I am tryng to compare the following data to obtain the largest number:\n\n$UserDeets \n\nname                 lastLogon\n----                 ---------\nFrank Ti 132273694413991065\nFrank Ti 1322797428841...</div></blockquote>",
+      "created_at": "2020-03-13T20:49:31Z",
+      "updated_at": "2020-03-13T20:49:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">I do not think this is reliable.\r\n> In what way would it not be reliable?\r\n\r\n:-) https://github.com/PowerShell/PowerShell/issues/12103#issuecomment-598883028 Do you want to ask @vexx32 ? :-) \r\nWe could switch to BigInt but we lost performance. The same is for Dynamic type. I do not think that we'd want this.\r\n\r\nI don't understand your stackoverflow example. My thought is to keep double type by default and add new parameter to switch to long type for inputs and results.",
+      "created_at": "2020-03-14T04:48:26Z",
+      "updated_at": "2020-03-14T04:48:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I wasn't aware `Measure-Object` was a performance-critical scenario. \ud83d\ude09 \r\n\r\nPersonally I think it makes the most sense to adopt the widest / least precise _input_ type for the overall output. Most likely, this would mean the actual class property would have to be `Object` or at least `ValueType` (can you make properties ValueType? I feel like I remember that's not really allowed or something).",
+      "created_at": "2020-03-14T05:04:26Z",
+      "updated_at": "2020-03-14T05:04:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\n> Do you want to ask @vexx32 ? :-)\r\n\r\nThe number-literal parsing is entirely incidental to this issue - the only reason I mentioned is that it is an instance of where we already perform automatic, helpful widening of types on demand.\r\n\r\n> We could switch to BigInt but we lost performance. The same is for Dynamic type. I do not think that we'd want this.\r\n\r\nWe don't need a dynamic type, and whether `[bigint]` is needed depends on the specifics of the input.\r\n\r\nAnd I agree with @vexx32  that performance shouldn't be the deciding factor here - see below.\r\n\r\n> I don't understand your stackoverflow example. \r\n\r\nIt was simply meant to show that the current (invariable) behavior is problematic in real-life situations; the `[bigint] (132273694413991065 | Measure-Object -Maximum).Maximum` example by itself illustrates the problem well enough, I think.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-03-14T23:03:04Z",
+      "updated_at": "2020-03-14T23:05:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@bpayette, I just noticed that the properties you quoted are from the <del>obsolete</del> ([see below](https://github.com/PowerShell/PowerShell/issues/12103#issuecomment-600052852)) [`Microsoft.PowerShell.Commands.GenericMeasureInfo`](https://docs.microsoft.com/en-US/dotnet/api/Microsoft.PowerShell.Commands.GenericMeasureInfo) class, which was replaced by [`Microsoft.PowerShell.Commands.GenericObjectMeasureInfo`](https://docs.microsoft.com/en-US/dotnet/api/Microsoft.PowerShell.Commands.GenericObjectMeasureInfo), precisely to fix the following (emphasis added):\r\n\r\n> **This class is created for fixing \"Measure-Object -MAX -MIN should work with ANYTHING that supports CompareTo\"**\r\nGenericMeasureInfo class is shipped with PowerShell V2. Fixing this bug requires, changing the type of Maximum and Minimum properties which would be a breaking change. Hence created a new class to not have an appcompat issues with PS V2.\r\n\r\nIn short, properties `Maximum` and `Minimum` are already `System.Object`-typed, so also applying the preservation of the input type during `-Minimum` and `-Maximum` operations to numeric types should be considered a _bug fix_.\r\n\r\n@iSazonov, can you please label this as a bug?\r\n\r\nAnd while supporting type widening for all properties is still worth considering - see #12141 -  I think this fix alone will eliminate most currently problematic real-world scenarios.\r\n\r\n---\r\n\r\n@vexx32, even though I've personally never seen it in the wild, it is indeed possible to create  `ValueType` properties, and the docs even provide an example; see https://docs.microsoft.com/en-US/dotnet/api/System.ValueType; aside from being somewhat self-documenting and ensuring that only value types can be assigned / returned, working with `ValueType` instances _directly_ has many limitations: not all value types are numbers, you can't perform arithmetic directly with `ValueType` instances, you can't use `stackalloc` or obtain pointers to them, ...\r\n\r\n\r\n\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/api/system.valuetype\">ValueType Class (System)</a></strong></div><div><p sourcefile=\"api/System.ValueType.yml\" sourcestartlinenumber=\"1\" jsonPath=\"/summary\">Provides the base class for value types.</p>\r\n</div></blockquote>",
+      "created_at": "2020-03-17T12:15:55Z",
+      "updated_at": "2020-03-17T12:52:32Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @bpayette, I just noticed that the properties you quoted are from the obsolete [`Microsoft.PowerShell.Commands.GenericMeasureInfo`](https://docs.microsoft.com/en-US/dotnet/api/Microsoft.PowerShell.Commands.GenericMeasureInfo) class, which was replaced by [`Microsoft.PowerShell.Commands.GenericObjectMeasureInfo`](https://docs.microsoft.com/en-US/dotnet/api/Microsoft.PowerShell.Commands.GenericObjectMeasureInfo)\r\n\r\nDoesn't look like `Measure-Object` is using it :/\r\n\r\n> @vexx32, even though I've personally never seen it in the wild, it is indeed possible to create `ValueType` properties\r\n\r\nYou don't see it much because it's basically the same as typing it as `object`.  It's still boxed, and afaik doesn't really buy you anything other than documenting that a struct or primitive is expected.",
+      "created_at": "2020-03-17T12:31:41Z",
+      "updated_at": "2020-03-17T12:31:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience - I didn't notice that it's only used _selectively_, with _non-numeric_ (but comparable) input when `-Minimum` or `-Maximum` are used:\r\n\r\n```powershell\r\n# No -Min / -Max -> GenericMeasureInfo (for all input types)\r\nPS> ('a', 'b' | Measure-Object -Maximum).GetType().Name\r\nGenericMeasureInfo\r\n\r\n# Non-numeric type, with -Min / -Max -> GenericObjectMeasureInfo\r\nPS> ('a', 'b' | Measure-Object -Maximum).GetType().Name\r\nGenericObjectMeasureInfo\r\n```\r\n\r\nSo the fix would be to _always_ output `GenericObjectMeasureInfo` when `-Minimum` and / or `-Maximum` are used.\r\n\r\nI'm hoping that said change, which is conceptually undoubtedly a bug fix, falls into [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area), but I'm not sure I have the full picture. Any thoughts?\r\n\r\n",
+      "created_at": "2020-03-17T12:50:51Z",
+      "updated_at": "2020-03-17T12:54:08Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83d\ude2c That fix is janky enough as it is, to be outputting a different type from a switch like that, given the original class already has those members, no?\r\n\r\nSeems like there may be much to gain and little to lose from replacing them both with a more useful type overall. \ud83e\udd14 \r\n\r\nYou'll note that the `Sum` property of even the newer class is still `Nullable<double>`.",
+      "created_at": "2020-03-17T12:52:24Z",
+      "updated_at": "2020-03-17T12:54:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Comment in the code say that it is by-design and it was designed in V3 time.\r\nSo request is to change the design because V2 is not supported and we can deprecate GenericMeasureInfo class and use only GenericObjectMeasureInfo class.\r\n\r\n/cc @SteveL-MSFT @daxian-dbw Please review this on PowerShell Committee.",
+      "created_at": "2020-03-17T14:43:30Z",
+      "updated_at": "2020-03-17T14:43:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That would be a good first step. \r\n\r\nIdeally we would deprecate _both_ and introduce a new class that defines most if not all of its members as `object` so that we can utilise the widest needed numeric type to handle the use case.",
+      "created_at": "2020-03-17T15:21:04Z",
+      "updated_at": "2020-03-17T15:21:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Great idea, @vexx32:\r\n\r\nNote: `ValueType` is used here to illustrate which properties are invariably numeric. \r\nBased on @SeeminglyScience's feedback, using just `object` in practice is probably the right choice.\r\n\r\n```csharp\r\n    // To replace both GenericObjectMeasureInfo and GenericMeasureInfo.\r\n    public sealed class ObjectMeasureInfo : MeasureInfo\r\n    {\r\n        public ValueType Count { get; set; }\r\n        public ValueType? Average { get; set; }\r\n        public ValueType? Sum { get; set; }\r\n        public ValueType? StandardDeviation { get; set; }\r\n        // As  before in GenericObjectMeasureInfo\r\n        // Can be reference-type instances, as long as the type implements IComparable.\r\n        public object Maximum { get; set; }\r\n        public object Minimum { get; set; }\r\n    }\r\n```\r\n\r\nThis type could then be used with the following type-widening rules, as also suggested in #12141 for\r\n`-Raw`, which would give us unified behavior:\r\n\r\n*  For `-Maximum` and `-Minimum`, whatever input value is identified should be passed through as-is, as is already the case for non-numeric inputs (which is the fix for the bug at hand).\r\n\r\n* For the inherently non-integral `-Average` and `-StandardDeviation` measurements, `[double]` is an appropriate default, but with (at least one) `[decimal]` input `[decimal]` should also be used on output.\r\n\r\n* For `Sum`, all-integer-only input should should also output an integral type (starting with the (largest) input type), with  _automatic type widening_, analogous to the widening (type promotion) that happens in PowerShell's number-literal parsing (`[int]` ->`[long]` -> `[decimal]`, and possibly even to `[bigint]` rather than the `[double]` that is the widest type for number literals. \r\n\r\n * `Count` should widen on demand the same way as `Sum`, though  numbers beyond `[int]` are unlikely to occur in practice, except perhaps if opt-in enumeration of array-valued properties is implemented via the proposed `-Recurse` switch - see #7244.\r\n",
+      "created_at": "2020-03-17T16:13:49Z",
+      "updated_at": "2020-03-18T22:51:31Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this, we do not want to take a breaking change for the type of the output object.  Instead, to support this scenario, we would propose a `-ValueType` parameter that takes a enum consisting of the existing members that would output an `object` so that the resulting input type is preserved.",
+      "created_at": "2020-03-18T22:50:39Z",
+      "updated_at": "2020-03-18T22:50:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think we need to take a step back, @SteveL-MSFT:\r\n\r\n* That numeric types aren't preserved with `-Min` and `-Max`, with large integers even outputting lossy `[double]`s that report a maximum that's not even among the input is clearly a bug: see  #13422\r\n\r\n* The proposed `-ValueType` enhancement based on an enum seems quite convoluted; I suggest the following instead:\r\n\r\n  * #12141 already proposes an opt-in with automatic type-widening on a per-property basis, via a `-Raw` switch.\r\n\r\n  * #13423  complements this proposal with a whole-object opt-in, via an `-AsAutoNumber` switch. \r\n\r\nI recommend closing this issue in favor of these new ones.",
+      "created_at": "2020-08-12T21:11:12Z",
+      "updated_at": "2020-08-12T21:11:12Z"
+    }
+  ],
+  "created_at": "2020-03-11T14:31:08Z",
+  "number": 12103,
+  "state": "open",
+  "title": "measure-object -maximum changes the type of its input",
+  "updated_at": "2020-08-12T21:11:12Z"
+}

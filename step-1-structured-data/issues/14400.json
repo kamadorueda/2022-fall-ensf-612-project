@@ -1,0 +1,34 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14400",
+  "author": "mklement0",
+  "body": "Note: This may come down to simply _documenting_ the ambiguity, but I'd like to get clarity on the design intent  first.\r\n\r\nIn explicit `Start-Job` calls, the only way to embed values from the _caller's_ scope is via the `$using:` scope.\r\n\r\nBy contrast, if you use the postpositional ` &` operator, this is _not_ required (but also supported).\r\n\r\nThis creates ambiguity around whether a variable reference refers to the caller's scope or the background job's.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n# Makes sure that $Error contains exactly 1 error.\r\n$Error.Clear(); try { 1 / 0 } catch {}\r\n\r\n# OK: in a Start-Job script block, \"unscoped\" variable references refer to \r\n#        variables *in the background job*. Since no errors have occurred there, the result should be 0.\r\nStart-Job { $Errors.Count } | Receive-Job -Wait -AutoRemoveJob | Should -Be 0\r\n\r\n# !! With the background-job *operator*, an \"unscoped\" variable reference\r\n# !! refers to a variable *in the caller's scope*, if such a variable exists there.\r\n($Error.Count &) | Receive-Job -Wait -AutoRemoveJob | Should -Be 0\r\n```\r\n\r\n## Expected behavior\r\n\r\nBoth tests should succeed.\r\n\r\n## Actual behavior\r\n\r\nThe 2nd test fails, because `$Error` is interpreted as referring to the _caller's_ variable.\r\n\r\n```none\r\n Expected 0, but got 1.\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.2.0-preview.1\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "It might be a bit surprising but it's not ambiguous. `$using:` can only be used in a _scriptblock_ and there is no scriptblock here. As far as the user experience goes, when we were designing the feature we felt that having this work:\r\n```powershell\r\n$foo = \"Hello\"\r\n# doesn't require `$using:`  because it's just parameter passing\r\nwrite-output $foo &\r\n```\r\nbut this\r\n```powershell\r\n$foo = \"hello\"\r\n$foo &\r\n```\r\nfail was a bad experience. So we made it just work.",
+      "created_at": "2020-12-17T23:51:04Z",
+      "updated_at": "2020-12-17T23:51:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for clarifying the design intent, @bpayette.\r\n\r\n> `$using:` can only be used in a _scriptblock_\r\n\r\nOf course, hypothetically, that doesn't prevent treating `$foo` in statement `$foo &` _as if it were a script block_ [_update_:  that is indeed what happens - see [below](https://github.com/PowerShell/PowerShell/issues/14400#issuecomment-748207497)] - which is a reasonable assumption to make if you conceive of `Start-Job { ... }` and `... &` as mere _syntax variations_, especially given how ` &`, the background operator,  is [currently documented](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_Operators?view=powershell-7.2#background-operator-):\r\n\r\n> This operator is functionally equivalent to `Start-Job`.\r\n\r\n---\r\n\r\nI do get that the user experience is better if the background operator does _not_ require `$using:`, but - at least hypothetically - it does prevents certain scenarios.\r\n\r\nThe ambiguity exists relative to `Start-Job`, but if we focus on the background operator alone, it's more a case of _invariably shadowing_ variables local to the background job and therefore not being able to refer to them:\r\n\r\nThe OP already demonstrates it with respect to `$Error`, but let me show another example:\r\n\r\n```powershell\r\nPS> $FormatEnumerationLimit = 42; ($FormatEnumerationLimit &) | Receive-Job -wait -AutoRemoveJob\r\n42  # $FormatEnumerationLimit referred to the CALLER'S copy\r\n```\r\n\r\nvs.\r\n\r\n```powershell\r\nPS> $FormatEnumerationLimit = 42; sajb { $FormatEnumerationLimit } | rcjba\r\n4  # The JOB's default vlue.\r\n```\r\n\r\nIt may be mostly hypothetical, but with the background operator there is no straightforward way that I'm aware of that would allow you to unambiguously reference the _background job_'s `$FormatEnumerationLimit` copy - to that end, an _inverse_ `$using:` construct would be needed.\r\n\r\n(Yes, you could do `$FormatEnumerationLimit='@'; (& ([scriptblock]::create('$FormatEnumerationLimit')) &) | Receive-Job -wait -AutoRemoveJob`, but, needless to say, that is both highly obscure and cumbersome.)\r\n",
+      "created_at": "2020-12-18T02:15:32Z",
+      "updated_at": "2020-12-18T17:05:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To offer an example that is perhaps closer to real life:\r\n\r\n```powershell\r\n# !! This prints the CALLER's $PWD, as explicit use of $using:PWD would.\r\n# !! There is no way to refer to the JOB's $PWD when using the background operator.\r\n(& { Set-Location /; $PWD } &) | Receive-Job -Wait -AutoRemoveJob\r\n```\r\n\r\nIncidentally, by contrast, with `$PID` it is the _job's_ copy that is visible by default:\r\n\r\n```powershell\r\nPS> $PID; ($PID &) | Receive-Job -Wait -AutoRemoveJob\r\n21873\r\n31086\r\n```\r\n\r\nBecause of that, `$using` actually helps in _this_ case:\r\n\r\n```powershell\r\nPS> $PID; ($using:PID &) | Receive-Job -Wait -AutoRemoveJob\r\n21875\r\n21875\r\n```\r\n\r\nAlso note the use of `$using:` _without_ an explicit script block (`{ ... }`), contradicting your earlier claim that `$using:` can only be used inside one.\r\n\r\nGenerally, though, for full feature parity with `Start-Job` a hypothetical `$callee:` pseudo scope would be needed, to bypass shadowing of the job's variables by the caller's.\r\n\r\nI understand that this isn't really called for in practice, but it highlights the limitations of the background operator.\r\n\r\nI will open a docs issue to request clarifying the difference between the background operator and `Start-Job` and will close this issue then.\r\n",
+      "created_at": "2020-12-18T17:04:13Z",
+      "updated_at": "2020-12-18T18:36:37Z"
+    }
+  ],
+  "created_at": "2020-12-11T23:47:25Z",
+  "number": 14400,
+  "state": "open",
+  "title": "The background-job operator does not require the $using: scope to reference the caller's variable values, which creates ambiguity",
+  "updated_at": "2020-12-18T18:36:37Z"
+}

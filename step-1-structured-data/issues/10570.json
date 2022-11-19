@@ -1,0 +1,321 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10570",
+  "author": "n3rdopolis",
+  "body": "I tested this in PowerShell 5.1, and PowerShell 7 preview 3.\r\n\r\nIf I add an Alternate Data Stream to a directory, verify with streams.exe that it exists, and then try to list the ADS stream for the directory itself with PowerShell\r\n```\r\nGet-Item P:\\ath\\To\\A\\Directory -Streams * \r\n```\r\ndoes not work, and appears to return nothing",
+  "closed_at": "2020-12-08T01:31:56Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "How do you add a stream to the directory?  Please add more info in repo steps.",
+      "created_at": "2019-09-18T12:53:10Z",
+      "updated_at": "2019-09-18T12:53:10Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Are wildcards supported for that parameter? I don't think that works for files with multiple streams either.",
+      "created_at": "2019-09-18T13:23:25Z",
+      "updated_at": "2019-09-18T13:23:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Wildcards are supported\r\nhttps://github.com/PowerShell/PowerShell/blob/79e80a8e06ddf286b231dc853347059f6da37d39/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L1253-L1280",
+      "created_at": "2019-09-18T13:33:20Z",
+      "updated_at": "2019-09-18T13:38:46Z"
+    },
+    {
+      "author": "n3rdopolis",
+      "author_association": "NONE",
+      "body": "You can do in a command prompt\r\necho hi > C:\\Downloads:test\r\n\r\nor \r\nset-output \"test\" C:\\downloads -stream test\r\nin PowerShell to create a stream.\r\n\r\n\r\nSome folders like $ENV:TEMP I get access denied oddly.\r\n\r\n",
+      "created_at": "2019-09-20T00:30:42Z",
+      "updated_at": "2019-09-20T00:30:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "All cmdlets (Get-Item, Set-Content, Get-Content, Clear-Content) work only with alternative streams on files. Code contains explicit checks for this.\r\n\r\n@SteveL-MSFT We need a conclusion should we support alternative streams on directories.",
+      "created_at": "2019-09-20T03:48:59Z",
+      "updated_at": "2019-09-20T03:48:59Z"
+    },
+    {
+      "author": "n3rdopolis",
+      "author_association": "NONE",
+      "body": "Support on it would be nice, to be able to write scripts that get directory sizes. Although probably very rare, someone could make a huge file as an ADS on a directory.",
+      "created_at": "2019-09-20T11:28:42Z",
+      "updated_at": "2019-09-20T11:28:42Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I don't believe this requires @PowerShell/powershell-committee review.  If sysinternals streams.exe supports it meaning NTFS supports it, then there's no reason not to have PowerShell support it.  However, it wouldn't be a priority as this is the first time this has come up and it's not clear to me what use case would add an alternate stream to a folder.",
+      "created_at": "2019-10-02T15:42:41Z",
+      "updated_at": "2019-10-02T15:42:41Z"
+    },
+    {
+      "author": "n3rdopolis",
+      "author_association": "NONE",
+      "body": "Whoo! Now for the record, I'm not looking to add them myself to folders, I don't see the use case for adding ADS streams to folders as well, but the script I made is for retrieving how large sub folders are. And I want to be able to count that, in case it actually happens...",
+      "created_at": "2019-10-03T00:39:31Z",
+      "updated_at": "2019-10-03T00:39:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could add a support for NTFS streams for directories at FileSystem provider V2 time.",
+      "created_at": "2020-01-31T07:57:10Z",
+      "updated_at": "2020-01-31T07:57:10Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "Not going to lie, this issue is why I downloaded the code.  I'm looking at a filesystem filter driver that needs to make use of alternate data streams, and I need to ensure I have tools to look at them to find and ferret out bugs.\r\n\r\nThat said, since it's well-known that Powershell doesn't allow administrators to even see alternate data streams on directories, they provide a very good place for a red team to store data for exfiltration.  The fact that Powershell doesn't support alternate stream syntax on directories is arguably a bug in Powershell.  (As has been noted, NTFS itself supports alternate data streams on directories, and has supported them since Windows NT 3.1.)\r\n\r\nThis is an incredibly easy patch.  (System.Management.Automation\\namespaces\\FileSystemProvider.cs, Microsoft.Powershell.Commands.FileSystemProvider.GetItem(string path). Just get rid of the isContainer check.)  It took me about 3 hours to find where to fix it, and about 2 minutes to understand how to fix it.\r\n\r\nI have built a local pwsh that doesn't have the isContainer check, and I have tested that it works with Get-Item.  However, a potential issue is raised due to the nature of NTFS alternate data streams on files versus directories:\r\n\r\n1. A file always has at least one stream of type $DATA, which is unnamed.  This means that `Get-Item filen.ame -Stream *` will always return at least one entry on files stored on NTFS.\r\n2. A directory usually has zero streams of type $DATA.  This means that `Get-Item dirn.ame -Stream *` will usually return nothing, which leads (interactively) to Get-Item returning a red message of `Get-Item: Reached the end of the file.`.\r\n\r\nPut simply, \"a directory is a file which can have zero data streams.\"  I haven't tested the behavior of powershell-as-distributed on FAT32 or exFAT, where neither files nor directories contain alternate data streams, but I suspect that the `Reached the end of the file.` message would be returned in all cases on those filesystems (either that or an exception would be thrown).\r\n\r\nSo, I have a question: should this functionality be enabled by an additional flag to the Get-Item command (like \"-EnableDirectoryStreams\" or such)?  Or should the isContainer check simply be removed, since containers in the NTFS filesystem can have streams and should be able to be seen regardless?\r\n",
+      "created_at": "2020-09-17T18:26:00Z",
+      "updated_at": "2020-09-17T18:28:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If that's tried on a non-NTFS filesystem, does the cmdlet throw a reasonable error? If we're going to enable it, we need to ensure that any errors arising from its use on non-NTFS file systems are handled in a reasonably clear fashion.\r\n\r\nBut yeah, if the given file system supports it I'm not sure there's really a reason to not allow it.",
+      "created_at": "2020-09-17T19:16:23Z",
+      "updated_at": "2020-09-17T19:16:23Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "> If that's tried on a non-NTFS filesystem, does the cmdlet throw a reasonable error? If we're going to enable it, we need to ensure that any errors arising from its use on non-NTFS file systems are handled in a reasonably clear fashion.\r\n\r\nIn powershell-as-distributed, if you attempt to get streams from a file stored on a FAT32 filesystem, it returns `Get-Item: The parameter is incorrect.`  If you attempt to get streams from a directory stored on a FAT32 filesystem, it returns nothing (the same way as it works on NTFS, because it simply doesn't try to get the streams from anything which has the isContainer C# property true).\r\n\r\nIn my local build, the `Get-Item: The parameter is incorrect.` message shows up on both files and directories stored on FAT32, as expected.\r\n\r\n",
+      "created_at": "2020-09-17T19:33:40Z",
+      "updated_at": "2020-09-17T19:34:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, we should probably make sure to catch that exception and wrap it so we can give a bit more useful of an error message, like, perhaps something to the effect of `The stream <name | *> could not be accessed for the item <Path>. The filesystem reported the following error: <Error text from the filesystem error>`",
+      "created_at": "2020-09-17T19:44:31Z",
+      "updated_at": "2020-09-17T19:44:31Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "erm, is there an example of where that's being done elsewhere in the codebase?  I have no qualms with it, I just don't know how to do it in a way that the code will work with.  (I mean, what's the exception to construct and throw?  Do I include the text of the caught exception myself, or is that something that the parent handler can do by accessing my thrown exception's InnerException property?)",
+      "created_at": "2020-09-17T20:16:50Z",
+      "updated_at": "2020-09-17T20:16:50Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vexx32 I uploaded a WIP of the (extremely minor) change to let -stream work on directories, but I'm not sure the best options for wrapping the exception (as seen in my prior comment).  I'm more than happy to work on it, and if you'd like to add to it please feel free.",
+      "created_at": "2020-09-17T20:34:22Z",
+      "updated_at": "2020-09-17T20:34:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Okay, this isn't something I'm super familiar with, but from a glance at the code I'd probably bet the exception initially gets thrown from the call to `GetStreams()`\r\n\r\nIn your current build of PowerShell, you'll need to trigger the exception and then check `$error[0].Exception.GetType().FullName` -- that's probably the exception type you should target in the code.\r\n\r\nI would probably recommend moving the `GetStreams()` call to before loop and store the result in a variable; that way, you can just have the try/catch around the GetStreams() call itself and not the entire loop.\r\n\r\nSomething similar to this pattern would most likely be effective:\r\n\r\n```csharp\r\ntry\r\n{\r\n    var alternateStreams = AlternateDataStreamUtilities.GetStreams(result.FullName);\r\n}\r\ncatch (Exception e) // replace Exception with the specific exception type you found earlier\r\n{\r\n    // you can probably reuse the WriteError() code from after the foreach loop here\r\n    // though you'll need to locate the error string in the `*.resx` file (the name should match the class name, \"FileSystemProviderStrings\")\r\n    // and add a new format string to reference so you can add in the `e.Message` from the caught exception here\r\n    WriteError( ... );\r\n\r\n    // finally just `return` from the method since we've already written an error and know there are no streams\r\n    // that we can use for the foreach loop\r\n    return;\r\n}\r\n\r\n\r\nforeach (AlternateStreamData stream in alternateStreams) {\r\n    // ... (rest of the existing code in the loop etc)\r\n```\r\nHopefully that makes some sense.",
+      "created_at": "2020-09-17T21:03:53Z",
+      "updated_at": "2020-09-17T21:03:53Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw says that the \"End of file has been reached.\" (ERROR_HANDLE_EOF) is an expected return value when the file in question has no ::$DATA streams.  If I catch that, would it make sense to only WriteError it if the isContainer is false?  That would assuage a concern that I have, that running `Get-Item * -stream *` might create spurious error stacks due to directories in the current directory not having any data streams.\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw\">FindFirstStreamW function (fileapi.h) - Win32 apps</a></strong></div><div>Enumerates the first stream with a ::$DATA stream type in the specified file or directory.</div></blockquote>",
+      "created_at": "2020-09-17T23:56:42Z",
+      "updated_at": "2020-09-17T23:56:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Maybe. I'm not really sure, it depends on how the `AlternateDataStreamUtilities.GetStreams()` API used here handles that error; that's a native error, so I'd generally hope that most common errors like that are handled by the API in use and wrapped in proper .NET exceptions before they leave the API. So I'd be thinking that if that's the case, the API should throw a different kind of exception; that's why I recommended you check the exception type and use that to catch it, so that other kinds of exceptions still show through normally, if they were going to be reported.",
+      "created_at": "2020-09-18T01:24:32Z",
+      "updated_at": "2020-09-18T01:25:22Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think we should follow common behavior for globbing - no exceptions/errors if glob char presents `Get-Item -Stream*` otherwise write an terminating error if the data stream does not exist `Get-Item -Stream \"noexist\"`.\r\n\r\n/cc @mklement0 ",
+      "created_at": "2020-09-18T10:44:31Z",
+      "updated_at": "2020-09-18T11:03:41Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think a terminating exception is a good idea; IIRC it's possible to do `Get-Item *.txt -Streams $streamName` so the error here should always be non-terminating IMO. Best not to overcomplicate the logic.",
+      "created_at": "2020-09-18T12:25:15Z",
+      "updated_at": "2020-09-18T12:25:15Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Maybe. I'm not really sure, it depends on how the `AlternateDataStreamUtilities.GetStreams()` API used here handles that error; that's a native error, so I'd generally hope that most common errors like that are handled by the API in use and wrapped in proper .NET exceptions before they leave the API. So I'd be thinking that if that's the case, the API should throw a different kind of exception; that's why I recommended you check the exception type and use that to catch it, so that other kinds of exceptions still show through normally, if they were going to be reported.\r\n\r\nAlternateDataStreamUtilities.GetStreams() is a direct usage of the Win32 API via P/Invoke.  (There exists no alternate data stream API in the .NET BCL.)  The ERROR_HANDLE_EOF (\"End of file has been reached.\") return was a direct result of a `throw new Win32Exception()`.\r\n\r\nThe other error return from that function that I've seen is ERROR_INVALID_PARAMETER, which is what you get from filesystems that don't implement data streams.  It is also returned as a thrown Win32Exception().",
+      "created_at": "2020-09-18T15:34:32Z",
+      "updated_at": "2020-09-18T15:34:32Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "[[edit to add: my understanding of terminating versus non-terminating was completely incorrect here.  Everything about this is non-terminating errors.  I'm including this note to make it easier for future archaeologists to figure out what is actually being said in this comment, but leaving the comment mostly unchanged except for this edit to make the following discussion and explanation of terminating versus non-terminating errors still make sense.]]\r\n\r\nLooking at the semantics here (for testing, from both current behavior and from discussion):\r\n\r\nCurrent code makes a nonexistent specificstream a terminating exception.  I have not changed this behavior.\r\n\r\nfile:specificstream exists, no exception.\r\nfile:specificstream nonexists, terminating exception.\r\nfile:wildcardstream exists, no exception.\r\nfile:wildcardstream nonexists, no exception.\r\ndirectory:specificstream exists, no exception.\r\ndirectory:specificstream nonexists, terminating exception.\r\ndirectory:wildcardstream exists, no exception.\r\ndirectory:wildcardstream nonexists, no exception.\r\n\r\nvexx32 thinks that it should be a nonterminating exception.\r\niSazonov thinks that it should be a terminating exception.\r\n\r\n@vexx32 What's the rationale for changing current code?  Do you believe such a change to this behavior could pass the backward compatibility contract test under bucket 2 or bucket 3?\r\n\r\n@iSazonov What's the rationale for keeping it a terminating exception?  Does the behavior parity concern apply to a glob application across multiple searches? (If you do a `Get-Item *.txt -Stream specificstream` it essentially repeats the search on every *.txt file, whereas the original glob of *.txt runs a single search against the current directory. Should a single file that is matched from the original glob but which doesn't contain specificstream prevent the search for specificstream from continuing across every requested file?)\r\n\r\nI will say that my own use case would be better served by it being a nonterminating exception, and I think that it makes more sense for a search failure on one file to not terminate the search against all other files.  That said, I'm not even a contributor here yet, and what I think doesn't really have as much weight as yours.\r\n\r\nAlso, I think that any change to the behavior for multiple files will necessitate committee review.  I'd like to get your thoughts before raising the issue for them to consider.",
+      "created_at": "2020-09-18T16:21:06Z",
+      "updated_at": "2020-09-28T09:17:48Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "If that's the existing behaviour, we should probably stick with it then. I might have my own opinions, but changing the existing behaviour is probably not a good idea at the moment. We can revisit it after the functionality has been added in if we feel it's needed, but I think keeping the added functionality separate from any breaks in backwards compatibility is a good idea when we're able to do that. \ud83d\ude42 \r\n\r\nPersonally, though, I think that making it non-terminating makes more sense and possibly the main reason it's terminating is because it's not actually handled explicitly (we're just surfacing the internal exception directly with no added information) which IMO is just poor form in general, really.",
+      "created_at": "2020-09-18T16:24:31Z",
+      "updated_at": "2020-09-18T16:25:43Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "I concur.",
+      "created_at": "2020-09-18T16:34:49Z",
+      "updated_at": "2020-09-18T16:34:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> iSazonov thinks that it should be a terminating exception.\r\n\r\nI was wrong. Non-terminating error is ok.",
+      "created_at": "2020-09-18T16:47:46Z",
+      "updated_at": "2020-09-18T16:47:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've only glanced at the discussion, so forgive me if this isn't helpful, but it does look like targeting a specific (non-wildcard) stream is currently a _non-terminating_ error (as it should be):\r\n\r\n```powershell\r\nPS> Get-Item $profile, $profile -Stream NoSuch\r\nGet-Item: Could not open the alternate data stream 'NoSuch' of the file 'C:\\Users\\jdoe\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1'.\r\nGet-Item: Could not open the alternate data stream 'NoSuch' of the file 'C:\\Users\\jdoe\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1'.",
+      "created_at": "2020-09-18T16:57:54Z",
+      "updated_at": "2020-09-18T16:58:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Thinking more I believe:\r\n- `Get-Item -Path * -Stream *` or `Get-Item -Path \"exact_name\" -Stream *` shouldn't write errors\r\n- `Get-Item -Path * -Stream \"exact_name_without_wildcards\"` should write non-terminating errors if the stream is not found.",
+      "created_at": "2020-09-18T16:59:13Z",
+      "updated_at": "2020-09-18T17:00:15Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "...clearly I need a refresher on the code difference between terminating and non-terminating errors.  Is there a document on it somewhere, or do I need to read more code?",
+      "created_at": "2020-09-18T17:00:09Z",
+      "updated_at": "2020-09-18T17:00:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@kyanha Use WriteError() for non-terminating errors.",
+      "created_at": "2020-09-18T17:01:43Z",
+      "updated_at": "2020-09-18T17:01:43Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The code difference is quite small; basically `WriteError(someErrorRecord)` is non-terminating, and `ThrowTerminatingError(someErrorRecord)` is terminating.",
+      "created_at": "2020-09-18T17:01:47Z",
+      "updated_at": "2020-09-18T17:01:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Here's some conceptual background: https://stackoverflow.com/a/39949027/45375\r\n\n\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/Img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/9294949/when-should-i-use-write-error-vs-throw-terminating-vs-non-terminating-errors\">When should I use Write-Error vs. Throw? Terminating vs. non-terminating errors</a></strong></div><div>Looking at a Get-WebFile script over on PoshCode, http://poshcode.org/3226, I noticed this strange-to-me contraption:\n\n$URL_Format_Error = [string]\"...\"\nWrite-Error $URL_Format_Error\nreturn\r\nWhat i...</div></blockquote>",
+      "created_at": "2020-09-18T17:01:59Z",
+      "updated_at": "2020-09-18T17:02:02Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "So, if we catch an ERROR_INVALID_PARAMETER Win32Exception (which usually indicates that the filesystem doesn't support streams), would that be a case to throw a terminating error rather than a non-terminating error?  Or is it reasonable to continue on the hypothesis that we may be running on a filesystem that may support streams for some objects but not all?  (NTFS is not the only filesystem which supports filestream syntax, and there's no enforcement within the kernel that NTFS's stream semantics are implemented or adhered to by the filesystem.)\r\n\r\nPut another way, how tightly do we want to couple the Win32 PowerShell with NTFS?",
+      "created_at": "2020-09-18T17:11:37Z",
+      "updated_at": "2020-09-18T17:11:37Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think if the filesystem reports invalid parameter it seems reasonable to throw a terminating error, because that indicates it doesn't support alternate streams, right?\r\n\r\nOr does that same Win32 error indicate more than just that?",
+      "created_at": "2020-09-18T17:13:02Z",
+      "updated_at": "2020-09-18T17:13:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I think if the filesystem reports invalid parameter it seems reasonable to throw a terminating error, because that indicates it doesn't support alternate streams, right?\r\n\r\nI think it is another case. We can ignore this in current time and wait a feedback.",
+      "created_at": "2020-09-18T17:17:57Z",
+      "updated_at": "2020-09-18T17:17:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Put another way, how tightly do we want to couple the Win32 PowerShell with NTFS?\r\n\r\nI believe we should think only about NTFS, ReFS and *FAT on Windows. All other file systems is \"edge case\" and we should wait feedbacks.",
+      "created_at": "2020-09-18T17:27:01Z",
+      "updated_at": "2020-09-18T17:27:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As a general rule, terminating errors should only be thrown _if the cmdlet cannot continue to process further inputs_ (see the previous SO link), which is not the case here, especially given that you can hypothetically pass multiple paths to `Get-Item` that refer to different file systems.",
+      "created_at": "2020-09-18T17:29:16Z",
+      "updated_at": "2020-09-18T17:29:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Ah, that's a very good point. Non-terminating makes the most sense then, aye.",
+      "created_at": "2020-09-18T17:38:52Z",
+      "updated_at": "2020-09-18T17:38:52Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "Hey, I'm having some trouble with writing the tests, because I don't really know what's happening here:\r\n\r\n```ps\r\n    Context \"Alternate Stream Tests\" {\r\n        BeforeAll {\r\n            if ( $skipNotWindows )\r\n            {\r\n                return\r\n            }\r\n            $altStreamPath = \"$TESTDRIVE/altStream.txt\"\r\n\t\t\t$altStreamDirectory = \"$TESTDRIVE/altstreamdir\"\r\n            $stringData = \"test data\"\r\n            $streamName = \"test\"\r\n\t\t\t$absentStreamName = \"noExist\"\r\n            $item = New-Item -type file $altStreamPath\r\n            Set-Content -Path $altStreamPath -Stream $streamName -Value $stringData\r\n\t\t\t$diritem = New-Item -type directory $altStreamDirectory\r\n\t\t\tSet-Content -Path $altStreamDirectory -Stream $streamName -Value $stringData\r\n        }\r\n        It \"Should find an alternate stream on a file if present\" -Skip:$skipNotWindows {\r\n            $result = Get-Item $altStreamPath -Stream $streamName\r\n            $result.Length | Should -Be ($stringData.Length + [Environment]::NewLine.Length)\r\n            $result.Stream | Should -Be $streamName\r\n        }\r\n\t\tIt \"Should not find an alternate stream on a file if not present\" -Skip:$skipNotWindows {\r\n\t\t\t$result = Get-Item $altStreamPath -Stream $absentStreamName\r\n\t\t\t$result.Length | Should -Be (0)\r\n\t\t}\r\n\t\tIt \"Should find an alternate stream on a directory if present\" -Skip:$skipNotWindows {\r\n\t\t\t$result = Get-Item $altStreamDirectory -Stream $streamName\r\n\t\t\t$result.Length | Should -Be ($stringData.Length + [Environment]::NewLine.Length)\r\n\t\t\t$result.Stream | Should -Be $streamName\r\n\t\t}\r\n\t\tIt \"Should not find an alternate stream on a directory if not present\" -Skip:$skipNotWindows {\r\n\t\t\t$result = Get-Item $altStreamPath -Stream $absentStreamName\r\n\t\t\t$result.Length | should -Be (0)\r\n\t\t}\r\n    }\r\n```\r\nGives this error:\r\n```\r\n    Context Alternate Stream Tests\r\n      [-] Error occurred in Context block 0ms\r\n        NotSupportedException: Unable to clear content of 'D:\\Users\\kyanha\\AppData\\Local\\Temp\\39e98245-6db5-49a4-ba1e-02a96e91a90c\\altstreamdir' because it is a directory. Clear-Content is only supported on files.\r\n        at <ScriptBlock>, D:\\Users\\kyanha\\work\\github\\Powershell\\Powershell\\test\\powershell\\Modules\\Microsoft.PowerShell.Management\\Get-Item.Tests.ps1: line 122\r\n        at Invoke-Blocks, D:\\Users\\kyanha\\work\\github\\Powershell\\Powershell\\src\\powershell-win-core\\bin\\Debug\\net5.0\\win7-x64\\publish\\Modules\\Pester\\4.10.1\\Functions\\SetupTeardown.ps1: line 135\r\n        at Invoke-TestGroupSetupBlocks, D:\\Users\\kyanha\\work\\github\\Powershell\\Powershell\\src\\powershell-win-core\\bin\\Debug\\net5.0\\win7-x64\\publish\\Modules\\Pester\\4.10.1\\Functions\\SetupTeardown.ps1: line 121\r\n        at DescribeImpl, D:\\Users\\kyanha\\work\\github\\Powershell\\Powershell\\src\\powershell-win-core\\bin\\Debug\\net5.0\\win7-x64\\publish\\Modules\\Pester\\4.10.1\\Functions\\Describe.ps1: line 209\r\n```\r\nLine 122 is `Set-Content -Path $altStreamDirectory -Stream $streamName -Value $stringData`.\r\n\r\nI haven't been able to figure out how to run my local pwsh build under a debugger (I usually use Visual Studio and I can't build it from there, and I haven't figured out how to start it under its debugger) so I can't really trace through it.",
+      "created_at": "2020-09-18T17:50:29Z",
+      "updated_at": "2020-09-18T17:50:29Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "```\r\nSet-Content -Path $altStreamDirectory -Stream $streamName -Value $stringData\r\n```\r\n\r\nLooks like Set-Content is hard-coded to not allow writing to directories, alternate streams or no... can you use Set-Item for that purpose here instead? If not, there might be more needed to allow setting alternate streams on directories :/",
+      "created_at": "2020-09-18T17:54:34Z",
+      "updated_at": "2020-09-18T17:54:34Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "The exception text refers to Clear-Content, not Set-Content.  (The original PR was to read alternate streams, not write them, though I would not be averse to writing them as well.)  Will it be okay if I execute commands with `cmd.exe /c` in the test setup, to at least ensure the environment for reading gets set up correctly?",
+      "created_at": "2020-09-18T17:57:42Z",
+      "updated_at": "2020-09-18T18:00:33Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, I think Set-Content internally makes a call to the Clear-Content api first. That's my best guess since Clear-Content isn't called directly there.\r\n\r\nAnd yeah that probably should be a separate PR, so using cmd /c calls is fine if need be... assuming those tests are only run on Windows, which I think is the case?",
+      "created_at": "2020-09-18T18:11:26Z",
+      "updated_at": "2020-09-18T18:11:26Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yeah, the entire set is headed by \r\n```ps\r\nif ( $skipNotWindows ) {\r\n    return\r\n}\r\n```\r\nNone of the AlternateDataStream tests are run on any platform other than Windows.",
+      "created_at": "2020-09-18T18:41:28Z",
+      "updated_at": "2020-09-18T18:41:28Z"
+    },
+    {
+      "author": "kyanha",
+      "author_association": "CONTRIBUTOR",
+      "body": "Patch updated with tests.  Can someone doublecheck to make sure I did them correctly, please?",
+      "created_at": "2020-09-18T18:41:49Z",
+      "updated_at": "2020-09-18T18:41:49Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #13941, which has now been successfully released as `v7.2.0-preview.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.2)\n",
+      "created_at": "2020-12-15T21:37:53Z",
+      "updated_at": "2020-12-15T21:37:53Z"
+    }
+  ],
+  "created_at": "2019-09-18T12:06:31Z",
+  "number": 10570,
+  "state": "closed",
+  "title": "Get-Item P:\\ath\\To\\A\\Directory -Streams * does not work",
+  "updated_at": "2020-12-15T22:45:34Z"
+}

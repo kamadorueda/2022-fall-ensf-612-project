@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17735",
+  "author": "Zetanova",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nI am trying to execute a simple pipe with an `foreach-object` remotely from a c# net6\r\n\r\nThe `ScriptBlock` parameter get converted to a string and throws an conversion exception on the remote site.\r\n\r\nI found no possibility to do.\r\n\r\nThe remote site is linux pwsh 7.2.5\r\n\r\n```\r\ncmd = new Command(\"Get-ChildItem\");\r\n            cmd.Parameters.Add(\"Path\", \"/dev/disk/by-id/scsi-*\");\r\n            commands.Add(cmd);\r\n\r\n            cmd = new Command(\"Foreach-Object\");\r\n            cmd.Parameters.Add(\"Process\", ScriptBlock.Create(\"Join-Path -Path $_.Directory -Child $_.Target -Resolve\"));\r\n            commands.Add(cmd);\r\n            \r\n            //this is executed on a linux remote runspace\r\n            var path = await power.InvokeAsync(commands).FirstOrDefaultAsync();\r\n                   \r\n\u00b4\u00b4\u00b4\r\n               \n\n### Expected behavior\n\n```console\nexecute the foreach-object script block remotely\n```\n\n\n### Actual behavior\n\n```console\nerror\n```\n\n\n### Error details\n\n```console\n.Management.Automation.RemoteException : Cannot bind parameter 'Process'. Cannot convert the \"Join-Path -Path $_.Directory -Child $_.Target -Resolve\" value of type \"System.String\" to type \"System.Management.Automation.ScriptBlock\".\n```\n\n\n### Environment data\n\n```powershell\nnet6, Microsoft.PowerShell (SDK.7.2.5)\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": "2022-07-23T12:01:18Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Unfortunately and bewilderingly, this behavior was declared to be by design - see duplicate\r\n* https://github.com/PowerShell/PowerShell/issues/11698",
+      "created_at": "2022-07-21T16:03:53Z",
+      "updated_at": "2022-07-21T16:03:53Z"
+    },
+    {
+      "author": "Zetanova",
+      "author_association": "NONE",
+      "body": "grandiose design,\r\nIt is possible to `enter-pssession` into the remote system and execute everything\r\n\r\nBut with c# and a Runspace and Pipeline its impossible to `Get-ChildItems` + `Join-Path` in a single pipe\r\n\r\n",
+      "created_at": "2022-07-21T18:34:56Z",
+      "updated_at": "2022-07-21T18:34:56Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "An alternative that works in more scenarios is using `ps.AddScript()` like so\r\n\r\n```csharp\r\nPowerShell ps = PowerShell.Create();\r\nps.AddScript(\"Get-ChildItem -Path $args[0] | ForEach-Object { Join-Path -Path $_.Directory -Child $_.Target -Resolve }\");\r\nps.AddArgument(\"/dev/disk/by-id/scsci-*\");\r\n\r\nvar path = await ps.InvokeAsync(commands).FirstOrDefaultAsync();\r\n```\r\n\r\nUnless I'm mistaken you can also just do `| Select-Object -ExpandProperty FullName` rather than using `Join-Path` here.",
+      "created_at": "2022-07-21T18:54:47Z",
+      "updated_at": "2022-07-21T18:54:47Z"
+    },
+    {
+      "author": "Zetanova",
+      "author_association": "NONE",
+      "body": "@jborean93  thx for the example\r\n\r\nSomething changed from pwsh6 to pwsh7 the Target is now suddenly `relative` to `directory` property value\r\n\r\nI used it here:\r\nhttps://github.com/Zetanova/hyperv-csi-driver/blob/4caa2254f7d717cf1a6fcdeee7ed5378e56eab42/src/hyperv-csi-driver/Infrastructure/HypervNodeService.cs#L103\r\n\r\nBecause of some bugs in the RunspacePool, I worte my own simple runspace pool management\r\nand view Runspace utility extensions. Maybe you have interest/idea for it. \r\n\r\n\r\n\r\n",
+      "created_at": "2022-07-21T19:50:21Z",
+      "updated_at": "2022-07-21T19:53:44Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Weird the `FullName` should be the absolute path, I know the behaviour of `ToString()` on the `FIleInfo` object changed from the file name to the absolute path but the `FullName` property stayed the same.",
+      "created_at": "2022-07-21T19:55:55Z",
+      "updated_at": "2022-07-21T19:55:55Z"
+    },
+    {
+      "author": "Zetanova",
+      "author_association": "NONE",
+      "body": "I need the target of the symlink and not the path of the symlink to discover the block device by VHDX ID (guid)\r\nIt is working now by a workaround, I query Directory and Target first and after execute a second pipe with them.\r\nThe `Join-Path` needs to be executed remotely because maybe the local system is running under windows. \r\n\r\n```\r\nPS /root> Get-ChildItem -Path /dev/disk/by-id/scsi-*47f90bea* | fl\r\n\r\n    Directory: /dev/disk/by-id\r\n\r\nName           : scsi-36002248047f90bead727987e9c2393f2\r\nLength         : 9\r\nCreationTime   : 7/20/2022 12:54:42 PM\r\nLastWriteTime  : 7/20/2022 12:54:42 PM\r\nLastAccessTime : 7/21/2022 7:57:31 PM\r\nMode           : l----\r\nLinkType       : SymbolicLink\r\nTarget         : ../../sdb\r\nVersionInfo    :\r\n\r\nName           : scsi-36002248047f90bead727987e9c2393f2-part1\r\nLength         : 10\r\nCreationTime   : 7/20/2022 12:54:42 PM\r\nLastWriteTime  : 7/20/2022 12:54:42 PM\r\nLastAccessTime : 7/21/2022 7:57:31 PM\r\nMode           : l----\r\nLinkType       : SymbolicLink\r\nTarget         : ../../sdb1\r\nVersionInfo    :\r\n\r\n\r\nPS /root> Get-ChildItem -Path /dev/disk/by-id/scsi-*47f90bea* | select FullName\r\n\r\nFullName\r\n--------\r\n/dev/disk/by-id/scsi-36002248047f90bead727987e9c2393f2\r\n/dev/disk/by-id/scsi-36002248047f90bead727987e9c2393f2-part1\r\n\r\nPS /root>\r\n``` ",
+      "created_at": "2022-07-21T20:01:24Z",
+      "updated_at": "2022-07-21T20:01:24Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Ah my apologise you are dealing with symlinks and `Target` that's my fault. Please ignore the `-ExpandProperty FullName` stuff.",
+      "created_at": "2022-07-21T20:02:47Z",
+      "updated_at": "2022-07-21T20:02:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "If memory serves, `.Target` was changed to report the target path _as defined_ - which is often relative - rather than _what full path it resolves to_.\r\n\r\nTo resolve the target to a full path:\r\n\r\nSince (at least?) 7.2, you can now use:\r\n\r\n```powershell\r\n# $true means: follow to the ultimate target, if the target is itself a symlink.\r\n(Get-Item /proc/self).ResolveLinkTarget($true).FullName\r\n```\r\n\r\nSince 7.3.0-preview.2, there's now an ETS `.ResolvedTarget` code property that reports the target's full path as a string; it simply calls `.ResolveLinkTarget($true).FullName`.\r\n\r\n```powershell\r\n(Get-Item /proc/self).ResolvedTarget\r\n```",
+      "created_at": "2022-07-21T20:22:38Z",
+      "updated_at": "2022-07-21T20:23:19Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> If memory serves, .Target was changed to report the target path as defined - which is often relative - rather than what full path it resolves to.\r\n\r\nJust to link to the issue about this change: https://github.com/PowerShell/PowerShell/issues/13365",
+      "created_at": "2022-07-21T20:55:53Z",
+      "updated_at": "2022-07-21T20:55:53Z"
+    },
+    {
+      "author": "Zetanova",
+      "author_association": "NONE",
+      "body": "The change on now the extension of features are fine,\r\n\r\nBut that someone can't use `Foreach-Object` Command remotely with a pipeline of `Microsoft.PowerShell.SDK` looks like a regression. \r\n\r\nI could really find no option to pass the parameters to `Joint-Path` from the pipeline\r\n\r\nAnd I am working with \r\n```csharp\r\nAppContext.SetSwitch(\"System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization\", true);`\r\n```\r\n\r\n@mklement0 \r\n`ResolveLinkTarget()` is working like it should be:\r\n```\r\nPS /root> (Get-ChildItem -Path /dev/disk/by-id/scsi-*47f90bea*).ResolveLinkTarget($true).FullName\r\n/dev/sdb\r\n/dev/sdb1\r\n```\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2022-07-22T07:17:11Z",
+      "updated_at": "2022-07-22T07:17:11Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-07-23T12:01:17Z",
+      "updated_at": "2022-07-23T12:01:17Z"
+    }
+  ],
+  "created_at": "2022-07-21T14:48:39Z",
+  "number": 17735,
+  "state": "closed",
+  "title": "Automation: Remoting ScriptBlock is not convertible from string",
+  "updated_at": "2022-07-23T12:01:18Z"
+}

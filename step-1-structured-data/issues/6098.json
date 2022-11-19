@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6098",
+  "author": "alx9r",
+  "body": "Consider the following code:\r\n\r\n```PowerShell\r\nfunction a {\r\n    param ( [Parameter(ValueFromPipeline)]$x )\r\n    process {\r\n        $PSCmdlet.ThrowTerminatingError(\r\n            [System.Management.Automation.ErrorRecord]::new(\r\n                'exception message',\r\n                'errorId',\r\n                [System.Management.Automation.ErrorCategory]::InvalidOperation,\r\n                $null\r\n            )\r\n        )\r\n    }\r\n}\r\n```\r\n\r\nInvoking\r\n\r\n```PowerShell\r\na\r\nWrite-Host 'statement after'\r\n```\r\n\r\noutputs \r\n\r\n```none\r\na : exception message\r\nAt C:\\test1.ps1:15 char:1\r\n+ a\r\n+ ~\r\n+ CategoryInfo          : InvalidOperation: (:) [a], Exception\r\n+ FullyQualifiedErrorId : errorId,a\r\n\r\nstatement after\r\n```\r\n\r\nwhich seems to be consistent with `.ThrowTerminatingError()` resulting in a \"statement-terminating error\".\r\n\r\nOn the other hand, invoking\r\n\r\n```none\r\ntry\r\n{\r\n    a\r\n    Write-Host 'statement after'\r\n}\r\ncatch\r\n{\r\n    Write-Host 'catch'\r\n}\r\n```\r\n\r\noutputs `catch` which indicates that, in this case, `.ThrowTerminatingError()` terminates more than just the statement.\r\n\r\nWhat is happening with flow of control in the code with the `try{}` block?  Does PowerShell search the whole call stack for a `try{}catch{}`?  Are there circumstances aside from a wrapping `try{}` that results in  `.ThrowTerminatingError` terminating more than just the statement?\r\n\r\nFWIW, this arose trying to understand PowerShell/PowerShell-Docs#1583.",
+  "closed_at": "2018-02-26T16:25:45Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I believe we terminating pipeline https://github.com/PowerShell/PowerShell/issues/2860#issuecomment-294914902",
+      "created_at": "2018-02-03T18:32:17Z",
+      "updated_at": "2018-02-03T18:32:17Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">I believe we terminating pipeline #2860 (comment)\r\n\r\nIf it were that simple, then the output of\r\n\r\n```PowerShell\r\ntry\r\n{\r\n    1 | a\r\n    Write-Host 'statement after'\r\n}\r\ncatch\r\n{\r\n    Write-Host 'catch'\r\n}\r\n```\r\n\r\nwould be `statement after` not `catch`.  The output is `catch` indicating that more happened with flow of control than merely terminating the pipeline established by `1 | a`.",
+      "created_at": "2018-02-03T18:45:14Z",
+      "updated_at": "2018-02-03T18:45:14Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You should view this from the perspective of the `try` / `catch` statement:\r\n\r\nIf a _terminating_ error occurs - whether script- or statement-terminating - the _entire `try` block_ is exited _at the point the error occurs_ and execution resumes in the `catch` block.\r\n\r\n(A _nonterminating_ error, by contrast, is _not_ caught.)\r\n\r\nExcept for the terminating-vs.-nonterminating error distinction, this is consistent with the usual `try` / `catch` semantics in, say, C#.",
+      "created_at": "2018-02-25T19:12:50Z",
+      "updated_at": "2018-02-25T19:12:50Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@mklement0 \r\n\r\nJust to make sure we're on the same page, the situation is at least this complicated:\r\n\r\n| Error Reported by | inside try{} | no try {} |\r\n|-------------------|--------------|-----------|\r\n|`Write-Error` | continue with next statement | continue with next statement |\r\n|`throw` | jump to `catch{}` | stop execution |\r\n|`$PSCmdlet.ThrowTerminatingError` | jump to `catch{}` | continue with next statement |\r\n\r\nIt seems to me that `$PSCmdlet.ThrowTerminating()` is neither consistently \"non-terminating\" nor consistently \"terminating\".\r\n\r\n>Except for the terminating-vs.-nonterminating error distinction, this is consistent with the usual try / catch semantics in, say, C#.\r\n\r\nI'm not proficient at C#.  Are there C# statements that continue to the next statement if there is no surrounding `try{}` block but jump to `catch{}` otherwise?  That's what `$PSCmdlet.ThrowTerminating()` seems to do.  I would consider PowerShell `throw`'s behavior consistent with usual try/catch semantics, but not `$PSCmdlet.ThrowTerminating()`.\r\n\r\n>If a terminating error occurs - whether script- or statement-terminating - the entire try block is exited at the point the error occurs and execution resumes in the catch block.\r\n\r\nThis much is evident from the repro in my OP.  But it doesn't really answer these questions from my OP:\r\n\r\nDoes PowerShell search the whole call stack for a try{}catch{}? Are there circumstances aside from a wrapping try{} that results in .ThrowTerminatingError terminating more than just the statement?",
+      "created_at": "2018-02-25T21:57:55Z",
+      "updated_at": "2018-02-25T21:57:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "So far, I don't see anything that contradicts my explanation.\r\n\r\n> It seems to me that $PSCmdlet.ThrowTerminating() is neither consistently \"non-terminating\" nor consistently \"terminating\".\r\n\r\n_Nothing_ is - by design - _consistently_  terminating vs. nonterminating in PowerShell:\r\n\r\nThe point of the `$ErrorActionPreference` preference variable / `-ErrorAction` parameter is to _control_ the \"terminatingness\" of the behavior _as needed_ (albeit in an inconsistent manner, and inconsistent with the documentation, as discussed in the linked docs issue).\r\n\r\n> Does PowerShell search the whole call stack for a try{}catch{}?\r\n\r\nFrom what I can tell, yes.\r\n\r\nTry this simple example (all scripts are assumed to reside in the current location):\r\n\r\nScript `t2.ps1`:\r\n\r\n```powershell\r\nGet-Item -NoSuchParam   # provoke statement-terminating error\r\n\"With the defaults, I'm pretty sure I won't execute, due to the try / catch on the call stack\"\r\n```\r\n\r\nScript `t1.ps1`:\r\n\r\n```powershell\r\ntry {\r\n  ./t2.ps1\r\n  \"What are you doing here?\"\r\n} catch {\r\n  'ouch'\r\n}\r\n```\r\n\r\nRunning `./t1.ps` yields:\r\n\r\n```none\r\nouch\r\n```\r\n\r\nThat is, the statement-terminating error inside `./t2.ps1` aborted both the `t2.ps` - due to the `try` / `catch` on the call stack - and, bubbling up, the the `try` block, ultimately executing only the `catch` block in `t1.ps1`.\r\n\r\n\r\n> Are there circumstances aside from a wrapping try{} that results in .ThrowTerminatingError terminating more than just the statement?\r\n\r\nNot that I'm aware of, but do let us know if you find such cases.\r\n\r\n\r\n",
+      "created_at": "2018-02-26T00:48:33Z",
+      "updated_at": "2018-02-26T00:48:33Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">Nothing is - by design - consistently terminating vs. nonterminating in PowerShell:\r\n\r\nThis might be down to semantics, but `throw` consistently terminates in my experience.\r\n\r\n>Try this simple example...\r\n\r\nThe trouble with that approach to answering this question is that it proves what happens in that particular set of circumstances and not much else.  I can get a more applicable version of that kind of information from unit testing commands that use `$PSCmdlet.ThrowTerminatingError()`.  But that information doesn't tell me where to expect surprises the way an analytical answer often does.  It seems like an analytical answer to this question is possible.",
+      "created_at": "2018-02-26T01:19:39Z",
+      "updated_at": "2018-02-26T01:19:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> This might be down to semantics, but `throw` consistently terminates in my experience.\r\n\r\n* Except if you use `try` / `catch` (so, yes, _by default_ `throw` is  _runspace-terminating_).\r\n\r\n* Yes, `throw` is the  \"apex error\" (what I call a _script-terminating error_ / runspace-terminating error) - it _directly_ throws a _by default uncaught_ exception that terminates the runspace.\r\n\r\n* You can _promote_ other types of errors (nonterminating / statement-terminating) to \"apex errors\" via `$ErrorActionPreference = 'Stop'` / `-ErrorAction Stop`.\r\n\r\n* In the end, you can catch them with `try` / `catch` , anywhere up the call stack.  \r\n\r\n  * If they're already _statement_-terminating errors, however, you needn't promote them - `try` / `catch` will catch them as-is (just as it catches _script_-terminating errors, but _unlike_ _nonterminating_ errors).\r\n\r\n* If you don't, they terminate the runspace.\r\n\r\nIf you find a scenario that doesn't fit this model (which is  based on _my_ experiments), let us know.\r\n\r\n> The trouble with that approach to answering this question is that it proves what happens in that particular set of circumstances and not much else. I can get a more applicable version of that kind of information from unit testing commands that use $PSCmdlet.ThrowTerminatingError(). But that information doesn't tell me where to expect surprises the way an analytical answer often does. It seems like an analytical answer to this question is possible.\r\n\r\nI don't know what you mean.",
+      "created_at": "2018-02-26T03:06:29Z",
+      "updated_at": "2018-02-26T03:18:20Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">If you find a scenario that doesn't fit this model (which is based on my experiments), let us know.\r\n\r\nYou model _seems_ to fit.  I think you almost have me convinced.   :)\r\n\r\nThanks for your help @mklement0!",
+      "created_at": "2018-02-26T16:25:45Z",
+      "updated_at": "2018-02-26T16:25:45Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "BrucePay wrote in [PowerShell/PowerShell#6286(comment)](https://github.com/PowerShell/PowerShell/issues/6286#issuecomment-373153890):\r\n\r\n> Note that the automatic change from statement-terminating error to exception in the presence of trap or try/catch is a fundamental semantic for PowerShell.",
+      "created_at": "2018-03-14T20:10:34Z",
+      "updated_at": "2018-03-14T20:10:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "(Replacing my earlier comment; got confused)\r\n\r\nTo think of this in terms of _exceptions_ is a bit confusing, because the use of exceptions is an _implementation detail_, given that PowerShell's native \"error currency\" is error records (`[System.Management.Automation.ErrorRecord]` instances).\r\n\r\n* Both `trap` and `try` / `catch` allow you to _intercept_ statement-terminating errors _and_ script-terminating errors - which in the presence of these constructs are _ignored_ by default, unless you take _explicit action_ : to truly generate a script-terminating error (unhandled exception), you must, in a `trap` block, explicitly execute `break`, and, in a `catch` block, explicitly execute `Throw`.\r\n\r\n* By contrast, using `$ErrorActionPreference = 'Stop'` is the only way to _directly_ promote _both_ nonterminating and statement-terminating errors _directly_ to script-terminating errors (unhandled exceptions) (the equivalent of using `Throw`).\r\n  While you can _also_ catch those with `trap` and `try` / `catch`, in their absence such promoted errors will _terminate the script_.\r\n\r\n   * In other words: `$ErrorActionPreference = 'Stop'` doesn't just promote nonterminating errors to statement-terminating errors, it promotes _both_ types to _script_-terminating errors.\r\n",
+      "created_at": "2018-03-15T01:39:21Z",
+      "updated_at": "2018-03-15T01:39:21Z"
+    }
+  ],
+  "created_at": "2018-02-03T18:11:18Z",
+  "number": 6098,
+  "state": "closed",
+  "title": "How, exactly, does PowerShell decide whether .ThrowTerminatingError() terminates only the statement?",
+  "updated_at": "2018-03-15T01:39:21Z"
+}

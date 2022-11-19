@@ -1,0 +1,300 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7768",
+  "author": "bstrautin",
+  "body": "`Select-Object` should never modify its input objects, but it does, when using both the `-ExpandProperty` and `-Property` parameters.\r\n\r\nThis behavior is documented, but wrong.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n$NestedObjects =\r\n  [pscustomobject]@{a=1; b=[pscustomobject]@{c=2}},\r\n  [pscustomobject]@{a=3; b=[pscustomobject]@{c=4}}\r\n\r\n$NestedObjects | Out-Host\r\n$NestedObjects | Select-Object a -ExpandProperty b | Out-Host\r\n\r\n$NestedObjects | Out-Host\r\n$NestedObjects | Select-Object a -ExpandProperty b | Out-Host\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nRe-running the same `Select-Object` statement should produce the same output, and should not modify its input objects, so the example code should produce the following output:\r\n\r\n```none\r\na b\r\n- -\r\n1 @{c=2}\r\n3 @{c=4}\r\n\r\n\r\n\r\nc a\r\n- -\r\n2 1\r\n4 3\r\n\r\n\r\na b\r\n- -\r\n1 @{c=2}\r\n3 @{c=4}\r\n\r\n\r\n\r\nc a\r\n- -\r\n2 1\r\n4 3\r\n\r\n\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\nInstead of creating new objects with the appropriate fields, `Select-Object` modifies the objects specified by `-ExpandProperty`, which causes an error the second time the same code runs:\r\n\r\n```none\r\na b\r\n- -\r\n1 @{c=2}\r\n3 @{c=4}\r\n\r\n\r\n\r\nc a\r\n- -\r\n2 1\r\n4 3\r\n\r\n\r\n\r\na b\r\n- -\r\n1 @{c=2; a=1}\r\n3 @{c=4; a=3}\r\n\r\n\r\nSelect-Object : The property cannot be processed because the property \"a\" already exists.\r\nAt line:9 char:18\r\n+ $NestedObjects | Select-Object a -ExpandProperty b | Out-Host\r\n+                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (@{a=1; b=}:PSObject) [Select-Object], PSArgumentException\r\n+ FullyQualifiedErrorId : AlreadyExistingUserSpecifiedPropertyExpand,Microsoft.PowerShell.Commands.SelectObjectCommand\r\n\r\n\r\nSelect-Object : The property cannot be processed because the property \"a\" already exists.\r\nAt line:9 char:18\r\n+ $NestedObjects | Select-Object a -ExpandProperty b | Out-Host\r\n+                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (@{a=3; b=}:PSObject) [Select-Object], PSArgumentException\r\n+ FullyQualifiedErrorId : AlreadyExistingUserSpecifiedPropertyExpand,Microsoft.PowerShell.Commands.SelectObjectCommand\r\n\r\nc a\r\n- -\r\n2 1\r\n4 3\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.1\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Strictly speaking, it's not the _input objects_ that are modified, but the _value of the property_ that `-ExpandProperty` targets.\r\n\r\nThat property value can be an instance of a _value type_ or an instance of a _reference type_.\r\n\r\nEither way, the properties specified in `-Property` are added as `NoteProperty` members to that value.\r\n\r\nIn the case of a _value-type_ instance, these `NoteProperty` members are by definition added to a _copy_ of that instance.\r\n\r\nIn the case of a _reference-type_ instance, these `NoteProperty` members are added to the _object pointed to by the reference_, and any pre-existing references to that object will see the changes - in your case, that is the `$NestedObject` array.\r\n\r\nWhile that behavior may be surprising, it makes sense, given that there's no _guaranteed_ way to _clone_ reference-type instances - and implicit, automatic cloning seems to be what you're looking for (leaving aside the need to distinguish between shallow and deep cloning).\r\n\r\nWhile _some_ reference types support cloning - and `[pscustomobject]` happens to be one via its `.Copy()` method - not all do, so the more consistent behavior is not to even attempt it.\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-09-13T03:09:36Z",
+      "updated_at": "2018-09-13T03:09:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It would be grandiose breaking change. \r\nWe can not even add a new switch parameter since @mklement0  pointed out that there is no generic way to clone an reference object.",
+      "created_at": "2018-09-13T04:58:20Z",
+      "updated_at": "2018-09-13T04:58:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@bstrautin \r\n> This behavior is documented, but wrong.\r\n\r\nYou could open a issue in PowerShell-Docs repo.",
+      "created_at": "2018-09-13T04:59:41Z",
+      "updated_at": "2018-09-13T04:59:41Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "Cloning is not necessary; in the same way that `Select-Object -Property *` creates new pscustomobjects with the necessary properties, a non-surprising version of `Select-Object -Property a -ExpandProperty b` would create new pscustomobjects with property `a` and all the properties from `b`.\r\n\r\nTo introduce non-modifying behavior as a non-breaking change, it seems like there are basically two options:\r\n\r\n1. Add a switch parameter to change the behavior of `-ExpandProperty`, named something like `-NoModifyExpandedProperty` or `-ExpandPropertyAsCopy`\r\n2. Add another parameter, named something like `-CopyAndExpandProperty`, which would create new pscustomobjects rather than adding note properties. It should behave more like `-Property`, i.e. accept multiple property names, wildcards, scriptblocks, and hashtables.\r\n",
+      "created_at": "2018-09-13T13:16:05Z",
+      "updated_at": "2018-09-13T17:02:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: I think what @bstrautin meant was that _the documentation is correct_ in that it correctly describes the current behavior, but that they consider _the current behavior_ to be wrong.",
+      "created_at": "2018-09-13T13:26:22Z",
+      "updated_at": "2018-09-13T13:26:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "OK, so we're talking about a _feature request_, not a problem with the existing behavior.\r\n\r\nTo be clear:  the purpose of `-ExpandProperty` is to return the specified property's value _as-is_, _optionally decorated_ with `NoteProperty` members, if `-Property`  is also specified.\r\n\r\nSo, yes, to get what you want, a new switch is required, but I'm unclear on the semantics:\r\n\r\nHow would you construct the custom object if the value of the property you're targeting is an instance of a CLR runtime type such as `[bool]`, which has no properties, or `[string]`, which has only a `Length` property?\r\nOr do you suggest _ignoring_ the new parameter if the value happens to be a value-type instance or a string, given that you'll _implicitly_ get copies in that case anyway?\r\n\r\nWhat if the property value is a collection?\r\n\r\n\r\n\r\n",
+      "created_at": "2018-09-13T14:14:20Z",
+      "updated_at": "2018-09-13T14:14:20Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "It's only a feature request if you don't consider the existing behavior to be a bug, which I do. (A `Select-...` cmdlet should never modify its input, but `Select-Object` does, semantics about \"decorating\" vs \"modifying\" aside.)\r\n\r\nMy preference would be to change the current behavior, which would be a breaking change if anyone were actually relying on it (which seems unlikely, given how weird it is.)  If that is not palatable, then it becomes a feature request.",
+      "created_at": "2018-09-13T14:55:51Z",
+      "updated_at": "2018-09-13T14:55:51Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "> How would you construct the custom object if the value of the property you're targeting is an instance of a CLR runtime type such as `[bool]`, which has no properties, or `[string]`, which has only a `Length` property?\r\n\r\n`-ExpandPropertyAsCopy` would always return objects, never scalars.\r\n\r\nExplanation by way of examples:\r\n\r\nExpanding a scalar property would return an object with that property. (The same as `-Property`):\r\n\r\n```powershell\r\n[pscustomobject] @{ one = 1; two = 2; three = 3 } | \r\n  Select-Object -ExpandPropertyAsCopy three\r\n```\r\n\r\nwould output\r\n\r\n```\r\nthree\r\n-----\r\n    3\r\n```\r\n\r\nIncluding `-Property` and expanding a scalar property would return an object with both properties. (Instead of making `-Property` and `-ExpandProperty` mutually exclusive per #6161)\r\n\r\n```powershell\r\n[pscustomobject] @{ one = 1; two = 2; three = 3 } | \r\n  Select-Object -Property one -ExpandPropertyAsCopy three\r\n```\r\n\r\nwould output\r\n\r\n```\r\none three\r\n--- -----\r\n  1     3\r\n```\r\n\r\n> What if the property value is a collection?\r\n\r\nBasically the same as `-ExpandProperty`, but creating new objects instead of modifying existing ones.\r\n\r\nIncluding `-Property` and expanding an object property would return an object with the indicated parent and child properties, duplicating the parent properties for each child.\r\n\r\n```PowerShell\r\n[pscustomobject]@{\r\n  a=1\r\n  b=[pscustomobject]@{c=2; d=3}, [pscustomobject]@{c=4; d=5}\r\n},\r\n[pscustomobject]@{\r\n  a=6\r\n  b=[pscustomobject]@{c=7; d=8}\r\n} |\r\n  Select-Object -Property a -ExpandPropertyAsCopy b\r\n```\r\n\r\nwould output\r\n\r\n```\r\na c d\r\n- - -\r\n1 2 3\r\n1 4 5\r\n6 7 8\r\n```\r\n\r\n`-ExpandPropertyAsCopy` with multiple properties:\r\n\r\n```PowerShell\r\n[pscustomobject]@{\r\n  a=1\r\n  b=[pscustomobject]@{d=2}\r\n  c=[pscustomobject]@{e=3}\r\n},\r\n[pscustomobject]@{\r\n  a=4\r\n  b=[pscustomobject]@{d=5}\r\n  c=[pscustomobject]@{e=6}\r\n} |\r\n  Select-Object -Property a -ExpandPropertyAsCopy b,c\r\n```\r\n\r\nwould produce\r\n\r\n```\r\na d e\r\n- - -\r\n1 2 3\r\n4 5 6\r\n```\r\n\r\n`-ExpandPropertyAsCopy` with multiple list properties having would behave like LINQ's SelectMany or SQL's cross join:\r\n\r\n```PowerShell\r\n[pscustomobject]@{\r\n  a=1\r\n  b=[pscustomobject]@{d=2},[pscustomobject]@{d=3}\r\n  c=[pscustomobject]@{e=4},[pscustomobject]@{e=5}\r\n},\r\n[pscustomobject]@{\r\n  a=6\r\n  b=[pscustomobject]@{d=7}\r\n  c=[pscustomobject]@{e=8},[pscustomobject]@{e=9}\r\n} |\r\n  Select-Object -Property a -ExpandPropertyAsCopy b,c\r\n```\r\n\r\nwould output\r\n\r\n```\r\na d e\r\n- - -\r\n1 2 4\r\n1 3 4\r\n1 2 5\r\n1 3 5\r\n6 7 8\r\n6 7 9\r\n```\r\n\r\nIMO, this is how `-ExpandProperty` should have been designed in the first place, but that ship has sailed.",
+      "created_at": "2018-09-13T18:33:09Z",
+      "updated_at": "2018-09-13T18:33:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It's only a feature request if you don't consider the existing behavior to be a bug, which I do.\r\n\r\nLet's summarize:\r\n\r\n*  The behavior is documented.\r\n\r\n* The behavior is useful and _opt-in_: by using `-ExpandProperty` _in combination with_ `-Property`, you're asking that `NoteProperty` members be added to whatever the value of the property passed to `-ExpandProperty` is, as documented (which is what I called _decorating_).\r\n\r\n* Nowhere does it state that \"A Select-... cmdlet should never modify its input\" - that may be your personal expectation and it certainly makes sense as the _default_ behavior (which is the case), but that doesn't make the behavior in question a bug.  Again: by combining `-ExpandProperty` with `-Property` you're _asking_ for the output objects to be decorated.  \r\nIt's not a commonly used feature, but it works predictably and can be useful.\r\n\r\nBut even if the community ends up agreeing with your assessment, backward-compatibility concerns alone would require implementing the alternative behavior envisioned by you to be _opt-in_.\r\n",
+      "created_at": "2018-09-13T18:40:17Z",
+      "updated_at": "2018-09-13T18:40:17Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "Partially agree with the summary. Regardless:\r\n\r\nTwo possible enhancements, which I am willing to develop:\r\n\r\n1. Change `-ExpandProperty` from accepting a single property name to accepting a list of property name, scriptblock, etc, like `-Property`. This would probably be a breaking change for consistency's sake, because expanding multiple `IEnumerable` properties would require creating new pscustomobjects rather than decorating the objects from a single property.\r\n2. Add a new parameter, `-FlattenProperty` or `-ExpandPropertyAsCopy` , which would behave as described.\r\n\r\nAnother piece of code that demonstrates `-ExpandProperty`'s buggy behavior, attempting to flatten two fields:\r\n\r\n```PowerShell\r\n[pscustomobject]@{\r\n  a=1\r\n  b=[pscustomobject]@{b2=2},[pscustomobject]@{b2=3}\r\n  c=[pscustomobject]@{c2=4},[pscustomobject]@{c2=5}\r\n},\r\n[pscustomobject]@{\r\n  a=6\r\n  b=[pscustomobject]@{b2=7}\r\n  c=[pscustomobject]@{c2=8},[pscustomobject]@{c2=9}\r\n} |\r\n  Select-Object -Property a,c -ExpandProperty b |\r\n  Select-Object -Property a,b2 -ExpandProperty c\r\n```\r\n\r\nExpected output:\r\n\r\n```\r\nc2 a b2\r\n-- - --\r\n 4 1  2\r\n 5 1  2\r\n 4 1  3\r\n 5 1  3\r\n 8 6  7\r\n 9 6  7\r\n```\r\n\r\nActual output, with erroneous values in `b2` and errors:\r\n\r\n```\r\nc2 a b2\r\n-- - --\r\n 4 1  2\r\n 5 1  2\r\nSelect-Object : The property cannot be processed because the property \"a\" already exists.\r\nAt line:12 char:3\r\n+   Select-Object -Property a,b2 -ExpandProperty c\r\n+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (@{b2=3; a=1; c=System.Object[]}:PSObject) [Select-Object], PSArgumentException\r\n+ FullyQualifiedErrorId : AlreadyExistingUserSpecifiedPropertyExpand,Microsoft.PowerShell.Commands.SelectObjectCommand\r\n\r\nSelect-Object : The property cannot be processed because the property \"b2\" already exists.\r\nAt line:12 char:3\r\n+   Select-Object -Property a,b2 -ExpandProperty c\r\n+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (@{b2=3; a=1; c=System.Object[]}:PSObject) [Select-Object], PSArgumentException\r\n+ FullyQualifiedErrorId : AlreadyExistingUserSpecifiedPropertyExpand,Microsoft.PowerShell.Commands.SelectObjectCommand\r\n\r\n 4 1  2\r\nSelect-Object : The property cannot be processed because the property \"a\" already exists.\r\nAt line:12 char:3\r\n+   Select-Object -Property a,b2 -ExpandProperty c\r\n+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (@{b2=3; a=1; c=System.Object[]}:PSObject) [Select-Object], PSArgumentException\r\n+ FullyQualifiedErrorId : AlreadyExistingUserSpecifiedPropertyExpand,Microsoft.PowerShell.Commands.SelectObjectCommand\r\n\r\nSelect-Object : The property cannot be processed because the property \"b2\" already exists.\r\nAt line:12 char:3\r\n+   Select-Object -Property a,b2 -ExpandProperty c\r\n+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (@{b2=3; a=1; c=System.Object[]}:PSObject) [Select-Object], PSArgumentException\r\n+ FullyQualifiedErrorId : AlreadyExistingUserSpecifiedPropertyExpand,Microsoft.PowerShell.Commands.SelectObjectCommand\r\n\r\n 5 1  2\r\n 8 6  7\r\n 9 6  7\r\n```\r\n",
+      "created_at": "2018-09-13T21:07:27Z",
+      "updated_at": "2018-09-13T21:07:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "First, let's look at how what you attempted with your sample command can be implemented with the current features:\r\n\r\n```powershell\r\n$NestedObjects | % { \r\n  $_.b.psobject.Copy() | Add-Member -PassThru -MemberType NoteProperty a -Value $_.a\r\n}\r\n```\r\n\r\n* `$_.b.psobject.Copy()` clones the custom object that is stored in the input object's `.b` property\r\n* `Add-Member -PassThru -MemberType NoteProperty a -Value $_.a` adds the input object's `.a` property to the clone and outputs the clone.\r\n\r\n----\r\n\r\n> `-ExpandPropertyAsCopy` would always return objects, never scalars.\r\n\r\nI assume you mean it would always return (newly created) _custom objects_ whose _properties_ contain the requested data.\r\n\r\nHowever, that's exactly what `-Property` already does.\r\n\r\nIf I understand you correctly, you're saying, with `-ExpandPropertyAsCopy foo`,\r\n\r\n* if the type of `.foo` is a _custom object_, clone _it_ (create a new custom object with the same properties)\r\n\r\n* if it is a different (non-collection) type, _wrap it in a custom object_.\r\n\r\nVarying the behavior based on the type of the property passed to `-ExpandPropertyAsCopy` sounds ill-advised to me.\r\n\r\n`Select-Object` was not designed with special handling of custom objects as _input_ in mind.\r\n\r\n---\r\n\r\n`-ExpandProperty` by design returns a _single property value_ from each input object.\r\n\r\nTo me, the only logical extension of that concept to _multiple_ properties is to return their values as _individual output objects_.\r\n\r\n---\r\n\r\n> Another piece of code that demonstrates -ExpandProperty's buggy behavior,\r\n\r\nAgain, while the behavior may be surprising, it works as designed:\r\n\r\nYou're attaching the _same objects_ as property values to _multiple objects_, so modifying the attached objects via one object is reflected in the others.\r\n\r\n---\r\n\r\nI'm personally not convinced by what you're proposing, but if you want to pursue this, I encourage you to open a new issue - or perhaps write an RFC - that explains the proposed new functionality in a focused manner.",
+      "created_at": "2018-09-13T22:19:55Z",
+      "updated_at": "2018-09-14T04:01:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I must note that this cmdlet is very sensitive to changes. There is very difficult to change something without a regression.\r\n\r\nI believe this is ready to be concluded by PowerShell Committee \r\n/cc @SteveL-MSFT ",
+      "created_at": "2018-09-14T03:59:33Z",
+      "updated_at": "2018-09-14T03:59:33Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "The root issue is not fully cloning the object or passing ByVal before making a destructive change to the original object. I've been frustrated by this too.\r\n\r\nWhat I see here is an implementation detail in terms of modifying this. The end result, for someone like me that heavily uses this feature, is for the `Object` to have all it's properties included with the `ExpandedProperty`. How it does this doesn't matter so long as it produces the same output. Changing this behavior to default to a fully cloned `PSObject` would solve an issue that I've had when trying to test my scripts.\r\n\r\nFor example, I have a list of Servers that has multiple IP Addresses stored in a IP_Address property. I need to change the output to give me each Server Name, IP Address, and other Server details as a separate row (`PSObject`). I do `Select * -ExpandProperty IP_address` to achieve this result. \r\nHowever, to rerun this, I have to repopulate the original `PSObject` with the server details because the properties already exist.",
+      "created_at": "2018-09-24T23:16:19Z",
+      "updated_at": "2018-09-24T23:16:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@dragonwolf83:\r\n\r\n> The root issue is not fully cloning the object \r\n\r\n`-ExpandProperty` makes no promise of _cloning_ anything - on the contrary, its promise is to pass the referenced property's values though _as-is_.\r\n\r\n> before making a destructive change to the original object.\r\n\r\nThe distinctions may be subtle, but they matter:\r\n\r\n* The modification isn't _destructive_, it is an act of _decoration_ - which, however, can undoubtedly can have side effects.\r\n\r\n* The modification isn't to the input object _per se_, it is to whatever objects  the values of the one property referenced by `-ExpandProperty` contain.\r\n  * Only if those values happen to be instance of _reference types_ is the input object affected, _indirectly_.\r\n\r\n> Changing this behavior to default to a fully cloned PSObject\r\n\r\n`-ExpandProperty` is agnostic with respect to the type of input objects's properties.\r\n\r\nAs such, we cannot assume that they're `[pscustomobject]` (unfortunately aka `[psobject]`) instances, nor is it advisable to special-case their handling.\r\n\r\n---\r\n\r\n> For example, I have a list of Servers that has multiple IP Addresses stored in a IP_Address property. I need to change the output to give me each Server Name, IP Address, and other Server details as a separate row (PSObject).\r\n\r\nI understand the use case, but `-ExpandProperty`, given its established semantics, is _not_ the way to implement this feature.\r\n\r\nWhat you and @bstrautin are asking for is an entirely new feature, and commingling it with \r\n`-ExpandProperty` is inviting confusion.\r\n\r\n",
+      "created_at": "2018-09-25T02:41:08Z",
+      "updated_at": "2018-09-25T03:18:24Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "This is why I said it is an implementation detail. How it is implemented is exactly as you described. However, what matters to the user is the final result, not how it gets there. The entire method of how it creates the result can be changed so long as the result is the same. The result is the contract, not the implementation.\r\n\r\nFrom my perspective, the feature works great but has a nasty side effect. It modifies the original object. One way to solve it is to have some method to clone the original object to make the modifications.  Making that modification is not going to break the contract of how the feature is used.\r\n\r\nAnother method is to create a new object with property from `-ExpandProperty` and add the master properties to it. This may be the easier method, less memory, but does subtly change the original behavior. This would be more experimental to verify it doesn't break any scripts that pipeline the results a few times.\r\n\r\nEither way, I don't think we need a new property to `Select-Object` to make this work better. Adding a new property, btw, would be a breaking change because I would have to modify all my scripts to use it when the end result is the same. That would be confusing!",
+      "created_at": "2018-09-25T04:48:07Z",
+      "updated_at": "2018-09-25T04:48:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The result is the contract, not the implementation.\r\n\r\nThe contract of `-ExpandProperty` is:\r\n\r\n* return the property values of the single property specified, _as-is_.\r\n\r\n* if `-Property` is - optionally - _also_ specified, decorate the output property values with NoteProperty members reflecting the value of the properties passed to `-Property`.\r\n\r\n\r\n> Another method is to create a new object with property from -ExpandProperty and add the master properties to it.\r\n\r\nThat is the gist of what you're asking for.\r\n_It is unrelated to what `-ExpandProperty` currently does_, and I suggest opening a _new_ issue to ask for what you want.\r\n\r\n",
+      "created_at": "2018-09-25T05:00:08Z",
+      "updated_at": "2018-09-25T05:00:29Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "I simply disagree about creating a new issue. It is related to what `-ExpandProperty` currently does. All that is being asked is to not do it to the original object. \r\n\r\n> return the property values of the single property specified, as-is.\r\n\r\nIt doesn't return as-is. It creates an array. No modification is done to the original object. It doesn't add a new property, or change a property to do it. It just creates an array.\r\n\r\n> if -Property is - optionally - also specified, decorate the output property values with NoteProperty \r\nmembers reflecting the value of the properties passed to -Property\r\n\r\nThe entire code for how this is done is exactly what I want done, with one small change. Decorate the output property values on a new object or a cloned object.\r\n\r\nThere is no reason to copy this behavior into a new property or cmdlet just to achieve that one change. The expectation of using `Select-Object` is that it does not modify the original object, and yet it does for this one use case. So fix it with a small change.",
+      "created_at": "2018-09-25T05:12:11Z",
+      "updated_at": "2018-09-25T05:12:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It doesn't return as-is.\r\n\r\nYou're right: *if* the property value is array-valued, the specified property value's are _enumerated_, _as-is_.\r\n\r\n> No modification is done to the original object. \r\n\r\nIndeed - as long as you don't also specify `-Property`, in which case you're opting into the decoration of each output value.\r\n\r\n> The entire code for how this is done is exactly what I want done, with one small change. Decorate the output property values on a new object\r\n\r\nThat is not _one small change_ - it is fundamentally different behavior:\r\nInstead of outputting a (possibly enumerated) _specific property value_ of the input objects, you're asking for _new custom objects_ that _contain_ the specified property (possibly one instance per property value), alongside the properties passed to `-Property`. \r\n\r\n> or a cloned object.\r\n\r\nAs stated, there is no type-agnostic way to clone arbitrary input objects.\r\n\r\nRemember that the typical use case for `-ExpandProperty` is to \"replace\" input objects with a specific property _value_ of theirs, _without_ a `[pscustomobject]` wrapper:\r\n\r\n```powershell\r\n[pscustomobject] @{ foo = 1 }, [pscustomobject] @{ foo = 2 } | Select-Object -ExpandProperty foo\r\n1\r\n2\r\n```\r\n\r\nThat is, an array of `[int]` values was returned, _without wrappers_.\r\n\r\nThe semantics you're proposing would alter this behavior fundamentally.\r\n\r\nAnd in case you're thinking of making the  behavior dependent on whether `-Property` is _also_ specified: \r\n\r\n* That would be a breaking change.\r\n\r\n* If you don't also specify `-Property`, how would you distinguish between `[pscustomobject] @{ one = 1,2,3 } | Select-Object -ExpandProperty one` returning an `[int[]]` array vs. wanting custom `[pscustomobject]` wrappers around the integer values?\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-09-25T05:56:46Z",
+      "updated_at": "2018-09-25T05:57:17Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "> That is not one small change - it is fundamentally different behavior:\r\n> Instead of outputting a (possibly enumerated) specific property value of the input objects, you're asking for new custom objects that contain the specified property (possibly one instance per property value), alongside the properties passed to -Property.\r\n\r\nWhich in effect what it does today, only it modifies the original object. Try running the following example and look at the results.\r\n\r\n```PowerShell\r\n$origObject = @(\r\n    [PSCustomObject] @{ Name = \"Bob\"; \r\n        Phone=@(\r\n            [PSCustomObject] @{PhoneNo=\"555-447-5285\"} \r\n            [PSCustomObject] @{PhoneNo=\"555-447-5286\"}\r\n        )\r\n    }\r\n    [PSCustomObject] @{ Name = \"Jones\"; \r\n        Phone=@(\r\n            [PSCustomObject] @{PhoneNo=\"555-449-7285\"} \r\n            [PSCustomObject] @{PhoneNo=\"555-449-7786\"}\r\n        )\r\n    }\r\n)\r\n\r\n$newObject = $origObject | Select * -ExpandProperty Phone\r\n```\r\nNow look at `Get-Member` for the results of both objects\r\n```PowerShell\r\n$origObject.Phone | Get-Member\r\n$newObject | Get-Member\r\n```\r\n\r\nThey are both `PSCustomObjects`, `$newObject` by all indications looks like any other `PSObject`. They are identical. That behavior stays the same.\r\n\r\nWhat happens underneath, however, is the issue. Run this command and then compare `$newObject` and `$origObject`\r\n```PowerShell\r\n$newObject | % { $_.PhoneHo = \"555-555-5555\" }\r\n```\r\n\r\nThe change impacts both, Unexpected result! The root cause is because the object is passed by reference so any modifications to other variables modifies the original object. Yet, this doesn't happen when you just do `Select-Object -Property`. When you do that, it creates a new `PSCustomObject`. You can test that by doing:\r\n\r\n```PowerShell\r\n$realNewObject = $newObject | Select *\r\n$realNewObject | % { $_.PhoneNo=0}\r\n```\r\n\r\nNotice only `$realNewObject` is modified. The original properties are not changed on `$newObject` or `$origObject`\r\n\r\nIt seems clear to me that the expected and correct result is to create a new object, then expand the properties when the property is an object. I can't think of any real breaking change here to a script.\r\n",
+      "created_at": "2018-09-25T07:39:26Z",
+      "updated_at": "2018-09-25T07:39:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The change impacts both, Unexpected result!\r\n\r\nIt's only unexpected if you expect it to work differently than the documented behavior; to recap:\r\nBy _combining_ `-ExpandProperty` with `-Property`, you're _opting into_ having the _property values_ that are output decorated - _whatever they are,_ which, in the case of reference-type instances, means that the originating object sees the decorations too.\r\n\r\nThe purpose of `-ExpandProperty` is _not_ to create _new objects_; the purpose is to pass out _property values_.\r\n\r\nThe behavior when you combine `-ExpandProperty` with `-Property` may be surprising, but:\r\n\r\n* it is documented (though the docs could stand improvement), and once the underlying logic is understood, not hard to conceptualize.\r\n* there is _no_ non-breaking transition to the behavior you're looking for, because: \r\n   * a property value that can be any type cannot be cloned generically\r\n   * the alternative of wrapping the property value in a custom object is a fundamental deviation from `-ExpandProperty`'s mandate.\r\n\r\nWhat _could_ be done is to introduce a _new_ parameter that implements the behavior you're looking for:\r\n\r\n* enumerate the values of a designated single property\r\n* for each value, _create a custom object_ with a property of the same name\r\n* attach any `-Property`-specified values (unenumerated) to each resulting custom object\r\n\r\nA possible name is `-EnumerateProperty`, e.g., based on your example:\r\n\r\n```powershell\r\n$newObject = $origObject | Select-Object -EnumerateProperty Phone -Property Name\r\n```\r\n\r\nThis would produce the following output:\r\n\r\n```powershell\r\n    [PSCustomObject] @{ Name = \"Bob\";   Phone=[PSCustomObject] @{PhoneNo=\"555-447-5285\"} },\r\n    [PSCustomObject] @{ Name = \"Bob\";   Phone=[PSCustomObject] @{PhoneNo=\"555-447-5286\"} },\r\n    [PSCustomObject] @{ Name = \"Jones\"; Phone=[PSCustomObject] @{PhoneNo=\"555-449-7285\"} },\r\n    [PSCustomObject] @{ Name = \"Jones\"; Phone=[PSCustomObject] @{PhoneNo=\"555-449-7286\"} }\r\n\r\n```\r\n",
+      "created_at": "2018-09-25T13:28:03Z",
+      "updated_at": "2018-09-25T13:28:03Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "You do not need to clone object to attach different properties to it. You just need to attach properties to `PSObject` wrapper instead of object itself. Actually `Select-Object -ExpandProperty` already doing exactly that thing unless property is `PSObject` already:\r\n```powershell\r\n$a = [object]::new()\r\nAdd-Member -InputObject $a -MemberType NoteProperty -Name a -Value a\r\n$b = [pscustomobject]@{ p = $a }           | Select-Object -ExpandProperty p -Property @{ Name = 'b'; Expression = { 'b' } }\r\n$c = [pscustomobject]@{ p = $a }           | Select-Object -ExpandProperty p -Property @{ Name = 'c'; Expression = { 'c' } }\r\n$d = [pscustomobject]@{ p = [psobject]$a } | Select-Object -ExpandProperty p -Property @{ Name = 'd'; Expression = { 'd' } }\r\n$e = [pscustomobject]@{ p = [psobject]$a } | Select-Object -ExpandProperty p -Property @{ Name = 'e'; Expression = { 'e' } }\r\n$f = [pscustomobject]@{ p = $b }           | Select-Object -ExpandProperty p -Property @{ Name = 'f'; Expression = { 'f' } }\r\n$g = [pscustomobject]@{ p = $c }           | Select-Object -ExpandProperty p -Property @{ Name = 'g'; Expression = { 'g' } }\r\n\r\n$a, $b, $c, $d, $e, $f, $g | Format-Table a, b, c, d, e, f, g\r\n\r\n[object]::ReferenceEquals($a, $b)\r\n[object]::ReferenceEquals($a, $c)\r\n[object]::ReferenceEquals($a, $d)\r\n[object]::ReferenceEquals($a, $e)\r\n[object]::ReferenceEquals($a, $f)\r\n[object]::ReferenceEquals($a, $g)\r\n```",
+      "created_at": "2018-09-28T20:08:21Z",
+      "updated_at": "2018-09-28T20:08:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Indeed, @PetSerAl, that is the current behavior, as documented (albeit in less technical detail).\r\n\r\nIt is this very behavior that @bstrautin and @dragonwolf83 aren't happy with, but, as I've tried to argue, it is well-defined and consistent, even if it may be surprising at first glance.\r\n\r\nWhat they're really looking for, it seems to me, is _new_ functionality, where a single designated property's possibly enumerated values, if applicable, are each _wrapped in a custom object_ (rather than being passed through, as currently with `-ExpandProperty`), to which the (unenumerated) `-Property` values are then also attached.\r\n\r\nAs I've argued, a _new_ parameter would be needed to opt into this behavior, as described in the `-EnumerateProperty` proposal in my previous comment.\r\n\r\n",
+      "created_at": "2018-09-29T03:50:06Z",
+      "updated_at": "2018-09-29T03:50:06Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I do not see current behavior as consistent:\r\n```powershell\r\nclass A {\r\n    [int] $a\r\n    A ([int] $a) { $this.a = $a }\r\n}\r\n\r\n$a1 = 1..3 | % { [A]::new($_) }\r\n$a2 = 1..3 | % { [A]::new($_) }\r\n\r\n$a1 | % { $_ | Add-Member b $_.a }\r\n$a2 | % { $_ | Add-Member b $_.a }\r\n\r\n$b1 = foreach($_ in $a1) { [pscustomobject]@{ p = $_ } }\r\n$b2 = $a2 | % { [pscustomobject]@{ p = $_ } }\r\n\r\n$b1 | Select-Object -ExpandProperty p -Property @{ Name = 'c'; Expression = { $_.p.a } } | Out-Host # have `a` and `c` properties\r\n$b2 | Select-Object -ExpandProperty p -Property @{ Name = 'c'; Expression = { $_.p.a } } | Out-Host # have `a`, `b` and `c` properties\r\n\r\n$a1 | Out-Host # have `a` and `b` properties\r\n$a2 | Out-Host # have `a`, `b` and `c` properties\r\n```\r\nAlso, can you point where this difference in behavior documented exactly?",
+      "created_at": "2018-09-29T04:23:12Z",
+      "updated_at": "2018-09-29T04:23:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Also, can you point where this difference in behavior documented exactly?\r\n\r\nI wasn't aware of the difference - and I don't understand it: please explain.\r\n\r\nFrom my limited understanding so far, it comes down to invisible extra `[psobject]` wrappers that cause subtle behavior differences, as discussed in #5579.\r\nNote: Calling them _extra `[psobject]` wrappers_ was my attempt at explaining what I've observed; given that I lack a deep understanding in this area, my conceptualization may be incorrect - do tell us, if so.\r\n\r\nWhat causes the different outcomes in your example is the difference between:\r\n*  using a `foreach` loop\r\n   *  `$b1 = foreach($_ in $a1) { [pscustomobject]@{ p = $_ } }`\r\n* and a pipeline with`%` (`ForEach-Object`)\r\n   * `$b2 = $a2 | % { [pscustomobject]@{ p = $_ } }`\r\n\r\nwhich are _seemingly_ equivalent (with the structurally equivalent `$a1` and `$a2`, respectively).\r\n\r\nThat they're not equivalent can be verified as follows:\r\n\r\n```powershell\r\n$b1[0].p -is [psobject]  # $False\r\n$b2[0].p -is [psobject]  # $True - !! extra [psobject] wrapper\r\n```\r\n\r\nDoesn't the fact these statements are _not_ equivalent strike you as a more fundamental problem?\r\nHow, exactly, does the difference then surface in `Select-Object -ExpandProperty`?\r\n\r\n---\r\n\r\nAside from this inconsistency, however, I hope we can agree that the primary intent of `-ExpandProperty` is to pass a given, single property's  _value_   through - enumerated, if applicable - and not to construct a `[pscustomobject]`  with that property attached.\r\n\r\n\r\n\r\n \r\n\r\n",
+      "created_at": "2018-09-29T07:09:49Z",
+      "updated_at": "2018-09-29T07:09:49Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "In v2 extra properties were linked to `PSObject` wrapper. So two `PSObject`s wrapping the same underlaying object can have different set of extra properties. In v3 properties now linked to underlaying object (with some exceptions), but not to `PSObject` wrapper. But in the process PowerShell devs decided to keep/grant `Select-Object -ExpandProperty` ability to create independent `PSObject` wrappers, which links properties to themselves rather than to underlaying objects.\r\nhttps://github.com/PowerShell/PowerShell/blob/4831a9fd639e9386075f0622710675105c43cff9/src/System.Management.Automation/engine/MshObject.cs#L1001-L1014\r\nAs you can see here `storeTypeNameAndInstanceMembersLocally` is not used, when you already have `PSObject`. And that is causing difference in `Select-Object -ExpandProperty` behavior.\r\n\r\nSo, given PowerShell have this ability, you do not need to know how to clone arbitrary object. Instead you can have two independent `PSObject`s wrapping the same underlaying object. Although, I do not think `Select-Object` should really do this. I do not see reasons why it use/have this ability in the first place (compatibility? maybe).",
+      "created_at": "2018-10-02T00:16:30Z",
+      "updated_at": "2018-10-02T00:16:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Could you please clarify about `Select-Object -ExpandProperty` design (@PetSerAl's comments)?",
+      "created_at": "2018-10-02T04:00:42Z",
+      "updated_at": "2018-10-02T04:00:42Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I don't remember any discussions about `Select-Object -ExpandProperty` in V3 when we changed the underlying representation of instance members.\r\n\r\nAs I recall, the primary factors were:\r\n1. Availability of `ConditionalWeakTable` which was designed for the scenario - it was unavailable for V2\r\n2. Make `Add-Member` easier to use - no need for `-PassThru`\r\n3. Preserve instance members when objects are passed through C# methods, e.g. in fluent apis.\r\n4. Preserve the PSObject public api semantics\r\n\r\nAs for the suggestion by @PetSerAl to use multiple PSObject wrappers - I would think it is viable, but you do lose point 3 above.",
+      "created_at": "2018-10-02T05:38:01Z",
+      "updated_at": "2018-10-02T05:38:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I appreciate the background information, @PetSerAl  and @lzybkr.\r\n\r\nHowever, @lzybkr, I don't think @PetSerAl is advocating use of separate PSObject wrappers - on the contrary:\r\n\r\n>  Instead you can have two independent PSObjects wrapping the same underlying object. **Although, I do not think Select-Object should really do this.** I do not see reasons why it use/have this ability in the first place (compatibility? maybe).\r\n\r\nThat means that the inconsistency pointed out by @PetSerAl should be resolved toward the documented behavior:\r\n\r\nAssociate all instance members added via `-Property` _directly with the base (underlying) object, whatever its type_, which, based on the current implementation, means:\r\n\r\n* Leave the `-ExpandProperty` behavior alone, if the property value happens to be a  `[psobject]` (whether a bona fide `[pscustomobject]` or just an incidental wrapper), as it is already correct.\r\n\r\n   * Of course, this won't give @bstrautin and @dragonwolf83 the behavior they want; more on that in a separate comment.\r\n\r\n* The behavior must be fixed for all other types to _not_ use the extra `[psobject]` wrapper, because instance members can currently _be unexpectedly discarded_.\r\n\r\n@PetSerAl's example above has already demonstrated the loss of instance members, but let me show it more succinctly:\r\n\r\n```powershell\r\n$v = [datetime]::now; $v | Add-Member myProp myPropValue\r\n\"[$($v.myProp)]\"\r\n'---'\r\n $vToo = [pscustomobject] @{ prop = $v } | Select-Object -ExpandProperty prop\r\n\"[$($vToo.myProp)]\"\r\n```\r\n\r\nThe above yields:\r\n\r\n```none\r\n[myPropValue]\r\n---\r\n[]\r\n```\r\n\r\nwhich demonstrates that the `myProp` instance member was lost.\r\n\r\nSince this affects only types _other_ than `[psobject]` / `[pscustomobject]`, however, this is a bug that is separate from the discussion here, so I've created #7937. \r\n\r\n---\r\n\r\nGenerally, the - seemingly legacy - mechanism of associating instance member with a - usually invisible - `[psobject]` _wrapper_  rather than the wrapped object itself strikes me as highly obscure, and not something to rely on to _emulate_ cloning of `[pscustomobject]` instances.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-10-03T14:04:03Z",
+      "updated_at": "2018-10-03T14:04:03Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I wasn't suggesting that it was a good idea, just that it was possible.\r\n\r\nPersonally I don't use `Select-Object`, and I don't find this use of `Select-Object` intuitive, I instead prefer creating a new object explicitly, something like (and I realize it's not exactly the same):\r\n\r\n```powershell\r\n# If I want something like this:\r\nGet-Process | Select-Object -Property Name -ExpandProperty Modules\r\n\r\n# I use something like this:\r\nGet-Process | ForEach-Object {\r\n    $n = $_.Name\r\n    $_.Modules | ForEach-Object { [pscustomobject]@{Name = $n; Module = $_ } }\r\n}\r\n```",
+      "created_at": "2018-10-03T18:24:43Z",
+      "updated_at": "2018-10-03T18:24:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm glad to hear you don't necessarily think it's a good idea, @lzybkr.\r\n\r\nI was responding to your statement that, \"As for the suggestion by @PetSerAl to use multiple PSObject wrappers\", pointing out that (a) from my understanding @PetSerAl suggested _not_ to dot that, and (b) that using multiple object wrappers:\r\n\r\n* causes the bug I've documented in #7937 \r\n* generally represent a _step back_ from the improvements introduced in v3, in that they introduce far-from-obvious subtle variations in behavior that no end user should ever have to worry about.\r\n\r\nIn other words: it's not only _not a good_ idea, it's _a bad idea_.\r\n\r\n---\r\n\r\nAs for your example:\r\n\r\nYes, the behavior resulting from combining `-ExpandProperty` with `-Property` is not exactly obvious, but it can be useful.\r\n\r\n(And I realize that my `-EnumerateProperty` suggestion may have missed the mark, given that it is predicated on creating a _wrapper_ `[pscustomobject]` for the property targeted by `-ExpandProperty` rather than returning a _clone_ of the property value itself, with the latter probably being what @bstrautin  and @dragonwolf83  were looking for.)\r\n\r\nIn short, if I read their intent correctly, what  @bstrautin  and @dragonwolf83 are looking for is for\r\n`-ExpandProperty` to act as `-ExpandPropertyOrACloneOfItIfItisACustomObject`.\r\n\r\nClearly, that's not's what's happening now.\r\n\r\nPossible solutions are:\r\n\r\n* Using  a `ForEach-Object` call in which the target property's value is explicitly cloned, as suggested in https://github.com/PowerShell/PowerShell/issues/7768#issuecomment-421171150\r\n\r\n* Special-casing the behavior of `-ExpandProperty` to _implicitly_ pass out (and decorate) a _clone_, _if_ it happens to be a _custom object_ (a type-less property bag with no base object).\r\n\r\nThe latter is an option, but amounts to an inconsistency that would require careful documentation.\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-10-04T04:13:54Z",
+      "updated_at": "2018-10-04T04:13:54Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Can someone summarize what the proposed change is for @PowerShell/powershell-committee to review?",
+      "created_at": "2018-12-12T17:58:54Z",
+      "updated_at": "2018-12-12T17:58:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "First, a genuine bug was uncovered, but it is now tracked in a separate issue: #7937\r\n\r\nSecond, the **question is whether `Select-Object -ExpandProperty -Property` works as designed and exhibits useful behavior, or whether it should be fixed / enhanced**:\r\n\r\n`Select-Object -ExpandProperty`, when combined with `-Property`, currently exhibits internally consistent behavior in line with the documentation, but the behavior can be surprising and isn't easy to understand:\r\n\r\n* The _value_ of the `-ExpandProperty` property is output, whatever its type, and if `-Property` is also present, the specified properties are added as ETS NoteProperty members to the output object, which amounts to _modifying_ that object from an ETS perspective.\r\n\r\n* If the ETS-modified output object is being referenced elsewhere, as part of a larger object, that larger object now sees the modified object, and sending that object to `Select-Object -ExpandProperty -Property` _again_ then causes failure, because the NoteProperty members already exist (see code in the [original post](https://github.com/PowerShell/PowerShell/issues/7768#issue-359599363)).\r\n\r\n@bstrautin and @dragonwolf83, if I understand them correctly, are looking for a _clone_ of the `-ExpandProperty` property value to be output, _if_ that value represents a _custom object_. They generally expect `Select-Object` _never_ to modify its input.\r\n\r\nThis would amount to special-casing the treatment of `-ExpandProperty` property values based on their type (cloning _all_ values is not an option, because not all reference-type instances can be cloned; in an ETS sense this means that non-custom objects would still be _modified_), with the following possible implementations:\r\n\r\n* Quiet, automatic special-casing based on the property's type; this may be too obscure.\r\n\r\n* @bstrautin suggested an opt-in mechanism with a new parameter named, e.g., <br>`-ExpandPropertyAsCopy` (see https://github.com/PowerShell/PowerShell/issues/7768#issuecomment-421002893 above); the behavior if an input object _isn't_ a custom object would have to be fleshed out.\r\n\r\nThe alternative is to not make any changes and work around the issue with a `ForEach-Object`-based solution with manual cloning (see https://github.com/PowerShell/PowerShell/issues/7768#issuecomment-421171150 above).\r\n\r\nI hope this is a fair summary.\r\nMy personal sense is that we don't need any changes, so I'll leave it to others to flesh out a proposed change.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-12-12T19:35:53Z",
+      "updated_at": "2018-12-12T19:35:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.: Another alternative to consider:\r\n\r\nPerhaps _cloning_ isn't necessary, _if_ it is acceptable to repeatedly modify the NoteProperty members on the _same_ objects.\r\n\r\nThat is, **we could let `Select-Object -ExpandProperty -Property` quietly accept _preexisting_ property members and simply _update_ them**, instead of complaining about them.\r\n\r\nArguably, this is more in in line with `Select-Objects` general behavior, where you can select preexisting properties or create new ones on demand (calculated properties).\r\n\r\nExample:\r\n\r\n```powershell\r\n$obj = [pscustomobject] @{ propToDecorateWith=1; customObj = [pscustomobject] @{ prop = 'val' } }\r\n\r\n# First act of decoration - currently OK\r\n# -> [pscustomobject] @{ propToDecorateWith=1; prop = 'val' } \r\n$obj | Select-Object -ExpandProperty customObj -Property propToDecorateWith\r\n\r\n# Update the input object\r\n$obj.propToDecorateWith = 2\r\n\r\n# Second act of decoration - currently BREAKS\r\n#    \"The property cannot be processed because the property \"propToDecorateWith\" already exists.\"\r\n# If we quietly accepted preexisting properties, we'd instead get:\r\n#   -> [pscustomobject] @{ propToDecorateWith=2; prop = 'val' } \r\n# But note that the very same custom object was modified in both cases.\r\n$obj | Select-Object -ExpandProperty customObj -Property propToDecorateWith\r\n```",
+      "created_at": "2018-12-12T19:54:59Z",
+      "updated_at": "2018-12-12T19:54:59Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "I think a better word than _clone_ is _new_ given how this currently works.\r\n\r\nWhen the property specified in `-ExpandProperty` is a `PSObject` it adds any properties in `-Property` to the new expanded object. The issue is that since the `PSObject` is a reference, the expanded object is modified in the root `PSObject`. \r\n\r\nIf you create a new `PSObject` first and add the properties to it, then it won't modify the original object and the output would be the same. \r\n\r\nThe only issue for existing scripts would be if someone wasn't capturing the results of `Select-Object` and going back to the original object to use it. I don't know how common a practice that would be. My expectation is that most people would capture the output: `$results = Select-Object`.",
+      "created_at": "2018-12-12T20:03:30Z",
+      "updated_at": "2018-12-12T20:03:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "If I understand correctly, @dragonwolf83, your vote is for the quiet, automatic special-casing.\r\n\r\nHowever the special-casing is implemented, if at all, it should apply to true _custom_ objects only (\"property bags\" without a base object), not instances of mostly-invisible helper type `[psobject]`.\r\n\r\nIf we pursued the other alternative - quiet repeated decoration of the _same_ object - existing scripts wouldn't be affected at all, but the question is: would that give you the behavior you want, i.e., is it OK to modify the same object repeatedly, as long as the NoteProperty values have the then-desired values?\r\n",
+      "created_at": "2018-12-12T20:38:33Z",
+      "updated_at": "2018-12-12T23:02:13Z"
+    },
+    {
+      "author": "bstrautin",
+      "author_association": "NONE",
+      "body": "Repeatedly modifying the same object would be trouble.\r\n\r\nSpecifically, in the situation where the same object appears in more than one parent object's property, data presented by Format-Table directly after Select-Object might look correct, but, when assigned to a variable, the actual data in the objects would be different from what was displayed.\r\n\r\ne.g. This code would display different values for what should be the same data:\r\n\r\n```\r\n$foo1 = [pscustomobject]@{foo = 'foo1'}\r\n$foo2 = [pscustomobject]@{foo = 'foo2'}\r\n\r\n$bars = @(\r\n  [pscustomobject]@{bar='bar1'; foos=$foo1,$foo2}\r\n  [pscustomobject]@{bar='bar2'; foos=$foo1}\r\n  ) * 10\r\n\r\n$bars | select -ExpandProperty foos -Property bar -ov expandedBars | ft | out-host\r\n\r\n$expandedBars | ft\r\n```\r\n",
+      "created_at": "2018-12-12T23:00:48Z",
+      "updated_at": "2018-12-12T23:00:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Repeatedly modifying the same object would be trouble.\r\n\r\nThis behavior is already \"by design\".\r\n\r\nI have to remind that this cmdlet is very sensitive and it is almost impossible to change something in it without breaking something else.\r\n\r\nI should also mention that cloning is generally a custom operation due to property nesting and the threat of an infinite loop (like in ConvertTo-Json).\r\n\r\nIf we need a new behavior, we better consider something like new cmdlet `ConvertTo-Object`.\r\n\r\n",
+      "created_at": "2018-12-13T17:45:44Z",
+      "updated_at": "2018-12-13T17:45:44Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "Forget about cloning. I think that is causing confusion in this discussion. We are not asking for a deep clone of the root object. That is not what this is about.\r\n\r\nWe are asking for the output that is produced to be exactly as it is today, same properties, but just applied to a new PSObject. That way, the original object is not referenced and modified. The output would be identical, minimizing the breaking change.\r\n\r\nThis is already special cased depending on whether the property to expand is an object or an array. Any changes would just be made to that section when it detects an object.\r\n\r\nWhat I'm proposing is similar to how the `Join-Object` script that was written long ago keeps from modifying the original object. That script creates a new PSObject first and adds the properties of 2 objects into the new object. Which is very close to what `-ExpandProperty` does in this instance. It takes the expanded object and adds properties of the root object to the expanded object. But because it doesn't create a new PSObject, the expanded object embedded in the root is modified.\r\n\r\nAs for the breaking change, that is what needs to be investigated. Do people primarily capture the output of `Select-Object -ExpandProperty` or do they run `Select-Object` and use the modified root object to access that property?  I think most would do the former and not expect the original object to be modified. Once that behavior is analyzed, then we can decide if a switch is needed to create a new object.",
+      "created_at": "2018-12-13T18:58:22Z",
+      "updated_at": "2018-12-13T18:58:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> This is already special cased depending on whether the property to expand is an object or an array.\r\n\r\nI wouldn't consider this special-casing, given that it's a documented feature: collection-valued properties targeted by `-ExpandProperty` are enumerated.\r\n\r\nIn either case, it is the (potentially enumerated) property value _itself_ that is currently decorated, at least from a PowerShell user's perspective.\r\n\r\nSo, to selectively change that for `[pscustomobject]` instances (true \"property bags\") and _effectively_ create a shallow clone of them before decorating (even if you frame it as creating a _new_ object) amounts to special-casing.\r\n\r\nIt's important to understand that for _other_ types the `-ExpandProperty` value _itself_ is modified, and that _can't be changed_:\r\n\r\n```powershell\r\n# Expand a [System.IO.DirectoryInfo] property value:\r\n$obj = [pscustomobject] @{ foo = 'hi'; bar = Get-Item / }\r\n($obj | Select-Object -ExpandProperty bar -Property foo).foo  # -> 'hi'\r\n$obj.bar.foo # -> 'hi' - enclosing $obj sees the change too\r\n```\r\n\r\nNow, perhaps the predominant use case for the - itself not all-too common - combination of `-ExpandProperty` and `-Property` is with `[pscustomobject]` instances with the expectation of creating _new_ objects always, so, yes, analyzing current usage is needed.\r\n\r\nIf so, then the quiet special-casing of `[pscustomobject]` will indeed make things easier, but, as stated, the special-casing would have to be carefully documented so that users won't be surprised if non-custom objects are directly \"modified\" (decorated).\r\n\r\n---\r\n\r\n@bstrautin: Yes, if you want to retain _all_ iterations of a custom object, iterative modification of the same object is not an option, but I was thinking more of a \"working object\" scenario: a reusable object whose temporary state is captured by transformation to a different object / format.\r\n\r\nMy sense is that repeated `Select-Object -ExpandProperty -Property` calls on the same object should _not_ fail, and simply update existing properties, but that's a separate issue.\r\n\r\nHowever, implementing the latter would - from the perspective of your new-object expectation - make the behavior potentially more obscure; if we opt for quiet special-casing, that point would be moot.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-12-13T20:37:22Z",
+      "updated_at": "2018-12-14T00:25:55Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  We believe the original intent is to not modify the original object and this looks like a bug.  This is a `Breaking Change`, but the benefit outweighs the potential impact.  We agree that we should just fix the original behavior so that a new object is emitted.",
+      "created_at": "2019-01-30T23:53:30Z",
+      "updated_at": "2019-01-30T23:53:30Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I'd postpone the change till next PowerSHell Core LTS version.",
+      "created_at": "2019-01-31T05:29:37Z",
+      "updated_at": "2019-01-31T05:29:37Z"
+    }
+  ],
+  "created_at": "2018-09-12T18:26:40Z",
+  "number": 7768,
+  "state": "open",
+  "title": "Select-Object modifies input objects when using both -ExpandProperty and -Property",
+  "updated_at": "2019-01-31T05:29:37Z"
+}

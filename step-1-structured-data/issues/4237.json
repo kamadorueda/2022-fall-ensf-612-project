@@ -1,0 +1,160 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4237",
+  "author": "mklement0",
+  "body": "I haven't looked into the logic behind which types' formatting data isn't being reported, but two examples are below.\r\n\r\nA counter example is `Get-FormatData System.Management.Automation.AliasInfo`, which works as expected.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nGet-FormatData System.IO.DirectoryInfo, System.IO.FileInfo\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n`[System.Management.Automation.ExtendedTypeDefinition]` instances describing the formatting, as usual.\r\n\r\nActual behavior\r\n---------------\r\n\r\nNo output is produced; `$?` indicates `$True`.\r\n\r\nYet, formatting data is clearly in effect.\r\n\r\nIn _Windows PowerShell_, it can be discovered as follows:\r\n\r\n```powershell\r\nSelect-String -List System.IO.DirectoryInfo, System.IO.FileInfo $PSHOME/*.ps1xml \r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.3 on macOS 10.12.5\r\nPowerShell Core v6.0.0-beta.3 on Ubuntu 16.04.1 LTS\r\nPowerShell Core v6.0.0-beta.3 on Microsoft Windows 10 Pro (64-bit; v10.0.14393)\r\nWindows PowerShell v5.1.15063.413 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2020-04-08T00:37:14Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "This is a bug, but the repro should be:\r\n\r\n```powershell\r\nGet-FormatData System.IO.DirectoryInfo, System.IO.FileInfo -PowerShellVersion 5.1\r\n```\r\n\r\nThis extra parameter was added in 5.1 so remoting would work between older clients and newer servers. The format data returned before 5.1 was incomplete and in some ways wrong, e.g. the file system types were returned as `FileSystemTypes` and it didn't actually work - the real type names were lost.\r\n\r\nThat said, there is still a bug, I'm not quite sure where it is though.",
+      "created_at": "2017-07-13T02:41:29Z",
+      "updated_at": "2017-07-13T02:41:29Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I should add - the format data for help is intentionally never returned - I forget the exact reason I did that - I think there were problems with serialization depth being exceeded and I decided it wasn't important to return those formats anyway.",
+      "created_at": "2017-07-13T02:44:22Z",
+      "updated_at": "2017-07-13T02:44:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr \r\n\r\nThanks for clarifying, but just so I get the full picture:\r\n\r\nAre you saying that even with the bug fixed it will be necessary to add `-PowerShellVersion 5.1` to `Get-FormatData` calls in order to get output?\r\n\r\nSince something like `Get-FormatData System.Management.Automation.AliasInfo` currently works as-is, to what types - other than the 2 mentioned (`System.IO.DirectoryInfo`, `System.IO.FileInfo`) - does this requirement to specify `-PowerShellVersion` apply?\r\n\r\nIs there an explicit list or some abstract criterion?",
+      "created_at": "2017-07-25T13:51:13Z",
+      "updated_at": "2017-07-25T13:51:13Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "In the abstract - some format data properties were missing before 5.1. If those properties were non-null, then the format data returned by `Get-FormatData` couldn't have been used correctly, so those types are not returned.\r\n\r\nTo be concrete, look at the implementations of [PSControl.CompatibleWithOldPowerShell](https://github.com/PowerShell/PowerShell/search?utf8=%E2%9C%93&q=CompatibleWithOldPowerShell&type=)\r\n\r\nBriefly, I think GroupBy, SelectCondition, and CustomControl are the items that trigger not getting returned by `Get-FormatData` unless you specify `-PowerShellVersion 5.1`.",
+      "created_at": "2017-07-25T17:59:31Z",
+      "updated_at": "2017-07-25T17:59:31Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The user should not have to specify anything and by default it should show all the formatters perhaps with a `PowerShellVersion` column.  I believe `-PowerShellVersion` exists for remoting.",
+      "created_at": "2017-11-28T00:31:30Z",
+      "updated_at": "2017-11-28T00:31:30Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If it's possible to detect how `Get-FormatData` is called, then it would be possible to return all formatters with no arguments, but only when called locally. If called from a remote client, then it's important to determine the client version and **not** return objects that won't deserialize.\r\n\r\nI'm not aware of any cmdlet that does something like this today, so I'm not sure how easy it would be.",
+      "created_at": "2017-11-28T00:49:31Z",
+      "updated_at": "2017-11-28T00:49:31Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PaulHigin are you aware of there is a way for a cmdlet to detect it is being remotely?",
+      "created_at": "2018-10-20T01:33:57Z",
+      "updated_at": "2018-10-20T01:33:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: \r\n\r\nYou can test if the automatic `$PSSenderInfo` variable is present, which is only defined in remoting sessions. (For additional robustness, you can test whether its type is `System.Management.Automation.Remoting.PSSenderInfo`, given that PowerShell doesn't prevent you from manually assigning to this variable in local sessions).\r\n\r\nPlease note that PR #8063 didn't fix _this_ issue, only a closely related one, so can you please re-open this one?\r\n\r\nThe issue is still that you shouldn't have to use `-PowerShellVersion` just so you can see the current session's formatting data reliably.\r\n\r\n\r\n",
+      "created_at": "2019-09-23T19:14:35Z",
+      "updated_at": "2019-09-23T19:14:35Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "When remoting needs to use a specific PSVersion does it always pass that parameter? If so, can we have `-PowerShellVersion` default value be `$PSVersionTable.PSVersion` solving this for local and remote use?",
+      "created_at": "2019-11-22T19:59:54Z",
+      "updated_at": "2019-11-22T19:59:54Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@ThomasNieto - the default value for a remote session must be compatible with older clients that are unaware of the parameter and hence do not specify it. This include Windows PowerShell v5.0 and earlier.\r\n\r\nFor the local case, maybe a different default is possible.",
+      "created_at": "2019-11-22T20:10:57Z",
+      "updated_at": "2019-11-22T20:10:57Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PaulHigin, would what @mklement0 proposes here work to detect remote usage?",
+      "created_at": "2019-11-22T21:33:02Z",
+      "updated_at": "2019-11-22T21:33:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sorry, @SteveL-MSFT: my previous attempt to distinguish true remoting from background jobs was flawed.\r\n\r\nI hope the following works robustly. \r\n\r\nPlease note the assumption made in the comments, which should be confirmed.\r\n\r\n---\r\n\r\nFrom what I can tell, all that is needed is to replace this:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/2f672538b235db9dfd26cba75064f92e1e903fb4/src/Microsoft.PowerShell.Commands.Utility/commands/utility/FormatAndOutput/common/GetFormatDataCommand.cs#L100-L102\r\n\r\nwith this:\r\n\r\n```c#\r\n// $PSSenderInfo is defined in true remoting contexts and background jobs.\r\n// Its Boolean .PSShowComputerName NoteProperty is false only in background jobs.\r\nbool remoting = (GetVariableValue(\"PSSenderInfo\") as PSObject)?.Properties[\"PSShowComputerName\"]?.Value is bool value && value;\r\nbool writeOldWay = remoting && (\r\n                    PowerShellVersion == null ||\r\n                    PowerShellVersion.Major < 5 ||\r\n                    (PowerShellVersion.Major == 5 && PowerShellVersion.Minor < 1)\r\n                    );\r\n```\r\n",
+      "created_at": "2019-11-22T22:04:45Z",
+      "updated_at": "2019-11-22T22:05:02Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is probably the best way to detect whether a cmdlet is running within a remote session in general.\r\nBut if this is a `built-in` cmdlet that has access to internal types the following will also work:\r\n```\r\nbool remoting = (this.Context.InternalHost.ExternalHost is ServerRemoteHost);\r\n```",
+      "created_at": "2019-11-25T17:19:05Z",
+      "updated_at": "2019-11-25T17:19:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin, but won't that return true for local-machine _background jobs_ as well, which I presume we do _not_ want?",
+      "created_at": "2019-11-25T17:23:32Z",
+      "updated_at": "2019-11-25T17:23:32Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "You still have the version check.  Background jobs will always run the current version of PowerShell.",
+      "created_at": "2019-11-25T21:28:10Z",
+      "updated_at": "2019-11-25T21:28:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  Background jobs will always run the current version of PowerShell.\r\n\r\nYes, which is why the version check shouldn't be done for background jobs, as in my code above.\r\n\r\nIf you only check for the host, you'll get a false positive for background jobs, given that true remoting and background jobs both use the `ServerRemoteHost` host.\r\n",
+      "created_at": "2019-11-25T21:36:24Z",
+      "updated_at": "2019-11-25T22:07:04Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I guess I'm confused.  You will never have a background job with version < 5.1, so the write is always the new way.  Isn't that what we want?",
+      "created_at": "2019-11-25T22:00:39Z",
+      "updated_at": "2019-11-25T22:00:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Note the `PowerShellVersion == null` part of the original conditional, which means that the \"old way\" kicks in in the _absence_ of a `-PowerShellVersion` argument as well. \r\n\r\nThat is, currently you _always_ get the \"old way\" if you don't explicitly specify `-PowerShellVersion 5.1`  or higher - this awkward requirement is what prompted creation of this issue.\r\n\r\nTherefore, we must ensure that background jobs aren't mistaken for remoting.",
+      "created_at": "2019-11-25T22:06:56Z",
+      "updated_at": "2019-11-25T22:30:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin, I think you may be missing that `PowerShellVersion` refers to a _parameter_, not to the executing PowerShell engine's version.",
+      "created_at": "2019-11-25T22:32:08Z",
+      "updated_at": "2019-11-25T22:32:08Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, you are right.  I think your code is the correct way.",
+      "created_at": "2019-11-26T00:00:18Z",
+      "updated_at": "2019-11-26T00:00:18Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11270, which has now been successfully released as `v7.1.0-preview.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.2)\n",
+      "created_at": "2020-04-23T18:02:44Z",
+      "updated_at": "2020-04-23T18:02:44Z"
+    }
+  ],
+  "created_at": "2017-07-12T22:19:42Z",
+  "number": 4237,
+  "state": "closed",
+  "title": "Get-FormatData doesn't report formatting data for some types for which formatting data ships with PowerShell.",
+  "updated_at": "2020-04-23T18:02:44Z"
+}

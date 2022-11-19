@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4031",
+  "author": "MikeM-MSFT",
+  "body": "<!--\r\n\r\nIf it is a bug report:\r\n- make sure you are able to repro it on the latest released version. \r\nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\r\n- Search the existing issues.\r\n- Refer to the [FAQ](../docs/FAQ.md).\r\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\r\n- Fill out the following repro template\r\n\r\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\r\n-->\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n[Convert]::ToString(0xFFFFFFFFFFFF -band 0xFF0000000000,2)\r\n[Convert]::ToString(0xFFFFFFFFFFFF -band 0x00FF00000000,2)\r\n[Convert]::ToString(0xFFFFFFFFFFFF -band 0x0000FF000000,2)\r\n[Convert]::ToString(0xFFFFFFFFFFFF -band 0x000000FF0000,2)\r\n[Convert]::ToString(0xFFFFFFFFFFFF -band 0x00000000FF00,2)\r\n[Convert]::ToString(0xFFFFFFFFFFFF -band 0x0000000000FF,2)\r\n\r\n\r\nExpected behavior\r\n-----------------\r\n111111110000000000000000000000000000000000000000\r\n1111111100000000000000000000000000000000\r\n11111111000000000000000000000000\r\n111111110000000000000000\r\n1111111100000000\r\n11111111\r\n\r\nActual behavior\r\n---------------\r\n\r\n111111110000000000000000000000000000000000000000\r\n1111111100000000000000000000000000000000\r\n111111111111111111111111000000000000000000000000\r\n111111110000000000000000\r\n1111111100000000\r\n11111111\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.15063.413\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.15063.413\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n",
+  "closed_at": "2022-06-08T04:00:55Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Poor `-band` is just the messenger here: **the problem is more fundamental, namely PowerShell's lack of _unsigned_ integer types**, which leads to unexpected behavior with hex. constants:\r\n\r\nIn short:\r\n\r\n* Use `[Convert]::ToString(0xFFFFFFFFFFFF -band 0x0000FF000000L,2)` (note the `L` suffix) to _work around_ the problem.\r\n\r\n* Even with the workaround, hex. constants only work as intended up to `[int64]::MaxValue` (`0x7fffffffffffffff`), not `[uint64]::MaxValue` (`0xffffffffffffffff`)\r\n\r\n* That PowerShell contravenes the fundamental user expectation that a hex. literal is always a *positive* - unsigned - number is problematic - see #3313\r\n\r\n---\r\n\r\nAs for the specifics of the symptom at hand:\r\n\r\n```powershell\r\n# The smallest *signed* integer type that can fit the bit pattern is chosen, which \r\n# is Int32 in this case.\r\n# The problem is that this can - unexpectedly from the user's perspective - \r\n# result in a *negative* number:\r\n> [Convert]::ToString(0x0000FF000000,2); (0x0000FF000000).GetType().Name; 0x0000FF000000;\r\n11111111000000000000000000000000  # so far, so good - the *32-bit* pattern is correct\r\nInt32\r\n-16777216  # !! Result is negative, because [System.Int32] was chosen as the data type.\r\n```\r\n\r\nSimilarly, `0xFF0000000000` becomes _signed_ type `[System.Int64]` (`long`).\r\nTherefore, in expression `0xFFFFFFFFFFFF -band 0x0000FF000000`, the RHS, an `Int32` by itself, is implicitly coerced to the type of the larger LHS, `Int64`, which is when the problem surfaces:\r\n\r\n```powershell\r\n> [Int64] 0x0000FF000000\r\n-16777216  # Result is the same - negative - value as before, only as Int64\r\n\r\n# That Int64 representation does NOT have the expected *bit pattern*, however, \r\n# due to being a signed type:\r\n> [Convert]::ToString([Int64] 0x0000FF000000, 2)\r\n1111111111111111111111111111111111111111000000000000000000000000\r\n\r\n# Here's the expected pattern, stemming from forcing the literal to a long (L), aka Int64.\r\n> [Convert]::ToString(0x0000FF000000L, 2)\r\n11111111000000000000000000000000\r\n```\r\n\r\n\r\n\r\nP.S.: Can you please edit your post to use fenced code / output blocks for readability?",
+      "created_at": "2017-06-16T17:47:36Z",
+      "updated_at": "2017-06-18T22:00:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "User can catch the issue with using C# or C++ binary flag constants. \ud83d\ude15 ",
+      "created_at": "2017-06-17T12:23:46Z",
+      "updated_at": "2017-06-17T12:23:46Z"
+    },
+    {
+      "author": "StevenBucher98",
+      "author_association": "COLLABORATOR",
+      "body": "Just want to add that this does not seem to be an issue with PS 7.2+ but still an issue with 5.1 ",
+      "created_at": "2022-06-06T17:27:14Z",
+      "updated_at": "2022-06-06T17:27:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This is likely to have been inadvertently fixed with either #7813 or #7993 where we added proper support for unsigned hex and binary literals.\r\n\r\nThese changes are not being backported to PS 5.1 -- almost nothing is able to be backported to the Windows PowerShell edition. I'm closing this as resolved for now, thanks for following up and confirming it's no longer an issue in 7.2+ \ud83d\ude42 ",
+      "created_at": "2022-06-06T18:52:11Z",
+      "updated_at": "2022-06-06T18:52:11Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as fixed and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-06-08T04:00:54Z",
+      "updated_at": "2022-06-08T04:00:54Z"
+    }
+  ],
+  "created_at": "2017-06-16T15:33:12Z",
+  "number": 4031,
+  "state": "closed",
+  "title": "Binary AND returns incorrect value",
+  "updated_at": "2022-06-08T04:00:55Z"
+}

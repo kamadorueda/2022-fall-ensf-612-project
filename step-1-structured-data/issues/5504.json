@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/5504",
+  "author": "alx9r",
+  "body": "It seems like certain things can only be defined once per PowerShell session.  Public enums named in calls to `Add-Type` are one such example.  In the repro below, a .Net enum of a particular name could only be defined once even though the two definitions are in separate modules.  Working around such naming collisions amongst unrelated modules is usually a one-time event.  However, the same problem manifests when more than one version of the same module is required to exist in a single session.  This occurs every time a .Net type in a low-level module changes and the mid-level modules aren't updated simultaneously.  I've been running into this problem in PowerShell with increasing frequency as I incorporate more third-party libraries and as my code has become more modular.  \r\n\r\nAs far as I've read this problem is called \"the diamond dependency problem\" ([video](https://www.youtube.com/watch?v=tISy7EJQPzI&feature=youtu.be&t=15m0s)).  The repro below demonstrates the canonical scenario described in the video in PowerShell.\r\n\r\nThere seems to be some signs that C# projects can load multiple versions of the same assembly thereby averting the diamond dependency problem (e.g. [stackoverflow question](https://stackoverflow.com/questions/4451220/loading-multiple-versions-of-the-same-assembly)).  Is there a similar strategy that works in PowerShell?\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nNew-Module libutil_v1 {\r\n    Add-Type -TypeDefinition 'public enum E {a,b,c}'\r\n    function f {\r\n        param\r\n        (            \r\n            [e]\r\n            $E\r\n        )\r\n    }\r\n} | Import-Module\r\n\r\nNew-Module libutil_v2 {\r\n    Add-Type -TypeDefinition 'public enum E {a,b,c,d}'\r\n    function f {\r\n        param\r\n        (            \r\n            [e]\r\n            $E\r\n        )\r\n    }\r\n} | Import-Module\r\n\r\nNew-Module liba {\r\n    Get-Module libutil_v1 | Import-Module\r\n\r\n    function g_a {\r\n        f -E c\r\n    }\r\n} | Import-Module\r\n\r\nNew-Module libb {\r\n    Get-Module libutil_v2 | Import-Module\r\n\r\n    function g_b {\r\n        f -E d\r\n    }\r\n} | Import-Module\r\n\r\n\r\ng_a\r\ng_b\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nNo exception thrown.\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nAdd-Type : Cannot add type. The type name 'E' already exists.\r\nAt C:\\users\\un1\\Desktop\\test.ps1:13 char:5\r\n+     Add-Type -TypeDefinition 'public enum E {a,b,c,d}'\r\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidOperation: (E:String) [Add-Type], Excepti\r\n   on\r\n    + FullyQualifiedErrorId : TYPE_ALREADY_EXISTS,Microsoft.PowerShell.Command\r\n   s.AddTypeCommand\r\n\r\nf : Cannot process argument transformation on parameter 'E'. Cannot convert\r\nvalue \"d\" to type \"E\". Error: \"Unable to match the identifier name d to a\r\nvalid enumerator name. Specify one of the following enumerator names and try\r\nagain:\r\na, b, c\"\r\nAt C:\\users\\un1\\Desktop\\test.ps1:35 char:14\r\n+         f -E d\r\n+              ~\r\n    + CategoryInfo          : InvalidData: (:) [f], ParameterBindingArgumentTr\r\n   ansformationException\r\n    + FullyQualifiedErrorId : ParameterArgumentTransformationError,f\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value                                           \r\n----                           -----                                           \r\nPSVersion                      6.0.0-beta.8                                    \r\nPSEdition                      Core                                            \r\nGitCommitId                    v6.0.0-beta.8                                   \r\nOS                             Microsoft Windows 6.3.9600                      \r\nPlatform                       Win32NT                                         \r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}                         \r\nPSRemotingProtocolVersion      2.3                                             \r\nSerializationVersion           1.1.0.1                                         \r\nWSManStackVersion              3.0                                             \r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Add-Type uses a default namespace. I think `Add-Type -Namespace` resolves the issue.\r\n\r\nI believe we could make th error message more informative.",
+      "created_at": "2017-11-20T04:20:39Z",
+      "updated_at": "2017-11-20T04:21:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Could you please clarify why we first [load assembly](https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Utility/commands/utility/AddType.cs#L1194) and only then check duplicate types? I'd expect that terminating error should prevent loading the assembly with duplicate types.",
+      "created_at": "2017-11-20T09:48:41Z",
+      "updated_at": "2017-11-20T09:48:41Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I agree with you that the duplicate type check should happen before actually loading the assembly. With the current behavior, 2 assemblies containing 2 different implementations of the same type name would be loaded in the AppDomain, and either one could be used when the user references the type name depending on the randomly generated assembly names by Add-Type.\r\n\r\nI think we check duplicates after loading now because it's easier. Before loading, it might be harder to know what types are in the assemblies. But I guess we can use the `SyntaxTree` returned from `CSharpSyntaxTree.ParseText` to get that information.",
+      "created_at": "2017-11-21T00:22:11Z",
+      "updated_at": "2017-11-29T19:47:25Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I found an interesting issue when playing with `Add-Type` and opened #5515",
+      "created_at": "2017-11-21T01:50:54Z",
+      "updated_at": "2017-11-21T01:50:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I discover that `CheckTypesForDuplicates` has a wonder logic - it can add new non-duplicate types in a loaded type cache and then throw on duplicate type - and we get full mess with types.\r\n\r\nI think our logic should be simple - don't load an assembly if the one contains duplicate types  in relation to loaded ones.\r\n",
+      "created_at": "2017-11-21T14:23:45Z",
+      "updated_at": "2017-11-24T14:43:00Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">Add-Type uses a default namespace. I think Add-Type -Namespace resolves the issue.\r\n\r\n@iSazonov Are you suggesting that, to avert this problem, the types used by the `liba` and `libb` modules should be namespaces named uniquely for each minor version of `libutil`?  So accessing the type from, say version 1.3.2 of module `liba` would look like `[libutil.v1_0_0.E]`, for example.  And accessing the type from version 1.3.3 of module `liba` would look like `[libutil.v_1_0_1.E]`.",
+      "created_at": "2017-11-29T19:43:49Z",
+      "updated_at": "2017-11-29T19:43:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r You can use this as workaround for this certain case.",
+      "created_at": "2017-12-01T05:45:39Z",
+      "updated_at": "2017-12-01T05:45:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Bugs in `Add-Type` fixed. Can we close the Issue? Currently we have a workaround. General solution requires a significant alteration in the type resolution.",
+      "created_at": "2018-05-08T11:07:26Z",
+      "updated_at": "2018-05-08T11:07:26Z"
+    }
+  ],
+  "created_at": "2017-11-20T01:03:49Z",
+  "number": 5504,
+  "state": "open",
+  "title": "Is there a way to avert the diamond dependency problem for modules that use .Net types?",
+  "updated_at": "2018-06-20T19:55:50Z"
+}

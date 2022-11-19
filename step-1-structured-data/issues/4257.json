@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4257",
+  "author": "mklement0",
+  "body": "**tl; dr**:\r\n\r\nThis issue is written based on the following, currently unfulfilled expectation:\r\n\r\n* When you wrap a `New-Object` call that outputs an array / collection in `@()`, it should not create an array wrapper around it.\r\n\r\n@PetSerAl disagrees with my expectation (quotes from the comments on this [SO post](https://stackoverflow.com/a/45091504/45375) that inspired this issue, part of which is reprinted below):\r\n\r\n> What is unexpected about this behavior? `New-Object` writes a single element to the pipeline and `@()` wraps it in an array.\r\n\r\nOn the tangentially related issue that `@()` preserves the specific array type:\r\n\r\n> Also, IMHO, `@([int[]] (1, 2)).GetType().Name` [returning `Int32[]`] is a bug (over-optimization; it returns `Object[]` in v2)\r\n\r\n---\r\n\r\nAs of Windows PowerShell v5.1 / PowerShell Core v6.0.0-beta.4, **`@()` unexpectedly wraps arrays / collections instantiated directly as .NET types with the `New-Object` cmdlet in an outer, single-element array**; in other words: it doesn't recognize that the results already _are_ array-valued:\r\n\r\n```powershell\r\n> @(New-Object 'Object[]' 2).Count; @(New-Object 'Object[]' 2)[0].Count\r\n1  # !! The array was unexpectedly wrapped in an outer single-item array.\r\n2  # !! Element [0] contains the original array.\r\n\r\n> @(New-Object 'System.Collections.ArrayList').Count; @(New-Object 'System.Collections.ArrayList')[0].Count\r\n1  # !! The array list was unexpectedly wrapped in an outer single-item array.\r\n0  # !! Element [0] contains the original (empty) array list.\r\n```\r\n---\r\n\r\nTo contrast the surprising `New-Object` behavior above with commands that _should_ be equivalent, but work as expected:\r\n\r\n```powershell\r\n> @((New-Object 'Object[]' 2)).Count\r\n2 # OK - !! Simply enclosing the New-Object call in (...) made the difference.\r\n\r\n> @([int[]] (1, 2)).Count\r\n2 # OK - using a cast in lieu of New-Object\r\n\r\n> @([System.Collections.ArrayList]::new()).Count\r\n0 # OK - using the static ::new() method in lieu of New-Object\r\n```\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.4 on macOS 10.12.5\r\nPowerShell Core v6.0.0-beta.4 on Ubuntu 16.04.2 LTS\r\nPowerShell Core v6.0.0-beta.4 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.413 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2017-07-17T15:30:06Z",
+  "comments": [
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "Let me describe how I understand how `@()` work.\r\n\r\nSuppose you have this:\r\n```powershell\r\n$Result = @(\r\n    some statements here\r\n)\r\n```\r\nIt is more or less equivalent to:\r\n```powershell\r\n. {\r\n    some statements here\r\n} | ForEach-Object -Begin { $Temp = [Collections.ArrayList]::new() } -Process { [void]$Temp.Add($_) } -End { $Result = $Temp.ToArray() }\r\n```\r\nSo `@()` invoke provided statements, collect all the pipeline output and create array from them. Notice: it absolutely does not care what kind of objects (scalar, array or some other collection) you write into pipeline, and that is where great power of `@()` is.\r\n\r\n_Note special case: `@(<array literal>)`. I think that in this case `@()` is eliminated as optimization, but that leads to incorrect, IMHO, result, when `<array literal>` is typed. `@([int[]] (1, 2)).GetType().Name` return `Int32[]` instead of `Object[]`._\r\n\r\nHow is that useful? It is useful when you work with arrays of arrays (jagged arrays in .NET terms). Suppose you have following command:\r\n```powershell\r\n$Result = Get-Content File -ReadCount 3\r\n```\r\nIf you have 9 lines in `File`, then result will be `[[1, 2, 3], [4, 5, 6], [7, 8, 9]]` (array of arrays). But if have only 3 lines, then result will be `[1, 2, 3]`, but not `[[1, 2, 3]]`. What if you always want to have array of arrays, regardless of number of lines in `File`? Simple solution:\r\n```powershell\r\n$Result = @(Get-Content File -ReadCount 3)\r\n```\r\nOther example: suppose you want to filter array of rows (arrays) by some condition, and then find how many are actually satisfy condition.\r\n```powershell\r\n$Array = (1, 2, 3), (4, 5, 6), (7, 8, 9)\r\n$Result = $Array | Where-Object { $_[1]%2 }\r\n$Result.Count # 3\r\n```\r\nThat is how to do it right:\r\n```powershell\r\n$Array = (1, 2, 3), (4, 5, 6), (7, 8, 9)\r\n$Result = @($Array | Where-Object { $_[1]%2 })\r\n$Result.Count # 1\r\n```\r\nThe same apply on any other transformation of array of rows, for example [sorting](https://stackoverflow.com/q/40954626). `@()` make this cases work especially because it wrap single array wrote into pipeline into another single element array, which other methods, like casting to `[Array]`, did not do.\r\n\r\nSo, how does `@(New-Object 'Object[]' 2)` different from `@($Array | Where-Object { $_[1]%2 })` from above? Right answer: them does not different, both write array into pipeline as single object, and it got wrapped by `@()` operator, because it is what that operator do.",
+      "created_at": "2017-07-14T21:38:30Z",
+      "updated_at": "2017-07-14T21:38:30Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "One thing everyone should understand about `@()` is that it always treat its content as statement, not as expression. That means that standard collection unrolling behavior apply, when expression supplied as first (or only) element of pipeline.\r\n```powershell\r\n$a = [int[]](1, 2)\r\n@(\r\n    $a; # write two objects into pipeline\r\n).Count # 2\r\n$AutomationNull = [System.Management.Automation.Internal.AutomationNull]::Value\r\n@(\r\n    $AutomationNull; # write zero objects into pipeline, do not work same way in v2\r\n).Count # 0\r\n@(\r\n    'Scalar'; # write single object into pipeline\r\n).Count # 1\r\nfunction WriteArrayAsSingleObject { ,(1..5) } # nothing special in New-Object, after all\r\n@(\r\n    WriteArrayAsSingleObject; # write single object into pipeline\r\n).Count # 1\r\n@(\r\n    (WriteArrayAsSingleObject); # write five objects into pipeline, do not work same way in v2\r\n).Count # 5\r\n```",
+      "created_at": "2017-07-14T22:04:34Z",
+      "updated_at": "2017-07-14T22:04:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PetSerAl: Thanks for the background info and the helpful examples.\r\n\r\nFirst, let me say that my example is obviously contrived and this issue may rarely, if ever, arise in the real world - of course, if you're explicitly constructing an array / collection, wrapping it in `@()` is pointless.\r\n\r\nIn the following examples I'll use something _other_ than an array for illustration, namely an _empty_ `[System.Collections.ArrayList]` instance.\r\n\r\nIf I understand you correctly, you're saying that:\r\n\r\nThe equivalent of this _cmdlet_-based statement:\r\n\r\n```powershell\r\n# Yields an [object[]] array whose 1 item is the empty array list.\r\n@(New-Object System.Collections.ArrayList)   \r\n```\r\n\r\nis the following _expression_-based statement:\r\n\r\n```powershell\r\n# To get the same result with an expression, the [System.Collections.ArrayList]::new() \r\n# call must be wrapped in an array(!).\r\n@(, [System.Collections.ArrayList]::new())\r\n```\r\n\r\nThis equivalence in itself is puzzling - why wouldn't the equivalent be just `@([System.Collections.ArrayList]::new())`, without the wrapper array?\r\n\r\nIt seems to me that there's **no good _conceptual_ reason for `New-Object` to wrap the instance created in an outer, single-element array** when writing to the pipeline - but, if I understand you correctly, **doing so is a _technical necessity_**, because the collection instance would otherwise invariably be converted to `System.Object[]` on output, correct?\r\n\r\nHere's another example of where the distinction is puzzling, at least to those not intimately familiar with the inner workings of PowerShell, and taking that perspective (as someone who has _some_ understanding of them) was the reason for creating this issue:\r\n\r\n```powershell\r\n# Yields *1*, because the *wrapped* empty array list is sent through the pipeline.\r\nNew-Object System.Collections.ArrayList | Measure-Object | % Count \r\n\r\n# Yields *0*, because the empty array list itself is enumerated:\r\n[System.Collections.ArrayList]::new() | Measure-Object | % Count\r\n```\r\n\r\nThe fact that **`(...)` causes unwrapping of _pipeline_ output** is also far from obvious:\r\n\r\n```powershell\r\n# Now yields *0*, because the (...) forces unwrapping.\r\n(New-Object System.Collections.ArrayList) | Measure-Object | % Count \r\n```\r\n\r\nIncidentally, that makes inspecting the true output generated by `New-Object System.Collections.ArrayList` all but impossible:\r\n\r\n```powershell\r\n# -InputObject must be used to inspect collections (using the pipeline would unwrap),\r\n# but the unavoidable use of (...) unwraps too.\r\nGet-Member -InputObject (New-Object System.Collections.ArrayList)\r\n\r\n# Storing in a variable doesn't help, because the assignment unwraps too.\r\n$al = New-Object System.Collections.ArrayList\r\nGet-Member -InputObject $al\r\n```\r\n\r\n---\r\n\r\nGiven that this seemingly comes down to the fundamentals of pipeline behavior, there's probably nothing that can be done - except perhaps consider including the findings in a collection of yet-to-be-created advanced help topics.\r\n\r\nUnless someone thinks that an actionable change is warranted here, I'll close this issue soon.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-07-16T13:34:08Z",
+      "updated_at": "2017-07-16T13:35:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.:\r\n\r\nRe:\r\n\r\n> Note special case: `@(<array literal>)`. I think that in this case `@()` is eliminated as optimization, but that leads to incorrect, IMHO, result, when `<array literal>` is typed. `@([int[]] (1, 2)).GetType().Name` return `Int32[]` instead of `Object[]`.\r\n\r\nI think what you mean is an _expression_ that creates an array (PowerShell has no array literals, only the `,` operator for array construction, and here a cast (class instantiation) is involved as well).\r\n\r\nI have no real opinion, but why do you think it is incorrect?\r\n\r\nBecause `@()` should _consistently_ create `System.Object[]` arrays?\r\nWhat's the harm in keeping the specific type?\r\n\r\nSomething like the following still works, for instance (and _then_ yields `[System.Object[]]`):\r\n\r\n```powershell\r\n@([int[]] (1, 2)) + 'three' \r\n```\r\n\r\nAs a minor consideration, arrays typed as value types perform better (though (shallow) _cloning_ of the array still happens).\r\n",
+      "created_at": "2017-07-16T13:45:24Z",
+      "updated_at": "2017-07-16T13:45:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PetSerAl:\r\n\r\nI think I finally wrapped my head around what you were saying, including why the type-preserving optimization may be problematic.\r\n\r\nThanks for your help.\r\n\r\nI've updated my [SO answer](https://stackoverflow.com/a/45091504/45375), which hopefully now contains a correct and comprehensive description of how `@()` works.\r\n",
+      "created_at": "2017-07-17T15:30:05Z",
+      "updated_at": "2017-07-17T15:30:05Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": ">The equivalent of this *cmdlet*-based statement:\r\n>```powershell\r\n># Yields an [object[]] array whose 1 item is the empty array list.\r\n>@(New-Object System.Collections.ArrayList)\r\n>```\r\n>is the following *expression*-based statement:\r\n>```powershell\r\n># To get the same result with an expression, the [System.Collections.ArrayList]::new()\r\n># call must be wrapped in an array(!).\r\n>@(, [System.Collections.ArrayList]::new())\r\n>```\r\n>This equivalence in itself is puzzling - why wouldn't the equivalent be just `@([System.Collections.ArrayList]::new())`, without the wrapper array?\r\n\r\nBecause PowerShell only unwrap result of expressions, but not result of commands:\r\n```powershell\r\n{\r\n    New-Object System.Collections.ArrayList\r\n}.Ast.EndBlock.Statements[0].PipelineElements[0].GetType().Name # CommandAst\r\n{\r\n    [System.Collections.ArrayList]::new()\r\n}.Ast.EndBlock.Statements[0].PipelineElements[0].GetType().Name # CommandExpressionAst\r\n```\r\nSo, when you use an expression, then you need something to prevent unwrapping.\r\n>It seems to me that there's **no good conceptual reason for `New-Object` to wrap the instance created in an outer, single-element array** when writing to the pipeline - but, if I understand you correctly, **doing so is a *technical necessity***, because the collection instance would otherwise invariably be converted to `System.Object[]` on output, correct?\r\n\r\nPowerShell do **not** automatically unwrap collections for compiled cmdlets, unless so was explicitly asked. You can see that, if you use `$PSCmdlet.WriteObject` in advanced function, because it is what cmdlets use to write objects into pipeline:\r\n```powershell\r\nfunction Test-WriteObject {\r\n    [CmdletBinding()]param() \r\n    $Result = [System.Collections.ArrayList]::new()\r\n    $PSCmdlet.WriteObject($Result)\r\n}\r\nTest-WriteObject | Measure-Object | % Count\r\n(Test-WriteObject).GetType().Name\r\n```\r\nSo, `New-Object` simply does not ask for unwrapping behavior in the first palace. It does not wrap `ArrayList` into something, because it just not necessary for cmdlets.\r\n>Here's another example of where the distinction is puzzling, at least to those not intimately familiar with the inner workings of PowerShell, and taking that perspective (as someone who has *some* understanding of them) was the reason for creating this issue:\r\n>```powershell\r\n># Yields *1*, because the *wrapped* empty array list is sent through the pipeline.\r\n>New-Object System.Collections.ArrayList | Measure-Object | % Count\r\n>\r\n># Yields *0*, because the empty array list itself is enumerated:\r\n>[System.Collections.ArrayList]::new() | Measure-Object | % Count\r\n>```\r\n\r\nSame distinction: *command* vs. *expression*:\r\n```powershell\r\n{\r\n    New-Object System.Collections.ArrayList | Measure-Object | % Count\r\n}.Ast.EndBlock.Statements[0].PipelineElements[0].GetType().Name\r\n{\r\n    [System.Collections.ArrayList]::new() | Measure-Object | % Count\r\n}.Ast.EndBlock.Statements[0].PipelineElements[0].GetType().Name\r\n```\r\n>The fact that **`(...)` causes unwrapping of *pipeline* output** is also far from obvious:\r\n>```powershell\r\n># Now yields *0*, because the (...) forces unwrapping.\r\n>(New-Object System.Collections.ArrayList) | Measure-Object | % Count\r\n>```\r\nParenthesis `(...)` do not cause unwrapping. Them transform `command` into `expression`:\r\n```powershell\r\n{\r\n    (New-Object System.Collections.ArrayList) | Measure-Object | % Count\r\n}.Ast.EndBlock.Statements[0].PipelineElements[0].GetType().Name\r\n```\r\nAnd because that expression used as first element in pipeline, that cause unwrapping.\r\n>Incidentally, that makes inspecting the true output generated by `New-Object System.Collections.ArrayList` all but impossible:\r\n\r\nIn my opinion *true output* of `New-Object System.Collections.ArrayList` is an `ArrayList` instance, and both your commands show members of it.\r\n>PowerShell has no array literals\r\n```powershell\r\n{ 1, 2, 3 }.Ast.EndBlock.Statements[0].PipelineElements[0].Expression.GetType().Name\r\n```\r\n>I have no real opinion, but why do you think it is incorrect?\r\n>\r\n>Because `@()` should consistently create `System.Object[]` arrays?\r\n\r\nYes, I think it should be always `System.Object[]`. Also:\r\n```powershell\r\n{ @([int[]] (1, 2, 3)) }.Ast.EndBlock.Statements[0].PipelineElements[0].Expression.StaticType\r\n```\r\n>What's the harm in keeping the specific type?\r\n```powershell\r\n@([int[]] (1, 2, 3))[1] = 'Not int'\r\n```",
+      "created_at": "2017-07-17T17:14:55Z",
+      "updated_at": "2017-07-17T17:14:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PetSerAl:\r\n\r\nThat's all very illuminating and I appreciate that you took the time to explain it.\r\n\r\nI have updated the SO answer yet again, and I'd appreciate it if you could take another look so I don't make any incorrect claims there.\r\n\r\n---\r\n\r\nRe array literals:\r\n\r\n```powershell\r\n> { 1, 2, 3 }.Ast.EndBlock.Statements[0].PipelineElements[0].Expression.GetType().Name\r\nArrayLiteralAst\r\n```\r\n\r\nI guess it's just a matter of terminology - there is no disagreement in substance here.\r\n\r\nI based my statement on this quote from [PowerShell in Action, 2nd Edition](https://www.amazon.com/Windows-PowerShell-Action-Second-Payette/dp/1935182137) (emphasis added): \r\n\r\n> Here\u2019s how array literals are defined in PowerShell: They\u2019re not. **There\u2019s no array literal notation in PowerShell**. [\u2026] instead of having array literals, there\u2019s a set of operations that create collections as needed. \r\n\r\nP.S.: The situation changes with a cast:\r\n\r\n```powershell\r\n> { [int[]] (1, 2, 3) }.Ast.EndBlock.Statements[0].PipelineElements[0].Expression.GetType().Name\r\nConvertExpressionAst\r\n```\r\n\r\n",
+      "created_at": "2017-07-17T19:46:23Z",
+      "updated_at": "2017-07-17T19:49:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Great discussions!!!\r\n\r\n@PetSerAl is right, PowerShell unravels collection results from expressions, but not commands.\r\nCommands themselves decide whether the result writen to pipe should be unravelled or not (`Cmdlet.WriteObject(object)` and `Cmdlet.WriteObject(object, enumerateCollection)` for C# and `Write-Output` and `Write-Output -NoEnumerate` for script).\r\n\r\nAs for the quote, here is more context on it:\r\n> Most programming languages have some kind of array literal notation similar to the PowerShell hash literal notation (`@{...}`), where there's a beginning character sequence followed by a list of values, followed by a closing character sequence. Here\u2019s how array literals are defined in PowerShell: They\u2019re not. **There\u2019s no array literal notation in PowerShell**. [\u2026] instead of having array literals, there\u2019s a set of operations that create collections as needed.\r\n\r\nI think the point is that you don't need a notation (beginning char sequence + closing char sequence) to create an array in PowerShell, for example, `1,2,3,4` is defining an array. But PowerShell does have [`ArrayLiteralRule`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/parser/Parser.cs#L5990) in parser and [`ArrayLiteralAst`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/parser/ast.cs#L9278).\r\n\r\n> The situation changes with a cast\r\n\r\nThe `ArrayLiteralAst` is embedded in the `ConvertExpressionAst`:\r\n```powershell\r\n{ [int[]] (1, 2, 3) }.Ast.EndBlock.Statements[0].PipelineElements[0].Expression.Child.Pipeline.PipelineElements[0\r\n].Expression.GetType().Name\r\nArrayLiteralAst\r\n```",
+      "created_at": "2017-07-17T21:26:51Z",
+      "updated_at": "2017-07-17T21:30:15Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @daxian-dbw, that's great to know.\r\n\r\nGiven the potentially problematic behavior of something like `@([int[]] (1, 2))` (the only case where `@()` doesn't output an `[object[]]` array), is it worth creating a new issue for that?\r\n\r\nIt's hard to imagine that anyone would have relied on that behavior, and eliminating it makes for a more predictable environment.",
+      "created_at": "2017-07-17T22:03:50Z",
+      "updated_at": "2017-07-17T22:04:44Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "[Here is the code](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/parser/Compiler.cs#L5503) that handles this special case. In my understanding, this happens only in one of the following two conditions:\r\n\r\n- the expression is a `ConvertExpressionAst` or a ParenExpression that wraps a `ConvertExpressionAst`, and the convert-to type is an array.\r\n- the expression is an `ArrayLiteralAst` or a ParenExpression that wraps an `ArrayLiteralAst`.\r\n\r\nIn the first case, since the conversion is explicitly specified, it's very unlikely the resulting array will again be used as `object[]`. In the second case, the resulting array from `ArrayLiteralAst` is already `object[]` so it doesn't matter. Plus, altering this behavior would be a breaking change. Given the above, I prefer to not make a behavior change. But feel free to notify the PowerShell-Committee if you want a further discussion.",
+      "created_at": "2017-07-18T04:35:24Z",
+      "updated_at": "2017-07-18T04:35:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @daxian-dbw.\r\n\r\nI can't imagine much existing code breaking, but, conversely, I can't imagine many people running into a problem with the current behavior in real-world scenarios, so, personally, I'm happy to leave it at that; perhaps @PetSerAl feels differently.",
+      "created_at": "2017-07-18T11:29:50Z",
+      "updated_at": "2017-07-18T11:29:50Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw, how about this:\r\n```powershell\r\n$a = 1..3\r\n$b = @([object[]]$a)\r\n[object]::ReferenceEquals($a, $b)\r\n$b[1] = 123\r\n$a[1]\r\n```\r\nNow `$b` is not copy of `$a` but is `$a`. Also if current behavior will be kept, is not [`ArrayExpressionAst.StaticType`](https://github.com/PowerShell/PowerShell/blob/master@{2017-07-18}/src/System.Management.Automation/engine/parser/ast.cs#L9493) should be adjusted to match current behavior?",
+      "created_at": "2017-07-18T11:40:08Z",
+      "updated_at": "2017-07-18T11:44:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PetSerAl: \r\n\r\nExcellent points - I now agree that this should be fixed, so I've created #4280.",
+      "created_at": "2017-07-18T14:28:28Z",
+      "updated_at": "2017-07-18T14:28:28Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Now `$b` is not copy of `$a` but is `$a`\r\n\r\nYes, `$b` and `$a` point to the same array in this case. But I don't think the array expression in powershell language is defined to always return a new array object.\r\n\r\n> Is not ArrayExpressionAst.StaticType should be adjusted to match current behavior?\r\n\r\nGood catch. It is inconsistent and should be fixed. But IMHO, the fix should be to change `ArrayExpressionAst.StaticType` to always return `System.Array` (also a breaking change :)). `StaticType` is by definition not accurate, because sometimes the actual type can be known only at runtime, for example, `BinaryExpressionAst.StaticType` returns `System.Object` when it's `-bor`, and the actual type may vary at runtime.",
+      "created_at": "2017-07-18T15:40:14Z",
+      "updated_at": "2017-07-18T15:52:15Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw But where I can see that definition of array expression? Before now I always expect it to return new array object each time. I myself use `$b = @($a)` (without cast although) as array copy operator, and I really do not like if it stop copying array at some point in the future.",
+      "created_at": "2017-07-18T16:01:40Z",
+      "updated_at": "2017-07-18T16:01:40Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "You can find the `Windows PowerShell Langauge Specification Version 3.0` [here](https://www.microsoft.com/en-us/download/details.aspx?id=36389). It hasn't been updated for a while, so new language features like DSC or PowerShell Class are not in it, but I believe the content in the specification should still apply to PowerShell 6.0.",
+      "created_at": "2017-07-18T16:13:09Z",
+      "updated_at": "2017-07-18T16:13:09Z"
+    }
+  ],
+  "created_at": "2017-07-14T19:57:25Z",
+  "number": 4257,
+  "state": "closed",
+  "title": "Surprising behavior of @() (array subexpression operator) with arrays/collections created with New-Object",
+  "updated_at": "2017-08-03T06:12:21Z"
+}

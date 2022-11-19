@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6716",
+  "author": "Tiberriver256",
+  "body": "I am wondering if PowerShell has or will have in the future native support for the Task-based Asynchronous pattern in C#.\r\n\r\nIt would be nice to have some sugar for async and await but also just being able to work with .NET apps that rely heavily on this pattern (such as Kestrel) without having to worry about managing runspaces would be very nice.\r\n\r\nI did find SeeminglyScience has a couple of PowerShell classes for a start on sample implementation as well as some basic functions to support async and await for some ideas on what I'm looking for:\r\nhttps://www.powershellgallery.com/packages/EditorServicesCommandSuite/0.4.0/Content/Classes%5CAsync.ps1",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "The referenced code takes a subset of the PowerShell syntax and turns it into .NET delegates but it is essentially a different language (e.g. no commands) . PowerShell concurrency is fundamentally based on runspaces. I wrote an RFC for a task(ish) based model of concurrency a while back [Native Support for Concurrent Programming in PowerShell](https://github.com/PowerShell/PowerShell-RFC/blob/master/1-Draft/RFC0023-Native-Support-for-Concurrent-Programming-in-PowerShell.md) but it hasn't gone anywhere. As far as `await` goes, I suspect doing the lift-and-split that C# does would be tricky in PowerShell (but I haven't looked at it a whole lot.) Now I do like Golang's model of concurrency with tasks and channels - maybe we should do that :-) \r\n\r\nAnyway, can you provide more specific scenarios/examples of what you'd like to do? Even if we can't do a fully general implementation, I sure there's something useful we can do.",
+      "created_at": "2018-04-24T17:00:36Z",
+      "updated_at": "2018-04-24T17:00:36Z"
+    },
+    {
+      "author": "Tiberriver256",
+      "author_association": "NONE",
+      "body": "Sure thing! So we are in the middle of a rewrite of https://github.com/PowerShell/Polaris to a pure PowerShell implementation and are currently using HttpListener which works fine cross-platform for now but as HttpListener doesn't seem to be getting any development love lately we're looking at the new hotness Kestrel.\r\n\r\nWe are currently working with HttpListener's event based asynchronous support and using @oising's marvelous function New-ScriptBlockCallback to provide an AsyncCallback. I was hoping to find the same thing in Kestrel but it appears that they only support the task based asynchronous pattern which I can't see an easy way to convert to an event based pattern.\r\n\r\nThe sample code that I would love to write and just have work is this sample:  (simplified from this [sample in C#](https://github.com/aspnet/Docs/blob/master/aspnetcore/fundamentals/servers/kestrel/sample2/Startup.cs))\r\n\r\n```ps\r\nImport-Module .\\lib\\Microsoft.AspNetCore.dll\r\nImport-Module .\\lib\\Microsoft.AspNetCore.Diagnostics.dll\r\nImport-Module .\\lib\\Microsoft.AspNetCore.Hosting.dll\r\nImport-Module .\\lib\\Microsoft.AspNetCore.Server.Kestrel.dll\r\n\r\nclass StartUp {\r\n    [void] Configure([IApplicationBuilder]$App){\r\n        [DeveloperExceptionPageExtensions]::UseDeveloperExceptionPage($App)\r\n        [RunExtensions]::Run($App, async $context => {\r\n                param($context)\r\n                return ([Microsoft.AspNetCore.Http.HttpResponseWritingExtensions]::WriteAsync($Context.Response, \"Hello World\", [Threading.CancellationToken]::None))\r\n      })\r\n    }\r\n}\r\n\r\n\r\n#$Env:ASPNETCORE_ENVIRONMENT = \"Development\"\r\n\r\n$WebHostBuilder = $Null\r\n[IWebHostBuilder]$WebHostBuilder = [Microsoft.AspNetCore.WebHost]::CreateDefaultBuilder()\r\n$WebHostBuilder = [WebHostBuilderExtensions]::UseStartup($WebHostBuilder, [StartUp])\r\n$WebHostBuilder = [WebHostBuilderKestrelExtensions]::UseKestrel($WebHostBuilder)\r\n$WebHost = $WebHostBuilder.Build()\r\n\r\n$Result = $WebHost.StartAsync()\r\n```\r\n\r\nThis is my specific use-case at the moment but I think there are quite a few other .Net projects that rely heavily on the task based asynchronous pattern that are currently fairly complex to work with natively in PowerShell.\r\n\r\nThanks for your thoughts!",
+      "created_at": "2018-04-24T22:35:06Z",
+      "updated_at": "2018-04-24T22:36:29Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@Tiberriver256 Thanks!",
+      "created_at": "2018-04-24T23:30:44Z",
+      "updated_at": "2018-04-24T23:30:44Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "So, back when I had more ideas than the focus to complete most of them, I wrote a threads/tasks prototype extension to my old PSEventing library that could handle tasks, apm (iasyncresult) and callbacks. It got annoying as I tried to deal with runspaces, and while I had solutions, it just seemed to unwieldy and inelegant so I just got bored with it. Anyway, you may have some luck if you grok  `System.Threading.Tasks.Task.FromAsync` (APM to Task methods) and the non-public static class `System.Threading.Tasks.TaskToApm` which goes in the other direction: Task to APM.",
+      "created_at": "2018-04-27T16:48:33Z",
+      "updated_at": "2018-04-27T16:48:33Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "Ok, so that works. \r\n\r\n```\r\nfind-module poke | install-module -scope currentuser\r\nipmo poke\r\n$tasksToApm = peek -Name System.Threading.Tasks.TaskToApm\r\n$task = [System.Threading.Tasks.Task]::CompletedTask\r\n$cb = New-ScriptBlockCallback -Callback { write-host \"completed!\" }\r\n$ar = $tasksToApm.Begin($task, $cb, $null)\r\ncompleted!\r\n```\r\n\r\nObviously I'm not suggesting a dependency on my Poke module, but it's just to facilitate the proof of concept here :)",
+      "created_at": "2018-04-27T17:12:24Z",
+      "updated_at": "2018-04-27T17:13:57Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay \r\n\r\n> The referenced code takes a subset of the PowerShell syntax and turns it into .NET delegates but it is essentially a different language (e.g. no commands) .\r\n\r\nI believe you're thinking of [PSLambda](https://github.com/SeeminglyScience/PSLambda) :)\r\n\r\nThe referenced code was an earlier attempt with a similar idea, but it just creates an lambda expression that invokes the script block against a `RunspacePool`.",
+      "created_at": "2018-04-27T20:20:06Z",
+      "updated_at": "2018-04-27T20:20:06Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "I found this tweet today from David Fowl from AspNet Core Team : \r\n \r\nhttps://twitter.com/davidfowl/status/1004237863913906176\r\n> Next, If you ever need to invoke a method on a type via reflection and that method could be async, we have a helper that we use everywhere in the http://ASP.NET  Core code base that is highly optimized and flexible. The ObjectMethodExecutor \r\n\r\nhttps://github.com/aspnet/Extensions/blob/ff87989d893b000aac1bfef0157c92be1f04f714/shared/Microsoft.Extensions.ObjectMethodExecutor.Sources/ObjectMethodExecutor.cs\r\n\r\nDo you think this code could be implemented as keyword \"await\" in PowerShell ?\r\n\r\n\r\n\r\n",
+      "created_at": "2019-04-06T13:03:48Z",
+      "updated_at": "2019-04-06T13:03:48Z"
+    },
+    {
+      "author": "chriskuech",
+      "author_association": "NONE",
+      "body": "Would it be possible to implement `await` as a cmdlet instead of a keyword?  The problem I see with JS's `await` is that it ruins chaining and would have similar impact to PowerShell pipelines.  I think the semantics around `Job`s circumvent this issue--perhaps we can use similar semantics for Tasks.\r\n\r\n```powershell\r\n1..10 | % {Invoke-WebRequest \"https://mysite?i=$_\" -Async} | Wait-Task | % {Invoke-Something $_}\r\n```",
+      "created_at": "2019-07-06T14:43:57Z",
+      "updated_at": "2019-07-06T14:45:39Z"
+    },
+    {
+      "author": "Bartolomeus-649",
+      "author_association": "NONE",
+      "body": "Also, when working with tasks and parallel stuff, a lot of functionality is implemented as extension methods, so easy, straight forward access to extension methods would be great in this context.",
+      "created_at": "2019-07-26T09:19:57Z",
+      "updated_at": "2019-07-26T09:19:57Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "Couldn't a Task continuation be represented by a specialization of a ThreadJob?",
+      "created_at": "2019-09-05T19:47:36Z",
+      "updated_at": "2019-09-05T19:47:36Z"
+    }
+  ],
+  "created_at": "2018-04-24T03:15:38Z",
+  "number": 6716,
+  "state": "open",
+  "title": "Task-based Asynchronous Pattern",
+  "updated_at": "2019-11-15T17:39:56Z"
+}

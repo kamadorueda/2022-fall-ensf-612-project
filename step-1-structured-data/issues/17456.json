@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17456",
+  "author": "michaeltlombardi",
+  "body": "### Summary of the new feature / enhancement\r\n\r\n> As a PowerShell script and module developer, I want to be able to use syntactic sugar for defining a switch statement that operates on an input variable based on that variable's object type, so that I can reduce the amount of boilerplate code used for this purpose.\r\n\r\nI find myself needing to switch on object types primarily under two conditions: when I'm munging unreliable data and processing collections of non-alike objects (especially tokens from parsing some sort of AST).\r\n\r\nRight now, there's really only two effective ways (that _I_ know of) to get this behavior:\r\n\r\n1. Pass the object to act on to `switch` and then use a conditional check for each type you want to handle, specifying `$_ -is <type-to-handle>`. \r\n2. Call the **GetType** method in the input expression, place the types in parentheses as the values, and then reference the input variable (**not** `$_` or `$PSItem`) in the scriptblock.\r\n\r\n### Conditional Validation\r\n\r\nFor this construction of the switch statement, you pass the object directly to `switch` and then use conditionals for each handled type, checking if `$_` is that type or not. You can then reference the current value by `$_`. This works for scalars and collections alike.\r\n\r\n```powershell\r\nfunction Get-SwitchedOutput {\r\n  param($InputObject)\r\n  \r\n  switch ($InputObject) {\r\n    ($_ -is [string])    { \"I am a string! My value is: '$_'\" }\r\n    ($_ -is [hashtable]) { \"I am a hash table! My value is: '$($_.Message)'\" }\r\n    default              { \"I am a $($_.GetType())! I'm not currently handled. :(\" }\r\n  }\r\n}\r\n\r\n$ExampleInput = @{\r\n  String  = 'Hello, friendo!'\r\n  Hash    = @{ ID = 'Greeting' ; Message = 'ohai!' }\r\n  Boolean = $true\r\n}\r\n\r\nGet-SwitchedOutput -InputObject $ExampleInput.String\r\nGet-SwitchedOutput -InputObject $ExampleInput.Hash\r\nGet-SwitchedOutput -InputObject $ExampleInput.Boolean\r\n\r\nGet-SwitchedOutput -InputObject $ExampleInput.Values\r\n```\r\n\r\n```output\r\nI am a string! My value is: 'Hello, friendo!'\r\n\r\nI am a hash table! My value is: 'ohai!'\r\n\r\nI am a bool! I'm not currently handled. :(\r\n\r\nI am a string! My value is: 'Hello, friendo!'\r\nI am a hash table! My value is: 'ohai!'\r\nI am a bool! I'm not currently handled. :(\r\n```\r\n\r\nFor short or infrequent use, this is _okay_, but it means repeating conditional statements over and over; it can be a little messy.\r\n\r\n### GetType Comparison\r\n\r\nThis option calls the **GetType()** method in the test expression itself, then has each type (wrapped in parentheses) as the conditional. In the action scriptblock for each matching type the actual object must be referenced; you can't use `$_` or `$PSItem` because that value is now a **RuntimeType** object. This prevents the switch from working on collections as input; the switch needs to be called in a `ForEach-Object` scriptblock or other looping construct that iterates over the items in the collection.\r\n\r\n```powershell\r\nfunction Get-SwitchedOutput {\r\n  param($InputObject)\r\n  \r\n  switch ($InputObject.GetType()) {\r\n    ([string])    { \"I am a string! My value is: '$InputObject'\" }\r\n    ([hashtable]) { \"I am a hash table! My value is: '$($InputObject.Message)'\" }\r\n    default       { \"I am a $_! I'm not currently handled. :(\" }\r\n  }\r\n}\r\n\r\n$ExampleInput = @{\r\n  String  = 'Hello, friendo!'\r\n  Hash    = @{ ID = 'Greeting' ; Message = 'ohai!' }\r\n  Boolean = $true\r\n}\r\n\r\nGet-SwitchedOutput -InputObject $ExampleInput.String\r\nGet-SwitchedOutput -InputObject $ExampleInput.Hash\r\nGet-SwitchedOutput -InputObject $ExampleInput.Boolean\r\n\r\nGet-SwitchedOutput -InputObject $ExampleInput.Values\r\n```\r\n\r\n```output\r\nI am a string! My value is: 'Hello, friendo!'\r\n\r\nI am a hash table! My value is: 'ohai!'\r\n\r\nI am a bool! I'm not currently handled. :(\r\n\r\nI am a System.Collections.Hashtable+ValueCollection, System.Private.CoreLib, Version=6.0.0.0, Culture=neutral, PublicKeyToken=7cec85d7bea7798e! I'm not currently handled. :(\r\n```\r\n\r\nThis construction is more readable as long as you don't need to operate on collections; but if you do, it immediately becomes more complex. It also requires a referencing the value from the original variable instead of `$_` or `$PSItem`, which can be confusing (and possibly a little fraught).\r\n\r\n### Proposed technical implementation details (optional)\r\n\r\nIn my experience, I read many more lines of code (especially if we include re-reads of the same line) than I write and I _suspect_ this is true for everyone. For cases where this behavior is needed, it would be preferable to rely on some syntactic sugar to make the code more readable.\r\n\r\nIdeally, an implementation would allow this:\r\n\r\n```powershell\r\nswitch -type ($InputObject) {\r\n    [string]    { \"I am a string! My value is: '$_'\" }\r\n    [hashtable] { \"I am a hash table! My value is: '$($_.Message)'\" }\r\n    default     { \"I am a $($_.GetType())! I'm not currently handled. :(\" }\r\n}\r\n```\r\n\r\nAn implementation allowing that example block would, in my opinion, be clear, backwards compatible (because it relies on a new parameter for `switch`, not modifying existing behavior), and much more readable/maintainable.\r\n\r\nSimilar constructs exist in other languages, such as golang and ruby:\r\n\r\n### Go\r\n\r\nIn Go, you can use a type assertion in a switch statement. This is roughly similar to the **GetType** option above. `item` in this code is the `inputObject` with the listed type asserted (so you can access properties and methods of that object, since go is strongly typed and the compiler gets angry if you make it guess).\r\n\r\n```golang\r\nswitch item := inputObject.(type) {\r\ncase string:\r\n\tfmt.Printf(\"I am a string! My value is: '%s'\\n\", item)\r\ncase map[string]string:\r\n\tfmt.Printf(\"I am a hashtable! My value is: '%s'\\n\", item[\"Message\"])\r\ndefault:\r\n\tfmt.Printf(\"I am a %T! I'm not currently handled. :(\\n\", item)\r\n}\r\n```\r\n\r\n### Ruby\r\n\r\nIn Ruby, you can have your case statement act on the type of the object without any special handling. This is the most similar to this feature request (though Ruby's implementation doesn't handle unwrapping collections for you, you'd need to put this in a recursive function - so in _practice_ it's somewhere between the desired implementation and the existing one).\r\n\r\n```ruby\r\ncase inputObject\r\nwhen String\r\n  \"I am a string! My value is: '#{inputObject}'\"\r\nwhen Hash\r\n  \"I am a hash table! My value is: '#{inputObject[:Message]}'\"\r\nelse\r\n  \"I am a #{inputObject.class}! I'm not currently handled. :(\"\r\nend\r\n```\r\n\r\n## Summary\r\n\r\nWhile this feature request is for syntactic sugar, I think it would be a worthwhile improvement for readability and maintainability of code bases that have to handle unreliable data types or collections of mixed data types.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "stevenjudd",
+      "author_association": "NONE",
+      "body": "I know a few people that would be glad to see this addition. ",
+      "created_at": "2022-05-30T03:20:29Z",
+      "updated_at": "2022-05-30T03:20:29Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "This is a good idea. Details which need bottoming out include: \r\n\r\n- Should it work like -is  so `[valuetype]` works for `[int` ? Or just check types are equal \r\n- Should the `Typename` as a string be converted to the type  ? It may need fewer parser changes if the type does not use []\r\n- Should it look at psTypeNames so something which is masquerading as a Widget is treated as [widget]. (I think this may be needed for deserialized objects, and quite a few \"types\" I work with aren't real types but are are PSCustomObject with PSTypeNames set to get formatting). \r\n\r\n\r\n",
+      "created_at": "2022-05-30T12:52:03Z",
+      "updated_at": "2022-05-30T12:52:03Z"
+    },
+    {
+      "author": "michaeltlombardi",
+      "author_association": "CONTRIBUTOR",
+      "body": "With the caveat that these are **not** _strong_ opinions and **are** _loosely_ held:\r\n\r\n- Probably it should work like `-is [foo]` since that's the closes replacement behavior and what I think users will naively expect\r\n- Casting 'Foo' via `[type]` seems okay to me for the conditional entries ahead of the scriptblocks, e.g. these blocks would have the same behavior as far as the user can tell:\r\n  \r\n  ```powershell\r\n  # -type with string\r\n  switch -type ($InputObject) {\r\n    'Int' { \"Integer! $_\" }\r\n  }\r\n  # -type with casting\r\n  switch -type ($InputObject) {\r\n    [type]'Int' { \"Integer! $_\" }\r\n  }\r\n  # -type with type\r\n  switch -type ($InputObject) {\r\n    [int] { \"Integer! $_\" }\r\n  }\r\n  # is with string cast to type\r\n  switch ($InputObject) {\r\n    { $_ -is [type]'Int' } { \"Integer! $_\" }\r\n  }\r\n  # is with type\r\n  switch ($InputObject) {\r\n    { $_ -is [int] } { \"Integer! $_\" }\r\n  }\r\n  ```\r\n- I'm not familiar with this use case but that _seems_ sensible to me.",
+      "created_at": "2022-05-30T16:46:56Z",
+      "updated_at": "2022-05-30T16:46:56Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Another option would be something like this:\r\n\r\n```powershell\r\nswitch ($obj) {\r\n    -is [string] { }\r\n    -is [int] { }\r\n    'but this also works' { }\r\n    default { }\r\n}\r\n```\r\n\r\nThis is a parse error today, so it would not be a breaking change to add this syntax.",
+      "created_at": "2022-05-31T14:36:33Z",
+      "updated_at": "2022-05-31T14:36:33Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience  you know these details better than I do , but I assumed the present \r\n```\r\nswitch ($obj) {\r\n    <String or number literal>  { }\r\n    {Anything else}  { }\r\n}\r\n ```\r\nWas carved in stone. Pretty much all the flow control statements are `name (thing to evaluate) {thing(s) to do}` and switch is odd because it also has -regex and -wildcard, and what is in `{thing(s) to do}` is a bit more involved so it may already have its own special exceptions. \r\n\r\nIf it is practical for the parser to handle `-is [type]`   would `-gt 100`  or `-in @( 'a', 'b')` etc. be just as do-able.  (i.e. any  `{$_  -op   <operand>}`   can  be simply `-op <operand>`)  ? Because I'm sure they would be welcome too.\r\n",
+      "created_at": "2022-05-31T16:36:11Z",
+      "updated_at": "2022-05-31T16:36:11Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Nothing is carved in stone, anything can be changed but is judged on a scale of impact vs effort. Note though, I'm not weighing in on how I think the scales balance here. Language changes in general have a very high bar of impact to hit because they are very expensive to implement and to maintain.\r\n\r\nBut if the language were just for me, I'd add the syntax I suggested without a doubt.",
+      "created_at": "2022-05-31T17:08:22Z",
+      "updated_at": "2022-05-31T20:59:50Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "> If it is practical for the parser to handle `-is [type]` would `-gt 100` or `-in @( 'a', 'b')` etc. be just as do-able. (i.e. any `{$_ -op <operand>}` can be simply `-op <operand>`) ? Because I'm sure they would be welcome too.\r\n\r\nInteresting, I like the idea of that.",
+      "created_at": "2022-07-08T23:51:26Z",
+      "updated_at": "2022-07-08T23:51:26Z"
+    }
+  ],
+  "created_at": "2022-05-29T21:37:33Z",
+  "number": 17456,
+  "state": "open",
+  "title": "Extend `switch` keyword to operate on the **Type** of the variable",
+  "updated_at": "2022-07-08T23:51:27Z"
+}

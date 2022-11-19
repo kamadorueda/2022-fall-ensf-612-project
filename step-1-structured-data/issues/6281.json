@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6281",
+  "author": "adityapatwardhan",
+  "body": "`psrp` nuget package has `libpsrpclient.so` which depends on `libmi.so`. \r\n\r\nWhen an netcore app adds reference to `psrp` nuget package in its csproj and executes `dotnet publish`, both the nuget packages are downloaded to nuget cache. \r\n\r\n`libpsrp.so` expects the `libmi.so` to be present in the same folder, but `libmi.so` is located in the nuget cache under it's package folder.\r\n\r\nExample:\r\n\r\nLocation of `psrp` in nuget cache.\r\n`/home/user/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native/libpsrpclient.so`\r\n\r\nLocation of `libmi` in nuget cache.\r\n`/home/user/.nuget/packages/libmi/1.4.101000/runtimes/linux-x64/native/libmi.so`\r\n\r\n`psrp` expects `libmi.so` to be at `/home/user/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native/`\r\n\r\nThanks @ianByrne for finding the issue.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nSample located at:  https://github.com/PowerShell/PowerShell/issues/3417#issuecomment-369206764\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nApplication runs as expected.\r\n```\r\n\r\nActual behavior\r\n---------------\r\nError:\r\n>This parameter set requires WSMan, and no supported WSMan client library was found. WSMan is either not installed or unavailable for this system.: Unable to load DLL 'libpsrpclient': The specified module or one of its dependencies could not be found\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.1\r\nPSEdition                      Core\r\nGitCommitId                    v6.0.1\r\nOS                             Linux 4.4.0-112-generic #135 Ubuntu \r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2018-04-20T23:31:49Z",
+  "comments": [
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "For those hitting this issue, such as PowerShell hosts, the work around is to build targetting a specific platform. This will place the binaries from the psrp and mi packages directly in the output directory with the app itself.  ",
+      "created_at": "2018-03-01T20:06:31Z",
+      "updated_at": "2018-03-01T20:06:31Z"
+    },
+    {
+      "author": "ianByrne",
+      "author_association": "NONE",
+      "body": "Hi @dantraMSFT - I am targeting linux-x64 in both my publish command, and my csproj file:\r\n`dotnet publish -c Release --runtime linux-x64`\r\n\r\n```xml\r\n<Project Sdk=\"Microsoft.NET.Sdk\">\r\n\r\n  <PropertyGroup>\r\n    <TargetFramework>netcoreapp2.0</TargetFramework>\r\n    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>\r\n  </PropertyGroup>\r\n\r\n  <ItemGroup>\r\n    <PackageReference Include=\"Microsoft.PowerShell.SDK\" Version=\"6.0.1.1\" /> \r\n    <PackageReference Include=\"Microsoft.PowerShell.Commands.Diagnostics\" Version=\"6.0.1.1\" />\r\n    <PackageReference Include=\"Microsoft.WSMan.Management\" Version=\"6.0.1.1\" />\r\n    <PackageReference Include=\"psrp\" Version=\"1.4.1\" />\r\n  </ItemGroup>\r\n\r\n</Project>\r\n```\r\n\r\nThe files do indeed get placed into the same output directory as the app itself, however when the app is run I still receive the above error.",
+      "created_at": "2018-03-01T23:51:21Z",
+      "updated_at": "2018-03-03T14:15:08Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "@ianByrne: I'm still working on a viable solution to this.  \r\nFor now...\r\nI suspect psrp is getting loaded from the nuget cache.  You can confirm this by manually copying libmi.so to the location of psrp in the nuget cache.  Let me know if that solves the problem.\r\n\r\n",
+      "created_at": "2018-03-02T00:29:44Z",
+      "updated_at": "2018-03-02T00:29:44Z"
+    },
+    {
+      "author": "ianByrne",
+      "author_association": "NONE",
+      "body": "Thanks for the tip @dantraMSFT , however I haven't had any luck.\r\n\r\nI am testing this using a docker image (built on a Linux machine):\r\n\r\n```Dockerfile\r\nFROM microsoft/dotnet:2.0-sdk\r\n\r\nWORKDIR /app\r\nRUN mkdir /app/src\r\nCOPY . ./src\r\nRUN dotnet publish ./src/testapp/testapp.csproj -c Release -o /app/ --runtime linux-x64\r\n\r\nRUN cp ./libmi.so /root/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native/libmi.so\r\nWORKDIR /root/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native\r\nRUN ls\r\n\r\nWORKDIR /app\r\nENTRYPOINT [\"dotnet\", \"testapp.dll\"]\r\n```\r\n\r\nThe build output reveals that the two files are indeed in the `/root/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native` dir\r\n\r\n> 2018-03-03T13:37:06.4932950Z Step 8/10 : RUN ls\r\n> 2018-03-03T13:37:06.6504763Z  ---> Running in b8261c8465bf\r\n> 2018-03-03T13:37:06.9260673Z **libmi.so**\r\n> 2018-03-03T13:37:06.9273397Z **libpsrpclient.so**\r\n> 2018-03-03T13:37:07.3225190Z  ---> 2cc54749e797\r\n> 2018-03-03T13:37:07.3419046Z Removing intermediate container b8261c8465bf\r\n\r\nHowever, on running the app, same error.",
+      "created_at": "2018-03-03T14:14:48Z",
+      "updated_at": "2018-03-03T14:14:48Z"
+    },
+    {
+      "author": "ianByrne",
+      "author_association": "NONE",
+      "body": "@dantraMSFT do you have any other suggestions for a workaround, or an ETA of when it may get resolved? Thanks",
+      "created_at": "2018-03-07T16:53:20Z",
+      "updated_at": "2018-03-07T16:53:20Z"
+    },
+    {
+      "author": "Qowy",
+      "author_association": "NONE",
+      "body": "How is this even supposed to work?\r\nIf I am on a Windows Machine and deploy the project (no matter if framework dependent or independent) libpsrpclient.so and libmi.so are never published. They sit in my .nuget folder, but what good is that if I publish to another Machine without SDK?\r\n\r\nAnd what kind of nuget package is psrp anyway? Since when are we using packages that are only applicable to certain OS? Why isn't it just part of the Microsoft.WSMan.Management? Native libraries for certain OS is done all the time isn't it?\r\n\r\nRunning the project on a Linux Machine with the SDK also does not work. The files are present in my .nuget folder but I still get `Exception: Unable to load DLL 'libpsrpclient': The specified module or one of its dependencies could not be found.` (using dotnet run)",
+      "created_at": "2018-03-08T15:19:58Z",
+      "updated_at": "2018-03-08T15:29:56Z"
+    },
+    {
+      "author": "Qowy",
+      "author_association": "NONE",
+      "body": "By the way:\r\n\r\nCopying\r\n`/home/user/.nuget/packages/libmi/1.4.101000/runtimes/linux-x64/native/libmi.so`\r\nto\r\n`/home/user/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native/`\r\nis currently a workaround. \r\n\r\nHowever this requires the the app to be run from the SDK\r\n\r\nLooking at your Dockerfile, you are both exporting the app to run without a dotnet Runtime by specifying --runtime and starting it from the SDK anyway.\r\nMaybe try one or the other. ",
+      "created_at": "2018-03-15T14:50:34Z",
+      "updated_at": "2018-03-15T14:50:51Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'll be releasing a nuget package by EOW that solves the problem on Linux by incorporating libmi into the psrp package.  Building with and without --runtime or --output works as expected.\r\n\r\nOn macOs, the results are more limited.  Currently, it will only work when building for a specific runtime.\r\n\r\nFYI: the reason we're hitting this problem is due to RPATH usage in psrp and mi.  Both are configured to work with PowerShell Core which builds to a specific runtime and third party binaries are restored to the bin directory at build time.\r\n\r\nI'll post again when I've published the packages.",
+      "created_at": "2018-04-20T19:11:58Z",
+      "updated_at": "2018-04-20T19:11:58Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "Release 1.4.2-2 (https://github.com/PowerShell/psl-omi-provider/releases/tag/v1.4.2-2) has been published.",
+      "created_at": "2018-04-20T23:31:49Z",
+      "updated_at": "2018-04-20T23:31:49Z"
+    },
+    {
+      "author": "ianByrne",
+      "author_association": "NONE",
+      "body": "Thanks @dantraMSFT and @adityapatwardhan - I can see that the psrp package was updated on the 20th, although I still seem to be struggling with this... Can you see where I'm going wrong?\r\n\r\n**NuGet.conf**\r\n```xml\r\n<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<configuration>\r\n  <packageSources>\r\n    <add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" /> \r\n    <add key=\"dotnet-core\" value=\"https://dotnet.myget.org/F/dotnet-core/api/v3/index.json\" />\r\n    <add key=\"powershell-core\" value=\"https://powershell.myget.org/F/powershell-core/api/v3/index.json\" />\r\n  </packageSources>\r\n</configuration>\r\n```\r\n\r\n**PSTest.csproj**\r\n```xml\r\n<Project Sdk=\"Microsoft.NET.Sdk\">\r\n\r\n  <PropertyGroup>\r\n    <OutputType>Exe</OutputType>\r\n    <TargetFramework>netcoreapp2.0</TargetFramework>\r\n    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>\r\n  </PropertyGroup>\r\n\r\n  <ItemGroup>\r\n    <PackageReference Include=\"Microsoft.PowerShell.Commands.Diagnostics\" Version=\"6.0.2\" />\r\n    <PackageReference Include=\"Microsoft.PowerShell.SDK\" Version=\"6.0.2\" />\r\n    <PackageReference Include=\"Microsoft.WSMan.Management\" Version=\"6.0.2\" />\r\n    <PackageReference Include=\"psrp\" Version=\"1.4.2\" />\r\n  </ItemGroup>\r\n\r\n</Project>\r\n```\r\n\r\n**Dockerfile**\r\n```Dockerfile\r\nFROM microsoft/dotnet:2.0-sdk\r\n\r\nWORKDIR /app\r\nRUN mkdir /app/src\r\nCOPY . ./src\r\nRUN dotnet publish ./src/PSTest.csproj -c Release -o /app/ --runtime linux-x64\r\n# Have also tried without --runtime linux-x64\r\n\r\n# Have also tried copying the file directly:\r\n# RUN mkdir -p /root/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native\r\n# RUN cp ./libmi.so /root/.nuget/packages/psrp/1.4.1/runtimes/linux-x64/native/libmi.so\r\n\r\nWORKDIR /app\r\n\r\nENTRYPOINT [\"dotnet\", \"PSTest.dll\"]\r\n```\r\n\r\n**Program.cs**\r\n```csharp\r\nusing System;\r\nusing System.Management.Automation;\r\nusing System.Management.Automation.Runspaces;\r\n\r\nnamespace PSTest\r\n{\r\n    class Program\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            Console.WriteLine(\"Creating PowerShell\");\r\n            PowerShell powerShell = PowerShell.Create();\r\n\r\n            Console.WriteLine(\"Creating runspace\");\r\n            powerShell.Runspace = RunspaceFactory.CreateRunspace(new WSManConnectionInfo()); // Throws exception\r\n\r\n            Console.WriteLine(\"We didn't make it this far\");\r\n        }\r\n    }\r\n}\r\n```\r\n\r\n**Output**\r\n\r\n> Creating PowerShell\r\nCreating runspace\r\nUnhandled Exception: System.Management.Automation.Remoting.PSRemotingTransportException: This parameter set requires WSMan, and no supported WSMan client library was found. WSMan is either not installed or unavailable for this system. ---> System.DllNotFoundException: Unable to load DLL 'libpsrpclient': The specified module or one of its dependencies could not be found.\r\n\r\nThe Docker image is being built on a VSTS Hosted Linux Preview agent, and is being run on an AWS Fargate ECS cluster.",
+      "created_at": "2018-04-22T13:56:14Z",
+      "updated_at": "2018-04-22T13:56:14Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "The manual workaround of copying libmi to a 1.4.1 directory is not likely to solve the problem.\r\n\r\nFrom your build steps, you should expect to see the update libpsrpclient.so and libmi.so binaries in the --output directory (-o app) and running your app from that directory should work.  \r\nI'm speculating that the binaries are not, in fact, being pulled down and suggest you explictly delete the psrp and mi directories from the nuget cache.  Your build steps should then indicate that 1.4.2 was pulled down as part of the build.",
+      "created_at": "2018-04-23T17:14:31Z",
+      "updated_at": "2018-04-23T17:14:31Z"
+    },
+    {
+      "author": "ianByrne",
+      "author_association": "NONE",
+      "body": "> The manual workaround of copying libmi to a 1.4.1 directory is not likely to solve the problem.\r\n\r\nGood point \ud83d\ude01 I forgot to update that when I changed to 1.4.2...\r\n\r\nI'll add some steps to peek into the /app/ dir to ensure that the files are indeed there, and will also try to explicitly delete from the nuget cache. Might not get around to this for another couple days so will report back then.",
+      "created_at": "2018-04-23T17:25:28Z",
+      "updated_at": "2018-04-23T17:25:28Z"
+    }
+  ],
+  "created_at": "2018-03-01T02:13:36Z",
+  "number": 6281,
+  "state": "closed",
+  "title": "psrp is unable to load libmi from nuget cache",
+  "updated_at": "2018-04-23T17:25:28Z"
+}

@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3911",
+  "author": "mklement0",
+  "body": "<sup>This is a follow-up to #3866.</sup>\r\n\r\nNote: Even if the conclusion will be that `Get-Content`'s behavior mustn't change for the sake of backward compatibility, the underlying scalar-vs.-collection design question is worth getting clarity on, for future reference.\r\n\r\nThe reasoning for expecting `Get-Content -Raw` to _always_ return a _string scalar_ is:\r\n\r\n* `-Raw` explicitly asks for the file contents to be returned as a _single string_.\r\n\r\n* By contrast, without `-Raw` - irrespective of the `-Encoding` requested (including `-Byte`) - `Get-Content` inherently returns a _collection_ of items (even though PowerShell unwraps a _single-item collection_ to a scalar _for convenience_):\r\n   * an array of _lines_ - by default and with any `-Encoding` value other than `Byte`\r\n   * an array of _bytes_ with `-Encoding Byte`\r\n\r\nTherefore, with an _empty_ (zero-byte) file:\r\n\r\n  * `-Raw` should return the _empty string_ (`''`)\r\n  * Not using `-Raw` should return a _null collection_ (\"nothing\", which is technically the `[System.Management.Automation.Internal.AutomationNull]::Value` singleton).\r\n\r\n**Note**: The **competing viewpoint** from the linked issue is to conceive of a zero-byte file that is read with neither `-Raw` nor `-Encoding Byte` as a special case of a _one-line_ file and therefore return the _empty string_ in that case, rather than a null collection.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n# Create empty (zero-byte) file.\r\nNew-Item -Type File zero.txt\r\n\r\n# Read it as a collection of lines, and count the line.\r\nGet-Content zero.txt | Measure-Object | % Count\r\n\r\n# Read it as a single string, and count that string (i.e., test if there actually IS a string).\r\nGet-Content -Raw zero.txt | Measure-Object | % Count\r\n\r\n# Explicitly compare the single string read to ''\r\n'' -eq (Get-Content -Raw zero.txt)\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```powershell\r\n0    # Get-Content zero.txt returns a null collection\r\n1    # Get-Content -Raw zero.txt *should* return string scalar ''\r\nTrue  # Get-Content -Raw zero.txt *should return ''\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```powershell\r\n0      # OK: Get-Content zero.txt returns a null collection\r\n0      # !! Get-Content -Raw zero.txt also returns a null collection\r\nFalse  # !! Get-Content -Raw zero.txt does NOT return ''\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta (v6.0.0-beta.1)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "By pulling this out into its own issue, you have discarded the idea that ```Get-Content``` without ```-Raw``` and without using ```-Encoding Byte``` should return an empty string if the file does not contain any characters. There are good arguments indicating that having ```Get-Content``` behave differently for empty files than it does for files with one line and differently than it does for files with more than one line is just confusing. That idea should not be discarded just because you don't agree with it. It should be included in this issue as a point of discussion, awaiting input from the PowerShell Team to determine what can/will be done, if anything, with this issue.",
+      "created_at": "2017-06-02T00:32:30Z",
+      "updated_at": "2017-06-02T00:32:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KirkMunro \r\n\r\nWhile I created this issue from the perspective of what makes sense to _me_:\r\n\r\n* I linked to the originating issue,\r\n\r\n* and let everyone know there that I had done so.\r\n\r\n> That idea should not be discarded\r\n\r\nWith your response it was just reintroduced, and that was precisely the point of creating this issue:  _so we can have a focused discussion here_.\r\n\r\nLet the conversation continue -  feel free to copy previously made points by you or @rkeithhill to this thread.\r\n",
+      "created_at": "2017-06-02T01:30:45Z",
+      "updated_at": "2017-06-02T01:30:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KirkMunro: I've added a paragraph to the initial post to represent your viewpoint. I hope it sums it up reasonably well. If you agree, let's just continue the conversation here.",
+      "created_at": "2017-06-02T01:41:25Z",
+      "updated_at": "2017-06-02T01:41:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> having Get-Content behave differently for empty files than it does for files with one line and differently than it does for files with more than one line is just confusing.\r\n\r\n* The one-item collection case (one-line case here) is not specific to `Get-Content` at all: it is at the heart of PowerShell, as has been mentioned: a one-item collection is _automatically_ unwrapped, _by PowerShell itself_, irrespective of what command produces it:\r\n\r\n   * This behavior is very convenient on the one hand, but, prior to v3, was a constant source of confusion and bugs: Because people thought that a cmdlet returned a _collection_, they didn't anticipate _not_ getting one if the cmdlet _happened to_ return just a _one-item_ collection that was automatically unwrapped.\r\n\r\n  * v3 ingeniously resolved this to retain the best of both worlds: even a scalar can now be treated like a collection, which means that you can consistently use `.Count` to count the number of items returned  and `[0]` to get the 1st item - whether there's only one or not. In other words: _we no longer need to worry about the special-casing of one-item results, and can live happily ever after in the collection mindset._\r\n     * On a side note: `foreach ($v in $null) { 'here' }` _not_ causing the loop to be entered strikes me as an inconsistency: a _scalar_ `$null` - as opposed to a _null collection_  - should be treated as an object to iterate over, just as happens with `$null | % { 'here' }`\r\n\r\nSo, now that cmdlets (with the appropriate options) that return _collections in principle_ can _consistently be treated as collections_ in the one- and multi-item cases, why should the _no_-item case be any different?\r\n\r\nAlso note that with your proposal a file made up of _just a newline_ would be treated the same as a zero-byte file.\r\nWith the collection approach, you'd get a null collection in the zero-byte file case, and an empty string in the just-a-newline case.\r\n\r\n\r\n\r\n",
+      "created_at": "2017-06-02T02:01:55Z",
+      "updated_at": "2017-06-02T02:01:55Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Here's a screenshot of a table showing a comparison of Get-Content calls with and without -Raw, and with and without -Encoding Byte, run against ASCII and UTF-8 files that are either empty, contain only LF, contain a single-line of text with no LF, contain a single-line of text with LF, contain multiple lines of text with no trailing LF, and contain multiple lines of text with a trailing LF.\r\n\r\n![image](https://cloud.githubusercontent.com/assets/3515485/26735600/f5c31054-4798-11e7-985e-844aead3dc0a.png)\r\n\r\nWhat this shows is the following:\r\n\r\n1. As Get-Content stands today, looking only at the output, you can accurately identify exactly what the file the output came from contains as long as you are using either -Raw or -Encoding Byte. If you are not using -Raw or -Encoding Byte, you can still identify what the file the output came from contains, with the exception of knowing what type of newlines were used and with the exception of knowing whether or not there was a trailing newline (unless the file contained nothing other than a newline, in which case you can tell the file contained exactly that).\r\n1. If Get-Content were changed to return an empty string from an empty file when -Raw is used and when -Encoding is not Byte, you would still be able to make the same determination.\r\n1. If Get-Content were changed to return an empty string from an empty file when -Raw is not used and when -Encoding is not Byte, you would not be able to determine from the content if the original file ended with a newline or not, _but that doesn't matter much_ because with the exception of files that don't contain any content or files that contain only a newline, you already cannot identify whether or not a file ended with a newline by looking at the content when you invoke Get-Content this way.\r\n\r\nAll that said, I see arguments for both sides when it comes to not using -Raw, but I still suspect this falls under the \"breaking change without enough tangible benefit or reason, therefore rejected\" category.",
+      "created_at": "2017-06-02T16:42:24Z",
+      "updated_at": "2017-06-02T16:46:20Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Cc @PowerShell/area-language ",
+      "created_at": "2017-06-03T23:24:58Z",
+      "updated_at": "2017-06-03T23:24:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KirkMunro  Thank you for your thorough analysis.\r\n\r\n> I still suspect this falls under the \"breaking change without enough tangible benefit or reason, therefore rejected\" category.\r\n\r\nThat may well be the outcome, but I want us to have clarity on what the right solution _would_ be if we didn't have to worry about backward compatibility, so we can apply that pattern in the future:\r\n\r\n  * Any call that is designed to return a _collection_ (array) of items _in principle_ should return a _null collection_ (`[System.Management.Automation.Internal.AutomationNull]::Value`) when _no_ items are being returned.\r\n\r\n    * In the case at hand, this applies to `Get-Content` _without `-Raw`, irrespective of what `-Encoding` value if any, and including `Byte`, is used.\r\n\r\n  * Conversely, any call that by design returns a _scalar_ should, if there's nothing to output, return the _empty_ version of that scalar (`''` in the case of `[string]`), as appropriate, falling back to (scalar) `$null`.\r\n\r\n    * In the case at hand, this applies to `Get-Content -Raw`, which, incidentally, you _shouldn't be able to to combine with `-Encoding Byte`_, going by the current docs: #3932\r\n\r\n> I see arguments for both sides when it comes to not using -Raw\r\n\r\nI see one _historical_ argument for returning `''` when not using `-Raw`: The historical ambiguity with respect to whether a newline is a _separator_ or a _terminator_, and the fact that a trailing newline is in practice considered an _optional terminator_.\r\n\r\nTherefore, you could argue that an empty file (`''`, when interpreted as a string) and a file containing just `<newline>` are _both_ a _collection of one, empty line_, which PowerShell then unwraps to the empty-string _scalar_.\r\n\r\nMy personal preference is to _not_ perpetuate this historical ambiguity with respect to a truly empty file, in favor of _overall consistency_, but I do realize that with _non-empty_ files (ones with actual content, aside from a Unicode signature (\"BOM\")), it must be preserved.\r\n\r\n\r\n\r\n",
+      "created_at": "2017-06-04T23:56:41Z",
+      "updated_at": "2017-06-26T14:05:47Z"
+    }
+  ],
+  "created_at": "2017-06-01T22:54:31Z",
+  "number": 3911,
+  "state": "open",
+  "title": "Get-Content -Raw should always return a string, and should therefore return the empty string for zero-byte (empty) files - scalars vs. arrays (collections)",
+  "updated_at": "2017-06-26T14:05:47Z"
+}

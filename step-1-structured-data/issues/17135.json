@@ -1,0 +1,328 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17135",
+  "author": "iRon7",
+  "body": "### Summary of the new feature / enhancement\r\n\r\nDon't blindly overwrite commands that are part of a signed script or module.\r\n\r\nReading this [Colibri Loader combines Task Scheduler and PowerShell in clever persistence technique](https://blog.malwarebytes.com/threat-intelligence/2022/04/colibri-loader-combines-task-scheduler-and-powershell-in-clever-persistence-technique/), I am quiet surprised to see how easily it appears to overwrite a native (presumably signed) command.\r\n\r\nSomehow, I think it should be possible to get the user's attention when this happens by asking whether to overwrite a function that is part of a signed script or module (when the `Set-ExecutionPolicy` is set to `RemoteSigned` or higher?):\r\n\r\n\r\n### Proposed technical implementation details (optional)\r\n\r\nWishful thinking:\r\n\r\n```PowerShell\r\nPS C:\\> Get-Content .\\MyScript.ps1\r\nfunction MySigned {\r\n    Write-Host 'Hello World'\r\n}\r\nPS C:\\> $Certificate = Get-ChildItem Cert:\\LocalMachine\\My | Where-Object {$_.Subject -eq 'CN=SelfSigned'}\r\nPS C:\\> Set-AuthenticodeSignature -FilePath MyScript.ps1 -Certificate $Certificate\r\n\r\nPS C:\\> . .\\MyScript.ps1\r\nPS C:\\> MySigned\r\nHello World\r\nPS C:\\> function MySigned { Write-Host 'Hello Colibri' }\r\n```\r\nAt this point I would like see a message in the direction of:\r\n\r\n> Do you want to overwrite the command `MySigned` which is a part\r\n> of the signed script `MyScript` from the publisher \"SelfSigned\"?\r\n>\r\n> [N] No  [Y] Yes [?] Help (default is \"N\"):\r\n\r\nThis would probably require that all functions (commands) that are part of a signed script or module should be securely marked as \"signed\" to be able to check for any possible unwanted overwrites.\r\n\r\n**Notes**\r\n* The question should also appear when the (signed) command is overwritten in a higher scope.\r\n* The question should **not** appear when the command comes from the same source (script/module, aka publisher) as the existing command, e.g. in case of a recurse function.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "It's a nice idea but \r\n1. Why would it apply only to functions - surely you would want it to apply to compiled cmdlets as well ? \r\n2. If it applied to built in cmdlets that would break existing Proxy functions.  For example Octopus deploy redefines `Write-Verbose` to capture verbose output to its own log.  `Write-verbose` is one of PowerShell's modules which is signed, so if this was a blanket block, octopus would fail\r\n3. You would also need to prevent an alias being defined with the name of the function you want to protect. \r\n4. With a compiled cmdlet or executable file (including a .ps1) you can ensure the command that you run has not been subverted  by specifying its full path.  e.g. `Microsoft.PowerShell.Utility\\Write-Verbose \"boo\" -Verbose`  this defeats aliases or proxy functions or a file higher up the search path running instead of the one you intended, but not redefining a function over the top of an existing one or creating an alias for a trusted function. \r\n5. To be used in an attack the function re-definition needs run between loading the legitimate function and running it. If you could do that, would you not just run the code which does the malicious thing, not set it as a function to be run if the  user runs some command later. ?    \r\n6. When you're loading something where nothing else can be  allowed to sneak in (JEA scenarios being one) a combination of command visibility and using `$ExecutionContext.SessionState to change the language mode and the apps and scripts that can run generally does the job \r\nIn this case I would make \r\n```\r\n$ExecutionContext.SessionState.LanguageMode = [System.Management.Automation.PSLanguageMode]::RestrictedLanguage\r\n```\r\nThe last line of the file. \r\n \r\n\r\n ",
+      "created_at": "2022-04-11T13:20:15Z",
+      "updated_at": "2022-04-11T13:20:15Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "The explanation at link has one oddity in it. Get-Variable.Exe gets run. Normally if there is a cmdlet and an .exe the cmdlet wins. So how is the exe getting run ? \r\n",
+      "created_at": "2022-04-11T13:44:01Z",
+      "updated_at": "2022-04-11T13:44:01Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah that's the most interesting part to me, that feels like it might be a bug. It's not clear from the article how / why exactly PowerShell is apparently running this executable when it starts, since from the article it doesn't appear any commands are actually passed to the PowerShell instance itself.",
+      "created_at": "2022-04-11T13:48:06Z",
+      "updated_at": "2022-04-11T13:48:06Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@jhoneill, thanks for response.\r\nI am not sure if I have a good answer for everything here, but::\r\n\r\n1. Correct.\r\n2. This might require a white list and something like a `[V] Never run  [N] No, do not overwrite [Y] Yes, only for this session [A] Always let this publisher overwrite this command [?] Help (default is \"D\"):`\r\n3. Correct.\r\n4. Not sure I understand, but I think it isn't not a showstopper\r\n5. If the command (e.g. `Get-Variable`) is a part of the user's own script from which he doesn't expect any security exploits, he might run it with elevated rights or accept a (expected or not) PowerShell.exe UAC warning.\r\n6. Correct, but that will close the door for a lot more.\r\n\r\nWith regards to:\r\n> The explanation at link has one oddity in it. `Get-Variable.Exe` gets run. Normally if there is a cmdlet and an .exe the cmdlet wins. So how is the exe getting run ?\r\n\r\nGood point.\r\nAnyways, someone might also simply overwrite (or create if not exist) the `$Profile` file and overwrite the native `Get-Variable` cmdlet with something like `function Get-Variable { e.g. <do upload webbrowser secrets to  malicious website> }`",
+      "created_at": "2022-04-11T14:31:02Z",
+      "updated_at": "2022-04-11T14:43:08Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "(2)  Would need to start with everything on the \"allow\" list and for things to put themselves on the \"block\" list. \r\n\r\n(4)  Suppose I know your organization runs a script as admin which contains `Write-Verbose` ; If I can sneak a function (or alias) named Write-Verbose into your session, when your script runs it runs my code instead of the cmdlet. To prevent this happening you can replace your calls to \"Write-Verbose\" with `Microsoft.PowerShell.Utility\\Write-Verbose`  now it always runs the command in the module not my code. In the same way if I know you run \"Batchprocess.ps1\",  and I can get my version of \"BatchProcess.ps1\" earlier in the path you'll run my code unless you run \"fully\\qualified\\path\\to\\BatchProcess.ps1\"\r\n\r\n(5) Doesn't stand up.  If something is hijacking another command by creating a function or alias  which runs when a trusted script runs - that Hijack has to get in between PowerShell starting and the script running.  Just putting a Get-Variable.exe on the path won't replace the cmdlet in a trusted script.  If you can  run arbitrary code in the session where the script is going to run, why not just run your malicious code - going to the trouble of putting it into a function is just an extra complication. \r\n\r\n\r\n ",
+      "created_at": "2022-04-11T19:15:59Z",
+      "updated_at": "2022-04-11T19:15:59Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "It's not pretty but if you want to always run a cmdlet from a specific module without being overwritten you can do\r\n\r\n```powershell\r\n&(Get-Command -Name Write-Verbose -Module Microsoft.PowerShell.Utility) -Message abc\r\n```\r\n\r\nUsing the FQDN cmdlet name `Microsoft.PowerShell.Utility\\Write-Verbose` is also an option but keep in mind someone may define a new alias or function with that name overloading it. This is why `Get-Command` is better as it ensures it finds the comand in the module specified.\r\n\r\nI believe Pester does something like this to store the set of \"safe\" commands in a hashtable rather than relying on the environment. It's not pretty but it works today.",
+      "created_at": "2022-04-11T19:18:04Z",
+      "updated_at": "2022-04-11T19:18:04Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "Misread @jborean93 's post above, he's clarified below\r\n\r\n",
+      "created_at": "2022-04-11T19:24:40Z",
+      "updated_at": "2022-04-11T19:57:55Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "```powershell\r\nMicrosoft.PowerShell.Utility\\Write-Output \"bar\"\r\n\r\nFunction Microsoft.PowerShell.Utility\\Write-Output {\r\n    \"foo\"\r\n}\r\n\r\nMicrosoft.PowerShell.Utility\\Write-Output \"bar\"\r\n```\r\n\r\nOutputs `bar` then `foo` as there's now a function with the name of the FQ cmdlet name.",
+      "created_at": "2022-04-11T19:26:34Z",
+      "updated_at": "2022-04-11T19:26:34Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> ```powershell\r\n> Microsoft.PowerShell.Utility\\Write-Output \"bar\"\r\n> \r\n> Function Microsoft.PowerShell.Utility\\Write-Output {\r\n>     \"foo\"\r\n> }\r\n> \r\n> Microsoft.PowerShell.Utility\\Write-Output \"bar\"\r\n> ```\r\n> \r\n> Outputs `bar` then `foo` as there's now a function with the name of the FQ cmdlet name.\r\n\r\n\r\nOK I was assuming the function name was simply \"Write-Output\".  I should have read what you said more closely , you did say that a function could be created using the fully qualified name, and that _is_ correct.  \r\n",
+      "created_at": "2022-04-11T19:57:23Z",
+      "updated_at": "2022-04-11T19:57:23Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@jhoneill,\r\n\r\n> (5) ... If you can run arbitrary code in the session where the script is going to run, why not just run your malicious code ...\r\n\r\nI find founding security precautions always difficult: at one hand, you might be wrong and take away all the arguments for the actual proposal. At the other hand, you might be right and open de box of Pandora...\r\n\r\nI am drifting away from the \"Colibri loader\" suggestion, but I think that command spoofing could potentially be used to get secure information and to get higher privileges where the _user account_ is already compromised (and the execution policy is not restricted) by piggybacking on procedures that normally require user intervention for security reasons, e.g.:\r\n* by spoofing the `Read-Host -AsSecureString` cmdlet and capture secrets\r\n* by spoofing any cmdlet (e.g. `Write-Host`) and just wait to act for the instance it has elevated privileges (where `[Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator) -eq $True`)\r\n\r\n",
+      "created_at": "2022-04-12T13:28:48Z",
+      "updated_at": "2022-04-13T11:53:58Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@iRon7  all valid points :-) \r\nIn my profile I redefine CD (it's push-location with improved completers, validators and transformers), h (better selection from history) and have a proxy function which adds -Recurse to Select-String. \r\nFor JEA I wrote proxy functions which restricted what cmdlets would do, even though they were running under a privileged account \r\n\r\nBut any of these could be done maliciously - how many admins run PowerShell elevated with their default profile? If I can access your home directory and add something to your profile then... game over. \r\n\r\nI do have an idea how anti-spoofing might done from a script, but it would need some tools to make it workable. \r\n`Get-AuthenticodeSignature (get-command Write-Verbose).module.path | % signerCertificate  `\r\n\r\nWill show you who signed the code for the present version of Write-Verbose. \r\nIf you had a #requires directive which had a command name, and certificate parameters you could say \r\n\"Abort the script if Read-Host doesn't come from the module with the right signature\". \r\n\r\nBut people would need to do work to use it . Something which blocked anything which puts in a substitute  for a command would break too many things.  \r\n",
+      "created_at": "2022-04-12T15:13:18Z",
+      "updated_at": "2022-04-12T15:13:18Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "one small thing @jhoneill - in the old days, you had to alias cd to push-location to be able to go \"back\". Now, with PowerShell 7, this is built in so no need to re-alias.",
+      "created_at": "2022-04-13T11:31:46Z",
+      "updated_at": "2022-04-13T11:31:46Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@jhoneill,\r\n\r\n>But any of these could be done maliciously - how many admins run PowerShell elevated with their default profile? If I can access your home directory and add something to your profile then... game over.\r\n\r\nNo offence, this is not an argument to *not* implement something to (better) prevent command spoofing, but actual a possible security vulnerability that should *also* be looked at.  \r\nTherefore, I have opened a formal bug report for this: [`#17148` Profiles shouldn't unnoticeable shared through UAC](https://github.com/PowerShell/PowerShell/issues/17148)\r\nFrom my perspective, the general approach to prevent malware to further compromise a system (that also applies to this issue) should be: **(PowerShell) Scripts shouldn't be unnoticeable shared through UAC**",
+      "created_at": "2022-04-13T15:06:35Z",
+      "updated_at": "2022-04-14T09:49:27Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "@iRon7  - \"With all respect\" sounds like you're about to rudely disagree, but in fact we mostly agree, and I haven't found you rude, yet :-)  \r\n\r\nMy view is  \r\n\r\n1. Changing what a command name does is a fundamental feature of PowerShell - whether that is the `sort` alias replacing `sort.com` on Windows, or a proxy function changing the `Add-ADGroupMember`  in a JEA environment to reject certain groups, or a custom profile adding recurse to `Select-String.`   The benefits are substantial and it has been used for a long time so even if that could be changed it would be undesirable to do so. \r\n2.  Like many things (including PowerShell itself)  attackers can abuse this feature.  If they are in a position to do so, they are already able to do malicious things (change trusted code, run arbitrary code in a user's session) and the _focus_ should be on preventing them having that access, mitigations if they do have that access are _secondary_ . I probably sound like _secondary_ equates to not worth bothering with :-)  Modifying a profile is just one case of this. I'll comment to the other issue on that.\r\n3. There are multiple reasons for wanting to ensure that a specific version of a command is run. For example I want to ensure that my Proxy functions for JEA are being called not the unrestricted cmdlets, or I want to ensure that version X of a module is loaded which implements a feature, and security There isn't a one size fits all for this - but trusted code should be signed, and specifying that a script requires commands to have signatures that meet some criteria looks like a possible solution.\r\n",
+      "created_at": "2022-04-14T09:08:44Z",
+      "updated_at": "2022-04-14T09:08:44Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@jhoneill,\r\n\r\n> \"With all respect\"\r\n\r\nSorry, that's because I am not native English, I think the correct approach would have been: \"No offence, ...\" (I a have changed that in the comment).  \r\nI agree on your view.\r\n\r\n",
+      "created_at": "2022-04-14T10:11:20Z",
+      "updated_at": "2022-04-14T10:11:20Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> @jhoneill,\r\n> \r\n> > \"With all respect\"\r\n> \r\n> Sorry, that's because I am not native English, I think the correct approach would have been: \r\n\r\nYour written English is better than some native speakers! :-)\r\n\r\n",
+      "created_at": "2022-04-14T10:18:22Z",
+      "updated_at": "2022-04-14T10:18:22Z"
+    },
+    {
+      "author": "hisashishimoe",
+      "author_association": "NONE",
+      "body": ":ok\r\n\r\nWindows \u306e \u30e1\u001a`\u30eb<https://go.microsoft.com/fwlink/?LinkId=550986> \u304b\u3089\u9001\u4fe1\r\n\r\n\u5dee\u51fa\u4eba: ***@***.***>\r\n\u9001\u4fe1\u65e5\u0095r: 2022\u5e744\u670814\u65e5 19:19\r\n\u5b9b\u5148: ***@***.***>\r\nCC: ***@***.***>\r\n\u4ef6\u540d: Re: [PowerShell/PowerShell] Prevent command spoofing (Issue #17135)\r\n\r\n\r\n@jhoneill<https://github.com/jhoneill>,\r\n\r\n\"With all respect\"\r\n\r\nSorry, that's because I am not native English, I think the correct approach would have been:\r\n\r\nYour written English is better than some native speakers! :-)\r\n\r\n\u2015\r\nReply to this email directly, view it on GitHub<https://github.com/PowerShell/PowerShell/issues/17135#issuecomment-1099010467>, or unsubscribe<https://github.com/notifications/unsubscribe-auth/AXPZ5XG2PH3XIESJAYEM36DVE7WM3ANCNFSM5TCR33NA>.\r\nYou are receiving this because you are subscribed to this thread.Message ID: ***@***.***>\r\n\r\n",
+      "created_at": "2022-04-14T10:25:08Z",
+      "updated_at": "2022-04-20T16:30:08Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> one small thing @jhoneill - in the old days, you had to alias cd to push-location to be able to go \"back\". Now, with PowerShell 7, this is built in so no need to re-alias.\r\n\r\n@doctordns   I found out when I used cd - on something which didn't have my profile  - Changing the alias means one profile works on all versions of PowerShell \r\nAnd too many cd -  do this \r\n\r\n```\r\n#650 PS7 ~\\Documents\\WindowsPowerShell> pwsh -noprofile\r\nPowerShell 7.2.2\r\nCopyright (c) Microsoft Corporation.\r\n\r\nhttps://aka.ms/powershell\r\nType 'help' to get help.\r\n\r\nPS C:\\Users\\mcp\\Documents\\WindowsPowerShell> cd ..\r\nPS C:\\Users\\mcp\\Documents> cd -\r\nPS C:\\Users\\mcp\\Documents\\WindowsPowerShell> cd -    # Stack should be empty\r\nPS C:\\> cd -\r\nSet-Location: There is no location history left to navigate backwards.\r\nPS C:\\>\r\n\r\nPS C:\\> exit\r\n#651 PS7 ~\\Documents\\WindowsPowerShell> cd -\r\n#652 PS7 ~\\Documents\\PowerShell> cd -   #empty stack does nothing\r\n#653 PS7 ~\\Documents\\PowerShell> cd -\r\n```\r\nThe stack isn't available with the newer implementation my customize version of cd lets me do cd = [tab] to peek down the stack without popping items off it, so I still need `push `instead of `set`. \r\n (remember Novell supported cd ... and cd ....  I've got that too :-) ) \r\n\r\n",
+      "created_at": "2022-04-14T11:27:43Z",
+      "updated_at": "2022-04-14T11:27:43Z"
+    },
+    {
+      "author": "hisashishimoe",
+      "author_association": "NONE",
+      "body": "\r\n\r\nWindows \u306e \u30e1\u001a`\u30eb<https://go.microsoft.com/fwlink/?LinkId=550986> \u304b\u3089\u9001\u4fe1\r\n\r\n\u5dee\u51fa\u4eba: ***@***.***>\r\n\u9001\u4fe1\u65e5\u0095r: 2022\u5e744\u670814\u65e5 20:28\r\n\u5b9b\u5148: ***@***.***>\r\nCC: ***@***.***>; ***@***.***>\r\n\u4ef6\u540d: Re: [PowerShell/PowerShell] Prevent command spoofing (Issue #17135)\r\n\r\n\r\none small thing @jhoneill<https://github.com/jhoneill> - in the old days, you had to alias cd to push-location to be able to go \"back\". Now, with PowerShell 7, this is built in so no need to re-alias.\r\n\r\n@doctordns<https://github.com/doctordns> I found out when I used cd - on something which didn't have my profile - Changing the alias means one profile works on all versions of PowerShell\r\nAnd too many cd - do this\r\n\r\n#650 PS7 ~\\Documents\\WindowsPowerShell> pwsh -noprofile\r\n\r\nPowerShell 7.2.2\r\n\r\nCopyright (c) Microsoft Corporation.\r\n\r\n\r\n\r\nhttps://aka.ms/powershell\r\n\r\nType 'help' to get help.\r\n\r\n\r\n\r\nPS C:\\Users\\mcp\\Documents\\WindowsPowerShell> cd ..\r\n\r\nPS C:\\Users\\mcp\\Documents> cd -\r\n\r\nPS C:\\Users\\mcp\\Documents\\WindowsPowerShell> cd -    # Stack should be empty\r\n\r\nPS C:\\> cd -\r\n\r\nSet-Location: There is no location history left to navigate backwards.\r\n\r\nPS C:\\>\r\n\r\n\r\n\r\nPS C:\\> exit\r\n\r\n#651 PS7 ~\\Documents\\WindowsPowerShell> cd -\r\n\r\n#652 PS7 ~\\Documents\\PowerShell> cd -   #empty stack does nothing\r\n\r\n#653 PS7 ~\\Documents\\PowerShell> cd -\r\n\r\nThe stack isn't available with the newer implementation my customize version of cd lets me do cd = [tab] to peek down the stack without popping items off it, so I still need push instead of set.\r\n(remember Novell supported cd ... and cd .... I've got that too :-) )\r\n\r\n\u2015\r\nReply to this email directly, view it on GitHub<https://github.com/PowerShell/PowerShell/issues/17135#issuecomment-1099089897>, or unsubscribe<https://github.com/notifications/unsubscribe-auth/AXPZ5XHKSMJ3GBL2UTYJS6DVE76LZANCNFSM5TCR33NA>.\r\nYou are receiving this because you commented.Message ID: ***@***.***>\r\n\r\n",
+      "created_at": "2022-04-14T12:26:41Z",
+      "updated_at": "2022-04-14T12:26:41Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Can anyone actually repro the same result of the article? As I would have expected I can't get it to work at all. Maybe it's missing a step?",
+      "created_at": "2022-04-14T15:07:01Z",
+      "updated_at": "2022-04-14T15:07:01Z"
+    },
+    {
+      "author": "chuckrock0095",
+      "author_association": "NONE",
+      "body": "WTF?",
+      "created_at": "2022-04-15T05:22:51Z",
+      "updated_at": "2022-04-15T12:20:22Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "> Can anyone actually repro the same result of the article? As I would have expected I can't get it to work at all. Maybe it's missing a step?\r\n\r\n> The explanation at link has one oddity in it. Get-Variable.Exe gets run. Normally if there is a cmdlet and an .exe the cmdlet wins. So how is the exe getting run ?\r\n\r\nI think I am able to confirm the PowerShell part where indeed an `exe`cutable file replaces the PowerShell command.\r\nNote that there is an error in the article where <strike>`%APPDATA%\\Local\\Microsoft\\WindowsApps`</strike> should be `%LOCALAPPDATA%\\Microsoft\\WindowsApps`:\r\n\r\n```PowerShell\r\nPS C:\\> Copy-Item (Get-Command WhoAmi).Source \"$Env:LOCALAPPDATA\\Microsoft\\WindowsApps\\Get-Variable.exe\"\r\nPS C:\\> Get-Variable\r\nComputer\\Username\r\n```\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.2\r\nPSEdition                      Core\r\nGitCommitId                    7.2.2\r\nOS                             Microsoft Windows 10.0.22000\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+      "created_at": "2022-04-15T09:43:06Z",
+      "updated_at": "2022-04-15T11:57:43Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah the Engine WG discussed this last night and @IISResetMe was able to repro.\r\n\r\nWe'd like the security WG to review this before we discuss it further. /cc @TravisEz13",
+      "created_at": "2022-04-15T12:18:21Z",
+      "updated_at": "2022-04-15T12:18:21Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@WG-Security\r\nIt looks like this feature request is to prevent a function being created having the same name as a function exposed through a loaded signed module file.\r\n\r\nPowerShell command precedence allows (proxy) functions and aliases to override module commands.  We recommend not changing this as it would be a significant breaking change.  In addition, users can already use module fully qualified command names to ensure they are running the command they expect, and this is encouraged as a best practice.  ",
+      "created_at": "2022-04-18T21:11:20Z",
+      "updated_at": "2022-04-18T21:11:20Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@PaulHigin,\r\n\r\n(I presume that with your comment, the issue is reviewed with security WG and I am allowed to discuss this further)\r\n\r\n> It looks like this feature request is to prevent a function being created having the same name as a function exposed through a loaded signed module file.\r\n\r\nI like to refine this to:\r\n\r\n> Prevent a function being *unnoticeably* and *undeniably* created with the same name as a function exposed through a loaded signed module file.\r\n\r\nBesides, I think that any corrective action towards a better security might simply be optional to avoid any significant break change for developers that care less.",
+      "created_at": "2022-04-19T07:01:22Z",
+      "updated_at": "2022-04-19T07:57:11Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "If prompting a user when a function is defined that overrides an existing module function is `opt-in`, then its value is greatly diminished.  It would be better for a concerned developer to simply `opt-in` to best practices and use fully qualified command names in script.\r\n\r\nThe real issue is a malicious actor running code on your machine.  Once this happens there are countless ways to perform malicious acts, especially if the code is running under an admin account.  The best way to guard against this is to have a system wide application control policy such as WDAC (Windows Defender Application Control), and using only trusted applications and modules.",
+      "created_at": "2022-04-19T15:47:16Z",
+      "updated_at": "2022-04-19T15:47:16Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PaulHigin If the recommendation is to use fully-qualified commands to prevent spoofing. Would it be considered a bug that fully-qualified commands can be overwritten with a function or alias?\r\n\r\n\r\n```powershell\r\nPS C:\\> Microsoft.PowerShell.Utility\\Write-Output 'output'\r\noutput\r\nPS C:\\> function Microsoft.PowerShell.Utility\\Write-Output { 'spoofed via function' }\r\nPS C:\\> Microsoft.PowerShell.Utility\\Write-Output 'output'\r\nspoofed via function\r\nPS C:\\> function spoofed { 'spoofed via alias' }\r\nPS C:\\> New-Alias -Name Microsoft.PowerShell.Utility\\Write-Output -Value spoofed\r\nPS C:\\> Microsoft.PowerShell.Utility\\Write-Output 'output'\r\nspoofed via alias\r\n```",
+      "created_at": "2022-04-19T19:58:52Z",
+      "updated_at": "2022-04-19T19:59:38Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Good question.  Yes, it seems to me that fully qualified names should resolve to modules.  Tagging for committee review.",
+      "created_at": "2022-04-19T20:19:28Z",
+      "updated_at": "2022-04-19T20:19:28Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Just a small reminder, you can use `Get-Command` to ensure you get a command in a specific module as per https://github.com/PowerShell/PowerShell/issues/17135#issuecomment-1095461560.",
+      "created_at": "2022-04-19T20:27:11Z",
+      "updated_at": "2022-04-19T20:27:11Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "> Just a small reminder, you can use **`Microsoft.PowerShell.Core\\Get-Command`** to ensure you get a command in a specific module as per [#17135 (comment)](https://github.com/PowerShell/PowerShell/issues/17135#issuecomment-1095461560).\r\n\r\n\ud83e\udd14\r\n\r\nIf I understand this correctly, this means that if you sign a PowerShell script, you better use fully qualified names for every command you invoke in the concerned script?\r\n\r\nIf that is true, I think that it would be appropriate to warn the signer if friendly command names are used in the concerned script to be signed or even possibly replace any friendly command name with a fully qualified name (returned by `Microsoft.PowerShell.Core\\Get-Command`) automatically prior the actual signing is done by using a specific cmdlet (PSScriptAnalyzer?) or an optional parameter for the cmdlet `Microsoft.PowerShell.Security\\Set-AuthenticodeSignature`.\r\n\r\n\r\n\r\n",
+      "created_at": "2022-04-20T06:33:34Z",
+      "updated_at": "2022-04-20T06:59:22Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "@iRon7 a key issue for me here is that you cannot just use what you feel to be a fully qualified function name to avoid this.\r\n\r\nIf you use:\r\n```powershell\r\nFunction Microsoft.PowerShell.Utility\\Write-Output {\"foo\"}\r\n```\r\nThen the name of this function is the same as a fully qualified name.\r\n\r\nShould PowerShell allow a function to have a name that is the same as a fully qualified function name?",
+      "created_at": "2022-04-20T08:12:12Z",
+      "updated_at": "2022-04-20T08:12:12Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "> If I understand this correctly, this means that if you sign a PowerShell script, you better use fully qualified names for every command you invoke in the concerned script?\r\n\r\n@iRon7 The purpose of script signing is to authenticate the exact contents of a file on disk, nothing more. It has nothing to do with command discovery at runtime. The fact that the source script is signed was never meant to provide the kinds of guarantees your appear to be expecting",
+      "created_at": "2022-04-20T11:44:59Z",
+      "updated_at": "2022-04-20T11:44:59Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> @iRon7 a key issue for me here is that you cannot just use what you feel to be a fully qualified function name to avoid this.\r\n> \r\n> If you use:\r\n> \r\n> ```powershell\r\n> Function Microsoft.PowerShell.Utility\\Write-Output {\"foo\"}\r\n> ```\r\n> \r\n> Then the name of this function is the same as a fully qualified name.\r\n> \r\n> **Should PowerShell allow a function to have a name that is the same as a fully qualified function name?**\r\n\r\nTLDR **NO**  And I don't think this should be limited to functions either. \r\n\r\nUntil @jborean93  pointed it out, I would have expected that name to be illegal.     \r\nAlthough technically forbidding slash and backslash in function (and alias) names would be a breaking change,  I can't think of a legitimate use for them.  **This** is another example that should not be possible, \r\n```\r\n> function Notepad {\"boo\"} \r\n> notepad \r\nboo       # <-- expected , desirable even.\r\n> New-Alias -Name  C:\\windows\\notepad.exe -Value foo         \r\n> C:\\windows\\notepad.exe          \r\nboo       # <-- Far from desirable. \r\n```\r\n `:` is illegal in windows file systems but is needed to have C:, D:  swap drives so is allowed in function and alias names.  \r\n\r\nBut is there any reason for allowing `\\  `and `/ `?    - `function:\\` and `function:/` are the root of the function PSDrive, since this drive doesn't have an kind of container I understand it doesn't need those characters to serve as path separators, but I can't find any logic to say they _should_  or _must_ be allowed in Alias or function names. I'm not sure that losing \".\" (or : from aliases) would be harmful either. \r\n\r\n\r\n",
+      "created_at": "2022-04-20T11:56:41Z",
+      "updated_at": "2022-04-20T11:56:41Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "FYI: I have just also formally reported the malicious intents that might result from this issue through [Secure@](https://github.com/PowerShell/PowerShell/issues/secure@microsoft.com) because it is unclear to me whether this has already been done (taking the fact that this issue started as a propose and later has been flagged with `WG-Security`).",
+      "created_at": "2022-04-20T12:27:31Z",
+      "updated_at": "2022-04-20T12:27:31Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> > If I understand this correctly, this means that if you sign a PowerShell script, you better use fully qualified names for every command you invoke in the concerned script?\r\n> \r\n> @iRon7 The purpose of script signing is to authenticate the exact contents of a file on disk, nothing more. It has nothing to do with command discovery at runtime. The fact that the source script is signed was never meant to provide the kinds of guarantees your appear to be expecting\r\n\r\nIt is any easy mistake to assume that if you have signed a script then if the signature says the script is unchanged then what runs is the same every time the script runs. How can something unchanged run different code?  Many ways, as it turns out. \r\n\r\nOne can create what looks like a new version of the module which contains some commonly called cmdlet... \r\n \r\nUnless the script is run in a clean session with -noprofile, and explicitly imports the modules it uses, first checking their signatures (I'll target `Get-AuthenticodeSignature` ) and verifies that every alias, function, cmdlet or external file called is the expected one (i.e. Get-Widget is a cmdlet in the verified Widget module) . The signature is just \"James was last to touch this part of a bigger whole, and this part hasn't been changed\" .\r\n\r\nI've signed my own scripts and put them into production (so if I went bad - who knows what was signed), and signed other peoples : in theory I reviewed before signing, but who knows what I might have added because I don't think people checked the code was as they gave it to me. When an organization signs its scripts the value of the signature depends on the process around it. ",
+      "created_at": "2022-04-20T12:30:37Z",
+      "updated_at": "2022-04-20T12:30:37Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "As @IISResetMe points out, PowerShell script signing execution policies are intended only to validate script file contents.  In addition, PowerShell execution policies are not a security boundary as they can be easily bypassed, and instead are a considered a convenience feature.\r\n\r\nWhat **is** a security boundary is PowerShell running under system wide application control policies such as WDAC, where it runs in [constrained language mode](https://devblogs.microsoft.com/powershell/powershell-constrained-language-mode).\r\nApplication control policies are designed to protect against these kinds of dll, exe, scriptfile planting issues.\r\n\r\nMy only question here, for the @PowerShell/powershell-committee, is whether script functions should be able to override fully qualified module functions.  That seems wrong to me, but it may not be worth addressing since it will likely result in breaking behavior.  ",
+      "created_at": "2022-04-20T15:47:56Z",
+      "updated_at": "2022-04-20T15:47:56Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this and agree that this is not a security issue in general, but would like the WG-Security group to revisit specifically the fully qualified cmdlet path and then the WG-Engine group to discuss the impact if we decide to not allow function names to resemble a fully qualified path.  Also consider if proxy functions may be impacted.  Expectation is that users should be able to rely on the fully qualified cmdlet path to know they are calling that cmdlet.",
+      "created_at": "2022-04-20T22:37:47Z",
+      "updated_at": "2022-04-20T22:37:47Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "Thanks all, for the comments on this issue.\r\nThe initial *propose* (not a bug or a security report) was to give signed functions a higher privilege as I was under the impression that signing scripts would always require the users attention in some way (and be traceable) but apparently that is not the case.\r\nI am ok to close the issue in `Resolution-Won't Fix` or keep it open for the \"*expectation that users should be able to rely on the fully qualified cmdlet path to know they are calling that cmdlet*\" remainder issue.\r\nDo you like me to change the title for this? or just close the issue? and create a new \"fully qualified cmdlet path\" issue?",
+      "created_at": "2022-04-21T10:56:30Z",
+      "updated_at": "2022-04-21T11:06:42Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "The engine WG has discussed this again and are concerned that any change here would be a breaking change. We are concerned as well as to how this might affect Pester as we believe that it takes advantage of this behavior.",
+      "created_at": "2022-04-28T21:26:47Z",
+      "updated_at": "2022-04-28T21:26:47Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "If that is the case what is the user friendly  recommended way to do this without some hacky workaround using Get-Command?\n\nEven if it is a breaking change wouldn't it be the expected behavior from design intent, documentation, and user expectation? ",
+      "created_at": "2022-04-28T21:28:24Z",
+      "updated_at": "2022-04-28T21:31:35Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The [Mocking](https://pester-docs.netlify.app/docs/usage/mocking) feature in Pester **may** depend on defining a fully-qualified name as an alias to intercept the call to a module function.\r\n\r\nhttps://github.com/pester/Pester/blob/ec2131a4640461f8f0b32c499ebce393019aa392/src/functions/Mock.ps1#L218-L220\r\nhttps://github.com/pester/Pester/blob/ec2131a4640461f8f0b32c499ebce393019aa392/src/functions/Mock.ps1#L547-L714\r\n\r\n![image](https://user-images.githubusercontent.com/127450/165864976-87584568-6dc3-4424-96e8-773768f1f2cc.png)\r\n\r\nSo, this breaking change could have big impact.\r\n\r\nAside from the breaking change concern, the Engine WG would like to have the Security WG (/cc @PaulHigin and @TravisEz13) to review again and clarify whether the current behavior (allowing function/alias with fully-qualified name) is really a security issue. We believe it's not (we could be wrong) given that if a bad actor can plant a function to override a module function, then the same actor can create a module with the same name and trick the user to load that module instead, even if we disallow function/alias with fully-qualified name.\r\n",
+      "created_at": "2022-04-28T23:56:55Z",
+      "updated_at": "2022-04-28T23:57:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Can we think about strict mode/constrained language? ",
+      "created_at": "2022-04-29T04:50:55Z",
+      "updated_at": "2022-04-29T04:50:55Z"
+    },
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "Regardless if this is a security issue or not. This is still a reliability problem. If the script or module author cannot ensure the fully qualified cmdlet being called has the same behavior in dev as in production. This can and will cause unexpected behavior and the end user will blame the script or module author rather than the person who overloaded the cmdlets with a custom function or alias.",
+      "created_at": "2022-04-29T05:34:52Z",
+      "updated_at": "2022-04-29T05:34:52Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Regardless if this is a security issue or not. This is still a reliability problem. If the script or module author cannot ensure the fully qualified cmdlet being called has the same behavior in dev as in production. This can and will cause unexpected behavior and the end user will blame the script or module author rather than the person who overloaded the cmdlets with a custom function or alias.\r\n\r\nIt should be exceedingly rare that someone would do this for a reason that is not explicitly for customization or mocking purposes. I don't think it's unreasonable for a module author to reply in this hypothetical that the scenario is not supported. Maybe someone would still be mad, but afaik this is all hypothetical and such a scenario has not occurred (*specifically* for a module qualified path, plenty of normal shadowing issues have occurred).\r\n\r\nThat said, even if we changed how command discovery of a module qualified invocation works, it could still be overridden by importing a module with the same name:\r\n\r\n```powershell\r\nNew-Module -Name 'Microsoft.PowerShell.Utility' -ScriptBlock {\r\n    function Add-Member {\r\n    }\r\n\r\n    Export-ModuleMember -Function Add-Member\r\n} | Import-Module\r\n\r\nMicrosoft.PowerShell.Utility\\Add-Member\r\n```\r\n\r\nThey can even add a `$ExecutionContext.SessionState.InvokeCommand.PreCommandLookupAction` if they really want to. Or use modding tools like harmony to alter engine code at runtime. These things can be prevented with security tools, but from a module author perspective there has to be some acceptance that there are some scenarios you can't support or account for.\r\n",
+      "created_at": "2022-04-29T14:49:17Z",
+      "updated_at": "2022-04-29T14:49:17Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "updated wrong issue",
+      "created_at": "2022-05-11T22:20:48Z",
+      "updated_at": "2022-05-11T22:25:14Z"
+    }
+  ],
+  "created_at": "2022-04-11T09:27:53Z",
+  "number": 17135,
+  "state": "open",
+  "title": "Prevent command spoofing",
+  "updated_at": "2022-05-11T22:25:14Z"
+}

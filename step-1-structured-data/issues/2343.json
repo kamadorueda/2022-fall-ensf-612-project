@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2343",
+  "author": "vors",
+  "body": "On @PowerShell/powershell-maintainers meeting we decided to update all coreclr packages regularly once per release.\nWe should add back dotnet preview feed.\n",
+  "closed_at": "2016-10-14T20:16:40Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Changes to `System.Runtime.Loader.AssemblyLoadContext` breaks `PowerShellAssemblyLoadContext` and cause powershell to crash. So the work on this issue is blocked.\n\nThe change in `AssemblyLoadContext` is \"an assembly loaded in the default context will not be visible by a different load context, and that means requesting for the same assembly (exactly the same full name) from another load context will get that assembly loaded again.\"\n\nIn open powershell, powershell.exe is actually a shim that initializes the powershell load context, and tell the powershell load context the real entry method. The PS load context initialization code will create a singleton of itself and assign it to a static member \u201cPowerShellAssemblyLoadContext.Instance\u201d. Then the PS load context will load the actual assembly where the real entry method lives and call into the real entry method. So after that, all implicit assembly loading request will be handled by the PS load context. The PS load context singleton is used by powershell a lot, and it\u2019s supposed to be referenced by using the static member \u201cPowerShellAssemblyLoadContext.Instance\u201d. This stopped working after I switched to the latest .NET Core packages. \u201cPowerShellAssemblyLoadContext.Instance\u201d turns out to be null when the actual powershell code starts to run.\n\nI believe this is because the change described above. Using \u201cPowerShellAssemblyLoadContext.Instance\u201d in actual powershell code will trigger an implicit load of the PS load context assembly, and due to the change, the PS load context singleton loaded by the default load context will load the same PS load context assembly again, and thus the static member in that newly loaded PS load context assembly will certainly be null.\n\nI'm having a conversation with CoreCLR team on this, and will update the issue when get more information.\n",
+      "created_at": "2016-09-30T00:59:53Z",
+      "updated_at": "2016-09-30T00:59:53Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "There are also changes to the `HttpClient` used by `Invoke-WebRequest`; it looks like [`System.Net.WebClient`](https://github.com/dotnet/corefx/commits/master/src/System.Net.WebClient/ref/System.Net.WebClient.cs) was brought back, and so I'm not sure what happened to the current `System.Net.Http` APIs @Francisco-Gamino used.\n",
+      "created_at": "2016-10-12T18:46:21Z",
+      "updated_at": "2016-10-12T18:46:21Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Updating with the latest .NET Core preview packages causes some regressions:\n1. Latest `System.Runtime.Loader.AssemblyLoadContext` causes a regression in PSAssemblyLoadContext. The regression has been fixed on PS side.\n2. With .NET Core 1.0.0 RTM, `dotnet.exe` doesn't verify the existence of assemblies that are built from the local projects when check the TPA deps assemblies, and thus we are able to remove IL assemblies after crossgen. However, the latest `dotnet.exe` checks the existence of locally built assemblies, so IL assemblies cannot be removed anymore.\n3. The new `dotnet.exe` loads IL assemblies in precedence, instead of NI assemblies. The symptom is that you will find `PowerShellAssemblyLoadContext.dll` is loaded by the default load context when both the IL and NI assemblies exist. But with RTM packages, `PowerShellAssemblyLoadContext.ni.dll` gets loaded by the default load context under the same circumstance. This doesn't affect us too much now because `PowerShellAssemblyLoadContext` handles the loading of other PS assemblies and it prefers NI over IL assemblies. **However, when the legacy APIs are back and it's time to retire PSALC, our crossgen story will be broken if the default context prefer IL over NI**. I will start a conversation with .NET Core team on this.\n4. Latest `Microsoft.Win32.Registry` will now raise `PlatformNotSupportedException` when you call any static members of it on UNIX. In PS code, we call some of its static properties when initializing some types (e.g. `System.Management.Automation.Utils`), and that caused PS to crash in UNIX. This is fixed.\n5. When working on `#4`, I found both `Registry` and `Certificate` providers are shown up in UNIX PS. They don't work in UNIX at all, and should not be exposed (until we have a UNIX implementation of `Certificate` provider someday). They are now excluded from compilation for UNIX PS.\n6. `[System.Text.Encoding]::Default` is available via reflection at runtime (exposed by `System.Private.CoreLib`), but it's not exposed in the reference contract of `System.Text.Encoding`, and thus we cannot use it in PS Code. This mismatch causes a redirection test to fail. The test is fixed to skip `Encoding.Default` for now. I will check with .NET Core team to clarify this mismatch.\n7. The exclusion of 'Certificate' provider causes some failures on UNIX PS, because some tests are using `Cert:\\` to test the error behavior when not using a `FileSystemProvider` drive. The tests are fixed.\n",
+      "created_at": "2016-10-13T19:40:02Z",
+      "updated_at": "2016-10-13T19:40:02Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@andschwa I didn't observe failures in `Invoke-WebRequest` and `Invoke-RestMethod`. I think we should be fine, the `HttpClient` and `HttpMessageHandler` are the way to go. Maybe `WebClient` is brought back just for compatibility reason.\n",
+      "created_at": "2016-10-13T19:42:00Z",
+      "updated_at": "2016-10-13T19:42:00Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "**[For `#2` and `#3`, I talked to CoreCLR team about this and here is the detailed explanation]**\nNow by comparing the \u201cProperty TRUSTED_PLATFORM_ASSEMBLIES\u201d in trace messages, I understand that in RTM, the assemblies produced by local projects are NOT listed in the TPA at all, and the default load context actually depends on APP_PATHS and APP_NI_PATHS to find them. And yes, that indicates the default load context actually prefer NI assemblies over IL assemblies when it can find/see both.\n\nWith the latest dotnet.exe, assemblies produced by local projects are now in the TPA list, and APP_APTHS and APP_NI_PATHS are no longer passed in. Therefore, the default load context can only see the IL assemblies, and thus only load the IL assemblies.\n\n> _another option would be to only drop you NI image but with the same name as the IL image_\n\nThis alternative is suggested by CoreCLR team and has been taken care of by PR #2484.\n",
+      "created_at": "2016-10-14T19:51:25Z",
+      "updated_at": "2016-10-14T19:51:25Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "**[For `#6`, I checked with CoreFx team]**\n\n> `Encoding.Default` will not be brought in the reference contract in Nov, probably as part of our 1.2 release in spring. In general it is isn\u2019t a good idea to use Encoding.Default as it is not the right think for most cases. I would highly suggest you pick the correct encoding for the scenario.\n\nSo we just need to keep our current implementation of the default encoding.\n",
+      "created_at": "2016-10-14T20:16:01Z",
+      "updated_at": "2016-10-14T20:16:01Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Resolved via PR #2472\n",
+      "created_at": "2016-10-14T20:16:40Z",
+      "updated_at": "2016-10-14T20:16:40Z"
+    }
+  ],
+  "created_at": "2016-09-22T20:14:31Z",
+  "number": 2343,
+  "state": "closed",
+  "title": "Update CoreCLR to the latest packages",
+  "updated_at": "2016-10-17T17:57:14Z"
+}

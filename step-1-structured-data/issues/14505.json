@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14505",
+  "author": "mklement0",
+  "body": "## Summary of the new feature/enhancement\r\n\r\n* Implement a `New-Xml` cmdlet that robustly parses XML from a given file and returns an `[xml]` instance.\r\n\r\n```powershell\r\n# WISHFUL THINKING: \r\n# Should be the equivalent of:\r\n#       & { $xmlDom = [xml]::new(); $xmlDoc.Load((Convert-Path file.xml)); return $xmlDom }\r\nNew-Xml file.xml   # -Path parameter implied.\r\n```\r\n\r\n Like `Select-Xml`, a `-Content` parameter should support an XML _string_ as input.\r\n\r\n* Complementarily, allow casts to `[xml]` to accept a single `Get-ChildItem` / `Get-Item` output object in order to parse from a file (which would complement the existing ability to cast a _string_; e.g., `[xml] '<xml><foo/></xml>'`)\r\n\r\n```powershell\r\n# WISHFUL THINKING: \r\n# Should be the equivalent of the above.\r\n[xml] (Get-Item file.xml)\r\n```\r\n\r\nNote: We could even accept path _strings_, given that it's trivial to distinguish an XML _string_ (which has to start with `<`) from a file path.\r\n\r\n---\r\n\r\n**Rationale**:\r\n\r\nReading XML files into an `[xml]` DOM ([`System.Xml.XmlDocument`](https://docs.microsoft.com/en-US/dotnet/api/System.Xml.XmlDocument)) is a common use case, and the idiom frequently seen is:\r\n\r\n```powershell\r\n$xmlDom = [xml] (Get-Content -Raw file.xml)\r\n```\r\n\r\nWhile concise and convenient, especially compared to the robust alternative, this approach is _not robust_, because it doesn't respect character-encoding information that is _part of the file itself_, as part of the XML declaration - see [this Stack Overflow answer](https://stackoverflow.com/a/65264118/45375) for background.\r\nAs an aside: `Select-Xml` currently has the same problem - see #14404.\r\n\r\nTo currently get robust behavior, use of .NET APIs is required, which is far from obvious and cumbersome:\r\n\r\n```powershell\r\n# Robustly parse file 'file.xml' into an [xml] DOM\r\n$xmlDom = [xml]::new(); $xmlDoc.Load((Convert-Path file.xml))\r\n```\r\n\r\nThe proposed new features above would provide a  PowerShell-idiomatic alternative that is both robust and convenient.\r\n\r\n---\r\n\r\nQuick-and-dirty `New-Xml` prototype (for simplicity, a single parameter is used, and whether an XML string or a file path is given is derived from the specific value passed):\r\n\r\n```powershell\r\nfunction New-Xml {\r\n  <#\r\n  .SYNOPSIS\r\n  Constructs an XML DOM ([xml] from an XML file or text.\r\n  #>\r\n  param([string] $PathOrText)\r\n  Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'\r\n  $doc = [xml]::new()\r\n  if ($PathOrText[0] -eq '<') { $doc.LoadXml($PathOrText) }\r\n  else                        { $doc.Load((Convert-Path $PathOrText)) } \r\n  return $doc \r\n}\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "ThomasNieto",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think breaking this functionality into two cmdlets would be better. `Import-Xml` to go along with the other `Import-*` cmdlets. Then update `ConvertTo-Xml` to support passing an XML formatted string (equivalent to ```[xml] '<xml><foo/></xml>'```).",
+      "created_at": "2020-12-28T16:52:19Z",
+      "updated_at": "2020-12-28T16:52:58Z"
+    },
+    {
+      "author": "Tomalak",
+      "author_association": "NONE",
+      "body": "All the XML cmdlets have the same problem as #14404, not only `Select-Xml`. Any XML document that is opened through the same internal function described over there suffers from this. Luckily that bug could be fixed without breaking existing interfaces (or scripts).",
+      "created_at": "2020-12-28T17:38:55Z",
+      "updated_at": "2020-12-28T17:38:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@ThomasNieto, I can see the argument for following that pattern, but there's also the symmetry with `Select-Xml`, which I think should take precedence here.\r\n\r\nAlso, `ConvertTo-Xml` serves a different purpose (and, as an aside, is [virtually useless](https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6676) in its current form and I wish we deprecated it), which I think would be confusing.\r\n\r\nAs a philosophical aside, I've never liked how functionality is  divided across cmdlets along the lines of data from a file vs. in-memory data - for instance, why should a `ConvertFrom-Csv` cmdlet not also support loading from _files_, obviating the need for a separate `Import-Csv` cmdlet?",
+      "created_at": "2020-12-28T17:42:44Z",
+      "updated_at": "2020-12-28T17:42:44Z"
+    },
+    {
+      "author": "Tomalak",
+      "author_association": "NONE",
+      "body": "The sad reality is that the `[xml](Get-Content ...)` pattern is ubiquitous and there is no way fighting it, it just has been wrong for way too long.\r\n\r\nGiven that, one of the options would be to implement encoding sniffing for XML files in `Get-Content`, i.e. recreate the same mechanism that `XmlDocument` uses, at least as long as the user has not expressed a preference using then `-Encoding` parameter.\r\n\r\nIt would make things transparently correct for anyone copying code off of the Internet and who's not deep enough into the details of how XML implements file encodings. It's not a _clean_ solution, but a very pragmatic one. It also would help people who naively (or for performance reasons) process XML data line-wise as plain text.",
+      "created_at": "2020-12-28T18:15:33Z",
+      "updated_at": "2020-12-28T18:15:33Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "I like the idea of automatically distinguishing between a path and a `xml` string.\r\nBut there are a few (corner) cases to take care of:\r\n\r\n### White spaces prefix\r\n```PowerShell\r\nNew-Xml @'\r\n\r\n<xml>\r\n<foo/>\r\n</xml>\r\n'@\r\n```\r\n\r\n### Collection of strings (lines)\r\n```PowerShell\r\nGet-Content .\\data.xml | Select-Object Skip 2 | New-Xml\r\n```",
+      "created_at": "2020-12-28T18:33:21Z",
+      "updated_at": "2020-12-28T18:52:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's a good point, @Tomalak, and I like the idea, but I think _both_ things are worth implementing.\r\n\r\nThat way, future users will have a more PowerShell-idiomatic way of constructing XML DOMs, whereas existing code and continued use of the old pattern implicitly benefits from the `Get-Content` enhancement.\r\n\r\nTherefore, can I suggest you create a _new_ proposal based on your comment?\r\nSome additional considerations:\r\n\r\n* The precedence of inferring the encoding would have to be laid out: \r\n  * A BOM should take precedence over an XML declaration.\r\n  * As currently, `-Encoding` should only be able to override interpretation of a file in the _absence_ of a BOM.\r\n* Performance impact must be minimized.\r\n\r\n",
+      "created_at": "2020-12-28T18:48:52Z",
+      "updated_at": "2020-12-28T18:48:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7:\r\n\r\nIf we implement this automatic distinction (which appeals to me), for string input I think it would be sufficient to do the following check:\r\n\r\n* Is the first character a non-whitespace character other than `<`? If so, assume the input is a _file path_; otherwise, assume XML text, and pass the text as-is to `.LoadXml()`\r\n\r\nYour `Get-Content` example is the type of command we want to get away from, at least given `Get-Content`'s current behavior of potentially misinterpreting the input file (through no fault of its own, strictly speaking).\r\n\r\nFor consistency, I think it would be better to have `New-Xml` construct an `[xml]` instance for _each input object_ - be it a file path or text. Thus, piping text would require a single, multi-line string (expressed in terms of `Get-Content`: `Get-Content -Raw`):\r\n\r\n \r\n",
+      "created_at": "2020-12-28T19:00:31Z",
+      "updated_at": "2020-12-28T19:00:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Great, @Tomalak - can you please post this as a _new_ issue (of type \"Feature Request/Idea\")? We should continue the conversation there.",
+      "created_at": "2020-12-28T19:06:14Z",
+      "updated_at": "2020-12-28T19:06:14Z"
+    },
+    {
+      "author": "Tomalak",
+      "author_association": "NONE",
+      "body": "@mklement0 Done & moved details over.",
+      "created_at": "2020-12-28T19:52:34Z",
+      "updated_at": "2020-12-28T19:52:34Z"
+    },
+    {
+      "author": "p0W3RH311",
+      "author_association": "NONE",
+      "body": "@mklement0 why in your function prototype you use `Set-StrictMode -Version 1;` and not `Set-StrictMode -Version latest;`",
+      "created_at": "2020-12-31T02:23:02Z",
+      "updated_at": "2020-12-31T02:23:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@p0W3RH311, because:\r\n\r\n* you shouldn't use `Set-StrictMode -Version Latest` in production code, given that any PowerShell upgrade outside of your control can break that code.\r\n\r\n* `Set-StrictMode -Version 2` and higher has a side effect that I find unacceptable (and which should have been fixed a long time ago): #2798\r\n",
+      "created_at": "2020-12-31T02:28:38Z",
+      "updated_at": "2020-12-31T02:28:38Z"
+    }
+  ],
+  "created_at": "2020-12-28T13:51:18Z",
+  "number": 14505,
+  "state": "open",
+  "title": "Make parsing XML from a file robustly easier, with a New-Xml cmdlet and the ability to cast file paths to [xml]",
+  "updated_at": "2020-12-31T02:28:38Z"
+}

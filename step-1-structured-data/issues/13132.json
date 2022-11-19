@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13132",
+  "author": "normj",
+  "body": "\r\n\r\nWe use the `Microsoft.PowerShell.SDK (7.0.2)` NuGet package in a .NET Core 3.1 application to execute PowerShell 7 scripts in a Linux environment. We have found when the .NET application is published with the runtime **linux-x64** to reduce the package size, scripts that use the `ForEach-Object -Parallel ...` fail with the following error message.\r\n```\r\n[Error] - The term 'Write-Host' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n```\r\nIf the .NET application is packaged without specifying runtime the script runs correctly. Also if the ForEach-Object command does not use the `-Parallel` parameter the script runs correctly.\r\n\r\n\r\n## Steps to reproduce\r\n\r\nHere is the test PowerShell script attempting to run through the .NET Application. \r\n```powershell\r\n$SharedVariable = \"Hello Shared Variable\"\r\n@(1..100) | ForEach-Object -Parallel { \r\n    $i = $_\r\n    Write-Host \"Running against: $i for SharedVariable: $($using:SharedVariable)\"\r\n}\r\n```\r\n\r\nHere is a trimmed down version of the .NET Core 3.1 application that is used for running the PowerShell script.\r\n\r\n```csharp\r\nusing System;\r\nusing System.IO;\r\nusing System.Management.Automation;\r\n\r\nnamespace PowerShellScriptRunner\r\n{\r\n    class Program\r\n    {\r\n        static Exception _lastException;\r\n\r\n        static void Main(string[] args)\r\n        {\r\n            if (args.Length == 0)\r\n            {\r\n                Console.Error.WriteLine(\"The first argument should the path to the script to run.\");\r\n                System.Environment.Exit(-1);\r\n            }\r\n            else if (!File.Exists(args[0]))\r\n            {\r\n                Console.Error.WriteLine($\"Script {args[0]} can not be found.\");\r\n                System.Environment.Exit(-2);\r\n            }\r\n\r\n            var executingScript = File.ReadAllText(args[0]);\r\n            Console.WriteLine(\"Executing script:\");\r\n            Console.WriteLine(executingScript);\r\n            var ps = PowerShell.Create();\r\n            SetupStreamHandlers(ps);\r\n\r\n            ps.AddScript(executingScript);\r\n\r\n            var output = new PSDataCollection<PSObject>();\r\n            var asyncResult = ps.BeginInvoke<PSObject, PSObject>(null, output);\r\n\r\n            while (!asyncResult.IsCompleted)\r\n            {\r\n                asyncResult.AsyncWaitHandle.WaitOne(500);\r\n            }\r\n        }\r\n\r\n        private static void SetupStreamHandlers(PowerShell ps)\r\n        {\r\n\r\n            Func<string, EventHandler<DataAddingEventArgs>> _loggerFactory = (prefix) =>\r\n            {\r\n                EventHandler<DataAddingEventArgs> handler = (sender, e) =>\r\n                {\r\n                    var message = e?.ItemAdded?.ToString();\r\n\r\n                    LogMessage(prefix, message);\r\n\r\n                    var errorRecord = e?.ItemAdded as ErrorRecord;\r\n                    if (errorRecord?.Exception != null)\r\n                    {\r\n                        _lastException = errorRecord.Exception;\r\n                    }\r\n                };\r\n                return handler;\r\n            };\r\n\r\n            ps.Streams.Verbose.DataAdding += _loggerFactory(\"Verbose\");\r\n            ps.Streams.Information.DataAdding += _loggerFactory(\"Information\");\r\n            ps.Streams.Warning.DataAdding += _loggerFactory(\"Warning\");\r\n            ps.Streams.Error.DataAdding += _loggerFactory(\"Error\");\r\n        }\r\n\r\n        private static void LogMessage(string prefix, string message)\r\n        {\r\n            if (string.IsNullOrEmpty(message))\r\n            {\r\n                return;\r\n            }\r\n\r\n            if (!string.IsNullOrEmpty(prefix))\r\n            {\r\n                message = $\"[{prefix}] - {message}\";\r\n            }\r\n\r\n            Console.WriteLine(message);\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nOn a Linux environment publish the project using the following command\r\n```\r\ndotnet publish --configuration Release --self-contained false --runtime linux-x64\r\n```\r\nthen execute the program\r\n```\r\ndotnet exec .\\bin\\Release\\netcoreapp3.1\\linux-x64\\publish\\PowerShellScriptRunner.dll <path-to-psscriptfile>\r\n```\r\n\r\nScript fails with the following error messages. \r\n```\r\n[Error] - The term 'Write-Host' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n```\r\nIf i repeat the steps above but remove the `--runtime linux-x64` switch there is no problem.\r\n\r\n\r\nOne theory I have is with the `--runtime linux-x64` switch the assemblies from the publish\\runtimes folder get flatten out at the root of the publish folder. But there is also the Modules in the publish\\runtimes\\unix\\lib\\netcoreapp3.1\\Modules and maybe something about the modules not being direct children of the assemblies anymore is causing the failure.\r\n\r\n\r\nOn a side note the value `--runtime win-x64` also doesn't seem to work either but for a different error. That error is \r\n```\r\nSystem.IO.FileNotFoundException: Could not load file or assembly 'Microsoft.Management.Infrastructure, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'. The system cannot find the file specified.\r\nFile name: 'Microsoft.Management.Infrastructure, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'\r\n   at System.Reflection.RuntimeAssembly.GetExportedTypes()\r\n   at System.Reflection.Assembly.get_ExportedTypes()\r\n   at System.Management.Automation.Runspaces.PSSnapInHelpers.GetAssemblyTypes(Assembly assembly, String name)\r\n   at System.Management.Automation.Runspaces.PSSnapInHelpers.AnalyzeModuleAssemblyWithReflection(Assembly assembly, String name, PSSnapInInfo psSnapInInfo, PSModuleInfo moduleInfo, String helpFile, Dictionary`2& cmdlets, Dictionary`2& aliases, Dictionary`2& providers)\r\n   at System.Management.Automation.Runspaces.PSSnapInHelpers.AnalyzePSSnapInAssembly(Assembly assembly, String name, PSSnapInInfo psSnapInInfo, PSModuleInfo moduleInfo, Dictionary`2& cmdlets, Dictionary`2& aliases, Dictionary`2& providers, String& helpFile)\r\n   at System.Management.Automation.Runspaces.InitialSessionState.ImportPSSnapIn(PSSnapInInfo psSnapInInfo, PSSnapInException& warning)\r\n   at System.Management.Automation.Runspaces.InitialSessionState.CreateDefault()\r\n   at System.Management.Automation.Runspaces.RunspaceFactory.CreateRunspace(PSHost host)\r\n   at System.Management.Automation.Runspaces.RunspaceFactory.CreateRunspace()\r\n   at System.Management.Automation.PowerShell.Worker.CreateRunspaceIfNeededAndDoWork(Runspace rsToUse, Boolean isSync)\r\n```\r\nWhich I can see the `Microsoft.Management.Infrastructure.dll` is missing in the publish folder but `Microsoft.Management.Infrastructure.CimCmdlets.dll` is there. This isn't my use case as I'm on Linux but maybe related somehow. \r\n\r\n\r\n## Expected behavior\r\n\r\nScripts using `-Parallel` argument execute successfully.\r\n",
+  "closed_at": "2020-07-12T00:00:11Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Could you please look the issue?",
+      "created_at": "2020-07-08T09:55:45Z",
+      "updated_at": "2020-07-08T09:55:45Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": " This looks like a build/publishing error where required core module binaries are not available, at runtime.  ForeEach-Object -Parallel code creates runspaces with default initial state that includes all core modules.  But for some reason runtime command discovery cannot find them.\r\n\r\n@daxian-dbw  has worked on the SDK.  Dongbo can you comment on why `Write-Host` cannot be found at runtime?",
+      "created_at": "2020-07-09T16:40:36Z",
+      "updated_at": "2020-07-09T16:40:36Z"
+    },
+    {
+      "author": "normj",
+      "author_association": "NONE",
+      "body": "Sorry I should have put this in the original post but sometimes I get the following error as well which might provide more clues.\r\n\r\n```\r\n2020-07-07 15:13:21: [Error] - An unexpected error has occurred while processing ForEach-Object -Parallel input. This may mean that some of the piped input did not get processed. Error: System.IO.DirectoryNotFoundException: Could not find a part of the path '/tmp/2473a89a-8513-49db-bf23-51d8af91a349/.local/share/powershell/Modules'.\r\n   at System.IO.FileSystem.CreateDirectory(String fullPath)\r\n   at System.IO.Directory.CreateDirectory(String path)\r\n   at System.Management.Automation.Platform.SelectProductNameForDirectory(XDG_Type dirpath)\r\n   at System.Management.Automation.ModuleIntrinsics.GetPersonalModulePath()\r\n   at System.Management.Automation.ModuleIntrinsics.GetModulePath(String currentProcessModulePath, String hklmMachineModulePath, String hkcuUserModulePath)\r\n   at System.Management.Automation.ModuleIntrinsics.SetModulePath()\r\n   at System.Management.Automation.ModuleIntrinsics..ctor(ExecutionContext context)\r\n   at System.Management.Automation.ExecutionContext.InitializeCommon(AutomationEngine engine, PSHost hostInterface)\r\n   at System.Management.Automation.ExecutionContext..ctor(AutomationEngine engine, PSHost hostInterface, InitialSessionState initialSessionState)\r\n   at System.Management.Automation.AutomationEngine..ctor(PSHost hostInterface, InitialSessionState iss)\r\n   at System.Management.Automation.Runspaces.LocalRunspace.DoOpenHelper()\r\n   at System.Management.Automation.Runspaces.LocalRunspace.OpenHelper(Boolean syncCall)\r\n   at System.Management.Automation.Runspaces.RunspaceBase.CoreOpen(Boolean syncCall)\r\n   at System.Management.Automation.Runspaces.RunspaceBase.Open()\r\n   at System.Management.Automation.PSTasks.PSTaskBase.Start()\r\n   at System.Management.Automation.PSTasks.PSTaskPool.Add(PSTaskBase task)\r\n   at Microsoft.PowerShell.Commands.ForEachObjectCommand.<InitParallelParameterSet>b__63_2(Object _).\r\n```",
+      "created_at": "2020-07-09T16:45:05Z",
+      "updated_at": "2020-07-09T16:45:05Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> One theory I have is with the --runtime linux-x64 switch the assemblies from the publish\\runtimes folder get flatten out at the root of the publish folder. But there is also the Modules in the publish\\runtimes\\unix\\lib\\netcoreapp3.1\\Modules and maybe something about the modules not being direct children of the assemblies anymore is causing the failure.\r\n\r\nThis is exactly the cause. The Runspace created by `ForEach-Object -Parallel` depends on all modules being present in the modules path, which are not.\r\nIt's a known limitation in the the `Microsoft.PowerShell.SDK` package that the deployment of built-in modules doesn't work when building with the specific RID. See https://github.com/PowerShell/PowerShell/pull/11832#issuecomment-584882314.\r\n\r\nThe workaround is to have a post build step, to copy the `Modules` folder to right under the publish folder, where `System.Management.Automation.dll` is located. The `Modules` folders are at `<publish-folder>\\unix\\lib\\netcoreapp3.1\\Modules` and `<publish-folder>\\win\\lib\\netcoreapp3.1\\Modules` for Linux/macOS and Windows respectively.\r\n\r\n--------------------------------------------\r\n\r\nFor the issue regarding `Microsoft.Management.Infrastructure`, it looks like a bug in the nuget packaging of `Microsoft.Management.Infrastructure.Runtime.Win` -- it doesn't have a runtime folder named `win-x64`, and hence `dotnet publish -r win-x64` cannot get the corresponding libraries deployed. @adityapatwardhan Can you please take a look?\r\n\r\n",
+      "created_at": "2020-07-09T16:53:11Z",
+      "updated_at": "2020-07-10T16:56:34Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Error: System.IO.DirectoryNotFoundException\r\n\r\nNo idea why `Directory.CreateDirectory` could fail with this exception. It doesn't require any part of the path to be present ... The code is [here](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/CoreCLR/CorePsPlatform.cs#L312). The path in use was `/tmp/2473a89a-8513-49db-bf23-51d8af91a349/.local/share/powershell/Modules` and `/tmp/2473a89a-8513-49db-bf23-51d8af91a349` was already successfully created by [this code](https://github.com/PowerShell/PowerShell/blob/5ad8a5916f37835feb0476396ff7c79e748c2577/src/System.Management.Automation/utils/PsUtils.cs#L145-L165).\r\n\r\n@normj Do you see this every time you use `ForEach-Object -Parallel` in your environment?",
+      "created_at": "2020-07-09T17:10:26Z",
+      "updated_at": "2020-07-09T17:11:23Z"
+    },
+    {
+      "author": "adityapatwardhan",
+      "author_association": "MEMBER",
+      "body": "Thanks for the detailed bug report! I really appreciate that.\r\n\r\nFor `Microsoft.Management.Infrastructure` we cannot have `win-x64` folder as the dependencies are OS specific. Hence, we have to use OS specific runtimes. \r\n\r\nAlso, can you try with `Microsoft.Management.Infrastructure` version `2.0.0`? That fixed a bunch of issues around runtimes.",
+      "created_at": "2020-07-09T17:10:45Z",
+      "updated_at": "2020-07-09T17:10:45Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@adityapatwardhan FYI, the user was using `Microsoft.PowerShell.SDK` 7.0.2, which reference the 2.0.0 version of `Microsoft.Management.Infrastructure`.",
+      "created_at": "2020-07-09T17:13:27Z",
+      "updated_at": "2020-07-09T17:13:27Z"
+    },
+    {
+      "author": "normj",
+      "author_association": "NONE",
+      "body": "Thanks for the information. I'm able to put a work around in our publishing tooling that moves around the Modules folder.",
+      "created_at": "2020-07-10T07:45:27Z",
+      "updated_at": "2020-07-10T07:45:27Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-07-12T00:00:09Z",
+      "updated_at": "2020-07-12T00:00:09Z"
+    }
+  ],
+  "created_at": "2020-07-08T07:18:22Z",
+  "number": 13132,
+  "state": "closed",
+  "title": "Scripts using -Parallel fail when run using Microsoft.PowerShell.SDK and a publish runtime flag",
+  "updated_at": "2020-07-12T00:00:11Z"
+}

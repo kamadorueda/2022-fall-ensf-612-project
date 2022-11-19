@@ -1,0 +1,167 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13677",
+  "author": "mklement0",
+  "body": "Note: \r\n * Windows PowerShell is _not_ affected - UTF-8 with BOM is used consistently there.\r\n * A fix for the closely related #13678 could probably encompass a fix for this issue as well.\r\n\r\nWhen the target file _happens to exist and doesn't have a BOM_ - even without `-Append` - `Start-Transcript` mistakenly uses ASCII encoding to write the file.\r\n\r\nWithout `-Append`, `Start-Transcript` shouldn't even look at the existing file - it should simply replace it, and use the default encoding (BOM-less UTF-8). See #13678 for a closely related bug _with_ `-Append`.\r\n\r\nInstead, `Start-Transcript` apparently looks for a BOM at the start of an existing file and uses ASCII encoding if it doesn't find one.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n# To surface the bug, make sure that the target file exists and doesn't have a BOM.\r\n$null > temp:/$PID.txt\r\n\r\n$null = Start-Transcript temp:/$PID.txt\r\n'\u00fc' # output a string with a non-ASCII-range character\r\n$null = Stop-Transcript\r\n\r\nSelect-String -Quiet '\u00fc' temp:/$PID.txt | Should -BeTrue\r\n\r\nRemove-Item temp:/$PID.txt\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe test should succeed.\r\n\r\n## Actual behavior\r\n\r\nThe test fails, because `\u00fc` was transliterated to verbatim `?`, suggesting that ASCII encoding was used to write the file.\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.7\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We get file encoding in the method https://github.com/PowerShell/PowerShell/blob/10237bdeb37718595d475bd0014b005a035b34df/src/System.Management.Automation/engine/Utils.cs#L1395\r\n\r\nLast resort there is ASCII. It seems the method is used only in transcript and we could safely change the default.",
+      "created_at": "2020-09-24T07:29:53Z",
+      "updated_at": "2020-09-24T07:29:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov.\r\n\r\nWhat you're describing is the right fix for the closely related #13678, whereas the fix for this issue is to not consider any preexisting file at all.\r\n\r\nI suspect both issues can easily be fixed together - not sure how you want to handle that in terms of tagging.\r\n\r\n",
+      "created_at": "2020-09-25T17:28:44Z",
+      "updated_at": "2020-09-25T17:28:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> whereas the fix for this issue is to not consider any preexisting file at all.\r\n\r\nI don't remember but perhaps we use the same code too and fallback to ASCII.",
+      "created_at": "2020-09-26T18:43:55Z",
+      "updated_at": "2020-09-26T18:43:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's what it looks like; so, to summarize:\r\n\r\n* _This_ issue should be fixed by _always_ using BOM-less UTF-8, because a preexisting file is simply _replaced_, so its encoding is irrelevant.\r\n\r\n*  #13678, which applies to `-Append`, should be fixed by falling back to (by definition BOM-less) UTF-8 rather than ASCII in the absence of a BOM in the preexisting file.",
+      "created_at": "2020-09-26T20:57:45Z",
+      "updated_at": "2020-09-26T20:57:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think we can change ASCII default to UTF8-NoBOM in  GetEncoding() - it is used only in transcript code.",
+      "created_at": "2020-09-27T18:18:35Z",
+      "updated_at": "2020-09-27T18:18:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, but additionally we shouldn't even call `GetEncoding()` _unless `-Append` is specified_.",
+      "created_at": "2020-09-27T18:24:07Z",
+      "updated_at": "2020-09-27T18:24:07Z"
+    },
+    {
+      "author": "Gimly",
+      "author_association": "CONTRIBUTOR",
+      "body": "Has work on this issue already started? If not, I'd be interested to try.",
+      "created_at": "2020-10-01T20:21:55Z",
+      "updated_at": "2020-10-01T20:21:55Z"
+    },
+    {
+      "author": "Gimly",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I've changed the default encoding to UTF8 No BOM in GetEncoding in the PR #13732. But for not calling GetEncoding if the Append is specified, it's a bit trickier, the call is made in a setter of the `Path` property which I feel might not be the best place for it. I'll take a bit more time to see exactly where the append parameter is specified and if I can move the call of `GetEncoding` out of the setter, but if you already have an idea about it, tell me.",
+      "created_at": "2020-10-01T20:58:12Z",
+      "updated_at": "2020-10-01T20:58:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for tackling this, @Gimly - I haven't even looked at the original code yet, but @iSazonov has, so perhaps he has thoughts.",
+      "created_at": "2020-10-01T21:00:13Z",
+      "updated_at": "2020-10-01T21:00:13Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 \r\nIt seems I found a root of the bug.\r\nWe use `System.IO.File.WriteAllText(effectiveFilePath, string.Empty);` -  its default is Utf8NoBOM.\r\nhttps://source.dot.net/#System.IO.FileSystem/System/IO/File.cs,300\r\nhttps://source.dot.net/#System.Private.CoreLib/StreamWriter.cs,139\r\n\r\n> Windows PowerShell is not affected - UTF-8 with BOM is used consistently there.\r\n\r\nAre you sure? See https://referencesource.microsoft.com/#mscorlib/system/io/file.cs,848\r\n\r\nThe pattern is seems popular https://stackoverflow.com/questions/4999988/how-can-i-clear-the-content-of-a-file\r\nYou could make a warning comment there.\r\n\r\nSince the pattern so popular we could ask .Net team to add new System.IO.File.Clear(string Path) to avoid such bugs.\r\n\r\n@Gimly I think we could use ` WriteAllText(string path, string? contents, Encoding encoding)` overload here\r\nhttps://github.com/PowerShell/PowerShell/blob/e107ecd08d68cc67512cd833a355dca868bd5a03/src/Microsoft.PowerShell.ConsoleHost/host/msh/StartTranscriptCmdlet.cs#L228-L232\r\n\r\nFor encoding detection in the place I suggest to use\r\n `StreamReader(string path, Encoding encoding, bool detectEncodingFromByteOrderMarks)`\r\n\r\n\n\n<blockquote><div><strong><a href=\"https://source.dot.net/#System.IO.FileSystem/System/IO/File.cs,300\">Source Browser</a></strong></div></blockquote>\n<blockquote><div><strong><a href=\"https://source.dot.net/#System.Private.CoreLib/StreamWriter.cs,139\">Source Browser</a></strong></div></blockquote>\n<blockquote><div><strong><a href=\"https://referencesource.microsoft.com/#mscorlib/system/io/file.cs,848\">Reference Source</a></strong></div></blockquote>\n<blockquote><img src=\"https://cdn.sstatic.net/Sites/stackoverflow/Img/apple-touch-icon@2.png?v=73d79a89bded\" width=\"48\" align=\"right\"><div>Stack Overflow</div><div><strong><a href=\"https://stackoverflow.com/questions/4999988/how-can-i-clear-the-content-of-a-file\">How can I clear the content of a file?</a></strong></div><div>I need to clear the contents of a particular file every time the applications starts. How do I do it?</div></blockquote>",
+      "created_at": "2020-10-02T05:12:09Z",
+      "updated_at": "2020-10-02T05:12:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Are you sure? See https://referencesource.microsoft.com/#mscorlib/system/io/file.cs,848\r\n\r\nThat's interesting, but _in practice_ `Start-Transcript` without a preexisting file on Windows PowerShell v5.1.18362.752 on Microsoft Windows 10 Pro (64-bit; Version 1909, OS Build: 18363.1082) creates UTF-8 files _with_ BOM.\r\nIs the reference source outdated, or is this not the relevant code?\r\n\r\n\r\n\r\n<blockquote><div><strong><a href=\"https://referencesource.microsoft.com/#mscorlib/system/io/file.cs,848\">Reference Source</a></strong></div></blockquote>",
+      "created_at": "2020-10-02T13:51:32Z",
+      "updated_at": "2020-10-02T14:07:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also, `System.IO.File.WriteAllText(effectiveFilePath, string.Empty)` effectively acts like a `.Clear()` method: given that BOM-less UTF-8 is the default encoding, the file is effectively reset to `0` bytes (and closed again).\r\n\r\nSo the problem isn't with this call - it must be with later write operations.",
+      "created_at": "2020-10-02T14:05:34Z",
+      "updated_at": "2020-10-02T14:06:59Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Is the reference source outdated, or is this not the relevant code?\r\n\r\nI guess it is outdated (they makes .Net Framework compatible with .Net Core).",
+      "created_at": "2020-10-02T15:15:25Z",
+      "updated_at": "2020-10-02T15:15:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Also, System.IO.File.WriteAllText(effectiveFilePath, string.Empty) effectively acts like a .Clear() method: given that BOM-less UTF-8 is the default encoding, the file is effectively reset to 0 bytes (and closed again).\r\n\r\nBut if source file is in UTF16BOM the method resets it to UTF8NoBOM.",
+      "created_at": "2020-10-02T15:21:54Z",
+      "updated_at": "2020-10-02T15:21:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> But if source file is in UTF16BOM the method resets it to UTF8NoBOM.\r\n\r\nIf `-Append` isn't specified, it doesn't matter what the previously existing file's encoding was. The cmdlet's default encoding should apply (which in PS Core is always BOM-less UTF-8), as it does if there is no preexisting file.\r\n",
+      "created_at": "2020-10-03T03:35:30Z",
+      "updated_at": "2020-10-03T03:36:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We call WriteAllText() only in Append scenario.",
+      "created_at": "2020-10-03T16:33:31Z",
+      "updated_at": "2020-10-03T16:33:31Z"
+    },
+    {
+      "author": "Gimly",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov I'm getting a bit lost on the discussion. If the default for WriteAllTextFile is indeed Utf8NoBOM, then isn't it what we expected it to be? You'd like to call the overload with the encoding with Utf8NoBOM anyway so that's we don't rely only on the default?",
+      "created_at": "2020-10-05T19:36:56Z",
+      "updated_at": "2020-10-05T19:36:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@Gimly My expectation is that we don't change an encoding of the transcript file if it exists.\r\n\r\n1. If the file does not exist - create with default encoding. Fix is to change the default from ASCII to Uft8NoBOM.\r\n2. If file exist:\r\n  - if no -Append - clear the file ~but preserve its encoding~ and write with default encoding\r\n  - if -Append presents - open file with current encoding\r\n\r\nTo detect encoding it is better follow StreamReader.",
+      "created_at": "2020-10-06T05:00:07Z",
+      "updated_at": "2020-10-06T08:01:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\nRe 1: agreed\r\n\r\nRe 2: \r\n\r\n* Without `-Append`: We do _not_ want to preserve any existing coding if the file exists. Just like `Set-Content` and `Out-File` quietly replace an existing file('s contents) with their _default encoding_ (unless `-Encoding` is explicitly used), so should `Start-Transcript`. The existing file's content simply does not matter.\r\n\r\n* With `-Append`: whatever implementation we choose, what matters is: if there's a BOM, respect it; if there's none, use (BOM-less) UTF-8.\r\n\r\n",
+      "created_at": "2020-10-06T05:14:26Z",
+      "updated_at": "2020-10-06T05:14:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Without -Append: We do not want to preserve any existing coding if the file exists.\r\n\r\nI have no strong objection.",
+      "created_at": "2020-10-06T08:00:04Z",
+      "updated_at": "2020-10-06T08:00:04Z"
+    },
+    {
+      "author": "Gimly",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I've opened a PR that, I think, fixes this issue. It's quite simple as I think the only part that was not working as you described was that the \"clear file\" that was done when the `-Append` flag isn't set wasn't fixing a specific encoding, but simply using the one that existed.\r\n\r\nNow I've fixed the encoding (using the static readonly instance present in Utils) to UTF8 No Bom, as we had done in the PR #13732.",
+      "created_at": "2020-10-26T22:00:12Z",
+      "updated_at": "2020-10-26T22:00:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thank you, @Gimly.",
+      "created_at": "2020-10-26T22:13:51Z",
+      "updated_at": "2020-10-26T22:40:44Z"
+    }
+  ],
+  "created_at": "2020-09-23T14:41:15Z",
+  "number": 13677,
+  "state": "open",
+  "title": "Start-Transcript uses lossy ASCII character encoding instead of BOM-less UTF-8 if the target file happens to exist",
+  "updated_at": "2022-05-18T03:55:17Z"
+}

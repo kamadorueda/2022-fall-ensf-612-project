@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15196",
+  "author": "LaurentDardenne",
+  "body": "## Steps to reproduce\r\n\r\n```powershell\r\n[void][Reflection.Assembly]::LoadWithPartialName(\"System.Data.DataSetExtensions\");\r\n$Dt = New-Object System.Data.DataTable\r\n[void]$Dt.Columns.Add( 'C1')\r\n[void]$Dt.Columns.Add( 'C2')\r\n[void]$Dt.Rows.Add( '1','2')\r\n[void]$Dt.Rows.Add( 'Y','Z')\r\n$Dt.xyz.GetType()\r\n# IsPublic IsSerial Name                                     BaseType\r\n# -------- -------- ----                                     --------\r\n# True     True     Object[]                                 System.Array\r\n$null -eq $Dt.xyz\r\n#$False\r\nSet-StrictMode -Version latest\r\n$Dt.xyz\r\n#PropertyNotFoundException: The property 'xyz' cannot be found on this object. Verify that the property exists.\r\nSet-StrictMode -Off\r\n```\r\n\r\n## Expected behavior\r\nsame behaviour as the following cases :\r\n```powershell\r\n$i=10\r\n$i.xyz\r\n#$null\r\n$i.xyz.gettype()\r\n#InvalidOperation: You cannot call a method on a null-valued expression.\r\n$null -eq $i.xyz\r\n#True\r\n\r\n$T=1..3\r\n$T.xyz\r\n#$null\r\n$T.xyz.gettype()\r\n#InvalidOperation: You cannot call a method on a null-valued expression.\r\n$null -eq $T.xyz\r\n#True\r\n```\r\n\r\n## Actual behavior\r\nThe call to GetType() on a non-existent property returns one or more values :\r\n```powershell\r\n$null -eq $Dt.xyz\r\n#$False\r\n```\r\n\r\n## Environment data\r\nWindows 10\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0, 5.0, 5.1.10032.0, 6.0.0, 6.1.0, 6.2.0, 7.0.0, 7.1.0}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\nThis issue may be related to #6466\r\n",
+  "closed_at": "2021-04-14T00:00:04Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Even though the type itself doesn't implement `IEnumerable`, PowerShell treats instances of `System.Data.DataTable` as enumerable rather than requiring you to use their (enumerable) `.Rows` property explicitly (which to me is both surprising and consistently implemented - see bottom section).\r\n\r\nTherefore, `$dt.xyz` - in the absence of `.xyz` property on the `System.Data.DataTable` instance _itself_ -  performs _member enumeration_, i.e. it behaves like `$dt.Rows.xyz` == `$dt.Rows | % { $_.xyz }`.\r\n\r\nIn the absence of a `.xyz` property on the individual rows too, `$null` is returned for each, so with 2 rows you get a `($null, $null)` array.\r\nWith strict mode in effect, you get an error, as expected.\r\n\r\n---\r\n\r\nAnother manifestation of this behavior is that `$dt.Count` returns `(1, 1)`, because - in given that `System.Data.DataTable` itself has no `.Count` property - `.Rows.Count` is returned, and each row - as a _scalar_ -has a count of 1.\r\n\r\nAlso, indexing doesn't work as expected: `$dt[0]` is _not_ the same as `$dt.Rows[0]`; instead, with indexing `System.Data.DataTable` is unexpectedly treated as a _scalar_, and `[0]` therefore returns the instance itself, i.e.. the _whole table_.\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-10T13:24:16Z",
+      "updated_at": "2021-04-10T13:24:54Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "I understood that there could be a different behavior, which is not documented, so we have to find out to know.\r\nThis has been achieved :-)\r\n\r\nIn the following case (a bit twisted), the result is different:\r\n```powershell\r\n #Cr\u00e9e une fonction \u00e0 partir d'une closure\r\n${Function:Test-GenericIEnumerable}=.{\r\n    #On recherche le type ouvert de l'interface g\u00e9n\u00e9rique IEnumerable\r\n    $GenericIEnumerable=[Type]'System.Collections.Generic.IEnumerable`1'\r\n\r\n    Return { \r\n     #La variable $InputObject impl\u00e9mente-t-elle l'interface g\u00e9n\u00e9rique IEnumerable ?\r\n      param( $InputObject )\r\n        foreach ($Interface in $InputObject.GetType().GetInterfaces())\r\n        {\r\n            #On suppose une seule impl\u00e9mentation de l'interface g\u00e9n\u00e9rique IEnumerable (https://stackoverflow.com/a/7852650)\r\n           if ($Interface.IsGenericType)\r\n           { \r\n               if ($Interface.GetGenericTypeDefinition() -eq $GenericIEnumerable) \r\n               {return $true}\r\n           }\r\n        }\r\n        return $false\r\n    }.GetNewClosure()\r\n}\r\n\r\n$Dt.Rows -is [System.Collections.IEnumerable]\r\n# True\r\n\r\nTest-GenericIEnumerable $Dt.Rows\r\n# False\r\nTest-GenericIEnumerable $Dt.xyz\r\n# True\r\n```\r\nSo is this the only type that behaves like this or how else can we identify them?",
+      "created_at": "2021-04-10T13:57:05Z",
+      "updated_at": "2021-04-10T13:57:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> the result is different:\r\n\r\nThat is to be expected: `$Dt.Rows`, with `.Rows` being a type-native property of a `[System.Data.DataTable]` instance, is of type `[System.Data.DataRowCollection]` is an `IEnumerable`, but not a _generic_ enumerable.\r\n\r\nBy contrast, `$Dt.xyz`, the result of _member enumeration_  is an `[object[]]` array (which it always is with two or more elements) , which _is_ a generic enumerable.\r\n\r\n> So is this the only type that behaves like this or how else can we identify them?\r\n\r\nWhich types PowerShell considers enumerable is based on hard-coded rules:\r\n\r\n* Any **type that implements** the **[`IEnumerable`](https://docs.microsoft.com/en-US/dotnet/api/System.Collections.IEnumerable) / [``IEnumerable`1``](https://docs.microsoft.com/en-US/dotnet/api/System.Collections.Generic.IEnumerable-1)** .NET interface(s)\r\n  * **_Except_** the following, which are _not_ automatically enumerated:\r\n\r\n    * [`IDictionary`](https://docs.microsoft.com/en-US/dotnet/api/System.Collections.IDictionary) / [``IDictionary`2``](https://docs.microsoft.com/en-US/dotnet/api/System.Collections.Generic.IDictionary-2), which notably includes `[hashtable]` (`@{ ... }`, as a literal) and its ordered cousin, [`OrderedDictionary`](https://docs.microsoft.com/en-US/dotnet/api/System.Collections.Specialized.OrderedDictionary) (`[ordered] @{ ... }`, as a literal)\r\n\r\n    * [`XmlNode`](https://docs.microsoft.com/en-US/dotnet/api/System.Xml.XmlNode), the base type for `[xml]` ([`XmlDocument`](https://docs.microsoft.com/en-US/dotnet/api/System.Xml.XmlDocument))\r\n\r\n    * _Strings_ ([`String`](https://docs.microsoft.com/en-US/dotnet/api/System.String)); note that `'foo'.Count` is `1` (the intrinsic property reflecting that a string is considered a _scalar_ (single thing)), whereas `'foo'.Length` is `3` (the type-native property that returns the character count).\r\n\r\n* **_Additionally_, [`System.Data.DataTable`](https://docs.microsoft.com/en-US/dotnet/api/System.Data.DataTable)** (which *itself* doesn't implement `IEnumerable`, only its `.Rows` property does).\r\n\r\nSee https://github.com/PowerShell/PowerShell/blob/48c7e112db8f0506a74555c83ecb8bec509b6597/src/System.Management.Automation/engine/LanguagePrimitives.cs#L523",
+      "created_at": "2021-04-10T18:42:41Z",
+      "updated_at": "2021-04-10T18:42:41Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "Thanks for these explanations, however accessing a non-existent property should generate an error.",
+      "created_at": "2021-04-11T12:26:20Z",
+      "updated_at": "2021-04-11T12:26:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It does, if you use `Set-StrictMode -Version 2` or higher, just as with any other property access:\r\n\r\n```powershell\r\n@{ Off = $true }, @{ Version = 2 }  | % {\r\n  Write-Verbose -vb \"-- With strict mode -$($_.Keys[0]):$($_.Values[0]):\"\r\n  Set-StrictMode @_\r\n  ([pscustomobject] @{}).NoSuchProp\r\n  [Data.DataTable]::new().NoSuchProp\r\n}\r\n```\r\n\r\n\r\n",
+      "created_at": "2021-04-11T20:08:53Z",
+      "updated_at": "2021-04-12T22:40:59Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2021-04-14T00:00:03Z",
+      "updated_at": "2021-04-14T00:00:03Z"
+    }
+  ],
+  "created_at": "2021-04-10T11:46:48Z",
+  "number": 15196,
+  "state": "closed",
+  "title": "For the DataTable type, the call to GetType() on a non-existent property returns a value",
+  "updated_at": "2021-04-14T00:00:04Z"
+}

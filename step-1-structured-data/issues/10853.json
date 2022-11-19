@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10853",
+  "author": "mklement0",
+  "body": "As described in [about_Command_Precedence](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_command_precedence), cmdlets take precedence over external programs with the same name.\r\n\r\nHowever, this currently only applies to cmdlets _whose containing module has already been imported_ into the session at hand.\r\n\r\nThis makes the behavior hard to predict.\r\n\r\nGiven that the commands exported by auto-loading modules are known in advance, before actual import, there's no reason to consistently give them precedence, even if that entails import on demand.\r\n\r\n# Steps to reproduce\r\n\r\nRun the following on _Windows_.\r\n\r\n```powershell\r\n pwsh -noprofile -c '$null>$env:TEMP\\Get-Service; $env:PATH += '';'' + $env:TEMP; (Get-Command Get-Service).Source; Remove-Item $env:TEMP\\Get-Service' |\r\n  Should -Not -BeLike \"$env:TEMP\\*\"\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe test should succeed, because submitting `Get-Service` should find the _cmdlet_ of that name in the auto-loading `Microsoft.PowerShell.Management` module - even though that module hasn't been loaded yet - not the external file in `$env:PATH` by that name.\r\n\r\n# Actual behavior\r\n\r\nThe test fails, because the external file in `$env:PATH` unexpectedly takes precedence.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.4 \r\n```\r\n",
+  "closed_at": "2019-10-22T18:36:28Z",
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "This is a good find. The problem is of course that proving a negative takes longer. We should look into fixing this, but it's probably a breaking change from Windows PowerShell and would also cause significant command invocation slowdown.",
+      "created_at": "2019-10-21T19:03:29Z",
+      "updated_at": "2019-10-21T19:03:29Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "The whole point of the cmdlet cache is to automatically load cmdlets that aren't present and this works today. I therefore assume that the issue with `Get-Command` is that it's using a different code path than `CommandDiscovery` which is weird. \r\n> cause significant command invocation slowdown\r\n\r\nI would *much* rather live with a minor, obscure inconsistency (if there is one) than take a big perf trying to fix it.",
+      "created_at": "2019-10-21T19:30:14Z",
+      "updated_at": "2019-10-21T19:30:14Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> it's probably a breaking change from Windows PowerShell\r\n\r\nTechnically, yes, but it's hard to imagine that someone actively relied on this behavior.\r\n\r\n> would also cause significant command invocation slowdown.\r\n\r\nWhy would there be a _significant_ slowdown?\r\n\r\nThe session already knows about the command names from not-yet-auto-loaded modules, so it sounds like you simply need to consider those too when looking up by name, which I wouldn't expect to have a tangible impact (though I know little about the plumbing).\r\n\r\nOr are you specifically concerned that  _immediately after session start-up_ it takes a while to collect all names from auto-loading modules, which would slow down CLI invocations with `-Command`?\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-21T19:40:14Z",
+      "updated_at": "2019-10-21T19:40:14Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Why would there be a significant slowdown?\r\n\r\nSay you have a script called `build.ps1` on the PATH.\r\n\r\nWhen you run the command `build`, the proposed new behaviour must look for commands matching that before falling back to the script.\r\n\r\nFirst we look for loaded commands. That's fast.\r\n\r\nThen we look in the module analysis cache. Slower since we might have to touch the filesystem, but still acceptable. But still no result.\r\n\r\nSo now, we're forced to look on the module path for any module exporting a command or alias called `build`. This is because the cache might not capture modules newly installed or added. This is very slow, because:\r\n\r\n- We must *find* every module on the module path\r\n- We must inspect all manifests\r\n- In the cases where manifests use wildcards, we must do module analysis (where we analyse script modules to see if we can work out their exports).\r\n\r\nOnly after we have looked at every module on the module path can we fall back to invoking the script file on the PATH. And because the filesystem can always have a new module plonked onto it without going through PowerShell (imagine extracting a zip onto the module path in explorer.exe), the cache can never prove the negative, so we always must look. Meaning script invocation now gets much much slower.\r\n\r\nTLDR: Every script invocation without a slash in it takes a `Get-Module -ListAvailable` performance hit.",
+      "created_at": "2019-10-21T20:37:09Z",
+      "updated_at": "2019-10-23T20:39:26Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "But I also agree that autoloading should be transparent and that it shouldn't affect command precedence. Invoking a script without the slash in it is something I personally wouldn't recommend and haven't seen much of. But I can imagine not everyone agrees with that second point.",
+      "created_at": "2019-10-21T20:47:44Z",
+      "updated_at": "2019-10-21T20:47:44Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I therefore assume that the issue with Get-Command is that it's using a different code path than CommandDiscovery which is weird.\r\n\r\nWe first try to resolve the command with CommandSearcher and then try autoloading:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/49e906bc3bd302e54ab1f5ad00c5bda8f8fba07f/src/System.Management.Automation/engine/CommandDiscovery.cs#L793-L822\r\n\r\nCommandSearcher looks like this:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/49e906bc3bd302e54ab1f5ad00c5bda8f8fba07f/src/System.Management.Automation/engine/CommandSearcher.cs#L76-L243",
+      "created_at": "2019-10-21T20:56:00Z",
+      "updated_at": "2019-10-21T20:56:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I appreciate the background information, @rjmholt - sounds like there is indeed a serious performance concern; let me mull that over a bit.\r\n\r\n@BrucePay: \r\n\r\n>  inconsistency (if there is one)\r\n\r\nIf the OP leaves any doubt as to whether there is an inconsistency, let me know.",
+      "created_at": "2019-10-21T22:54:49Z",
+      "updated_at": "2019-10-21T22:54:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "How many name conflicts do we have? It seems it is an edge case.\r\n\r\nFor interactive session it is not critical too - user can fix his mistake by adding extension, or path to the command name, or install/import a module.\r\n\r\nFor reliable scripts we would use full qualified cmdlet names and full path to scripts to avoid name conflicts. Otherwise, there is always a way to break the script. (Even just changing PATH env variable)",
+      "created_at": "2019-10-22T06:00:44Z",
+      "updated_at": "2019-10-22T06:00:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Given the performance implications, it makes sense to live with this inconsistency and simply _document_ it - see https://github.com/MicrosoftDocs/PowerShell-Docs/issues/4976 - so I'm closing this.\r\n\r\n@iSazonov, @rjmholt \r\n\r\nI don't expect it to be common either, but naming conflicts strike me as most likely with `*.ps1` scripts placed in `$env:PATH`.\r\n\r\nI use this technique personally to avoid having to cram too many functions into my `$PROFILE` (and when creating a whole module would be overkill), but, more importantly, the technique makes sense for convenient invocation of PSGallery-installed scripts (`Install-Script`).\r\n\r\nWith other kinds of external executables, naming conflicts with cmdlets are unlikely, though more so with functions with non-standard names and especially aliases.\r\n\r\nYes, you can work around the issue, but the points is that _you may not be aware of the need to do so_, especially given that the behavior differs _situationally_.\r\n",
+      "created_at": "2019-10-22T18:36:28Z",
+      "updated_at": "2019-10-22T18:36:28Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I don't expect it to be common either, but naming conflicts strike me as most likely with *.ps1 scripts placed in $env:PATH.\r\n\r\nWe could continue (async) search after we found first command and write warnings about possible name conflicts.",
+      "created_at": "2019-10-23T04:16:19Z",
+      "updated_at": "2019-10-23T04:16:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov - I personally think it's sufficient to document the issue.\r\n",
+      "created_at": "2019-10-23T15:52:53Z",
+      "updated_at": "2019-10-23T20:40:16Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I'll make an edit just so there's no jumping around required",
+      "created_at": "2019-10-23T20:37:32Z",
+      "updated_at": "2019-10-23T20:37:32Z"
+    }
+  ],
+  "created_at": "2019-10-21T13:42:34Z",
+  "number": 10853,
+  "state": "closed",
+  "title": "Command precedence should be honored irrespective of whether an auto-loading module is currently already imported or not",
+  "updated_at": "2019-10-23T20:40:16Z"
+}

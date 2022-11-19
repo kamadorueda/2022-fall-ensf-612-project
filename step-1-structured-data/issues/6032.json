@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6032",
+  "author": "k1rb",
+  "body": "Hi there, \r\n\r\nOpening `/usr/bin/pwsh`, typing in `\"hello world.\"` and pressing enter yields 43 (+4 on exit) events to /var/log/syslog. This isn't the case with all of my servers but it is for all of my servers running `Powershell 6.0.0-1.debian.9`. \r\n\r\nHere is the first log generated, as an example:  \r\n```\r\nJan 25 15:53:30 server-name powershell[18813]: (v6.0.0:7:11) [Command_Lifecycle:CommandStart.Method.Informational] Command Import-Module is Started.#012%n%nContext:%n        Severity = Informational#012        Host Name = ConsoleHost#012        Host Version = 6.0.0#012        Host ID = 183c0648-d3c2-4c60-9ba5-18204b3c9f81#012        Host Application = /opt/microsoft/powershell/6.0.0/pwsh.dll#012        Engine Version = 6.0.0#012        Runspace ID = b261234c-963d-4ab3-b814-03161505d08f#012        Pipeline ID = 1#012        Command Name = Import-Module#012        Command Type = Cmdlet#012        Script Name = #012        Command Path = #012        Sequence Number = 7#012        User = server-name\\root#012        Connected User = #012        Shell ID = Microsoft.PowerShell#012%n%nUser Data:%n%n\r\n```\r\n\r\n17 lines later it's telling me that the console is ready for use:\r\n```\r\nJan 25 15:53:31 server-name powershell[18813]: (v6.0.0:1:10) [Perftrack_ConsoleStartupStop:PowershellConsoleStartup.WinStop.Informational] PowerShell console is ready for user input\r\n```\r\nAnd then finally, 47 lines later it's done with:\r\n```\r\nJan 25 16:10:08 server-name powershell[18813]: (v6.0.0:7:11) [Command_Lifecycle:CommandStop.Method.Informational] Command PSConsoleHostReadline is Stopped.#012%n%nContext:%n        Severity = Informational#012        Host Name = ConsoleHost#012        Host Version = 6.0.0#012        Host ID = 183c0648-d3c2-4c60-9ba5-18204b3c9f81#012        Host Application = /opt/microsoft/powershell/6.0.0/pwsh.dll#012        Engine Version = 6.0.0#012        Runspace ID = b261234c-963d-4ab3-b814-03161505d08f#012        Pipeline ID = 9#012        Command Name = PSConsoleHostReadline#012        Command Type = Function#012        Script Name = #012        Command Path = #012        Sequence Number = 42#012        User = server-name\\root#012        Connected User = #012        Shell ID = Microsoft.PowerShell#012%n%nUser Data:%n%n\r\n```\r\n\r\nAs you can imagine, running even a simple script would cause flooding of syslog and then worse for log servers downstream. \r\n\r\nIs this \"normal\" now, is there a way to disable this behavior or at least redirect logging to another source, for instance to one that isn't sent off for parsing by log servers?\r\n\r\nThanks!",
+  "closed_at": "2018-02-02T19:04:32Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@dantraMSFT what is the default logging level supposed to be?",
+      "created_at": "2018-01-26T02:20:05Z",
+      "updated_at": "2018-01-26T02:20:05Z"
+    },
+    {
+      "author": "k1rb",
+      "author_association": "NONE",
+      "body": "Thank you for looking into this, wanted to say that this behavior persists in 6.0.1-1.debian.9. I see a pending pull request related to this but thought I'd let you know anyway. ",
+      "created_at": "2018-01-29T18:50:43Z",
+      "updated_at": "2018-01-29T18:50:43Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "Informational is the default logging level but I'll dig into it; perhaps I have a filtering problem or new log items have been added.",
+      "created_at": "2018-01-29T22:00:37Z",
+      "updated_at": "2018-01-29T22:00:37Z"
+    },
+    {
+      "author": "k1rb",
+      "author_association": "NONE",
+      "body": "I suggest using `/var/log/powershell/{debug.log,information.log,warning.log,error.log}` respectively,  instead of `/var/log/syslog`, with the exception of errors which can be sent to both their own log and `/var/log/syslog`.\r\n\r\nI currently have a single 98 line powershell script running on a server right now that generates 32 lines a minute to `/var/log/syslog`... each line is then read, parsed and filtered, sent over the network, parsed again, tagged, sorted, stored... and then retrieved and filtered out repeatedly forever after.",
+      "created_at": "2018-01-29T23:31:35Z",
+      "updated_at": "2018-01-29T23:39:26Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've got a consistent repro; analytic events are not being filtered.\r\nThis appears to be a regression of https://github.com/PowerShell/PowerShell/pull/5791.\r\n\r\n",
+      "created_at": "2018-01-31T01:35:05Z",
+      "updated_at": "2018-01-31T01:35:05Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@dantraMSFT This should be related to this [if block](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/utils/tracing/SysLogProvider.cs#L316) added in #5791.\r\n\r\nThe script block execution logging uses `PSKeyword.UseAlwaysAnalytic`, and the default keyword filter caused those loggings to be filtered out even if the script block logging was enabled.\r\n\r\nThe `UseAlwaysAnalytic` event is able to be written into ETW on Windows (see the code [here](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/utils/tracing/PSEtwLogProvider.cs#L281)). So, that change was made to work around the default keyword filtering on Unix. Looking back at that change, it's not well thought through as it basically cancels the default keyword filtering.\r\n\r\nI think the root problems are:\r\n1. what level of parity should the logging on Unix has compared with on Windows? For example, an event with the keyword `UseAlwaysAnalytic` can be written to ETW by default. Does that make sense? Should the logging on Unix be able to do that by default as well?\r\n2. we need to review the code that issues events. Are they using the correct keyword and channel? For example, I see calls like `PSEtwLog.LogOperationalVerbose(..., PSKeyword.UseAlwaysAnalytic, ...)` where operational channel is used but the pass-in keyword is \"PSKeyword.UseAlwaysAnalytic\".",
+      "created_at": "2018-01-31T17:35:32Z",
+      "updated_at": "2018-01-31T17:35:32Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "The windows implementation is based on a misunderstanding of how channels and keywords are used. Under the hood, channels and keywords are simply bits in a larger bit set and enabling/disabling a given bit does not cause the event to be written.  What causes it to be written is one or more listeners that have compatible bit set for the given event.  If no listeners have requested events with the analytic bit set, they are dropped on the floor.\r\n\r\nNormally, this is handled completely transparently to the component raising the events, the underlying event descriptor indicates what keywords are defined for each event and has a bit set for the target channel.  \r\n\r\nProblems occur when attempting to customize this behavior. In this case, stripping the analytic bit from all events mean all analytic events get logged.\r\n\r\nAs far as #2 above, that code really doesn't make sense from an ETW standpoint. Events are expected to target a single channel, not changed on the fly and in your example, under the hood it is targeting multiple channels since both operational and analytic are marked (one via LogOperationAlVerbose and a second via PSKeyword.UseAlwaysAnalytic).\r\n\r\nAn alternative solution would be to log 'required' script block events to operational (perhaps as warning) and leave the remaining marked as analytic and don't attempt to mix and match keywords and channels on the fly; it usually ends up causing unexpected results.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-01-31T18:27:40Z",
+      "updated_at": "2018-01-31T18:27:40Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've reopened  https://github.com/PowerShell/PowerShell/issues/5695 and will revisit the script block events for an alternative approach.",
+      "created_at": "2018-01-31T20:29:51Z",
+      "updated_at": "2018-01-31T20:29:51Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> the underlying event descriptor indicates what keywords are defined for each event\r\n\r\nDoes this mean the caller shouldn't specify a keyword when writing an ETW event?",
+      "created_at": "2018-01-31T22:52:23Z",
+      "updated_at": "2018-01-31T22:52:23Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "On windows, the only thing the caller 'should' be providing is the event id and payload.  All other values, including keywords, channel, opcode, task and level are  embedded in the event descriptor.  It's not clear to me why the original PowerShell code base decided to also pass these values as explicit parameters. At best, it's passing redundant values, at worse, the events that are logged do not always match the definition in the manifest.  \r\n\r\nPowerShell usually gets away with it more as a side-effect of how consuming code usually decodes events but it also means cases where precise queries are needed may not return the complete results since the logged events do not match the events declared in the manifest.  However, if the consuming code uses the manifest as the authority, events may be presented incorrectly. For example, if the manifest indicates an event has an Informational level but the event was logged as Error level, the event would be presented as Informational.\r\n\r\nIf we end up doing the work to decouple PowerShell's logging from ETW, this will have to be refactored out of the callers and will like require an updated, and simpler, ETW manifest when used on Windows.",
+      "created_at": "2018-01-31T23:54:12Z",
+      "updated_at": "2018-01-31T23:56:52Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@dantraMSFT Thanks for the clarification! I like the idea that all events are defined in the manifest and the caller just provides event id and payload to write an event. But would this also work for syslog and apple log (no manifest on Unix platforms)?",
+      "created_at": "2018-02-01T01:29:00Z",
+      "updated_at": "2018-02-01T01:30:39Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "This would work on Linux and MacOS; in fact, the manifest is currently being used to generate the resx file containing the event messages that are logged to syslog/os_log. Take a look at tools\\ResxGen\\Resxgen.psm1.  It currently extracts this information from the manifest in anticipation of changes to our logging.  \r\n\r\nFor example, it's straight forward to use this to generate a C# class like mc.exe does then insert the platform specific 'logger' interface underneath it.",
+      "created_at": "2018-02-01T18:31:16Z",
+      "updated_at": "2018-02-01T18:53:41Z"
+    },
+    {
+      "author": "dantraMSFT",
+      "author_association": "CONTRIBUTOR",
+      "body": "@k1rb: This should now be fixed with PR https://github.com/PowerShell/PowerShell/pull/6086",
+      "created_at": "2018-02-02T19:04:31Z",
+      "updated_at": "2018-02-02T19:04:31Z"
+    }
+  ],
+  "created_at": "2018-01-26T00:16:39Z",
+  "number": 6032,
+  "state": "closed",
+  "title": "Powershell 6.0.0-1.debian.9 logging to /var/log/syslog is too verbose...",
+  "updated_at": "2018-02-02T19:10:41Z"
+}

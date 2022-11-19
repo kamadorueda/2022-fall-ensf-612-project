@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13613",
+  "author": "atriumcarceri",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n$scriptThrottleLimit = 4\r\n$scriptTimeoutLimit = 0\r\n$ErrorActionPreference = Continue\r\n$test = Get-Aduser -Filter *\r\n$test.count\r\n14483\r\n\r\n $test.samaccountname | Foreach-Object -Parallel {\r\n     Write-Output $_\r\n } -ThrottleLimit $scriptThrottleLimit -TimeoutSeconds $scriptTimeoutLimit\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\nworks normally, process all object\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nAfter processing some pack of objects, server goes to out of memory, then pwsh stop using cpu (0-1%) and stop processing pipe. Only stop process works. I tried different numbers in throttlelimit, no change, it just slow memory leak.\r\nhttps://prnt.sc/ueti4c\r\nhttp://prntscr.com/uetj45\r\ni think it not clean after each of parallel instance\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.3\r\nOS                             Microsoft Windows 10.0.14393\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @PaulHigin for information.",
+      "created_at": "2020-09-10T12:33:29Z",
+      "updated_at": "2020-09-10T12:33:29Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This version of PowerShell does not have the perf improvement for ForEach-Object -Parallel, and creates and destroys a runspace for each loop iteration (perf improvement in 7.1 preview reuses runspaces by default).\r\n\r\nBut I have tested both versions for leaks, and haven't found any.\r\n\r\nHowever, running scripts in parallel *does* use a lot of resources.  Try adding `[System.GC]::Collect()` to your loop to help ensure CLR recovers resources.\r\n\r\nI notice two things in your test repro above:\r\n  1. You store output from Get-ADUser, which may use a lot of resources depending on how large the returned objects are.  Instead you could just stream directly to For-EachObject -Parallel.\r\n\r\n  2. Your loop script writes to output/console, which is a serial operation.  So your repro expends a tremendous amount of resources to parallelize something that is immediately re-serialized, and essentially provides no benefit.",
+      "created_at": "2020-09-10T15:38:22Z",
+      "updated_at": "2020-09-10T15:38:22Z"
+    },
+    {
+      "author": "icanhazpython",
+      "author_association": "NONE",
+      "body": "I've seen similar things, although I'm not sure if the issue is constrained to foreach-parallel or just in general. This is some MS Graph code that causes my powershell process to grow in size until it completely exhausts all memory on my system: \r\n```\r\nConnect-MgGraph -Scopes 'Mail.ReadWrite'\r\n$SearchPhrase = \"from:bot@xyz.net\"\r\n$UserId = \"person@xyz.net\"\r\n$ThrottleLimit = 20\r\n$Sync = [System.Collections.Hashtable]::Synchronized(@{ count = 0 })\r\nwhile ($true) { \r\n  $Sync.count = 0\r\n  $Job = Get-MgUserMessage -Search $SearchPhrase -UserId $UserId -PageSize 100 | ForEach-Object -ThrottleLimit $ThrottleLimit -AsJob -Parallel { \r\n    Remove-MgUserMessage -UserId $using:UserId -MessageId $_.Id\r\n    ($using:sync).count ++; \r\n  } \r\n  while ($Job.State -eq 'Running') { \r\n    Write-Progress -Activity \"Deleting $($sync.count)/100 messages\" -PercentComplete (($sync.count -gt 100) ? 100 : $sync.count)\r\n    Start-Sleep -Seconds 0.1; \r\n  } \r\n}\r\n```\r\n\r\nI took a look with JetBrains dotMemory and all it really tells me is that most survived objects are strings and system.management.automation.cmdletinfo. Any ideas?",
+      "created_at": "2021-09-22T21:53:42Z",
+      "updated_at": "2021-09-22T21:53:42Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "The tests I've run have shown no memory leaks as long as the CLR can perform garbage collection.  And the CLR has various strategies on when to collect non-rooted objects.  I don't believe anything has changed since my tests (although they were awhile ago).\r\n\r\nYou should try to make sure the garbage collection has a chance to run.\r\nhttps://docs.microsoft.com/en-us/dotnet/standard/garbage-collection/fundamentals\r\n\r\nBut if you are getting OOM errors, that is concerning.  You can use this tutorial to investigate the leak and determine which objects remain rooted and where they are rooted.\r\nhttps://docs.microsoft.com/en-us/dotnet/core/diagnostics/debug-memory-leak\n\n<blockquote><img src=\"https://docs.microsoft.com/dotnet/media/dot-net-cross-platform.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/standard/garbage-collection/fundamentals\">Fundamentals of garbage collection</a></strong></div><div>Learn how the garbage collector works and how it can be configured for optimum performance.</div></blockquote>\n<blockquote><img src=\"https://docs.microsoft.com/dotnet/media/dotnet-logo.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/core/diagnostics/debug-memory-leak\">Debug a memory leak tutorial</a></strong></div><div>Learn how to debug a memory leak in .NET Core.</div></blockquote>",
+      "created_at": "2021-09-23T15:51:15Z",
+      "updated_at": "2021-09-23T15:51:17Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Another good write up on .NET memory management.\r\nhttps://github.com/Maoni0/mem-doc/blob/master/doc/.NETMemoryPerformanceAnalysis.md\n\n<blockquote><img src=\"https://opengraph.githubassets.com/584bf84154912f85392357d13ef63f6e0388cfcd4dc7bb988295d643d67e8cfc/Maoni0/mem-doc\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/Maoni0/mem-doc\">mem-doc/.NETMemoryPerformanceAnalysis.md at master \u00b7 Maoni0/mem-doc</a></strong></div><div>This is a document to help with .NET memory analysis and diagnostics. - mem-doc/.NETMemoryPerformanceAnalysis.md at master \u00b7 Maoni0/mem-doc</div></blockquote>",
+      "created_at": "2021-09-23T15:57:35Z",
+      "updated_at": "2021-09-23T15:57:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> my powershell process to grow in size until it completely exhausts all memory on my system\r\n\r\nMaybe it is not memory leak but it is very bad situation. This rather says that GC does not work optimally in PowerShell scenarios. Perhaps there is a better way to do it.\r\n\r\nI have noticed many times that Windows PowerShell is much more aggressive in freeing memory while PowerShell Core does it lazily and slowly (sometimes it takes several minutes for the memory to return to its original state).\r\n\r\n@PaulHigin perhaps conversations with .Net GC team could helps to find how we could adjust GC parameters. Can you ping anybody from .Net team?",
+      "created_at": "2021-09-23T16:58:45Z",
+      "updated_at": "2021-09-23T16:58:45Z"
+    },
+    {
+      "author": "Kettoch",
+      "author_association": "NONE",
+      "body": "In 7.1.4, I am noticing similar issues.  I have resorted to having each thread call [system.gc]::Collect() before the end of the parallel loop.  I am running between 25 and 100 threads each of which is loading modules and i get all kinds of weird effects.\r\n\r\n- Memory increasing and hours after the script has exited gracefully the process still has GBs of RAM that on some servers can threaten and has once made the server unable to reboot without an external hard reset.  The effect on memory seems to be different depending upon 7.1.4 running on 2019, 2012 R2 or windows 10.\r\n- Even with garbage collection being called in this manner, i still see memory increasing over the course of the 7 hours this script runs.\r\n\r\nBut what's also alarming is that custom repositories go missing in threads sporadically.  IE in a batch of 50 threads, maybe 10 to 15 respond that the Repo is unavailable and when that happens, i am required to re-register the repo at the beginning of the script because the configuration keeps getting lost.\r\n\r\nThere is something fundamental in how threads are spawned in this manner that needs to be reviewed.",
+      "created_at": "2021-09-28T17:57:31Z",
+      "updated_at": "2021-09-28T17:57:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@Kettoch Can you share simple repro steps and script?",
+      "created_at": "2021-09-29T05:17:08Z",
+      "updated_at": "2021-09-29T05:17:08Z"
+    },
+    {
+      "author": "icanhazpython",
+      "author_association": "NONE",
+      "body": "> In 7.1.4, I am noticing similar issues.  I have resorted to having each thread call [system.gc]::Collect() before the end of the parallel loop.  I am running between 25 and 100 threads each of which is loading modules and i get all kinds of weird effects.\n> \n> \n> \n> - Memory increasing and hours after the script has exited gracefully the process still has GBs of RAM that on some servers can threaten and has once made the server unable to reboot without an external hard reset.  The effect on memory seems to be different depending upon 7.1.4 running on 2019, 2012 R2 or windows 10.\n> \n> - Even with garbage collection being called in this manner, i still see memory increasing over the course of the 7 hours this script runs.\n> \n> \n> \n> But what's also alarming is that custom repositories go missing in threads sporadically.  IE in a batch of 50 threads, maybe 10 to 15 respond that the Repo is unavailable and when that happens, i am required to re-register the repo at the beginning of the script because the configuration keeps getting lost.\n> \n> \n> \n> There is something fundamental in how threads are spawned in this manner that needs to be reviewed.\n\n@Kettoch ive seen sporadic issues loading custom repos as well, but I don't have anything on hand to easily reproduce this. I saw the issue when using a module I wrote to do massively parallel ps-remoting. After being steeped in loooots of pwsh over the past few years, I think it has its purpose, but parallelization and remoting on a grand scale are just a bit too finicky for my taste. I've been considering rewriting this tool by leveraging a golang-based server and agent that communicate via grpc. Golang is nice and it handles parallelization pretty gracefully. There are also some interesting projects out there that either exec pwsh or actually create a clr hosting environment for pwsh to run. For myself, I'm going to be leveraging these more performant languages in situations such as these, and gluing to pwsh where it makes sense to. ",
+      "created_at": "2022-01-11T11:28:11Z",
+      "updated_at": "2022-01-11T11:28:11Z"
+    }
+  ],
+  "created_at": "2020-09-10T09:59:11Z",
+  "number": 13613,
+  "state": "open",
+  "title": "Memory leak when foreach-object parallel",
+  "updated_at": "2022-01-11T11:28:11Z"
+}

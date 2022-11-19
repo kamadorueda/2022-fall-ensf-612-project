@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13114",
+  "author": "daxian-dbw",
+  "body": "### Problem Statement\r\n\r\nToday, the splatting of a Hashtable in a PowerShell command invocation works just like explicitly specifying those key-value pairs as individual named parameters in the command line, so the following example doesn't work:\r\n```powershell\r\n$common = @{\r\n    AddressPrefix = \"10.0.0.0/16\"\r\n    ResourceGroupName = \"MyResourceGroup\"\r\n    Location = \"westus\"\r\n}\r\n\r\nNew-AzVirtualNetwork @common -Name MyNet -AddressPrefix \"10.0.0.0/24\"\r\n\r\n> New-AzVirtualNetwork: Cannot bind parameter because parameter 'AddressPrefix' is specified more than once. To provide \r\n> multiple values to parameters that can accept multiple values, use the array syntax. For example, \"-parameter \r\n> value1,value2,value3\".\r\n```\r\n`$common` may work well for all other 99 `New-AzVirtualNetwork` calls in my scripts, but there is one instance where a different address prefix is required. In such a case, I would have to temporarily change the Hashtable and restore it after the invocation, like this:\r\n```powershell\r\ntry {\r\n    $commonAddrPrefix = $common.AddressPrefix\r\n    $common.AddressPrefix = \"10.0.0.0/24\"\r\n\r\n    New-AzVirtualNetwork @common -Name MyNet\r\n}\r\nfinally {\r\n    $common.AddressPrefix = $commonAddrPrefix\r\n}\r\n```\r\n\r\n### Proposed technical implementation details\r\n\r\nThe proposal is to allow an explicitly specified named parameter to supersede _the same one_ that is expanded from splatting a Hashtable.\r\n\r\n1. To be clear, I want to point out that the proposal targets _\"Hashtable splatting\"_ and _\"explicitly specified named parameters\"_ only.\r\n    (a). Array splatting won't change its current behavior.\r\n    (b). Hashtable splatting won't change its current behavior when working with explicitly specified positional parameters.\r\n    (c). Both Array splatting and Hashtable splatting keep their current behaviors when working with native command.\r\n\r\n1. The `CommandParameterInternal` created from [splatting a Hashtable](https://github.com/PowerShell/PowerShell/blob/babf02768bec3ab11c5991b5c2b3603256bad43a/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L340) needs to be marked as _came-from-splatting_.\r\n\r\n1. To determine whether 2 named parameters are _the same_, parameters need to be resolved to cover the use of parameter alias or prefix (e.g. `-s` for `-Seconds` in `Start-Sleep`), so the work should be done in the parameter binder.\r\n\r\n1. Script-block-to-PowerShell conversion also [does splatting](https://github.com/PowerShell/PowerShell/blob/babf02768bec3ab11c5991b5c2b3603256bad43a/src/System.Management.Automation/engine/runtime/ScriptBlockToPowerShell.cs#L736). It calls `powershell.AddParameter(string paramName, object paramValue)` for each of the key-value pair of the Hashtable. The _\"came-from-splatting\"_ message needs to be passed on to the `PowerShell` instance, so we will need to add a boolean property `CamFromSplatting` to [`CommandParameter`](https://github.com/PowerShell/PowerShell/blob/babf02768bec3ab11c5991b5c2b3603256bad43a/src/System.Management.Automation/engine/CommandParameter.cs#L13) to track that information, which will be used when invoking the `PowerShell` instance.\r\n\r\n1. __Challenge:__ the script-block-to-PowerShell conversion is also used in remoting scenario [when the script block to invoke on the remote side contains command invocations only](https://github.com/PowerShell/PowerShell/blob/babf02768bec3ab11c5991b5c2b3603256bad43a/src/System.Management.Automation/engine/remoting/commands/PSRemotingCmdlet.cs#L2298), for example `Invoke-Command { param($hash) dir @hash } -ArgumentList @{ path = \"c:\\\" }`. In that case, the generated `PowerShell` instance will be used to create a remote pipeline and run on the remote side, so the new member added to `CommandParameter` will likely cause serialization/deserialization problems. More investigation is needed.\r\n\r\n**Update to (5):** powershell committee agreed (https://github.com/PowerShell/PowerShell/issues/13108#issuecomment-655794760) to not use `GetPowerShell` in remote command execution, so (5) won't be a blocker.\r\n\r\n/cc @SteveL-MSFT @JamesWTruher @joeyaiello \r\n",
+  "closed_at": "2020-08-05T05:59:54Z",
+  "comments": [
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "Additionally, we could provide _new_ behavior where the position of the splatted provides a clue as to which values should be applied - here's an example of what I'm talking about:\r\n```\r\nPS> function get-test {\r\nparam (\r\n[Parameter()]$first,\r\n[Parameter()]$second\r\n)\r\n\"$first : $second\"\r\n}\r\n\r\nPS> $h = @{ first = 1; second = 2 }\r\nPS> get-test -first \"what\" @h\r\n1 : 2\r\n\r\nPS> get-test @h -first what\r\nwhat : 2\r\n```\r\n\r\nin the first example `get-test -first \"what\" @h` the values in the splatted hashtable are used and override the explicit parameter use. in the second example `get-test @h -first \"what\"`, since the explicit parameter is used after the splatted hashtable, the explicitly provided value is used. Configuration systems sometimes provide this behavior.",
+      "created_at": "2020-07-15T23:00:49Z",
+      "updated_at": "2020-07-15T23:00:49Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Having parameter argument overrides based on position in the argument list feels very confusing to me.  It is something that is easy to forget, get wrong, and difficult to read and maintain.  Having explicit parameter arguments override splatting arguments seems more intuitive to me.  ",
+      "created_at": "2020-07-15T23:10:17Z",
+      "updated_at": "2020-07-15T23:10:17Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Having parameter argument overrides based on position in the argument list feels very confusing to me.\r\n\r\nI agree with @PaulHigin.\r\nI think it will cause burden to the script maintenance for sure. For example, when I need to add a few more named parameters to the following existing command call in a script, I have to figure out why the arguments were specified in that order, was it intentional or by accident? If it was by accident and it happened to work, then it may break when `$hashConfig` gets changed (e.g. added `Param1 = arg0`).\r\n\r\n```powershell\r\nInvoke-XXXX -Param1 args1 @hashConfig -Param2 arg2 -Param3 arg3\r\n```",
+      "created_at": "2020-07-15T23:37:56Z",
+      "updated_at": "2020-07-15T23:37:56Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #13162, which has now been successfully released as `v7.1.0-preview.6`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.6)\n",
+      "created_at": "2020-08-17T22:21:43Z",
+      "updated_at": "2020-08-17T22:21:43Z"
+    }
+  ],
+  "created_at": "2020-07-06T00:22:23Z",
+  "number": 13114,
+  "state": "closed",
+  "title": "Allow explicitly specified named parameter to supersede the one from hashtable splatting",
+  "updated_at": "2020-08-17T22:21:43Z"
+}

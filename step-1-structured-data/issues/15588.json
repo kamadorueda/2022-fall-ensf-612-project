@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15588",
+  "author": "aersam",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nPowershell Package Authoring in C#/.Net is a very unsatisfying task for anything that relies on complex Nuget Packages. As an example: It's nearby impossible to get a package working on Powershell Gallery that relies on the Nuget Package of the SQL Server Driver (Microsoft.Data.SqlClient). I have to reference platform specified dll's somehow and it requires a lot of code just to get that dll working. The SQL Server Module \r\n\r\nIn addition, as a Powershell package can only have dependencies from PowershellGallery (de-facto), it's common to include the .Net DLLs in the Package, see [SqlServer Module](https://www.powershellgallery.com/packages/SqlServer) for example. If two packages include the same dll's we have a conflict. As an example, the SqlServer Module mentioned uses Newtonsoft.Json which should be fairly common to include. \r\n\r\n## Proposed technical implementation details\r\n\r\nI'd propose to support Nuget Dependencies directly in the Manifest Files (psd1). In Powershell and or Binary Modules you should then be able to use that package, just by using the `using` Statement. \r\n",
+  "closed_at": "2021-06-18T07:45:28Z",
+  "comments": [
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "@aersamkull are you talking about authoring directly in C# or authoring \"hybrid\" modules that use .ps1 scripts to do .net calls to assemblies?\r\n\r\nFor the former just following a traditional C# project path and bringing in PowershellStandard as a dependency. The dotnet new psmodule is a good example.\r\n\r\nAs far as the assembly conflicts, solving the .dll conflict between two modules probably can't be solved with just having dependencies in the manifest. AssemblyLoadContext with PS6+ can potentially solve this but has a host of its own issues.\r\n\r\nFor hybrid modules, a using statement may be helpful, I'm working on something in a module that doesn't necessarily need to be in the engine that will use Paket to facilitate this.\r\n\r\nHave you seen this article?\r\nhttps://docs.microsoft.com/en-us/powershell/scripting/dev-cross-plat/choosing-the-right-nuget-package?view=powershell-7.1\r\n\r\nThe other articles in that same category are very useful too.\r\n\n\n<blockquote><img src=\"https://docs.microsoft.com/media/logos/logo-powershell-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/powershell/scripting/dev-cross-plat/choosing-the-right-nuget-package\">Choosing the right PowerShell NuGet package for your .NET project - PowerShell</a></strong></div><div>Alongside the executable packages published with each PowerShell release, the PowerShell team also maintains several packages available on NuGet. These packages allow targeting PowerShell as an API platform in .NET.</div></blockquote>",
+      "created_at": "2021-06-17T17:41:04Z",
+      "updated_at": "2021-06-17T17:41:06Z"
+    },
+    {
+      "author": "aersam",
+      "author_association": "NONE",
+      "body": "I talk about writing both, pure C# Modules and hybrid module, however I personally wanted to do the first one. \r\n\r\nThe problem I have is not just referenencing the Powershell Reference Assembly but more complex Projects. If you look at Microsoft.Data.SqlClient: It has a number of platform specifiec dlls and dependencies. In order to use that Package from a Powershell script I had to manually add the Dll's using Add-Type (Or use the new [directory structure](https://docs.microsoft.com/en-us/powershell/scripting/dev-cross-plat/writing-portable-modules?view=powershell-7.1#dependency-on-native-libraries), but it's not quite the same as in .Net/Nuget) . Then I had to recursively get all non-framework dependencies and do the same. And in the end my module probably can't be used together with the SqlServer Module because of Dll conflicts. \r\nSo the frustrating thing is: I can write a traditional c# project, but in practice not really with Nuget Packages that are a bit more complex. This really limits the whole Powershell Ecosystem, I think. If we could just take any Nuget Package, add some Cmdlet's and publish is to Powershell Gallery, we had the whole Nuget stuff available in Powershell. Wouldn't that be great ? :)\r\n\r\nIn a \"normal\" .Net project, as a Package Consumer I don't have to care about all that stuff. I simply add a reference, Dll's and dependencies are loaded just perfectly. .Net is very strong there, I nearby never had to mess around with Dll's. That's why I expect more from Powershell ;) \r\n\r\n",
+      "created_at": "2021-06-18T05:00:19Z",
+      "updated_at": "2021-06-18T05:00:19Z"
+    },
+    {
+      "author": "JustinGrote",
+      "author_association": "CONTRIBUTOR",
+      "body": "@aersamkull \r\nSo this sounds like something more appropriate to the module manifest than the using statement. There already is AssembliesToLoad, so something like AssembliesToImport in the manifest could meet a similar need, either in the the process of building a module by auto-pulling the nuget packages and dotnet restoring them into your module folder before publishing, or during the install process by fetching them during the module installation.\r\n\r\nThe reason I say this route is that it would probably be very difficult to get something like a new `using` keyword merged, because it's not really the responsibility of the core powershell engine to handle the acquisition of packages, just to load packages **already present.**\r\n\r\nPowershellGet is currently being rewritten to v3 and Install-PSResource will replace Install-Module. Something could definitely be added there to read the Powershell Manifest for a new keyword like AssembliesToImport and do the work I discussed during the Install-PSResource process.\r\n\r\nI've always wanted a \"go get\" Golang way of pulling in packages and other github packages easily just from lines at the top of the file, that's why I've looked at Paket which has solved that problem very well.\r\n\r\nI have a couple modules that are \"hybrid\" modules that basically just bring in Nuget packages and use them from Powershell, no C# written at all. An example is PowerConfig and I just bring in the packages via a .csproj like you say. If you do it as part of a csproj then you can just dotnet restore it into the lib of your output like I do here. The platform-specific stuff can then be loaded in the .psm1 file and then you shouldn't have conflicts.\r\nhttps://github.com/justingrote/powerconfig\r\n\r\nSpecific code here:\r\nhttps://github.com/JustinGrote/PowerConfig/blob/7b814b94938d1e317e5099c0710429f9999d80d1/PSModule.build.ps1#L13-L36\r\n\r\nSo I hope that helps with the potential avenues to resolve this:\r\n1. A new `using` keyword is probably unlikely to get merged into master anytime soon unless it was a super pressing need\r\n2. The ask can be addressed via a build module/build script, and those could be made easier or integrated into Powershell Get. It could also be addressed with a DSL-style module that allows you to put a UsingNugetPackage function at the top of the file that will download and import the nuget package in the background. Because it can be addressed in a module, it's not likely to get merged into the core master.\r\n3. I would recommend opening/referencing this issue at https://github.com/powershell/powershellget and see if they have any plans for something like this on the roadmap.",
+      "created_at": "2021-06-18T05:14:21Z",
+      "updated_at": "2021-06-18T05:16:36Z"
+    },
+    {
+      "author": "aersam",
+      "author_association": "NONE",
+      "body": "seems reasonable, ported the issue to PowershellGet",
+      "created_at": "2021-06-18T07:45:28Z",
+      "updated_at": "2021-06-18T07:45:28Z"
+    }
+  ],
+  "created_at": "2021-06-16T04:56:42Z",
+  "number": 15588,
+  "state": "closed",
+  "title": "Better Support for Nuget Dependencies for Binary Modules",
+  "updated_at": "2021-06-18T08:09:42Z"
+}

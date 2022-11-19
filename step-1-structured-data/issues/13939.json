@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13939",
+  "author": "pee-tu",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nfsutil file setCaseSensitiveInfo d:\\ca\r\nD:\\ca> mkdir HH\r\nD:\\ca> mkdir hh\r\nD:\\ca> rmdir hh\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\nLowercase named object 'hh' is removed.\r\nD:\\ca> dir\r\nHH\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nUppercase named object 'HH' is removed instead of 'hh'. The same observed for 'Remove-Item' and 'del'. Also for files.\r\nD:\\ca> dir\r\nhh\r\n\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0-rc.2\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "So I think the problem lies in https://github.com/PowerShell/PowerShell/blob/7e145ef2da91f2ac49e9a4d4a988f309a02007ad/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L173.\r\n\r\nWhen the FileSystemProvider is given a path it tries to normalise it which involves a few steps like converting file system separators from the alt to the actual separator. The current code is designed to get the actual casing of the path item, so if you did `Get-Item -Path C:\\WinDowS | Select Name, FullName' it will be `Windows` and not the one specified in the cmdlet parameter.\r\n\r\nThe trouble in this case is that `[IO.Directory]::GetFileSystemEntries('D:\\ca', 'hh')` is case insensitive on Windows regardless of the folder settings and it will return both folders, for example:\r\n\r\n```powershell\r\nPS C:\\temp\\ca> gci\r\n\r\n\r\n    Directory: C:\\temp\\ca\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\nd----          30/10/2020 11:31 AM                HH\r\nd----          30/10/2020 11:31 AM                hh\r\n\r\nPS C:\\temp\\ca> [IO.Directory]::GetFileSystemEntries('C:\\temp\\ca', 'hh')\r\nC:\\temp\\ca\\HH\r\nC:\\temp\\ca\\hh\r\n```\r\n\r\nNow when `GetFileSystemEntries` returns 1 or more elements the current code just returns the first one, in your case `HH` https://github.com/PowerShell/PowerShell/blob/7e145ef2da91f2ac49e9a4d4a988f309a02007ad/src/System.Management.Automation/namespaces/FileSystemProvider.cs#L174-L177.\r\n\r\nIt sounds like we need a more stringent check when multiple elements are returned here. I'm not sure if this code path is also meant to handle wildcard in the path but it does explain this issue. While the code has changed a bit, the use of normalising the path was introduced with https://github.com/PowerShell/PowerShell/commit/6bc2b55fdf99bf70cf11bbc2a37ffa20aa9881d5 and  part of the 7.0.0 release.",
+      "created_at": "2020-10-30T01:55:41Z",
+      "updated_at": "2020-10-30T01:55:41Z"
+    },
+    {
+      "author": "pee-tu",
+      "author_association": "NONE",
+      "body": "Thanks for prompt response. \r\nI guess the simplest fix for now would be to replace line 176 with following piece:\r\n\r\n```none\r\nif( entries.Length == 1) \r\n{\r\n    // This one here is a little bit complicated case:\r\n    // CaseSensitiveInfo might be still enabled but requested \"item\" is not matched case against folder entry.\r\n    // Therefore it is rather tentative fix. Permament fix would required to check\r\n    // whether folder is Case-enabled which would indicate match case is required otherwise a blind delete is OK\r\n    exactPath = entries[0];\r\n}\r\nelse\r\n{\r\n    // >1 indicates that CaseSensitiveInfo is enabled and there are multiple entries,\r\n    // item must match case - no other option possible.\r\n    foreach(entry in entries)\r\n    {\r\n        if(entry == item)\r\n        {\r\n           exactPath == item;\r\n        }\r\n    }\r\n   // here the error would be requred if nothing is matching case. Deleting a random item woud not be a good idea.\r\n}\r\n```",
+      "created_at": "2020-10-30T13:30:35Z",
+      "updated_at": "2020-10-30T13:30:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That sounds like a pretty good medium, assuming wildcards aren't going to cause complications. It would be good for the error message to mention the file/folder names that were found so the user knows it's a casing issue.",
+      "created_at": "2020-10-30T13:38:38Z",
+      "updated_at": "2020-10-30T13:38:38Z"
+    },
+    {
+      "author": "pee-tu",
+      "author_association": "NONE",
+      "body": "One issue with that piece of code: it will only works in Windows. For linux everything must go case-sensitive.",
+      "created_at": "2020-10-30T15:18:09Z",
+      "updated_at": "2020-10-30T15:18:09Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> One issue with that piece of code: it will only works in Windows. For linux everything must go case-sensitive.\r\n\r\nOn Linux at least `GetFileSystemEntries()` is case sensitive so it will match the entries exactly. What I don't know is if that's dependent on the file system being case sensitive or if it's just a global rule. Unfortunately that sits in another repo but I would hope it's the latter.",
+      "created_at": "2020-10-30T21:41:28Z",
+      "updated_at": "2020-10-30T21:41:28Z"
+    }
+  ],
+  "created_at": "2020-10-30T00:33:18Z",
+  "number": 13939,
+  "state": "open",
+  "title": "del, rmdir, Remove-Item are deleting wrong file/folder in CaseSensitiveInfo enabled folders",
+  "updated_at": "2021-12-01T07:24:38Z"
+}

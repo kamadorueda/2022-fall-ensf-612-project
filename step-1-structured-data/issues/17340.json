@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17340",
+  "author": "Hamsterman",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nThe following code fails on PS 7.2.3 but works just fine on PS 5.1.19041.1682 (Windows 10 version)\r\n\r\n    $req = [System.Net.HttpWebRequest]::Create('https://' + $Domain)\r\n    $req.AllowAutoRedirect = $true\r\n    $req.ServerCertificateValidationCallback = [System.Net.Security.RemoteCertificateValidationCallback] { return $true }\r\n    $resp = $req.GetResponse()\n\n### Expected behavior\n\n```console\nNo errors and any validation errors are hidden\n```\n\n\n### Actual behavior\n\n```console\nException is thrown\n```\n\n\n### Error details\n\n```console\n\"There is no Runspace available to run scripts in this thread. You can provide one in the DefaultRunspace property of the System.Management.Automation.Runspaces.Runspace type. The script block you attempted to invoke was:  return $true \"\n```\n\n\n### Environment data\n\n```powershell\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.3\r\nPSEdition                      Core\r\nGitCommitId                    7.2.3\r\nOS                             Microsoft Windows 10.0.19043\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": "2022-05-17T22:00:44Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "It's a .NET change that makes the callback runs on thread pool thread now. Here are some duplicates issues: https://github.com/PowerShell/PowerShell/issues/15688, https://github.com/PowerShell/PowerShell/issues/13597",
+      "created_at": "2022-05-16T17:59:30Z",
+      "updated_at": "2022-05-16T17:59:30Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "There are 3 main ways you can bypass this. The simplest is to just use [Invoke-WebRequest](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/invoke-webrequest?view=powershell-7.2) with the `-SkipCertificateCheck`. There are many more options on that cmdlet and it is quite advanced since it was rewritten in the pwsh v6/7 days. It also uses the [HttpClient](https://docs.microsoft.com/en-us/dotnet/api/system.net.http.httpclient?view=net-6.0) class internally which is recommended today over the `HttpWebRequest` class.\r\n\r\nThe 2nd options is to use `Add-Type` to compile the C# code containing your delegate:\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition @'\r\nusing System;\r\nusing System.Net.Security;\r\nusing System.Security.Cryptography.X509Certificates;\r\n\r\nnamespace HTTP\r\n{\r\n    public class Validator\r\n    {\r\n        public static bool MyTlsValidator(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)\r\n        {\r\n            return true;\r\n        }\r\n    }\r\n}\r\n'@\r\n\r\n$req = [System.Net.HttpWebRequest]::Create('https://' + $Domain)\r\n$req.AllowAutoRedirect = $true\r\n$req.ServerCertificateValidationCallback = $certDelegate\r\n$resp = $req.GetResponse()\r\n```\r\n\r\nThe benefit of this approach is you can store the responses on the class for later retrieval or easily change it up and add conditional validation logic.\r\n\r\nThe 3rd option is to use a Linq Expression to build the delegate yourself. It's a bit more involved but saves you having to compile the code inline and this expression is quite simple\r\n\r\n```powershell\r\n$certDelegate = [System.Linq.Expressions.Expression]::Lambda(\r\n    [System.Net.Security.RemoteCertificateValidationCallback],\r\n    [System.Linq.Expressions.Expression]::Block(\r\n        [System.Linq.Expressions.Expression]::Constant($true)\r\n    ),\r\n    [System.Linq.Expressions.ParameterExpression[]](\r\n        [System.Linq.Expressions.Expression]::Variable([object]),\r\n        [System.Linq.Expressions.Expression]::Variable([System.Security.Cryptography.X509Certificates.X509Certificate]),\r\n        [System.Linq.Expressions.Expression]::Variable([System.Security.Cryptography.X509Certificates.X509Chain]),\r\n        [System.Linq.Expressions.Expression]::Variable([System.Net.Security.SslPolicyErrors])\r\n    )\r\n).Compile()\r\n\r\n$req = [System.Net.HttpWebRequest]::Create('https://' + $Domain)\r\n$req.AllowAutoRedirect = $true\r\n$req.ServerCertificateValidationCallback = $certDelegate\r\n$resp = $req.GetResponse()\r\n```\r\n\r\nUltimately unless `Invoke-WebRequest` or `Invoke-RestMethod` didn't have a feature you needed you should really stick with the cmdlets as they do all this for you.",
+      "created_at": "2022-05-16T19:10:54Z",
+      "updated_at": "2022-05-16T19:10:54Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as external and has not had any activity for **1 day**. It has been be closed for housekeeping purposes.",
+      "created_at": "2022-05-17T22:00:43Z",
+      "updated_at": "2022-05-17T22:00:43Z"
+    },
+    {
+      "author": "Hamsterman",
+      "author_association": "NONE",
+      "body": "Invoke-Webrequest is not really working either: see issue #17333\r\nBut it would be much better if it did :)",
+      "created_at": "2022-05-20T07:24:55Z",
+      "updated_at": "2022-05-20T07:24:55Z"
+    }
+  ],
+  "created_at": "2022-05-13T18:22:44Z",
+  "number": 17340,
+  "state": "closed",
+  "title": "7.2.3: ServerCertificateValidationCallback throws There is no Runspace available to run scripts in this thread",
+  "updated_at": "2022-05-20T07:24:55Z"
+}

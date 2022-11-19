@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7930",
+  "author": "vexx32",
+  "body": "Using the `-First $n` parameter for `Select-Object` *completely skips* the `end {}` blocks of **all** cmdlets preceding it in the pipeline.\r\n\r\nThis can be quite hazardous, e.g., for a cmdlet that access a resource that needs to have that handle properly disposed of (like a file) may not release that handle correctly.\r\n\r\nThere is no `finally {}` block available to PS, and the method in which `Select-Object` terminates the pipeline appears to happen in such a manner that *no script-based function can account for*; that is, even *with* a `try...finally` construct in the cmdlets' `process {}` blocks it will not kick off in the event that `Select-Object` is used to prematurely end the pipeline.\r\n\r\nInstead, a method should be exposed for `Select-Object` (and potentially other cmdlets?) to *safely* terminate the pipeline by ceasing all `process` steps and kicking off the chain of `end {}` steps in the pipeline.\r\n\r\nSteps to reproduce\r\n------------------\r\n(shamelessly pinched from @TimCurwick's [fantastic example](https://gist.github.com/TimCurwick/c1794b1c2f978fc5fd9c86d19a683636) he posted in the PS Slack)\r\n```powershell\r\nfunction test {\r\n    [cmdletbinding()]\r\n    param(\r\n        [Parameter(ValueFromPipeline)]\r\n        $X \r\n    )\r\n    begin {\r\n        Write-Host \"Begin test\"\r\n    }\r\n    process {\r\n        Write-Host \"Process test\"\r\n        $X\r\n    }\r\n    end {\r\n        Write-Host \"End test\"\r\n    }\r\n}\r\n    \r\n1, 2, 3 | test | test | select -first 2\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nBegin Test\r\nBegin Test\r\nProcess Test\r\nProcess Test\r\n1\r\nProcess Test\r\nProcess Test\r\n2\r\nEnd Test\r\nEnd Test\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nBegin test\r\nBegin test\r\nProcess test\r\nProcess test\r\n1\r\nProcess test\r\nProcess test\r\n2\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 10.0.17763\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Hi @vexx32 `end` is not intended to be a cleanup block. Cleanups in cmdlets should be handled in the `Dispose()` implementation. For scripts, there currently isn't an equivalent solution.  Issue #6673 was opened to address this.",
+      "created_at": "2018-10-03T03:30:10Z",
+      "updated_at": "2018-10-03T03:30:10Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Certainly, @BrucePay but given that output from `end{}` is valid and an accepted pattern, there exist many cases with `Select-Object -First $n` where that output (which may be perfectly valid regardless of the decision to accept only the first `$n` items from `process {}` may not occur.\r\n\r\nThere may also be logging steps or any number of actions that one would *expect* to be performed in the `end {}` step which is, *silently and without any form of documentation explaining the behaviour*, completely skipped without warning. There is [**one line** in the Select-Object documentation](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/select-object?view=powershell-6#description) that indicates that it stops prior commands. This is, however, without mention that potentially significant portions of *all previous commands in the entire pipeline sequence preceding* `Select-Object` will be summarily skipped. In a sense, it feels a bit like a breach of the pipeline contract, so to speak, if there was such a thing.\r\n\r\nThe worst part is, because this is implemented in this fashion, there is *absolutely no way* for a module author to combat this. `Select-Object -First $n` is an effective way of completely neutering *any* cmdlet's `end {}` block, whether that is your intention or not. \r\n\r\nAppreciate the linked issue, but I think that given the pipeline standard of executing `begin {}` once, `process {}` for each object, and `end {}` once, it simply doesn't make sense for *a cmdlet from another module* to entirely and without any kind of warning for the user skip entire segments of other cmdlets' or functions' code.",
+      "created_at": "2018-10-03T04:00:38Z",
+      "updated_at": "2018-10-03T04:03:48Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@vexx32 \r\n> but given that output from end{} is valid and an accepted pattern, there exist many cases with Select-Object -First $n where that output (which may be perfectly valid regardless of the decision to accept only the first $n items from process {} may not occur\r\n\r\n`-first n` stops after n characters have been written.  _That's the literal definition of `-first`_.  It doesn't matter if those characters come from `process` or `end`, you ask for n characters, you get n characters. Very simple. And there has never been any contract that says all pieces of the pipeline will execute fully. Any cmdlet can throw a pipeline-terminating exception, or just a terminating exception or the user can hit ctrl-c. Things are guaranteed be called in `begin`,`process`,`end` order but not necessarily that they will all be called.",
+      "created_at": "2018-10-03T04:32:17Z",
+      "updated_at": "2018-10-03T04:32:17Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sure, in cases of error, not everything happens. But Select-Object abusing that means that any sane user who utilises that (awfully handy) functionality remains unaware that code has been skipped -- until something else goes wrong further down the line.\r\n\r\nIn cases of error, this behaviour is relatively obvious. In Select-Object's usage? It's not an error state, it's a deliberately induced state that has unforeseeable consequences unless one is familiar with the underlying code, and shouldn't directly alter other functions' code paths like this.",
+      "created_at": "2018-10-03T04:38:03Z",
+      "updated_at": "2018-10-03T15:07:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I agree that from an end user's perspective there's a crucial difference between something `throw`ing in a pipeline - an unexpected _error_ that, if unhandled, _aborts processing_ - and using `Select-Object -First` to only process part of the pipeline input - a regular feature during _normal operation_ that simplify _modifies_ processing.\r\n\r\nIt just so happens that the way `Select-Object -First` stops the upstream cmdlets is also implemented as an exception _behind the scenes_, but that is an implementation detail that shouldn't determine the behavior, for the reasons @vexx32 has already stated.",
+      "created_at": "2018-10-03T19:02:54Z",
+      "updated_at": "2018-10-04T02:47:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This issue would be alleviated somewhat with the introduction of `cleanup{}` in this PR: #9900 ",
+      "created_at": "2020-11-06T17:36:39Z",
+      "updated_at": "2020-11-06T17:36:39Z"
+    }
+  ],
+  "created_at": "2018-10-03T01:36:08Z",
+  "number": 7930,
+  "state": "open",
+  "title": "Select-Object -First X skips End{ } blocks of previous cmdlets",
+  "updated_at": "2020-11-06T17:36:39Z"
+}

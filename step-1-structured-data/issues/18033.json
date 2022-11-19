@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/18033",
+  "author": "hazychill",
+  "body": "### Prerequisites\r\n\r\n- [X] Write a descriptive title.\r\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- [X] Search the existing issues.\r\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\r\n\r\n### Steps to reproduce\r\n\r\n### Preparation\r\nCreate test script (copytest.ps1)\r\n``` PowerShell\r\n[CmdletBinding()]\r\nparam (\r\n    [switch]$UseNewObject\r\n)\r\n\r\n$bufLen = 1MB\r\nif ($UseNewObject) {\r\n    $buffer = New-Object -TypeName byte[] -ArgumentList $bufLen\r\n}\r\nelse {\r\n    $buffer = [byte[]]::new($bufLen)\r\n}\r\n\r\n$srcFile = Join-Path -Path $PSScriptRoot -ChildPath 'srcFile'\r\n$dstFile = Join-Path -Path $PSScriptRoot -ChildPath 'dstFile'\r\nif (Test-Path -LiteralPath $dstFile) {\r\n    Remove-Item -LiteralPath $dstFile\r\n}\r\n\r\ntry {\r\n    $inputStream = [System.IO.File]::Open($srcFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)\r\n    $outputStream = [System.IO.File]::Open($dstFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)\r\n    $stopwatch = [System.Diagnostics.Stopwatch]::new()\r\n    $stopwatch.Start()\r\n    while ($true) {\r\n        $ts = Measure-Command -Expression { $readCount = $inputStream.Read($buffer, 0, $buffer.Length) }\r\n        [PSCustomObject]@{\r\n            Operation = 'Read'\r\n            Count = $readCount\r\n            Time = $ts.TotalMilliseconds\r\n        }\r\n\r\n        if ($readCount -eq 0) {\r\n            break\r\n        }\r\n\r\n        $ts = Measure-Command -Expression { $outputStream.Write($buffer, 0, $readCount) }\r\n        [PSCustomObject]@{\r\n            Operation = 'Write'\r\n            Count = $readCount\r\n            Time = $ts.TotalMilliseconds\r\n        }\r\n    }\r\n    $stopwatch.Stop()\r\n    \"----------\"\r\n    \"Time Total:  $($stopwatch.Elapsed.TotalMilliseconds)\"\r\n}\r\nfinally {\r\n    $outputStream.Dispose()\r\n    $inputStream.Dispose()\r\n}\r\n```\r\nThis script simply copies srcFile to dstFile using Stream read/write operation with byte[] buffer. With no parameter, buffer would be created using `[byte[]]::new()` method. With `-UseNewObject` parameter, buffer would be created using `New-Object` cmdlet.\r\n\r\ncreate srcFile (10MB) in the same directory as copytest.ps1.\r\n``` PowerShell\r\nPS> fsutil file createnew srcFile (10MB)\r\n```\r\n\r\n### Execution\r\n\r\n``` PowerShell\r\nPS> Enable-ExperimentalFeature PSAMSIMethodInvocationLogging\r\n```\r\nRestart pwsh\r\n\r\n#### Case1 PSAMSIMethodInvocationLogging ON, new() method\r\n``` PowerShell\r\nPS> .\\copytest.ps1\r\n\r\nOperation   Count  Time\r\n---------   -----  ----\r\nRead      1048576  0.26\r\nWrite     1048576 10.06\r\nRead      1048576  0.27\r\nWrite     1048576  3.84\r\nRead      1048576  0.24\r\nWrite     1048576  3.71\r\nRead      1048576  0.31\r\nWrite     1048576  3.87\r\nRead      1048576  0.27\r\nWrite     1048576  4.15\r\nRead      1048576  0.29\r\nWrite     1048576  3.79\r\nRead      1048576  0.26\r\nWrite     1048576  3.78\r\nRead      1048576  0.35\r\nWrite     1048576  3.98\r\nRead      1048576  0.29\r\nWrite     1048576  3.92\r\nRead      1048576  0.18\r\nWrite     1048576  3.51\r\nRead            0  0.05\r\n----------\r\nTime Total:  51.1335\r\n```\r\n\r\n#### Case2 PSAMSIMethodInvocationLogging ON, New-Object cmdlet\r\n``` PowerShell\r\nPS> .\\copytest.ps1 -UseNewObject\r\n\r\nOperation   Count   Time\r\n---------   -----   ----\r\nRead      1048576 435.67\r\nWrite     1048576 531.13\r\nRead      1048576 448.98\r\nWrite     1048576 458.24\r\nRead      1048576 454.25\r\nWrite     1048576 448.41\r\nRead      1048576 434.75\r\nWrite     1048576 474.36\r\nRead      1048576 436.77\r\nWrite     1048576 461.22\r\nRead      1048576 450.79\r\nWrite     1048576 465.32\r\nRead      1048576 453.66\r\nWrite     1048576 466.68\r\nRead      1048576 456.89\r\nWrite     1048576 459.88\r\nRead      1048576 454.27\r\nWrite     1048576 446.89\r\nRead      1048576 465.88\r\nWrite     1048576 457.08\r\nRead            0 452.79\r\n----------\r\nTime Total:  9625.9351\r\n```\r\n\r\n``` PowerShell\r\nPS> Disable-ExperimentalFeature PSAMSIMethodInvocationLogging\r\n```\r\nRestart pwsh\r\n\r\n#### Case3 PSAMSIMethodInvocationLogging OFF, new() method\r\n``` PowerShell\r\nPS> .\\copytest.ps1\r\n\r\nOperation   Count Time\r\n---------   ----- ----\r\nRead      1048576 0.48\r\nWrite     1048576 4.15\r\nRead      1048576 0.35\r\nWrite     1048576 3.78\r\nRead      1048576 0.27\r\nWrite     1048576 6.58\r\nRead      1048576 0.28\r\nWrite     1048576 3.85\r\nRead      1048576 0.38\r\nWrite     1048576 3.53\r\nRead      1048576 0.26\r\nWrite     1048576 3.42\r\nRead      1048576 0.25\r\nWrite     1048576 3.48\r\nRead      1048576 0.24\r\nWrite     1048576 3.89\r\nRead      1048576 0.32\r\nWrite     1048576 3.66\r\nRead      1048576 0.19\r\nWrite     1048576 3.90\r\nRead            0 0.09\r\n----------\r\nTime Total:  47.3111\r\n```\r\n#### Case4 PSAMSIMethodInvocationLogging OFF, New-Object cmdlet\r\n``` PowerShell\r\nPS> .\\copytest.ps1 -UseNewObject\r\n\r\nOperation   Count Time\r\n---------   ----- ----\r\nRead      1048576 0.50\r\nWrite     1048576 4.22\r\nRead      1048576 0.27\r\nWrite     1048576 3.96\r\nRead      1048576 0.28\r\nWrite     1048576 3.94\r\nRead      1048576 0.27\r\nWrite     1048576 4.52\r\nRead      1048576 0.27\r\nWrite     1048576 4.02\r\nRead      1048576 0.27\r\nWrite     1048576 3.66\r\nRead      1048576 0.30\r\nWrite     1048576 3.65\r\nRead      1048576 0.34\r\nWrite     1048576 3.93\r\nRead      1048576 0.26\r\nWrite     1048576 3.80\r\nRead      1048576 0.26\r\nWrite     1048576 3.60\r\nRead            0 0.05\r\n----------\r\nTime Total:  46.4007\r\n```\r\n\r\nStrangely, only in Case2 (PSAMSIMethodInvocationLogging ON, and buffer created with New-Object cmdlet), Stream read/write operation become extreamly slow (more than 188 times).\r\nPSAMSIMethodInvocationLogging will be stable in PS7.3 (#17962), so some scripts may slow down at that time.\r\n\r\n### Expected behavior\r\n\r\n```console\r\nAll 1-4 Cases take roughly the same time\r\n```\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\nStream read/write operation become extreamly slow in Case2\r\n```\r\n\r\n\r\n### Error details\r\n\r\n```console\r\nNo error\r\n```\r\n\r\n\r\n### Environment data\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.3.0-preview.7\r\nPSEdition                      Core\r\nGitCommitId                    7.3.0-preview.7\r\nOS                             Microsoft Windows 10.0.19044\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\n### Visuals\r\n\r\n_No response_",
+  "closed_at": "2022-09-12T16:15:15Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@hazychill Using a buffer created with New-Object looks unnatural. Is there a real scenario where the AMSI logging causes a performance problem?",
+      "created_at": "2022-09-07T04:56:10Z",
+      "updated_at": "2022-09-07T04:56:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see we can slow down any script :-(. Example:\r\n```powershell\r\n\"a \".Trim()\r\n``\r\nthis raise AMSI logging and if it is in loop we fall in perf issue too.",
+      "created_at": "2022-09-07T05:07:33Z",
+      "updated_at": "2022-09-07T05:07:33Z"
+    },
+    {
+      "author": "hazychill",
+      "author_association": "NONE",
+      "body": "@iSazonov \r\n> @hazychill Using a buffer created with New-Object looks unnatural. Is there a real scenario where the AMSI logging causes a performance problem?\r\n\r\nThe only case I've experienced is this Stream reading/writeting, but since I just rewritten it to new() method, it's not a real problem.",
+      "created_at": "2022-09-07T05:39:45Z",
+      "updated_at": "2022-09-07T05:49:21Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @daxian-dbw ",
+      "created_at": "2022-09-07T15:24:24Z",
+      "updated_at": "2022-09-07T15:24:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps it makes sense to log only first method invoke.",
+      "created_at": "2022-09-08T05:24:29Z",
+      "updated_at": "2022-09-08T05:24:29Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "The problem is with converting PSObject argument with ToString.  @daxian-dbw is looking into it.",
+      "created_at": "2022-09-08T18:56:39Z",
+      "updated_at": "2022-09-08T18:56:39Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #18060, which has now been successfully released as `v7.3.0-preview.8`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.3.0-preview.8)\n",
+      "created_at": "2022-09-20T19:41:34Z",
+      "updated_at": "2022-09-20T19:41:34Z"
+    }
+  ],
+  "created_at": "2022-09-06T15:11:20Z",
+  "number": 18033,
+  "state": "closed",
+  "title": "PSAMSIMethodInvocationLogging: Stream operation is extremely slow when buffer is created with New-Object",
+  "updated_at": "2022-09-20T19:41:34Z"
+}

@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13089",
+  "author": "Artoria2e5",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nThis proposal seeks to come up with a plan for getting #1995 (argv-passing) right without having to call out to the system shell. A two-step migration plan is proposed:\r\n* For powershell v7.1, we seek to make a proper `-ArgumentList` available (in the sense of escaping like `System.Diagnostics.Process` does) by adding a switch to `Start-Process` that defaults to `false`.\r\n* For powershell v7.2, we make the correct behavior the default by:\r\n  * making the new `Start-Process` switch default to `$true`\r\n  * making escaping the behavior for `&` and normal external command calls\r\n  * bumping whatever protocol version is affected\r\n\r\nThe goal is to make sure that PowerShell pass the `argv` as-is to most programs on Windows and all programs on Unix. In other words, for any given string object `$x`, the result for the two commands are expected to be the same:\r\n```powershell\r\nWrite-Output $x\r\n/bin/printf \"%s\\n\" $x\r\n```\r\n\r\nWin32 programs that use custom cmdline parsing will still be usable with the `--%` marker as well as our new switch. Unix programs always use the MSVCRT parsing rule under-the-hood in CoreFX, so they won't be negatively affected at all. For Unix, `--%` can be seen as a way to... poke at the internals.\r\n\r\nAfter all, pwsh is supposed to be a cross-platform shell, so Windows-specific idiosyncrasies should not be part of the basic interface.\r\n\r\n## Proposed technical implementation details\r\n\r\nAs some unspecified utility class, we duplicate the `PasteArguments` class from CoreFX runtime. This is needed because some  our logging code paths use `startupInfo.Arguments` already. It makes more sense to log the stuff escaped like how we invoke it than to log it wrong or using some other custom escape method.\r\n\r\nFor 7.1 and 7.2, we add a `bool? EscapeArgs` (name to be discussed) member to the `StartProcessCommand` class. This flag is to be checked in the existing `if (ArgumentList != null)` branch. When we decide that we shall escape the args according to the fallback rules in the first section, we do it ourselves using the new utility class.\r\n\r\nFor 7.2 we change `NativeCommandParameterBinder::AppendOneNativeArgument` to use the new class. (The existing code tries to do escaping, but it somehow fails. `NeedQuotes` is miserably wrong.)\r\n\r\nI don't have time to check `Invoke-Expression` and `Invoke-Command` yet. I guess they are handled by the latter change?\r\n\r\n## Examples\r\nThe change to quoting behavior mainly affects strings with embedded whitespace and double quotes. Consider the snippet below:\r\n```powershell\r\n$x = 'a\" b\" c d'\r\nnode -e \"console.log(process.argv.splice(1).join('|'))\" -- \"$x\"\r\n```\r\n\r\nIn current powershell, the string printed would be `a|b c d`, a result that can only be understood by one with an idea about how MSVCRT parses arguments and how we decide what to wrap quotes around for. In the proposed version, the output would be the `a\" b\" c d`, exactly as fed into the command (as `Write-Output` would show).\r\n\r\nThe linked PR, #13099, also changes how empty parameters are handled. They were previously omitted on the command-line, but now they are included correctly as empty native arguments. As a result, unassigned variables used will shift the parameter position by one. To avoid this, initalize it to an empty list.\r\n```ps1\r\n# add $cpflag = @()\r\nif ($shouldReflink) {\r\n  $cpflag = '--reflink=auto'\r\n}\r\ncp -a $cpflag $source $dest\r\n```\r\n\r\n#13099 also enables globbing on ALL bare words. As a result, constructs like ``a` b*`` is now subject to globbing. If globbing is undesired, you should be quoting the string. It is expected that few people will rely on the old behavior, as quoted strings are easier to use anyways. A separate proposal (#13098) will address the ergonomics of needing to manually backtick-escaping everything.\r\n\r\nA lot of old code is expected to rely on the old example 2 behavior, since that's how POSIX `sh` works with unquoted expansions. More complex frameworks may do its own quoting, coming into conflict with example 1. An experimental feature switch will be added that covers all three.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@Artoria2e5 Current plan is 7.2 will be next LTS version (not 8.0).",
+      "created_at": "2020-07-03T09:18:26Z",
+      "updated_at": "2020-07-03T11:47:37Z"
+    },
+    {
+      "author": "Artoria2e5",
+      "author_association": "NONE",
+      "body": "Since this will be a public interface change, some protocol version bump will needed. I dont really get how the whole versioning thing works, but if we can keep the 7 while bumping the protocol version that will be great too.\r\n\r\nAh shit, there's a dedicated repo for RFCs and I didnt see that. Ooooops. Call this a pre-RFC then. ",
+      "created_at": "2020-07-03T10:03:08Z",
+      "updated_at": "2020-07-03T11:03:43Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Ah shit, there's a dedicated repo for RFCs and I didnt see that. Ooooops. Call this a pre-RFC then.\r\n\r\n@Artoria2e5 No you are doing the right thing. Open an issue for discussion is the first step before moving to draft an RFC.\r\nI suggest you to include more examples to demonstrate your proposal.",
+      "created_at": "2020-07-05T05:45:16Z",
+      "updated_at": "2020-07-05T05:45:16Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": ">duplicate the PasteArguments class from CoreFX\r\n\r\nJust duplicating would probably not be enough. For some edgecases you could probably read my old RFC and the corresponding discussion starting at https://github.com/PowerShell/PowerShell-RFC/pull/90#issuecomment-511427663",
+      "created_at": "2020-07-05T07:43:01Z",
+      "updated_at": "2020-07-05T07:43:15Z"
+    },
+    {
+      "author": "TSlivede",
+      "author_association": "NONE",
+      "body": "Specifically regarding the behavior of `Start-Process` there is also https://github.com/PowerShell/PowerShell/issues/5576 posted by @mklement0 \r\n\r\nAnd while I do like the Idea of using `Start-Process` instead of a new operator (suggested here: https://github.com/PowerShell/PowerShell/issues/13068#issuecomment-653526374) it would require to make some other features available to `Start-Process`: AFAIK `Start-Process` can currently not redirect the out streams of the executable to the next command in the pipeline. And there are probably more differences between `Start-Process` and the call operator `&`... ",
+      "created_at": "2020-07-05T08:11:26Z",
+      "updated_at": "2020-07-05T08:11:26Z"
+    },
+    {
+      "author": "Artoria2e5",
+      "author_association": "NONE",
+      "body": "Wait, there's a three-year-old RFC for this? \r\n\r\n> Just duplicating would probably not be enough. For some edgecases you could probably read my old RFC and the corresponding discussion starting at [PowerShell/PowerShell-RFC#90 (comment)](https://github.com/PowerShell/PowerShell-RFC/pull/90#issuecomment-511427663)\r\n\r\nI want to keep stuff... minimal. My plan is that rogue programs will eventually only be served by `--%`, for which people will write modules around. It should get documented after all. There *is* the problem of being unable to pass a literal `%`, but people should be able to make up their own env var for it. `--=` is nice and shouldn't be too hard to add.\r\n\r\nI cannot think of a good interface for reusable escaping. Doing `cmd` would take either a very complicated version of the normal rules that keeps tracks of cmd's view of quoting or a non-standard one with the undocumeted `\"\"`. And top it with the usual `/c /k /s \"verbatim cmdline here\"` stuff.\r\n\r\nI kind of like the idea of preserving quoting structure, but then a bareword with trailing backslashes will always throw it off. Issue 13098 can however use some inspection if I can figure out what the AST looks like with `'a 'b` vs `a' b'`...",
+      "created_at": "2020-07-05T08:12:43Z",
+      "updated_at": "2020-07-05T08:17:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TSlivede \r\n\r\n> And while I do like the Idea of using `Start-Process` instead of a new operator\r\n\r\nThis is not an either-or scenario: _both_ direct/`&`-based invocation and `Start-Process` must be fixed - they serve distinct purposes.\r\n\r\nIf I understand @Artoria2e5's proposal correctly, the aim with respect to direct/`&`-based invocation is to _fix_ them in a _breaking manner_.\r\n\r\nHowever, my understanding is that **there is still a fundamental unwillingness to ever take such a big breaking change**.\r\nCorrect, @SteveL-MSFT?\r\n\r\nWith this in mind:\r\n\r\n* The proposal in #5576 is to add a _new parameter_ to `Start-Process`, `-IndividualArguments`, which could use [`System.Diagnostics.ProcessStartInfo.ArgumentList`](https://docs.microsoft.com/en-US/dotnet/api/System.Diagnostics.ProcessStartInfo.ArgumentList) behind the scenes (that on the PowerShell side it is `-ArgumentList` that is the _broken_ parameter is unfortunate, but cannot be helped).\r\n\r\n* Since direct/`&`-based invocation cannot be fixed, https://github.com/PowerShell/PowerShell/issues/13068#issuecomment-653526374 proposes that the fix be implemented _as a new operator_.\r\n\r\n   * This would mean implementing @TSlivede's RFC (https://github.com/PowerShell/PowerShell-RFC/pull/90#issuecomment-511427663), the fundamentals of which I think are agreed upon, but a few details have yet to be worked out.\r\n\r\n   * While it is, of course, unfortunate, that direct/`&`-based invocation will continue to be broken, introducing something like `&!` is (a) concise) and (b) at least easy to communicate: \r\n        * Going forward, only ever use `&!` instead of `&` (for PowerShell commands it will act like `&` already does, for external programs, it will pass arguments properly. \r\n        * When calling external programs, always use `&!`, don't use direct invocation.\r\n\r\nFixing the original features is undoubtedly preferable in an ideal world, but with the commitment to backward compatibility that isn't an option.\r\n\r\n",
+      "created_at": "2020-07-05T14:58:26Z",
+      "updated_at": "2020-07-05T18:12:54Z"
+    },
+    {
+      "author": "Artoria2e5",
+      "author_association": "NONE",
+      "body": "The RFC has an idea about a feature switch variable for controlling the behavior. It should be a good option for maintaining backward compatibility too if we make it scopable.",
+      "created_at": "2020-07-06T01:16:50Z",
+      "updated_at": "2020-07-06T01:30:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Artoria2e5 \r\n\r\nThe RFC proposes a _preference variable_ as an opt-_out_  mechanism - to opt out of the _new_, correct behavior, in order to get the _old_, broken behavior.\r\n\r\n* This logic contradicts the commitment to backward compatibility.\r\n\r\n* Even if we were to _reverse_ that logic - asking for an opt-_in_ to the new, correct behavior, PowerShell's _dynamic_ scoping of (preference) variables makes this solution problematic - see https://github.com/PowerShell/PowerShell/issues/1995#issuecomment-650262164\r\n\r\nA new operator, as awkward as that is, avoids these problems.\r\n\r\n",
+      "created_at": "2020-07-06T02:00:04Z",
+      "updated_at": "2020-07-06T02:00:04Z"
+    },
+    {
+      "author": "jeff-hykin",
+      "author_association": "NONE",
+      "body": "For anyone looking for an essentially bulletproof workaround to this issue (that adjusts itself depending on the powershell version.\r\n### Comparison\r\n```powershell\r\n#\r\n# system echo (linux)\r\n#\r\n\r\n# broken version\r\n& '/bin/echo' 'hello \"world\"' 'I am free \"finally don''t need to worry about escaping\"'       \r\n# >>> hello world I am free finally don't need to worry about escaping\r\n\r\n# fixed version\r\nexecute '/bin/echo' 'hello \"world\"' 'I am free \"finally don''t need to worry about escaping\"' \r\n# >>> hello \"world\" I am free \"finally don't need to worry about escaping\"\r\n\r\n\r\n#\r\n# powershell's echo\r\n#\r\n\r\n# default behavior\r\n& 'echo' 'hello \"world\"' 'I am free \"finally don''t need to worry about escaping\"' \r\n# >>> hello \"world\"\r\n# >>> I am free \"finally don't need to worry about escaping\"\r\n\r\n# backwards compatible behavior (doesn't double-escape)\r\nexecute 'echo' 'hello \"world\"' 'I am free \"finally don''t need to worry about escaping\"' \r\n# >>> hello \"world\"\r\n# >>> I am free \"finally don't need to worry about escaping\"\r\n```\r\n\r\n### Code\r\n```powershell\r\n# example: execute 'echo' 'hello \"world\"' 'I am free \"finally don''t need to worry about escaping\"' \r\n# fixes: https://github.com/PowerShell/PowerShell/issues/3049\r\nfunction execute {\r\n    # \r\n    # argument processing\r\n    # \r\n    $all_args = $PsBoundParameters.Values + $args\r\n    \r\n    # \r\n    # escape all of them\r\n    # \r\n    $escaped_arg_string = \"&\"\r\n    $partly_escaped_arg = \"&\"\r\n    $is_first_arg = $true\r\n    ForEach ($item in $args) {\r\n        # single quotes escape everything... everything except \r\n        $escaped_item = $item\r\n        $escaped_item = ($escaped_item -replace \"'\", \"''\")\r\n        $escaped_twice_item = ($escaped_item -replace '\"', '\"\"')\r\n        \r\n        # the command name/path is handled different\r\n        if ($is_first_arg) {\r\n            $is_first_arg = $false\r\n            # powershell doens't escape the double quotes of the command name\r\n            # so we dont double escape them this one time\r\n            $escaped_twice_item = $escaped_item\r\n        }\r\n        $escaped_arg_string = $escaped_arg_string + \" '\" + $escaped_twice_item + \"'\"\r\n        # post-7.1\r\n        $partly_escaped_arg = $partly_escaped_arg + \" '\" + $escaped_item + \"'\"\r\n    }\r\n    \r\n    # all this because sometimes its an array, sometimes its not\r\n    $results = (Get-Command -CommandType \"All\" -Name $args[0] -ErrorAction SilentlyContinue).Source\r\n    if ($results -is [array]) {\r\n        $results = $results[0]\r\n    }\r\n    $main_item_source = $results\r\n    \r\n    # all this because sometimes its an array, sometimes its not\r\n    $results = (Get-Command -CommandType \"Application\" -Name $args[0] -ErrorAction SilentlyContinue).Source\r\n    if ($results -is [array]) {\r\n        $results = $results[0]\r\n    }\r\n    $main_application_source = $results\r\n    \r\n    # if on older version, note: https://github.com/PowerShell/PowerShell/issues/13089\r\n    # and if it is calling an Application (not a script/function)\r\n    if (($PSVersionTable.PSVersion) -lt ([version]\"7.2.0\") -and ($main_item_source -eq $main_application_source)) {\r\n        # use the fix\r\n        return (Invoke-Expression $escaped_arg_string)\r\n    # if on newer version or not calling an Application\r\n    } else {\r\n        return (Invoke-Expression $partly_escaped_arg)\r\n    }\r\n}\r\n```\r\n\r\nThis should always escape the arguments correctly, even when taking into account the planned 7.2 change [here](https://github.com/PowerShell/PowerShell/issues/13089).",
+      "created_at": "2021-05-09T00:27:02Z",
+      "updated_at": "2021-05-09T00:28:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jeff-hykin, if you're looking for something prepackaged that works robustly and also incorporates the important accommodations on _Windows_ proposed in #15143 that the new-in-PowerShell Core 7.2.0-preview.5 experimental `PSNativeCommandArgumentPassing` feature does not and [seemingly will never include](https://github.com/PowerShell/PowerShell/issues/15143#issuecomment-833090452) (though it does work robustly on _Unix_), consider the `ie` function from the [`Native`](https://github.com/mklement0/Native) module (authored by me).\r\n\r\n",
+      "created_at": "2021-05-09T01:50:20Z",
+      "updated_at": "2021-05-09T01:50:55Z"
+    },
+    {
+      "author": "jeff-hykin",
+      "author_association": "NONE",
+      "body": "@mklement0 Thanks for the info, that looks like a much better long term solution. ",
+      "created_at": "2021-05-09T02:39:52Z",
+      "updated_at": "2021-05-09T02:39:52Z"
+    },
+    {
+      "author": "DemiMarie",
+      "author_association": "NONE",
+      "body": "Can we at least include @mklement0\u2019s msiexec mitigation?  If I understand it correctly, it is 100% compatible and ~~requires no special-casing whatsoever~~ still needs special-casing for certain commands :disappointed:.",
+      "created_at": "2021-05-12T12:04:39Z",
+      "updated_at": "2021-05-12T12:52:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@DemiMarie, I suggest  posting your comment in issue  #15143, as that is where the official decision not to include such accommodations was announced.",
+      "created_at": "2021-05-12T12:12:44Z",
+      "updated_at": "2021-05-12T12:12:44Z"
+    }
+  ],
+  "created_at": "2020-07-03T08:42:10Z",
+  "number": 13089,
+  "state": "open",
+  "title": "[Pre-RFC] Argument Escape Migration (Start-Process, &, and the normal cmd starting; v7.1 / v7.2)",
+  "updated_at": "2021-05-12T12:52:46Z"
+}

@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4636",
+  "author": "mklement0",
+  "body": "<sup>Related: #4634</sup>\r\n\r\nBased on the official cmdlet error-reporting guidelines, (statement)-_terminating_ errors should be reported in the following situations: \"Cmdlets that can accept only 0-1 input objects and generate only 0-1 output objects should treat errors as terminating errors and generate terminating exceptions.\" - https://msdn.microsoft.com/en-us/library/ms714412%28v=vs.85%29.aspx  \r\n\r\nTherefore, `Push-Location`, which, only accepts 1 input and produces no output, should generate a (statement-)_terminating_ error in case of inability to change to the specified location.\r\n\r\nMore generally, it's worth examining _all_ core cmdlets with respect to whether they're playing by the official error-reporting rules. In _Windows PowerShell_, there's at least one cmdlet that, based on its documented behavior, claims to report a (statement)-terminating error in a specific scenario: `Resume-Job`,  which applies to _workflows_ only, supposedly generates a terminating error when passed a non-workflow job object, but currently doesn't.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\ntry { Push-Location /NoSuch } catch { 'no such dir.' }\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nThe Try / Catch handler should catch the terminating error.\r\n\r\n```none\r\nno such dir\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\nThe Try / Catch handler is ignored, and a non-terminating error is issued.\r\n\r\n```none\r\nPush-Location : Cannot find path '/NoSuch' because it does not exist\r\n...\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.5 on macOS 10.12.6\r\nPowerShell Core v6.0.0-beta.5 on Ubuntu 16.04.3 LTS\r\nPowerShell Core v6.0.0-beta.5 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.483 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2017-08-22T13:06:19Z",
+  "comments": [
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I disagree. `-Path` can be accepted via the pipeline and this creates the ability to accept multiple Paths instead of just 1.  In a scenario where you where you needed to so something like this\r\n\r\n```powershell\r\n'c:\\temp', 'c:\\' | Push-Location -PassThru | Invoke-SomeCommand \r\n```\r\n\r\nOne would not want a terminating error from ` Push-Location` to break the pipeline. \r\n\r\nIn this case, I think perhaps changing `-Path` and `-LiteralPath`  to accept an arrays might be a better approach to make the parameters consistent between named parameter and pipeline modes.",
+      "created_at": "2017-08-22T12:00:20Z",
+      "updated_at": "2017-08-22T12:00:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus:\r\n\r\nThanks - you are correct; I hadn't considered this use of `Push-Location`. I'm closing this (should be labeled as as-designed).\r\n\r\n> In this case, I think perhaps changing -Path and -LiteralPath to accept an arrays might be a better approach to make the parameters consistent between named parameter and pipeline modes.\r\n\r\nActually, this one of those rare cases where a _scalar_ pipeline-binding parameter does make sense, given that something like `Push-Location -LiteralPath 'c:\\temp', 'c:\\'` wouldn't make sense.\r\n\r\nGenerally, though, we unfortunately have many cmdlets where the pipeline-binding `-InputObject` parameter indeed should be an array, but currently isn't (e.g., `Export-Csv`) - see #4242.\r\n",
+      "created_at": "2017-08-22T13:06:19Z",
+      "updated_at": "2017-08-22T13:06:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S.:  A pitfall regarding your sample command that I wasn't initially aware of:\r\n\r\nSince the current location is a session-global setting, whatever path `Push-Location `ends up changing to last in the pipeline remains as the session's current location after the pipeline has run.",
+      "created_at": "2017-08-22T13:30:38Z",
+      "updated_at": "2017-08-22T13:30:38Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "Correct. In cases like that you may be building a stack against candidate paths, performing an action and then reversing the stack. might also use a named stack `-StackName`\r\n\r\n```powershell\r\n'c:\\temp', 'c:\\', 'c:\\noloexisto\\' | Push-Location -PassThru -StackName 'Test' | Invoke-SomeCommand\r\n\r\n$Processedpaths = Get-Location -StackName 'Test'\r\n```",
+      "created_at": "2017-08-22T13:39:27Z",
+      "updated_at": "2017-08-22T13:39:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, though note that `$ProcessedPaths` will not contain _all paths sent through the pipeline_, but instead the previous working location plus all paths sent through the pipeline _except the last_.\r\n\r\nAlso note that outputs a `[System.Management.Automation.PathInfoStack]` _scalar_, not an array - which I personally think is unfortunate - see #4642.\r\n\r\nAllow me this little tangent (I wrote it up for my own notes; do tell me if I got something wrong):\r\n\r\nIf you could guarantee that the `Test` stack doesn't exist / is empty before the pipeline runs, you could use `Set-Location (Get-Location -StackName Test).ToArray()[-1]` to return to the previous location after.\r\nEnsuring an empty / non-existent `Test` stack beforehand is quite cumbersome, however, because there's no direct test for whether a stack  with a given name exists, and if it does exist, calling `.Clear()` on the  `[System.Management.Automation.PathInfoStack]` instance returned has no effect (except on the object returned) - see #4643.\r\n\r\nThus, to avoid the pitfall I mentioned, it's probably easiest to save and restore the current location:\r\n\r\n```powershell\r\nPush-Location -StackName temp # Save current location using temp. stack.\r\n\r\n'/', '/tmp' | Push-Location -PassThru | % { \"running in $PWD\" }\r\n\r\nPop-Location -StackName temp # Restore previous location from temp. stack.\r\n```\r\n\r\nOf course, if the locations changed to in the pipeline don't need to be remembered, using `Set-Location` instead enables a simpler solution (assuming that _no_ command in the pipeline calls `Push-Location` or `Pop-Location`):\r\n\r\n```powershell\r\nPush-Location # Save current location using the unnamed (default) stack.\r\n\r\n'/', '/tmp' | Set-Location -PassThru | % { \"running in $PWD\" }\r\n\r\nPop-Location # Restore previous location.\r\n```\r\n\r\nLastly, using a custom variable to save and restore the location is, of course, also an option:\r\n\r\n```powershell\r\n$prevLoc = $PWD\r\n\r\n'/', '/tmp' | Set-Location -PassThru | % { \"running in $PWD\" }\r\n\r\nSet-Location $prevLoc\r\n```\r\n",
+      "created_at": "2017-08-22T17:32:39Z",
+      "updated_at": "2017-08-22T17:33:00Z"
+    }
+  ],
+  "created_at": "2017-08-21T21:51:55Z",
+  "number": 4636,
+  "state": "closed",
+  "title": "Push-Location should generate a terminating error, not a non-terminating one, when passed an invalid/non-existent location",
+  "updated_at": "2017-08-23T10:04:09Z"
+}

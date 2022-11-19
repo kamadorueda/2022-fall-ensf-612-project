@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17121",
+  "author": "adamdriscoll",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nYou can run this in any version of PowerShell from 5.1 to 7.2.2 and it will hang. I figure this bug exists somewhere but my GitHub googlin' wasn't yielding anything so feel free to close if this is a dupe. \r\n\r\n```\r\ntry { invoke } catch { $error[0] | ConvertTo-Json -Depth 100 }\r\n```\r\n\r\nIt will also run away with memory until all memory on the system is gone. \r\n\r\n![image](https://user-images.githubusercontent.com/1256531/162280034-76b97ea6-d63e-42f3-bfc6-7f1de88bc7aa.png)\r\n\n\n### Expected behavior\n\n```console\nConvertTo-Json (even at max depth) either throws an error or doesn't continue to serialize this much data from a \"simple\" object.\n```\n\n\n### Actual behavior\n\n```console\nConvertTo-Json consumes all memory on the system.\n```\n\n\n### Error details\n\n_No response_\n\n### Environment data\n\n```powershell\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.2\r\nPSEdition                      Core\r\nGitCommitId                    7.2.2\r\nOS                             Microsoft Windows 10.0.22000\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.22000.282\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.22000.282\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": "2022-04-07T21:18:13Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> ConvertTo-Json (even at max depth) either throws an error or doesn't continue to serialize this much data from a \"simple\" object.\r\n\r\nI wouldn't really call it a simple object. At least without special handling to cherry pick the important properties.\r\n\r\nEspecially once you hit `Exception.TargetSite` you get a whole lot of branching recursive references. Short of hard coding handling for `Exception` I'm not sure what can be done here.",
+      "created_at": "2022-04-07T20:29:32Z",
+      "updated_at": "2022-04-07T20:29:32Z"
+    },
+    {
+      "author": "adamdriscoll",
+      "author_association": "CONTRIBUTOR",
+      "body": "We kind of blindly fire stuff through `ConvertTo-Json` in PSU and I think that's part of my problem. We've worked around this by using async pipeline processing and terminating the pipe if it doesn't return after a few seconds of serialization. I'll just put some warnings on our docs and stuff (or may right in the UI) about it. \r\n\r\nIt looks like NewtonSoft ignores TargetSite or has some special handling for exceptions. We were using NewtonSoft previously but it doesn't handle PSObjects well. \r\n\r\n```\r\nPS C:\\Users\\adamr> $var = try { invoke } catch { [NewtonSoft.Json.JsonConvert]::SerializeObject($error[0].Exception)  }\r\nPS C:\\Users\\adamr> ConvertFrom-Json $var\r\n\r\nClassName              : System.Management.Automation.CommandNotFoundException\r\nMessage                : The term 'invoke' is not recognized as a name of a cmdlet, function, script file, or\r\n                         executable program.\r\n                         Check the spelling of the name, or if a path was included, verify that the path is correct\r\n                         and try again.\r\nData                   : @{System.Management.Automation.Interpreter.InterpretedFrameInfo,\r\n                         System.Management.Automation, Version=7.2.2.500, Culture=neutral,\r\n                         PublicKeyToken=31bf3856ad364e35=System.Object[]}\r\nInnerException         :\r\nHelpURL                :\r\nStackTraceString       :    at System.Management.Automation.ExceptionHandlingOps.CheckActionPreference(FunctionContext\r\n                         funcContext, Exception exception)\r\n                            at System.Management.Automation.Interpreter.ActionCallInstruction`2.Run(InterpretedFrame\r\n                         frame)\r\n                            at\r\n                         System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame\r\n                         frame)\r\n                            at\r\n                         System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame\r\n                         frame)\r\nRemoteStackTraceString :\r\nRemoteStackIndex       : 0\r\nExceptionMethod        :\r\nHResult                : -2146233087\r\nSource                 : System.Management.Automation\r\nWatsonBuckets          :\r\nErrorId                : RuntimeException\r\nErrorCategory          : 0\r\nCommandName            : invoke\r\n```\r\n\r\nI guess I just didn't really grasp the impact of -Depth 100. It must never reach that depth while trying to serialize the world. \r\n",
+      "created_at": "2022-04-07T21:18:13Z",
+      "updated_at": "2022-04-07T21:19:03Z"
+    },
+    {
+      "author": "adamdriscoll",
+      "author_association": "CONTRIBUTOR",
+      "body": "Found it: https://github.com/JamesNK/Newtonsoft.Json/blob/f7e7bd05d9280f17993500085202ff4ea150564a/Src/Newtonsoft.Json/Serialization/DefaultContractResolver.cs#L302\n\n<blockquote><img src=\"https://opengraph.githubassets.com/e39986999f4a0dd6573e84474d1817be5d9ddfc0b37fd297b65810b5d1aecc67/JamesNK/Newtonsoft.Json\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/JamesNK/Newtonsoft.Json\">Newtonsoft.Json/DefaultContractResolver.cs at f7e7bd05d9280f17993500085202ff4ea150564a \u00b7 JamesNK/Newtonsoft.Json</a></strong></div><div>Json.NET is a popular high-performance JSON framework for .NET - Newtonsoft.Json/DefaultContractResolver.cs at f7e7bd05d9280f17993500085202ff4ea150564a \u00b7 JamesNK/Newtonsoft.Json</div></blockquote>",
+      "created_at": "2022-04-07T21:21:59Z",
+      "updated_at": "2022-04-07T21:22:01Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I guess I just didn't really grasp the impact of -Depth 100. It must never reach that depth while trying to serialize the world.\r\n\r\nYeah `MethodInfo` has a ton of properties that cycle. Each layer of depth exponentially increases the total tree size. Depth 100 would take *some time* to hit \ud83d\ude01 ",
+      "created_at": "2022-04-08T00:41:33Z",
+      "updated_at": "2022-04-08T00:41:33Z"
+    }
+  ],
+  "created_at": "2022-04-07T19:21:44Z",
+  "number": 17121,
+  "state": "closed",
+  "title": "ConvertTo-Json Hangs and Consumes More and More Memory",
+  "updated_at": "2022-04-08T00:41:34Z"
+}

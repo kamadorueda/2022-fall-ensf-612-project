@@ -1,0 +1,314 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11674",
+  "author": "mklement0",
+  "body": "Follow-up from https://github.com/PowerShell/PowerShell/issues/11662#issuecomment-577861216:\r\n\r\n### Context:\r\n\r\nNote: _Deprecation_ in the context of PowerShell is _always_ \"soft\" deprecation in the sense that, given the commitment to backward compatibility, features are never _removed_, so that old code _continues to function_. Instead, deprecation means _discouraging use_ of a given feature, for various reasons: having been superseded by a superior alternative, general obsoleteness, security concerns.\r\n\r\nDeprecation can be implemented in the following, potentially complementary ways:\r\n\r\n* _Documentation_ warnings: Clearly state that a given cmdlet / one of its parameters is deprecated and should not be used in new code.\r\n\r\n* _Design-time_ warnings: Implement a PSScriptAnalyzer (PSSA) warning that is ideally also surfaced in Visual Studio Code, via the PowerShell extension's integrated PowerShell Editor Services (PSES).  \r\nThis is currently mostly _not_ implemented (see details below).\r\n\r\n* _Runtime_ warnings:\r\nCurrently, a warning (to stream `3`) is emitted when a deprecated feature is called.\r\n\r\nThe latter are currently implemented by a _repurposing_ of the general [`System.ObsoleteAttribute`](https://docs.microsoft.com/en-US/dotnet/api/System.ObsoleteAttribute) attribute, whose purpose is to provide _compile-time_ warnings (and optionally _errors_) about obsolete features: given that PowerShell code isn't compiled, the PowerShell engine explicitly surfaces `Obsolete` attributes on _cmdlets_ or their _parameters_ (but seemingly not SDK classes with the attribute) with a PowerShell warning _at runtime_.\r\n\r\nExamples of features currently deprecated this way are `Send-MailMessage` and the `-Raw` parameter of the `Format-Hex`  cmdlet; e.g.:\r\n\r\n```powershell\r\nPS> 'foo' | Format-Hex -Raw\r\nWARNING: Parameter 'Raw' is obsolete. Raw parameter is deprecated.\r\n... # regular output\r\n```\r\n\r\n`3>$null`  or `-WarningAction Ignore` can be used to suppress the warning, but old code written pre-deprecation _will_  show the warning.\r\n\r\nAs an aside: The combination of the boilerplate part of the warning (`Parameter 'Raw' is obsolete`) with the attribute-specific message (`Raw parameter is deprecated`) could use some revising.\r\n\r\n----\r\n\r\n### Relevant questions are:\r\n\r\n* Should deprecation be signaled _at runtime_ at all?\r\n  * If so, is the current approach the right one?\r\n\r\n* Is it sufficient to warn at _design time_, knowing that not every user will see those warnings, given that they may use an editor other than Visual Studio Code and not install and routinely run `Invoke-ScriptAnalyzer` after installing the [`PSScriptAnalyzer`](https://www.powershellgallery.com/packages/PSScriptAnalyzer/) module?\r\n\r\n  * As of this writing, PSSA (warning) rules seems to comprise just _one_ relating to one specific deprecated feature, [`AvoidUsingDeprecatedManifestFields`](https://github.com/PowerShell/PSScriptAnalyzer/blob/master/RuleDocumentation/AvoidUsingDeprecatedManifestFields.md), whereas several more deprecated features exist - full list of rules is [here](https://github.com/PowerShell/PSScriptAnalyzer/tree/master/RuleDocumentation).\r\n\r\n  * Perhaps a more promising approach is to let PSSA directly surface `Obsolete` attributes encountered in code, if technically feasible.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks @mklement0! Copying my comment here so I can mark the one in the other thread as off topic. \r\n\r\n> While I agree that adding an `ObsoleteAttribute` would be annoying and probably not what we want here, I strongly disagree that it would be a breaking change.\r\n> \r\n> If adding `ObsoleteAttribute` to anything is a breaking change, then that attribute is pointless. \r\n\r\nIt definitely *can* break things (I know there is a difference between something breaking the change contract and a change technically breaking a thing, but bear with me):\r\n\r\n```powershell\r\nfunction Test-Something {\r\n    [CmdletBinding()]\r\n    param()\r\n    end {\r\n        if ($theWorldIsEnding) {\r\n            $PSCmdlet.WriteWarning('some bad stuff is happening')\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nThis is part of why I don't really like the warning system at all.  Most of the things I would want to warn about are better off as a non-terminating error anyway.\r\n\r\nIf something is writing a warning, I'm either silencing it, or throwing on it.  If I'm throwing on it with `-WarningAction Stop`, then adding `ObsoleteAttribute` will cause my script to always throw.\r\n\r\nI know that if it's considered a breaking change than that makes the attribute useless, but that's how it feels currently. Personally I think `ObsoleteAttribute` should be moved to a design time warning only, *maybe* with `error: true` being the exception.  That's how C# works as well, anything already built keeps on chugging but you're gonna know about it if you try to use it in something new.\r\n\r\n> The whole idea of attributes is that they behave as additive metadata.\r\n\r\nThat's true up until the point where something reads that metadata and changes behavior based on it. Adding `Mandatory` to a `ParameterAttribute` for example is for sure a breaking change.",
+      "created_at": "2020-01-24T16:21:38Z",
+      "updated_at": "2020-01-24T16:21:38Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Simply emitting a new warning message can also break systems that detect success/failure based on stdout/err.\r\n\r\nFor example, script based application detection methods in SCCM.  The SCCM client will invoke a PowerShell script and use stdout/err to determine if the subject application was installed correctly.  Here's a table (from [About custom script detection methods](https://docs.microsoft.com/en-us/configmgr/apps/deploy-use/create-applications#about-custom-script-detection-methods)):\r\n\r\n##### Zero exit code\r\n\r\n|STDOUT|STDERR|Script result|Application detection state|\r\n|---------|---------|---------|---------|\r\n|Empty|Empty|Success|Not installed|\r\n|Empty|Not empty|Failure|Unknown|\r\n|Not empty|Empty|Success|Installed|\r\n|Not empty|Not empty|Success|Installed|\r\n\r\n##### Non-zero exit code\r\n\r\n|STDOUT|STDERR|Script result|Application detection state|\r\n|---------|---------|---------|---------|\r\n|Empty|Empty|Failure|Unknown|\r\n|Empty|Not empty|Failure|Unknown|\r\n|Not empty|Empty|Failure|Unknown|\r\n|Not empty|Not empty|Failure|Unknown|\r\n\r\nSo since warning counts as stdout, if a detection method uses a command that has been deprecated, all of those applications will start reporting as if they are already installed.",
+      "created_at": "2020-01-24T16:36:33Z",
+      "updated_at": "2020-01-24T16:36:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "GitHub search results:\r\n- -WarningAction - 8472\r\n- -ErrorAction - 400857\r\n\r\nI still believe that the transfer of the system to a new version involves testing. I don\u2019t think anyone can easily jump from 5.1 version to 7.0.\r\n\r\nTo migrate a large system like SCCM MSFT team and consumers must test all used scripts.\r\nI guess we need a special label for already tested scripts and engine could report still not tested scripts.\r\n\r\nFor warning messages we could play with preference level to ignore such messages in scripts and show in console session.\r\n \r\n\r\n",
+      "created_at": "2020-01-24T19:34:59Z",
+      "updated_at": "2020-01-24T19:34:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> GitHub search results:\r\n> \r\n> * -WarningAction - 8472\r\n> * -ErrorAction - 400857\r\n>\r\n\r\n\r\nThat's honestly *way* more than I expected to see. I would have guessed like low 300s.\r\n\r\n> I still believe that the transfer of the system to a new version involves testing. I don\u2019t think anyone can easily jump from 5.1 version to 7.0.\r\n>\r\n> To migrate a large system like SCCM MSFT team and consumers must test all used scripts.\r\n\r\nWell yeah for sure.  I've supported many breaking changes in the past and will continue to do so - when the benefit outweighs the risk.\r\n\r\nYou could argue (and I'd find it hard to disagree) that the risk is pretty small for adding a warning.  That said, it's often discussed as zero risk, like it's an interactive only change. The risk is definitely higher than zero, and in my opinion higher than should be acceptable for the simple act of marking something as obsolete.  I'm mainly suggesting that a design time warning should be sufficient.",
+      "created_at": "2020-01-24T22:25:14Z",
+      "updated_at": "2020-01-24T22:25:14Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "A new `Obsolete` or `Deprecate` stream could be added that is only updated by the `System.Obsolete` attribute. That prevents breaking changes with anyone using `-WarningAction` and separates out code changes from scripting logic.\r\n\r\nThe SCCM scenario is not likely an issue. `Warning` and `Verbose` are not redirected to standard out by default so it should not be breaking their detection logic. You can redirect those streams individually or redirect all streams to standard out, but then `Verbose` would break you way before anything else does. Anyone redirecting those streams likely is already handling error detection properly.",
+      "created_at": "2020-01-25T03:44:21Z",
+      "updated_at": "2020-01-25T03:44:21Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> A new `Obsolete` or `Deprecate` stream could be added that is only updated by the `System.Obsolete` attribute. That prevents breaking changes with anyone using `-WarningAction` and separates out code changes from scripting logic.\r\n\r\nThat's a cool idea, but a lot of work.  Problems with that approach aside, they're realistically not going to do that.\r\n\r\n> The SCCM scenario is not likely an issue. `Warning` and `Verbose` are not redirected to standard out by default so it should not be breaking their detection logic. You can redirect those streams individually or redirect all streams to standard out, but then `Verbose` would break you way before anything else does. Anyone redirecting those streams likely is already handling error detection properly.\r\n\r\nWhen I say stdout, I'm not referring to PowerShell's output stream.  I'm referring to the console process standard output.  Anything that writes to the console window and isn't classified as an error message is written to standard output.\r\n\r\nOpen up `cmd.exe` and run this\r\n\r\n```bat\r\npowershell -nop -noni -c \"Write-Warning visible\" > test.log\r\n```\r\n\r\nIn the file will be \"WARNING: visible\".",
+      "created_at": "2020-01-25T06:02:55Z",
+      "updated_at": "2020-01-25T06:02:55Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "> When I say stdout, I'm not referring to PowerShell's output stream.\r\n\r\nI was too, but I see `$WarningPreference` defaults to `Continue` so it is redirecting by default to standard out but `Verbose` output is not unless you specify it. \r\n\r\nAnother option is to just write to the console only and not implement as a full stream. I don't believe the old `Write-Host` from before PS 5 wrote to standard out since the whole issue was that it wrote to the console directly. If that is the case, surfacing that logic shouldn't be too hard for this special case.",
+      "created_at": "2020-01-25T06:27:56Z",
+      "updated_at": "2020-01-25T06:27:56Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Another option is to just write to the console only and not implement as a full stream. I don't believe the old `Write-Host` from before PS 5 wrote to standard out since the whole issue was that it wrote to the console directly. If that is the case, surfacing that logic shouldn't be too hard for this special case.\r\n\r\nThe issue was that it wasn't going through a PowerShell controlled stream.  It did still write to stdout though.",
+      "created_at": "2020-01-25T06:47:49Z",
+      "updated_at": "2020-01-25T06:47:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "To illustrate that with a quick example: The following `cmd.exe` command has no output, because not just `Write-Host`, but `[Console]::WriteLine()` goes to stdout too:\r\n\r\n```sh\r\nC:\\>pwsh -nop -c \"write-host hi; [console]::writeline('ho')\" > NUL\r\n```\r\n\r\nAs an aside: That _all_ streams, including the _error_ stream, go to _stdout_ is, of course, a problem, but changing that would be a breaking change: https://github.com/PowerShell/PowerShell/issues/7989#issuecomment-430854508\r\n\r\n> I'm mainly suggesting that a design time warning should be sufficient.\r\n\r\nI agree; in order to implement that we'd have to do the following (I can't speak to the technical feasibility):\r\n\r\n* Make only PSSA, not the PS engine look for `Obsolete` attributes and automatically surface them as warnings.\r\n  * If this is technically feasible, it would obviate the need for _individual_ rules for deprecated features, and the need for playing catch-up with the source code.\r\n  * Conversely, it would mean that you can only provide the ability to turn _all_ deprecation warnings on or off _as a group_.\r\n\r\n* Make PSES and therefore Visual Studio Code (with the PowerShell extension) surface all deprecation warnings by default.\r\n\r\n* Through announcements and documentation, make it clear that the best PowerShell development experience is offered by Visual Studio Code (along the line of [this](https://docs.microsoft.com/en-us/powershell/scripting/components/ise/introducing-the-windows-powershell-ise?view=powershell-7#support), but not just from the perspective of obsolescent technology) and that use of a _different_ editor should be complemented with integrating `Invoke-ScriptAnalyzer`  into the development workflow.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-01-25T13:55:05Z",
+      "updated_at": "2020-01-27T21:39:06Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see the discussion is only about\"Runtime warnings\".\r\n\r\nI think that the SCCM example is not successful, because SCCM starts an external process. Sometimes it seems to me that it has no design at all :-). Since PowerShell merges everything into one output stream, this will always be a problem, regardless of whether there are warnings. This mechanism is, by definition, completely unreliable. \r\nOpposite look SC Orchestrator. It doesn't use external process, it hosts PowerShell and as result has not the issue.\r\n\r\nNow we should look how deprecation is used. We have 2 main scenario - user console session and application session (I mean all without user interaction).\r\nAs user I'd accept informational messages that a cmdlet or feature will be removed from future version as non-secure (Invoke-Expression) or non-supported (Send-MailMessage).\r\nBut it is important that the message offers a replacement (link to docs) otherwise it will useless and annoying. User will switch to proposed alternative and will do not get warnings.\r\n\r\nFor applications the warnings are pointless. Main concern in the discussion is that warnings can break something. I believe we are thinking not in right direction because besides this minimal risk there are many, many changes that represent a real risk.\r\nRunning blindly any script, module or application on new PowerShell version is dangerous and may be destructively. Users should test their scripts in sandbox before run in live business environment.\r\nRight direction is that we should protect users and enforce them to test scripts.\r\nProposal is to introduce _PowerShell adoption mode_ to prevent users from running non-tested scripts.\r\n\r\n\r\n",
+      "created_at": "2020-01-25T16:42:31Z",
+      "updated_at": "2020-01-25T16:42:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Since PowerShell merges everything into one output stream, this will always be a problem, regardless of whether there are warnings. This mechanism is, by definition, completely unreliable.\r\n\r\nThis is a separate problem, which can be tackled via the planned separate PowerShell executable for not loading `$PROFILE` by default - see #8072.\r\nThe right behavior is to send all streams _other_ than the success output stream to _stderr_, which is the only other native stream available.\r\n\r\n> it hosts PowerShell \r\n\r\nThis is not just about SCCM. It is unrealistic and unreasonable to expect all external (build, CI / CD, ....) tooling to host PowerShell, so the problem will persist, even with the above fix in place.\r\n\r\nAside from that, even a host that checks streams separately could be thrown off by the appearance of new warnings.\r\n\r\n> user console session\r\n\r\nAgreed, in _interactively submitted individual commands_  (as opposed to scripts) that _print to the host_ it would be helpful for the engine to surface deprecation warnings, along with helpful links.\r\n\r\n> Proposal is to introduce PowerShell adoption mode to prevent users from running non-tested scripts.\r\n\r\nInteresting - I suggest you create a new issue for that.\r\n\r\nBut if I interpret your comments correctly, you agree that there is no need for runtime deprecation warnings for unattended (update: and captured / redirected) execution, correct?\r\n\r\n\r\n\r\n",
+      "created_at": "2020-01-25T17:21:01Z",
+      "updated_at": "2020-01-25T17:47:25Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> But if I interpret your comments correctly, you agree that there is no need for runtime deprecation warnings for unattended execution, correct?\r\n\r\nI find it useful for users in interactive session and pointless for scenarios like task scheduler (here we could only write a log event and telemetry if we need).\r\n",
+      "created_at": "2020-01-25T17:46:03Z",
+      "updated_at": "2020-01-25T17:46:03Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "One option would be to only write the warning when `CommandOrigin` is `Runspace`  and `-NonInteractive` was not specified. That would eliminate the majority of risk.",
+      "created_at": "2020-01-25T18:50:47Z",
+      "updated_at": "2020-01-25T18:50:47Z"
+    },
+    {
+      "author": "lukeb1961",
+      "author_association": "NONE",
+      "body": "As a IT admin, if I see 'deprecated' in any way/shape/form you finally decide on, I am going to expect to see 6 different alternatives/examples in help showing me why it is deprecated and what are my options to change to the New/Right/Approved way. Everything you guys don't like about PowerShell, you have to tell me why and how to change to the New Way. \r\nJust thought I'd throw that in now rather than later...",
+      "created_at": "2020-01-26T02:37:37Z",
+      "updated_at": "2020-01-26T02:37:37Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> One option would be to only write the warning when CommandOrigin is Runspace and -NonInteractive was not specified. That would eliminate the majority of risk.\r\n\r\nWe could create an internal method for this and use it in Send-MailMessage and Invoke-Expression BeginProcessing().",
+      "created_at": "2020-01-26T11:20:09Z",
+      "updated_at": "2020-01-26T11:20:09Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> > One option would be to only write the warning when CommandOrigin is Runspace and -NonInteractive was not specified. That would eliminate the majority of risk.\r\n> \r\n> We could create an internal method for this and use it in Send-MailMessage and Invoke-Expression BeginProcessing().\r\n\r\nForgot about invoke expression.  That one definitely shouldn't warn interactively since that's the only scenario it makes sense to use it for.  And tbh what I proposed would be pretty hard to reason about for newer folks.  I'm back to thinking a design time warning is the right route.",
+      "created_at": "2020-01-26T13:17:47Z",
+      "updated_at": "2020-01-26T13:17:47Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Tagged the @PowerShell/powershell-committee so that they can discuss this, since I think they need to be aware of our desire to standardise deprecation in PowerShell on a method that is discoverable but is unlikely to break code.",
+      "created_at": "2020-01-27T17:53:48Z",
+      "updated_at": "2020-01-27T17:53:48Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thank you for the breakdown here, @mklement0. You've articulated really well our difficulty in being anything but tactical and reactionary when it comes to deprecated (or \"pseudo-deprecated\") components. \r\n\r\nBefore we get too far along on the discussion, can we start enumerating all the deprecated, almost-deprecated, or \"wish we could have deprecated before we broke\" features/components from PS 5.1 to 7? Off the top of my head:\r\n\r\n* Snap-ins\r\n* Workflow\r\n* `Send-MailMessage`\r\n* `Workflow` value on `CmdletInfo`(?) enum\r\n* `Format-Hex -Raw`\r\n* PowerShellGet 2.0 (eventually)\r\n* Encoding changes between 5.1 and 6\r\n* WinRM remoting (ish)",
+      "created_at": "2020-01-27T20:52:29Z",
+      "updated_at": "2020-01-27T20:52:29Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Some thoughts I want to throw carelessly into the ether:\r\n\r\n- There are different reasons to deprecate things and different conceptual degrees of deprecation. But adding granularity there is sure to be complex and confusing, so perhaps it's best to just establish a bar for deprecation and a single process for marking something as deprecated\r\n- We should distinguish between opinion on style, invocations that are error prone but valid, invocations that are very likely to be dangerous and finally APIs that it's recommended to move off of or for which support is not continuing\r\n- In that final case, there have been APIs that have been removed without deprecation (like the WMI cmdlets or the win event cmdlets). In some cases there might be little or no opportunity to go through a deprecation process (where a Windows or .NET API is what has changed), but this might be a good opportunity to work out if we could be more consistent on this\r\n- If we decide that there should be an online deprecation register or similar, it might be make sense to formally deprecate some of the APIs that no longer appear in 7\r\n\r\nI think @mklement0 enumerated the options for deprecation well (but everyone please feel free to add new ideas for communicating deprecation). Two thoughts on that:\r\n\r\n- PSScriptAnalyzer, while owned by the PowerShell team, is a very community-driven tool. Most of its rules have been written with or guided by community input, and I wouldn't say they have an *official* capacity. That is to say, if we want PSSA to be a deprecation vector, I would suggest we create a new namespace for \"official\" deprecation rules. I say this since some rules have a style opinion, and the PowerShell team tries not to prescribe styles too much (at least not in my time).\r\n- As I touched on in https://github.com/PowerShell/PowerShell/issues/11662#issuecomment-577818647, we've had trouble articulating the concept of \"deprecation\" to users and a document describing what that means both generally and for PowerShell specifically should probably be a deliverable here.\r\n\r\nSo in terms of what it would take to resolve this issue in my mind, I would list the following:\r\n\r\n- Written dev process on deprecating a PowerShell feature/API (that is, a guide on how to implement the deprecation of a feature)\r\n- Documentation of the concept of deprecation and the deprecation process in the docs repo, as well as possible ways to ignore deprecation if needed\r\n- Any needed updates to currently deprecated features' documentation\r\n- Possibly a list of examples of reasons for deprecation, without trying to be prescriptive about criteria",
+      "created_at": "2020-01-27T21:28:50Z",
+      "updated_at": "2020-01-27T21:28:50Z"
+    },
+    {
+      "author": "riverar",
+      "author_association": "NONE",
+      "body": "re: terminology\r\nIn this context, can we define `obsolete` and `deprecated`? There appears to be some confusion (e.g. the first comment uses obsolete/deprecated interchangeably which is very confusing).\r\n\r\nre: signaling deprecation/obsolescence \r\nI think it makes sense to think about how this is handled elsewhere. Let's look at Win32 APIs. Those APIs\u2014some [deprecated](https://docs.microsoft.com/en-us/previous-versions/windows/desktop/legacy/jj635743(v=vs.85))\u2014certainly don't function differently in an attempt to signal lifecycle status/policy to the user. This ensures maximum app compatibility until the very last moment. The working assumption here is that the user is aware of the API's lifecycle via other side channels (e.g. docs, blogs, tooling warnings and errors, crashes, etc).\r\n\r\n\u274c I **do not** support the emission of any data to any stream (e.g. screen, file, network) at runtime to signal intent. This will break apps.\r\n\r\n\u2714 I **do** support updates to dev tooling and docs to communicate this class of information prior to making changes.\r\n\r\nPowerShell Core follows the [Modern Lifecycle Policy](https://support.microsoft.com/en-us/help/30881/modern-lifecycle-policy), which requires upgrades after 6 months (and patch installs after 30 days). The vehicle for these Cmdlet changes is already in place and active. Use it!\r\n\r\nWindows PowerShell instead falls back onto the OS lifecycle. Want a stable platform for your scripts to run for years unimpeded? Use a long-term servicing branch of Windows and Windows PowerShell.",
+      "created_at": "2020-01-27T21:35:48Z",
+      "updated_at": "2020-01-27T21:35:48Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> * PSScriptAnalyzer, while owned by the PowerShell team, is a very community-driven tool. Most of its rules have been written with or guided by community input, and I wouldn't say they have an _official_ capacity. That is to say, if we want PSSA to be a deprecation vector, I would suggest we create a new namespace for \"official\" deprecation rules. I say this since some rules have a style opinion, and the PowerShell team tries not to prescribe styles too much (at least not in my time).\r\n\r\nYeah I agree.  Just to clarify, when I suggest that obsolescence should be a design time warning, what I'm suggesting is:\r\n\r\n1. Remove the run time warning for `ObsoleteAttribute`\r\n1. Add a rule to PSSA that checks for said attribute\r\n\r\nWhat is and isn't deprecated is still dictated by the author, PSSA just delivers the news.",
+      "created_at": "2020-01-27T21:38:30Z",
+      "updated_at": "2020-01-27T21:38:30Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Add a rule to PSSA that checks for said attribute\r\n\r\nThe issue I see here is that this relies on the PowerShell version analysing the script (which is something I don't like about PSSA in general). Perhaps that's not the end of the world, or even a good thing in this case. But my preference would be for PSSA to have a catalogue of deprecated invocations and us keeping that up to date.\r\n\r\n> Let's look at Win32 APIs\r\n\r\nThose are very low level APIs; there's really no mechanism to decorate them for deprecation (at least not one that wouldn't slow some APIs down by orders or magnitude). Conversely, the .NET APIs, which PowerShell is more directly built on, emit compile-time warnings for every static use of an API with an `ObsoleteAttribute` on it.\r\n\r\nI don't like emitting warnings at runtime for deprecated APIs though. PowerShell's \"compile time\" is essentially at runtime (or at least, isn't dependable enough a stage to put warnings at). I still don't fully agree with the breaking argument -- warnings are differentiated from errors in that they are ignorable (open the dev console in any webpage and see how many warnings show up), they are also configurable and redirectable, `ObsoleteAttribute`s have emitted warnings for some time in PowerShell, and other data streams get used in the background by PowerShell all the time. However, emitting warnings at runtime for this is both ugly and inefficient (since every invocation must look for `ObsoleteAttribute`s).\r\n\r\nI'm also wary that most users aren't using PSScriptAnalyzer or really all that much in the way of tooling. But I suspect that tooling and documentation is the best answer we have here. To get to that point though, PSSA is going to need some investment, both in terms of making it a better tool (which is planned to be worked on but will take time and could always use help) and also in terms of helping PowerShell users discover, configure and use it.\r\n\r\nI also suspect that in documentation, we should have a one-stop-shop for enumerating deprecated APIs so that they are really discoverable.\r\n\r\nAlso, nobody's said otherwise, but I feel like I should add that in terms of SDK/development experience, the `ObsoleteAttribute` is still useful (arguably more so) to let module/host authors know what APIs are deprecated.",
+      "created_at": "2020-01-27T23:21:17Z",
+      "updated_at": "2020-01-27T23:21:17Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I'm also wary that most users aren't using PSScriptAnalyzer or really all that much in the way of tooling\r\n\r\nAfter mentioning this briefly to @joeyaiello, he raised the valid point that a reasonable proportion of users may never even use PowerShell non-interactively.\r\n\r\nWhile I think tooling works well for scripts to be deployed and run non-interactively, it doesn't provide a mechanism to let users know that the commands they're using or habits they're building are deprecated. Getting past runtime warnings here is hard. A possible alternative *might* be in PSReadLine (like if it coloured deprecated commands differently or put a warning in the completion info section), but that's really spitballing.\r\n\r\nThe other problem with not emitting runtime warnings is that statically analysing for deprecated invocations isn't always possible. It's entirely possible to use a deprecated API in a way that a tool analysing the AST (be it PSSA or PSReadLine) wouldn't pick up (but which the engine always catches).",
+      "created_at": "2020-01-27T23:34:29Z",
+      "updated_at": "2020-01-27T23:36:32Z"
+    },
+    {
+      "author": "riverar",
+      "author_association": "NONE",
+      "body": "Throwing in some data: PowerShell had a similar predicament with [unapproved verbs](https://powershell.org/forums/topic/how-do-i-get-rid-of-annoying-warning-message/) and made them opt-in by default / added a flag to hide them. So there's emission precedent.",
+      "created_at": "2020-01-27T23:44:13Z",
+      "updated_at": "2020-01-27T23:48:28Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I currently use `ObsoleteAttribute` when cleaning up old scripts. I like that I can see the warning when running Pester tests. When other people consume my scripts, they get the warnings when using those attributes. I can scan execution log files for the warning messages produced. I have not ran into any issues with the warnings produced this way. It has been a great tool for me when refactoring internal projects. I would like a way to specify Deprecated vs Obsolete.\r\n\r\nHaving PSSA identify the use of an `ObsoleteAttribute` is a great idea. I hacked together a script to scrape my own code for use of obsolete attributes but never took it so far to make a PSSA rule for it.\r\n\r\nHowever we implement deprecation in PowerShell, it would be nice if module authors can also make use of it.",
+      "created_at": "2020-01-28T00:42:34Z",
+      "updated_at": "2020-01-28T00:42:34Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@joeyaiello \r\n> Encoding changes between 5.1 and 6\r\n\r\nI'm not sure how we would even mark this type of thing as deprecated.\r\n",
+      "created_at": "2020-02-26T23:00:30Z",
+      "updated_at": "2020-02-26T23:00:30Z"
+    },
+    {
+      "author": "FireInWinter",
+      "author_association": "NONE",
+      "body": "I'm for never showing a message interactively.  Just tried Send-MailMessage in PowerShell 7rc3 and got the news that it is obsolete, but gives me no guidance on what to use instead.  This isn't something I ever want consumers on my modules to see interlaced with other output.  It's a bad experience and doesn't even offer a solution.  Seeing it when I'm writing something is a lot more useful as I see it as the developer and not as a consumer/user.  As a developer I can plan/understand that I will eventually have to replace it with something else.",
+      "created_at": "2020-02-27T01:04:04Z",
+      "updated_at": "2020-02-27T01:04:04Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> This isn't something I ever want consumers on my modules to see interlaced with other output\r\n\r\n```powershell\r\n# Suppress warnings emitted by redirecting the warning stream\r\nSend-MailMessage -From me@outlook.com -To you@outlook.com 3>$null\r\n```\r\n\r\n> but gives me no guidance on what to use instead\r\n\r\nI believe the obsolescence message is the following:\r\n\r\n> WARNING: The command 'Send-MailMessage' is obsolete. This cmdlet does not guarantee secure connections to SMTP servers. While there is no immediate replacement available in PowerShell, we recommend you do not use Send-MailMessage at this time. See https://aka.ms/SendMailMessage for more information.\r\n\r\n~~If you follow that link, there is a recommendation. It does look like more recommendations could be given. I'm sure PRs would be accepted to improve that document.~~ Sorry, I just realised that's a .NET deprecation notice. As users of their platform, we're bound by their decisions. And if we don't communicate deprecations to our users, we manage an impossible asymmetry.\r\n\r\n> Seeing it when I'm writing something is a lot more useful as I see it as the developer and not as a consumer/user\r\n\r\nUnfortunately this is a hard problem to address in a scripting language with no compile step. Many script invocations are not made by developers but in an interactive scenario, in which case PSScriptAnalyzer won't address the need to inform PowerShell users that the command they just used is something they should reconsider. In places like reddit and Twitter, users still ask about PSSnapIns and WMI cmdlets in the context of PowerShell 7 &mdash; communicating obsolescence is hard.\r\n\r\n<blockquote><img src=\"https://avatars0.githubusercontent.com/u/9141961?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dotnet/platform-compat\">dotnet/platform-compat</a></strong></div><div>Roslyn analyzer that finds usages of APIs that will throw PlatformNotSupportedException on certain platforms. - dotnet/platform-compat</div></blockquote>",
+      "created_at": "2020-02-27T04:54:01Z",
+      "updated_at": "2020-02-27T04:59:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rjmholt, re `3>$null` / `-WarningAction SilentlyContinue`: I think the point is that **warnings shouldn't suddenly start showing up in deployed code** written _before_ a feature became obsolete.\r\n\r\n@FireInWinter, re:\r\n> I'm for never showing a message interactively.\r\n\r\nI can't speak to the technical feasibility (@SeeminglyScience has hinted at a solution), but to me it makes sense to **show the warning in _direct_ interactive use (only)**, e.g., if you submit\r\n`'foo' | Format-Hex -Raw` _directly at the prompt_ - as opposed to doing it _inside a script_. This would alert _non-scripters_ to the deprecation as well, and alert scripters early.\r\n\r\nTo turn the warning off, you could use \r\n`$PSDefaultParameterValues.Add('Format-Hex:WarningAction', 'SilentlyContinue')` (though note that it will silence _all_ potential warnings emitted by the cmdlet).\r\n\r\nAs @rjmholt notes, without a compilation step we cannot really ensure that scripters will see the warning, but being vocal about the recommended tooling (PSSA, directly or implicitly via VSCode) would help.\r\n\r\nOf course, someone who only ever invokes _scripts_ / module functions / cmdlets would then never get to see the warnings, but I think it's fair to expect scripters (command authors) to take responsibility for deploying updated commands that avoid the deprecated features.\r\n\r\nThis **could be complemented with an _opt-in_ mechanism (preference variable) to _always_ show deprecation warnings at runtime**, which would address @KevinMarquette's scenario, though not by default; similarly, it addresses the limitations of _static_ analysis that PSSA can provide, as noted by @rjmholt.\r\n\r\nAdditionally, a **centralized online deprecation \"registry\"**, as mentioned by @rjmholt, sounds like a great idea, especially for the wholesale removals / fundamental breaking changes mentioned by @joeyaiello , such as the removal of workflows and the change in default character encoding.\r\n\r\n---\r\n\r\nRe **terminology**:\r\n\r\nWhile not really formalized, **the term _deprecated_ - not _obsolete_ - has historically been used in PowerShell** (e.g., for the `ModuleToProcess` module-manifest entry), _generally_ with the \"soft\" meaning outlined in the OP: \r\n * not recommended for use anymore, but won't be removed \r\n\r\n_Why_ it is not recommended anymore, which could be one of several reasons, should be detailed in the specific _messages_ - as I agree with @rjmholt that trying to formalize _degrees_ of deprecation would introduce too much complexity; as @joeyaiello and @rjmholt have noted, some features effectively _have_ gone away, notably in the transition to PS Core, but that's the exception, from what I understand. \r\n\r\nUse of the `ObsoleteAttribute` .NET attribute is an _implementation detail_, whose terminology happens not to align with PowerShell's; _publicly_, these terms shouldn't be mixed - **only _deprecated_ should be used**, which means that the boilerplate part of  deprecation warnings shouldn't say \"is _obsolete_\"  - it should say \"is _deprecated_\", which requires changing the `UseOfDeprecatedCommandWarning` and `UseOfDeprecatedParameterWarning` messages (others?)\r\n\r\n\r\n\r\n\r\n\r\n \r\n",
+      "created_at": "2020-02-29T18:52:23Z",
+      "updated_at": "2020-02-29T18:52:23Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this and we agree the current approach is inadequate and needs a consistent design.  We'll follow-up with individual comments/ideas.",
+      "created_at": "2020-03-04T23:42:08Z",
+      "updated_at": "2020-03-04T23:42:08Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I think the point is that warnings shouldn't suddenly start showing up in deployed code written before a feature became obsolete.\r\n\r\nI do understand that, but that is the same as saying \"deployed code should never become obsolete\". Eventually features, libraries, platforms can become obsolete. You might deploy a security library today and have it become obsolete in the future. What's more, the obsolescence warning will only appear if PowerShell itself is updated, at which point the deployment should be re-evaluated for compatibility.",
+      "created_at": "2020-03-05T00:10:38Z",
+      "updated_at": "2020-03-05T00:10:38Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It may make sense to introduce a `$DeprecationActionPreference` with default value of `Continue` which would emit the warning message as it exists today.  It can be set to `Stop` to turn the warnings into errors, `Inquire` to prompt, `SilentlyContinue` and `Ignore` to be silent.",
+      "created_at": "2020-03-05T03:29:01Z",
+      "updated_at": "2020-03-05T03:29:01Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That implies a whole other stream, though, which is currently not true. I don't think we need to _increase_ the potential confusing factors here. \ud83d\ude42 ",
+      "created_at": "2020-03-05T04:28:20Z",
+      "updated_at": "2020-03-05T04:28:29Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "That was my thought too, @vexx32, but we also proposed that a NoteProperty on the Warning stream might be better. Then they can be squashed with all other warnings, queried on in logs, etc.\r\n\r\n@BrucePay also raised that a good lens to look through in the future is along the lines of \"consumers\" (e.g. interactive users and script executors) as opposed to \"developers / authors\" who are building modules and scripts they need to be well maintained over a period of time.",
+      "created_at": "2020-03-11T22:32:36Z",
+      "updated_at": "2020-03-11T22:32:36Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "For the author, we could make a message visible with `-Debug` messages, `Set-StrictMode` latest make its usage an error, PSScriptAnalyzer issue a warning or error, call it out in the documentation, and have the PowerShell team blog it. `Test-ModuleManifest`,`Publish-Module`, and `Publish-PSResource` throw errors with an switch to bypass. PSGallery can send notifications to module authors. Issue warning in `Install-Module` or `Install-PSResource` when a module is installed. Optionally `Import-Module` can issue a warning on import.\r\n\r\nFor the consumer, for the first major version after it's actually gone, throw a specific error to communicate why their script is broken instead of the standard parse error. This also helps authors that run preview versions to discover it early.\r\n\r\nIf all that doesn't get the authors attention, then it's unlikely they would have changed it before it breaks. We can't say we didn't give our best effort.\r\n\r\nAs far as implementation details, having an attribute that can be used on functions, parameters, variables, classes (and their methods and properties) that's available in script modules gives authors the ability to utilize this feature. It would be good if the attribute on the functions,classes, (or modules?) can specify properties and members that have been removed. \r\n\r\nI prefer the attributes but as an alternate implementation, use something in the module manifest to indicate what's on the way out or already gone so it's handled appropriately and gives other authors a single place to look in a module to see all these settings in one place.  This would help `PowerShellGet` integration into the notification effort.",
+      "created_at": "2020-05-23T22:51:08Z",
+      "updated_at": "2020-05-23T22:52:03Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "One thing I want to clarify as we think through this is that we should really scope the conversation to *notifying the user of deprecation*, rather than actually building a path to actually removing things from the engine. I was very convinced by @BrucePay's argument offline that we really *can't* ever remove anything from PS7 given it's LTS nature and stability long-term. \r\n\r\nOne idea I had today (inspired by some of @JamesWTruher's suggestions) is that we could create a parallel to experimental features called \"deprecated features\". They'd be on by default to keep breaking changes from occurring, but with Get/Enable/Disable-DeprecatedFeature sets, you'd get:\r\n* queryability of deprecation\r\n* opportunity to be strict in your own environment by disabling deprecated features\r\n* context on how to address the deprecation (similar to how rule documentation works in PSSA)\r\n* (potentially) generating the warning (or deprecation) stream messages\r\n  * similarly, users could suppress these messages from a Enable-Disable-DeprecatedFeatureMessage cmdlet)\r\n* (potentially) giving hooks to module authors to centralize and message their deprecations\r\n\r\nI'm planning on writing up a specific issue for just this idea, but I wanted to float it here first to move the ball forward on getting it shot down ;) \r\n",
+      "created_at": "2020-07-01T23:00:23Z",
+      "updated_at": "2020-07-01T23:00:23Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think long term, we actually have an unanswerable need to be able to break things that used to work in order to build better things.\r\n\r\nOtherwise, we simply end up with mountains upon mountains of technical dept, half-written features, semi-supported use cases that never _actually_ worked properly, just \"well enough\" for some limited usage, etc., etc., etc.\r\n\r\nIf breaking changes/deprecation of features is never going to be OK, PowerShell will eventually just become another bloated tool that does too many things not well enough, and will ultimately be superceded by more effective and streamlined tools.\r\n\r\nPart of the reason semver even _exists_ is to help developers communicate that across some version jumps, things may break. It's a tool we _should_ be OK with using. Nobody is forcing folks to move to new versions until they're ready to do so; at some level, we need to be willing to remove old code, or the project as a whole will gradually become effectively impossible to maintain.\r\n\r\nJust my 2 cents.",
+      "created_at": "2020-07-01T23:54:53Z",
+      "updated_at": "2020-07-01T23:54:53Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "To my mind we need a process that allows breaking changes and API removal. That's related to deprecation but isn't the same thing. Deprecation is just a warning system, and it might warn about breaking changes or it might warn about other things.\r\n\r\nI think to break things the right way, we need:\r\n\r\n- A way to phase out/in APIs\r\n- A system for keeping breaking changes in the right branch and in only the right releases\r\n- A process to identify whether a breaking change should be taken, and if so what next milestone it should appear in\r\n\r\nToday we don't really have any of these, other than possibly experimental features for the first, and I think it would require a fair amount of work to get them. If we decided to take it on, we'd need to find the time to invest in it.\r\n\r\nI should also say that on the edge of development there is always a bias for moving forward, but as a shell, a programming language and a platform, PowerShell needs to be mindful of the full lifecycle of changes it introduces, and should look around to see how other software we compare ourselves to behaves. How often and in what way does bash, zsh, C#, .NET or Python take a breaking change?\r\n\r\nAs @joeyaiello says though, conversation about breaking things should be moved to a new issue. Deprecation is a warning system.",
+      "created_at": "2020-07-02T00:36:20Z",
+      "updated_at": "2020-07-02T00:36:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I wonder how many TMA we are talking about? Can we take the SDK and classify all the APIs to understand this?\r\n\r\n Also, if we are only talking about warnings, it\u2019s enough to set the obsolete attribute and add XML comment.\r\n",
+      "created_at": "2020-07-02T03:59:55Z",
+      "updated_at": "2020-07-02T03:59:55Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Moving the conversation about how we make breaking changes to https://github.com/PowerShell/PowerShell/issues/13129",
+      "created_at": "2020-07-07T20:36:21Z",
+      "updated_at": "2020-07-07T20:36:21Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": ".NET has written up an interesting document about [obsoletion](https://github.com/dotnet/designs/blob/master/accepted/2020/better-obsoletion/better-obsoletion.md) which might be worth comparing to our discussions here",
+      "created_at": "2020-08-06T16:26:12Z",
+      "updated_at": "2020-08-06T16:26:12Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this today.  Although no conclusion, we did agree on a few things:\r\n\r\n- We should have Deprecated Feature flags like we have Experimental Feature flags.  If a Deprecated Feature is disabled, then it should throw an exception (instead of being hidden).\r\n- We should have warnings and telemetry when a Deprecated Feature is used, this will help determine if a Deprecated feature can ever be removed (default is to never remove a feature as we don't have usage data today)\r\n- For .NET APIs that are obsolete, we can also prevent usage if disallowed if called by scripts\r\n\r\nWe believe this feature requires a RFC to be authored",
+      "created_at": "2020-08-19T23:04:09Z",
+      "updated_at": "2020-08-26T22:31:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could do not complicate and simply continue to use Experimental Features but have \"Deprecate\" in an experimental feature name.",
+      "created_at": "2020-08-20T03:30:51Z",
+      "updated_at": "2020-08-20T03:30:51Z"
+    }
+  ],
+  "created_at": "2020-01-24T16:11:23Z",
+  "number": 11674,
+  "state": "open",
+  "title": "What is the right way to implement deprecation in PowerShell?",
+  "updated_at": "2020-08-26T22:31:30Z"
+}

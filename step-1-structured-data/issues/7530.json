@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7530",
+  "author": "alx9r",
+  "body": "The parameter to `.AddScript()` is a string, not a scriptblock, so any file position information that might have been present in the `ScriptBlock` object never makes it into that method.  Is there some other way to get a `PowerShell` object to invoke a `ScriptBlock` without losing file position information?\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\ntry {\r\n    [powershell]::Create().AddScript({\r\n        throw 'message'\r\n    }).Invoke()\r\n}\r\ncatch {\r\n    $_.Exception.InnerException.ErrorRecord.ScriptStackTrace\r\n}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nat <ScriptBlock>, <C:\\Users\\UserName\\Desktop\\test.ps1>: line 3\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nat <ScriptBlock>, <No file>: line 2\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.4\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0-preview.4\r\nOS                             Microsoft Windows 6.3.9600 \r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-05-08T18:22:40Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "How about:\r\n\r\n```powershell\r\ntry {\r\n    [powershell]::Create().AddCommand('Invoke-Command').AddArgument({\r\n        throw 'message'\r\n    }).Invoke()\r\n} catch {\r\n    $_.Exception.InnerException.ErrorRecord.ScriptStackTrace\r\n}\r\n```\r\n\r\nYour stack will be 1 deeper than you want, but that should be easy to clean up.\r\n\r\nIf you don't want to use `Invoke-Command`, you could use `AddScript('. $args[0]')`",
+      "created_at": "2018-08-14T23:51:11Z",
+      "updated_at": "2018-08-14T23:51:11Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Thanks @lzybkr.  I think that will get me there.  For posterity, here's what it seems to take to accomplish all of the following:\r\n\r\n* invoke a scriptblock in another runspace\r\n* pass positional arguments\r\n* pass input\r\n* pass named arguments\r\n* preserve scriptblock position info on error\r\n\r\n```PowerShell\r\n$inputObject = 'input1','input2'\r\n$argumentList = 'arg1','arg2'\r\n$namedParameters = @{\r\n    Named1 = 'named 1'\r\n    Named2 = 'named 2'\r\n}\r\n$scriptblock = {\r\n    param($Named1,$Named2)\r\n    begin {\r\n        function f { throw 'something' }\r\n    }\r\n    process\r\n    {\r\n        $_\r\n        $PSBoundParameters\r\n        $args\r\n        f\r\n    }\r\n}\r\n\r\n$output = [System.Management.Automation.PSDataCollection[psobject]]::new()\r\ntry {\r\n\r\n    [powershell]::Create().\r\n        AddScript({    \r\n            process {\r\n                $argumentList = $args[1]\r\n                $namedParameters = $args[2]\r\n                ,$_ | . $args[0] @argumentList @namedParameters\r\n            }\r\n        }).\r\n        AddArgument($scriptblock).\r\n        AddArgument($argumentList).\r\n        AddArgument($namedParameters).\r\n        Invoke((,$inputObject),$output)\r\n    $output\r\n}\r\ncatch {\r\n    $output\r\n    $_.Exception.InnerException.ErrorRecord.ScriptStackTrace\r\n}\r\n```\r\n\r\nThat outputs \r\n\r\n```none\r\ninput1\r\ninput2\r\n\r\nKey    Value\r\n---    -----\r\nNamed2 named 2\r\nNamed1 named 1\r\narg1\r\narg2\r\nat f, C:\\Users\\un1\\Desktop\\test.ps1: line 10\r\nat <ScriptBlock><Process>, C:\\Users\\un1\\Desktop\\test.ps1: line 17\r\nat <ScriptBlock><Process>, <No file>: line 5\r\n```",
+      "created_at": "2018-08-21T02:10:26Z",
+      "updated_at": "2018-08-21T02:10:26Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@lzybkr I'm seeing crashes and \"InvalidOperationException: Stack Empty\" using this technique combined with concurrent calls to `.BeginInvoke()`.\r\n\r\n## Repro\r\n\r\n```PowerShell\r\n$scriptblock = {\r\n    function fibonacci {\r\n        param([int]$n)\r\n        [bigint]$a=0\r\n        [bigint]$b=1\r\n        foreach ($x in 0..$n)\r\n        {\r\n            $a,$b = $b,($a+$b)\r\n        }\r\n        $b\r\n    }\r\n    fibonacci 100000 | % {'complete'}\r\n}\r\n\r\n$invocations = 1..2 |\r\n    % {\r\n        $powershell = [powershell]::Create().\r\n            AddScript({. $args[0]}).\r\n            AddArgument($scriptblock)\r\n        @{\r\n            PowerShell = $powershell\r\n            Invocation = $powershell.BeginInvoke()\r\n        }\r\n    }\r\n$invocations |\r\n    %{ $_.PowerShell.EndInvoke($_.Invocation)}\r\n```\r\n\r\n## Expected\r\n\r\n```none\r\ncomplete\r\ncomplete\r\n```\r\n\r\n## Actual\r\n\r\nThis is the most verbose output I have witnessed.  The run ended in a \"PowerShell Core 6 has stopped working\" message box.\r\n\r\n```none\r\ncomplete\r\n% : Stack empty.\r\nAt C:\\users\\un1\\Desktop\\test.ps1:26 char:5\r\n+     %{ $_.PowerShell.EndInvoke($_.Invocation)}\r\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [ForEach-Object], InvalidOperationEx\r\nception\r\n+ FullyQualifiedErrorId : System.InvalidOperationException,Microsoft.PowerShell.\r\nCommands.ForEachObjectCommand\r\n\r\n\r\nAn error has occurred that was not properly handled. Additional information is s\r\nhown below. The PowerShell process will exit.\r\n\r\nUnhandled Exception: System.InvalidOperationException: Stack empty.\r\n   at System.Collections.Generic.Stack`1.ThrowForEmptyStack()\r\n   at System.Collections.Generic.Stack`1.Pop()\r\n   at System.Management.Automation.DlrScriptCommandProcessor.OnRestorePreviousSc\r\nope()\r\n   at System.Management.Automation.CommandProcessorBase.DoComplete()\r\n   at System.Management.Automation.Internal.PipelineProcessor.DoCompleteCore(Com\r\nmandProcessorBase commandRequestingUpstreamCommandsToStop)\r\n   at System.Management.Automation.Internal.PipelineProcessor.SynchronousExecute\r\nEnumerate(Object input)\r\n   at System.Management.Automation.Runspaces.LocalPipeline.InvokeHelper()\r\n   at System.Management.Automation.Runspaces.LocalPipeline.InvokeThreadProc()\r\n   at System.Management.Automation.Runspaces.PipelineThread.WorkerProc()\r\n   at System.Threading.Thread.ThreadMain_ThreadStart()\r\n   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionCo\r\nntext, ContextCallback callback, Object state)\r\n--- End of stack trace from previous location where exception was thrown ---\r\n   at System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw()\r\n```",
+      "created_at": "2018-08-21T22:15:08Z",
+      "updated_at": "2018-08-21T22:18:22Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "That looks like a potentially serious bug, maybe open a new issue?\r\n\r\nThis looks like the stack to save and restore variables like `$_` when dot sourcing.  If the stack was empty, then the wrong stack may have been used, probably from another runspace.",
+      "created_at": "2018-08-21T22:28:53Z",
+      "updated_at": "2018-08-21T22:28:53Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r Might be due to PowerShell attempting to send the scriptblock back to it's origin runspace.  Try `AddArgument($scriptBlock.Ast.GetScriptBlock())`",
+      "created_at": "2018-08-22T13:03:31Z",
+      "updated_at": "2018-08-22T13:03:31Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience - `$scriptBlock.Clone()` should work as well and should be faster - it would avoid recompiling the script block.\r\n\r\nAlso - if that workaround works, I still think this issue should not be ignored - if my assumption is correct, it might also manifest silently and do something unexpected.",
+      "created_at": "2018-08-22T17:44:38Z",
+      "updated_at": "2018-08-22T17:44:38Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr It's internal unfortunately :/",
+      "created_at": "2018-08-22T20:56:56Z",
+      "updated_at": "2018-08-22T20:56:56Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I don't see any immediate downsides to making it public.\r\n\r\nMaybe try calling it via reflection in some experiments where you were using `$scriptBlock.Ast.GetScriptBlock()` to see if there are any problems or if I'm mistaken about the performance impact.",
+      "created_at": "2018-08-22T21:19:47Z",
+      "updated_at": "2018-08-22T21:19:47Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": ">That looks like a potentially serious bug, maybe open a new issue?\r\n\r\nDone.  The new issue is #7626.",
+      "created_at": "2018-08-23T23:21:17Z",
+      "updated_at": "2018-08-23T23:21:17Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Thanks for the help @lzybkr and @SeeminglyScience.\r\n\r\nIt seems like the peformance of .Clone() and .Ast.GetScriptBlock() are similar:\r\n\r\n```PowerShell\r\nfunction Clone {\r\n    param($scriptblock)\r\n    [scriptblock].GetMethod(\r\n        'Clone',\r\n        [System.Reflection.BindingFlags]'Instance,NonPublic'\r\n    ).\r\n        Invoke($scriptblock,$null)\r\n}\r\n\r\nfunction GetFromAst {\r\n    param($scriptblock)\r\n    $scriptblock.Ast.GetScriptBlock()\r\n}\r\n\r\n$scriptblock = {\r\n    function fibonacci {\r\n        param([int]$n)\r\n        [bigint]$a=0\r\n        [bigint]$b=1\r\n        foreach ($x in 0..$n)\r\n        {\r\n            $a,$b = $b,($a+$b)\r\n        }\r\n        $b\r\n    }\r\n    fibonacci 100000 | % {'complete'}\r\n}\r\n\r\n'GetFromAst','Clone' |\r\n    % {\r\n        $commandName = $_\r\n        [pscustomobject]@{\r\n            CommandName = $commandName\r\n            'Time(s)   ' = Measure-Command { \r\n                1..10000 | % {& $commandName $scriptblock} \r\n            } |\r\n                % { [System.Math]::Round($_.TotalSeconds,2) }\r\n        }\r\n    }\r\n```\r\n\r\nOne typical result of this run on my computer is:\r\n\r\n```none\r\nCommandName Time(s)\r\n----------- ----------\r\nGetFromAst        1.25\r\nClone             1.36\r\n```",
+      "created_at": "2018-08-24T00:09:26Z",
+      "updated_at": "2018-08-24T00:09:26Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "FWIW I have settled (for now) on the following for creating scriptblock clone from C#:\r\n\r\n```PowerShell\r\nstatic class Extensions\r\n{\r\n    public static ScriptBlock Clone(this ScriptBlock scriptBlock)\r\n    {\r\n        return ((ScriptBlockAst)scriptBlock.Ast).GetScriptBlock();\r\n    }\r\n}\r\n```",
+      "created_at": "2018-08-24T00:27:54Z",
+      "updated_at": "2018-08-24T00:27:54Z"
+    },
+    {
+      "author": "animasc",
+      "author_association": "NONE",
+      "body": "This is interesting! Any non reported progress since 2018? Thanks",
+      "created_at": "2020-05-08T16:18:48Z",
+      "updated_at": "2020-05-08T16:18:48Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@animasc I just checked.  It looks like I settled on the following for my general-purpose runspace invoker:\r\n\r\n```C#\r\n            var powershell = PowerShell.Create();\r\n            powershell\r\n                .AddScript(@\"\r\n                    process {\r\n                        $argumentList = $args[1]\r\n                        $namedArgs    = $args[2]\r\n                        Set-Variable __PSStreams $args[3] -Option Constant,AllScope\r\n                        Set-Variable __PSOutput  $args[4] -Option Constant,AllScope\r\n                        ,$_ | . $args[0] @argumentList @namedArgs\r\n                    }\r\n                \")\r\n                .AddArgument(input.ScriptBlock.Clone())\r\n                .AddArgument(input.ArgumentList)\r\n                .AddArgument(input.NamedArgs)\r\n                .AddArgument(powershell.Streams)\r\n                .AddArgument(output);\r\n```\r\n\r\nand \r\n\r\n```C#\r\n    static class ScriptBlockExtensions\r\n    {\r\n        internal static ScriptBlock Clone(this ScriptBlock scriptBlock)\r\n        {\r\n            // see also PowerShell/PowerShell#7530\r\n            return ((ScriptBlockAst)scriptBlock.Ast).GetScriptBlock();\r\n        }\r\n    }    \r\n```",
+      "created_at": "2020-05-08T18:22:40Z",
+      "updated_at": "2020-05-08T18:22:40Z"
+    }
+  ],
+  "created_at": "2018-08-14T21:30:03Z",
+  "number": 7530,
+  "state": "closed",
+  "title": "Is there an alternative to PowerShell.AddScript() that preserves file position information?",
+  "updated_at": "2020-05-08T18:22:40Z"
+}

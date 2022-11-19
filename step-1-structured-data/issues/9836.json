@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9836",
+  "author": "rjmholt",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nCurrently registering a PSTypeConverter that converts to string doesn't do anything.\r\nAny defined functionality is ignored for `value.ToString()`.\r\n\r\nAn example to try out:\r\n\r\n```csharp\r\nusing System;\r\nusing System.ComponentModel;\r\nusing System.IO;\r\nusing System.Management.Automation;\r\n\r\n[TypeConverter]\r\npublic class DirectoryInfoTypeConverter : PSTypeConverter\r\n{\r\n    public override bool CanConvertFrom(object source, Type type)\r\n    {\r\n        return source.GetType() == typeof(DirectoryInfo)\r\n            && type == typeof(string);\r\n    }\r\n\r\n    public override object ConvertFrom(object source, Type type, IFormatProvider fp, bool ignoreCase)\r\n    {\r\n        return \"moo\";\r\n    }\r\n\r\n    public override bool CanConvertTo(object source, Type type)\r\n    {\r\n        return source.GetType() == typeof(DirectoryInfo)\r\n            && type == typeof(string);\r\n    }\r\n\r\n    public override object ConvertTo(object source, Type type, IFormatProvider fp, bool ignoreCase)\r\n    {\r\n        return \"moo\";\r\n    }\r\n}\r\n```\r\n\r\n```powershell\r\nUpdate-TypeData -TypeConverter DirectoryInfoTypeConverter -TypeName System.IO.DirectoryInfo\r\n\r\n(gi .) -as [string]\r\n```\r\n\r\nCompare this to if you change the original converter to:\r\n\r\n```csharp\r\n[TypeConverter]\r\npublic class DirectoryInfoTypeConverter : PSTypeConverter\r\n{\r\n    public override bool CanConvertFrom(object source, Type type)\r\n    {\r\n        return source.GetType() == typeof(DirectoryInfo)\r\n            && type == typeof(int);\r\n    }\r\n\r\n    public override object ConvertFrom(object source, Type type, IFormatProvider fp, bool ignoreCase)\r\n    {\r\n        return 33;\r\n    }\r\n\r\n    public override bool CanConvertTo(object source, Type type)\r\n    {\r\n        return source.GetType() == typeof(DirectoryInfo)\r\n            && type == typeof(int);\r\n    }\r\n\r\n    public override object ConvertTo(object source, Type type, IFormatProvider fp, bool ignoreCase)\r\n    {\r\n        return 12;\r\n    }\r\n}\r\n```\r\n\r\nThis is actually already [a uservoice issue](https://windowsserver.uservoice.com/forums/301869-powershell/suggestions/16972927-custom-pstypeconverter-cannot-be-used-to-convert-o).\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nWe should discuss how this code:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/f5e3de036e84f37820eb1dac635c337f8fc17718/src/System.Management.Automation/engine/LanguagePrimitives.cs#L5620-L5652\r\n\r\ncould be changed. Clearly PowerShell currently has a set of types where the language type conversion takes precedence, and it's not clear why that's not configurable. Inserting a type converter lookup as the first call would not break most cases, but could break some things.\r\n\r\nAlso that `if`/`else` cascade needs a serious refactor...\r\n",
+  "closed_at": "2019-10-20T07:21:42Z",
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "(Looked into this as a workaround for https://github.com/PowerShell/PowerShell/issues/9800)",
+      "created_at": "2019-06-06T00:34:49Z",
+      "updated_at": "2019-06-06T00:34:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Could you please add working sample? I can not compile with Add-Type.",
+      "created_at": "2019-06-06T07:33:58Z",
+      "updated_at": "2019-06-06T07:33:58Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt We were pretty careful to not prioritize conversions to string since anything can be converted to string and so that conversion will **always** succeed. It's the \"gray goo\" of type conversions. Also the type conversion algorithm is intended to be reasonable i.e. you should be able reason about what will happen or at least be able to understand why a particular conversion was chosen after the fact. Making the conversion order mutable makes it much harder to reason about.",
+      "created_at": "2019-06-06T09:00:51Z",
+      "updated_at": "2019-06-06T09:00:51Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Could you please add working sample? I can not compile with Add-Type.\r\n\r\n@iSazonov Just for you I've added the usings",
+      "created_at": "2019-06-06T15:14:52Z",
+      "updated_at": "2019-06-06T15:14:52Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay yeah I suspected the current order was quite deliberate and I understand the reasoning.\r\n\r\nMy counterpoints would be:\r\n- I want this converter because the grey goo has failed - .NET changed a `ToString()` behaviour.\r\n- I'd argue that having a type conversion order that's fixed for some types and not for others is more complex than having one simple algorithm for finding a type converter (and having a mechanism to register, query and unregister your own)\r\n- I'd characterise the conversion order itself as immutable (you can't change the algorithm) but custom converter registration as mutable -- which I feel would be a simple single point of configuration\r\n- PSTypeConverters feel obscure enough to me (I don't think they're documented) that they can be considered something of an expert feature, like AssemblyLoadContext manipulation. So I think we should let people shoot themselves in the foot with them (but provide easy ways to disarm...)",
+      "created_at": "2019-06-06T15:23:40Z",
+      "updated_at": "2019-06-06T15:23:40Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "As it is today, a `TypeConverter` only come into play if there are no language defined conversions.\r\n\r\nAllowing a `TypeConverter` before other conversions would make PowerShell less reliable - it would be impossible to reason about conversions (not that it's easy now) because you literally no longer control conversions at all - anyone could define a type converter that takes over any conversion.  I can easily see it being abused for nefarious purposes.",
+      "created_at": "2019-06-06T18:22:57Z",
+      "updated_at": "2019-06-06T18:22:57Z"
+    }
+  ],
+  "created_at": "2019-06-06T00:32:38Z",
+  "number": 9836,
+  "state": "closed",
+  "title": "Allow PSTypeConverter to convert to string",
+  "updated_at": "2019-11-11T11:33:34Z"
+}

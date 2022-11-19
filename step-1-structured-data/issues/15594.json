@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15594",
+  "author": "TylerLeonhardt",
+  "body": "## Summary of the new feature/enhancement\r\n\r\nI try to use as many of the new operators in PS7 as possible but I sometimes find myself in an unwinnable situation\u2026\r\n\r\nLet\u2019s say I logically want this:\r\n```pwsh\r\n$a = $emptyStr || $emptyStr2 || $real\r\n```\r\nWhere `$a` gets the value of `$real` because the first 2 or falsy\r\n\r\nthat doesn\u2019t work. It sets it to `$emptyStr` because pipeline chain ops only relate to exit code basically\r\n\r\nSo then I think ok whatabout `-or`?\r\n```pwsh\r\n$a = $emptyStr -or $emptyStr2 -or $real\r\n```\r\nbut unfortunately that turns `$a` into a boolean\u2026 So then I think ok how about the `??=` operator:\r\n```pwsh\r\n$a = $emptyStr\r\n$a ??= $real\r\n```\r\nbut no\u2026 that ends up with an empty string because `$a` has a value of empty string and `??=` only works if it\u2019s `null` which I think makes sense personally.\r\n\r\nI _could_ do ternaries:\r\n\r\n```pwsh\r\n$a = $empty ? $empty : $empty2 ? $empty2 : $real\r\n```\r\nbut that's evil. So then I go back to old reliable:\r\n```pwsh\r\n$a = if($emptyStr) { $emptyStr } elseif($emptyStr2) { $emptyStr2 } else { $real }\r\n```\r\nbut it\u2019s just so much extra text.\r\n\r\nHere's the scenario I was actually trying to solve in GitHub actions where I'm trying to consolidate values in a few places into one centralized output:\r\n\r\n```pwsh\r\n          $releaseBranch = '${{ steps.get-release-branch.outputs.release_branch }}'\r\n          $passedInBranch = '${{ github.event.inputs.vscodebranch }}'\r\n\r\n          $branch = if ($releaseBranch) {\r\n              $releaseBranch\r\n          } elseif ($passedInBranch) {\r\n              $passedInBranch\r\n          } else {\r\n              'main'\r\n          }\r\n\r\n          Write-Host \"Branch to use: $branch\"\r\n          Write-Host \"::set-output name=chosen_branch::$branch\"\r\n```\r\n## Proposed technical implementation details (optional)\r\n\r\n<!-- \r\nA clear and concise description of what you want to happen.\r\nConsider providing an example PowerShell experience with expected result.\r\n-->\r\n\r\nidk... in TypeScript `||` and `&&` also handle truthy/falsy stuff so that to me is ideal... but I guess a different operator like `-eor` or `-eand` maybe for backcompat.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I discussed some thoughts on this in https://github.com/PowerShell/PowerShell/issues/3241#issuecomment-383263156.\r\n\r\nIn that issue there seemed to be broad agreement that that `&&`/`||` syntax should be reserved for Bourne shell-style control operators for chaining commands.\r\n\r\nFuzzy-boolean coalescence lives in the world of expression values rather than command effects, so the existing PowerShell expression operator syntax seems appropriate.\r\n\r\nI think I've proposed it somewhere else, but basically a thought I've had in my head was to just make expression-value-conserving versions of the existing boolean operators that work like JavaScript's `&&` and `||`:\r\n\r\n```powershell\r\n'' -eor 'default' # evaluates to 'default'\r\n\r\n'' -eand 'second' # evaluates to ''\r\n```\r\n\r\n(The `e` stands for \"expression\", since we want the actual expression result &mdash; just a suggestion!)",
+      "created_at": "2021-06-16T21:35:07Z",
+      "updated_at": "2021-06-16T21:39:28Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "Maybe I'm wrong, but I considered this construction as the result of executing a command. Success or failure.\r\n```\r\nGet-Item variable:fake -ea 0 || Get-Item variable:fake2 -ea 0 || 'Failure'\r\nGet-Item variable:fake -ea 0 || Get-Item variable:PSHome -ea 0 && 'Success'\r\n```",
+      "created_at": "2021-06-16T22:08:32Z",
+      "updated_at": "2021-06-16T22:08:32Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@237dmitry yeah, you've characterised your example correctly.\r\n\r\nI think the issue with that is that it requires a cmdlet to be executed and to succeed or fail to use PowerShell's `&&`/`||` operators. You can think of those operators as conditional semicolons; they proceed from statement to statement on condition of success or failure. If you're trying to just coalesce to some default value, that's cumbersome, computationally expensive, and relies on the notion of execution state (rather than a conceptually pure expression).\r\n\r\nRather than shoulder that complexity, it would be nice to just have a way to coalesce expressions directly:\r\n\r\n```powershell\r\n$fake -eor $fake2 -eor 'Failure'\r\n```\r\n\r\nWhile I think more on it, it turns out you can kind of do something similar with the existing boolean operators:\r\n\r\n```powershell\r\n$null = ($result = $fake) -or ($result = $fake2) -or ($result = 'Failure')\r\n```\r\n\r\nThat takes advantage of (1) the result of the assignment occurring before conversion to boolean, (2) the value of an assignment statement being the value of the assigned value for the purposes of a subpipeline, and (3) the short-circuit logic of boolean operators.",
+      "created_at": "2021-06-16T22:14:28Z",
+      "updated_at": "2021-06-16T22:19:44Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "This is success as there are not terminated errors:\r\n```\r\n$fake && $fake2 && 'Success'\r\n```\r\nFor checking null-values:\r\n```\r\n$fake ?? 'This is $null'\r\n$fake ??= 10            # if fake is $null set it to 10\r\n$fake\r\n```",
+      "created_at": "2021-06-16T22:31:13Z",
+      "updated_at": "2021-06-16T22:31:13Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, in the first case `$fake` being unset, null or the empty string won't affect the result. You'll always get the concatenation of the outputs as the final result.\r\n\r\nIn the second case, the null assignment only checks for null values, not falsey ones.",
+      "created_at": "2021-06-16T22:45:29Z",
+      "updated_at": "2021-06-16T22:45:29Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "I suppose you could introduce a new operator that checked IsNullOrEmpty instead of just IsNull e.g.:\r\n```\r\n$emptyStr ??~ $emptyStr2 ??~ $real\r\n```\r\nNot crazy about that operator token.",
+      "created_at": "2021-06-16T22:49:48Z",
+      "updated_at": "2021-06-16T22:49:48Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "> In the second case, the null assignment only checks for null values, not falsey ones.\r\n\r\nYes, I agreed\r\n\r\n> `??~`\r\n\r\nThis is beauty ))",
+      "created_at": "2021-06-16T22:55:32Z",
+      "updated_at": "2021-06-16T22:55:32Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> that checked IsNullOrEmpty\r\n\r\nI was thinking the underlying test would be [`LanguagePrimitives.IsTrue(value)`](https://github.com/PowerShell/PowerShell/blob/77054ff586d2c723114862347b798bd89f8e0c56/src/System.Management.Automation/engine/LanguagePrimitives.cs#L987). However, it looks like `-and` and `-or` don't use a `LanguagePrimitives` API:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/77054ff586d2c723114862347b798bd89f8e0c56/src/System.Management.Automation/engine/parser/Compiler.cs#L5659-L5662\r\n\r\n> `??~`\r\n\r\nI would normally associate `~` in an operator with regex, like [in Perl](https://www.tutorialspoint.com/perl/perl_regular_expression.htm), [bash](https://stackoverflow.com/questions/19441521/bash-regex-operator), or [Haskell](http://www.serpentine.com/blog/2007/02/27/a-haskell-regular-expression-tutorial/).",
+      "created_at": "2021-06-16T22:59:12Z",
+      "updated_at": "2021-06-16T22:59:12Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "RE `~` I was thinking \"approximately\".  In the 90's I worked on a graphical programming environment for engineering and we had an `~=`  operator that would compare floating point numbers such that they were considered \"equal\" if they were within `epsilon` of one another.  But I agree, these days `~` is more often associated with regex operations.",
+      "created_at": "2021-06-16T23:06:57Z",
+      "updated_at": "2021-06-16T23:06:57Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Here's another slightly cursed option that I've probably used at some point before:\r\n\r\n```powershell\r\n$a = @($emptyStr, $emptyStr2, $real).Where({$_}, 'First')\r\n```",
+      "created_at": "2021-06-16T23:17:46Z",
+      "updated_at": "2021-06-16T23:20:53Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt \r\n\r\n> However, it looks like `-and` and `-or` don't use a `LanguagePrimitives` API:\r\n\r\nIt's confusing at a glance, but `Convert` there is an extension method that does eventually call `LanguagePrimitives`. You're (understandably) thinking of `Expression.Convert` which doesn't.",
+      "created_at": "2021-06-17T13:07:01Z",
+      "updated_at": "2021-06-17T13:08:29Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> an extension method that does eventually call LanguagePrimitives\r\n\r\nAh, I had my suspicions. It seemed like it was doing that given things like `'hello' -and 'goodbye'`",
+      "created_at": "2021-06-17T16:16:05Z",
+      "updated_at": "2021-06-17T16:16:05Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Here's another slightly cursed option that I've probably used at some point before\r\n\r\nYeah I wrote something like this as a demo:\r\n\r\n```powershell\r\nfunction Coalesce\r\n{\r\n    foreach ($a in $args) { if ($a) { return $a } }\r\n}\r\n\r\nCoalesce $first $second 'default'\r\n```\r\n\r\nYou could probably make this work more generally like in https://github.com/PowerShell/PowerShell/issues/8098#issuecomment-434540830 too.",
+      "created_at": "2021-06-17T16:19:07Z",
+      "updated_at": "2021-06-17T16:19:07Z"
+    }
+  ],
+  "created_at": "2021-06-16T21:27:20Z",
+  "number": 15594,
+  "state": "open",
+  "title": "Improvements in falsy or handling for CI scenarios",
+  "updated_at": "2021-06-17T16:19:07Z"
+}

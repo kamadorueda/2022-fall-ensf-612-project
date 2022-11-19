@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9683",
+  "author": "mikeTWC1984",
+  "body": "### System information\r\n- **Windows POwershell / Powershell Core**\r\n- **Windows 10, Linux (Ubuntu)**:\r\n- **ML version 1.0.0-preview**:\r\n\r\n### Issue\r\n\r\nI'm trying to integrate ML.NET with powershell. I'm using [Sentiment Analysis sample](https://github.com/dotnet/samples/tree/master/machine-learning/tutorials/SentimentAnalysis) for testing. Sample code runs just fine as a C# console app, but throws errors if executed as Powershell Cmdlet. It doesn't matter if it's binary cmdlet  ( using same exact code as console app) or pure PS. It doesn't work even if I save sample as a class library (and calling static methods from PS).\r\n\r\n- **Shuffle input cursor reader failed with an exception**\r\nIf disabling shuffling, getting this:\r\n- **Splitter/consolidator worker encountered exception while consuming source data**\r\n\r\nThis happens when calling fit method after trainer is added to the pipeline (I can call fit on estimator with no error). I tried Log regression and Fast Tree trainers (getting same errors)\r\n\r\nNot sure if there is any fundamental blocker, but I think it would be extremely useful to get it work with PowerShell. Below are links to MLNET source files where those errors are described, is there anything incompatible with powershell runtime?\r\n\r\n[Shuffle input cursor](https://github.com/dotnet/machinelearning/blob/45b6c43387294d19cad843a21e87539213e8d34c/src/Microsoft.ML.Data/Transforms/RowShufflingTransformer.cs#L652)\r\n[Splitter/consolidator worker](https://github.com/dotnet/machinelearning/blob/45b6c43387294d19cad843a21e87539213e8d34c/src/Microsoft.ML.Data/Data/DataViewUtils.cs#L832)\r\n\r\n### Source code / logs\r\n\r\n```PowerShell\r\n\r\n<# Downloading assemblies and data set\r\n\r\n# download nuget if needed\r\n# iwr \"https://dist.nuget.org/win-x86-commandline/latest/nuget.exe\" -OutFile \"nuget.exe\"\r\n\r\nnuget install Microsoft.ML -version 1.0.0-preview\r\n\r\nmkdir bin\r\n\r\ngci \"*\\lib\\netstandard*\\*.dll\" | copy-item -Destination \".\\bin\"\r\n\r\n$url = \"https://raw.githubusercontent.com/lucasalexander/mlnet-samples/master/sentiment-analysis/data/yelp_labelled.txt\"\r\nInvoke-WebRequest -Uri $url -OutFile \"yelp_labelled.txt\"\r\n\r\n#>\r\n\r\n\r\nAdd-Type -Path \"$pwd\\bin\\*.dll\" \r\n\r\n\r\n$dataPath = \"$pwd\\yelp_labelled.txt\"\r\n\r\n$mlCOntext = [Microsoft.ML.MLContext]::new()\r\n\r\n$columns = [System.Collections.Generic.List``1[Microsoft.ML.Data.TextLoader+Column]]::new()\r\n\r\n$columns.Add([Microsoft.ML.Data.TextLoader+Column]::new(\"SentimentText\", \"String\", 0))\r\n$columns.Add([Microsoft.ML.Data.TextLoader+Column]::new(\"Label\", \"Boolean\", 1))\r\n\r\n$columns.Add([Microsoft.ML.Data.TextLoader+Column]::new(\"PredictedLabel\", \"Boolean\", 2))\r\n$columns.Add([Microsoft.ML.Data.TextLoader+Column]::new(\"Probability\", \"Single\", 3))\r\n$columns.Add([Microsoft.ML.Data.TextLoader+Column]::new(\"Score\", \"Single\", 4))\r\n\r\n$opt = [Microsoft.ML.Data.TextLoader+Options]::new()\r\n$opt.Separators = \"`t\"\r\n$opt.Columns = $columns\r\n$opt.HasHeader = $false\r\n\r\n\r\n$dataView = [Microsoft.ML.TextLoaderSaverCatalog]::LoadFromTextFile($mlCOntext.Data, $dataPath, $opt)\r\n\r\n# preview data\r\n# [Microsoft.ML.DebuggerExtensions]::Preview($dataView).rowview | foreach { $_.Values.Value -join \" | \" }\r\n\r\n\r\n$splitDataView =  $mlCOntext.Data.TrainTestSplit($dataView, 0.2)\r\n$trainSet = $splitDataView.TrainSet\r\n$testSet = $splitDataView.TestSet\r\n\r\n\r\n$estimator = [Microsoft.ML.TextCatalog]::FeaturizeText($mlCOntext.Transforms.Text, \"Features\", \"SentimentText\")\r\n\r\n\r\n$optTrain = [Microsoft.ML.Trainers.SdcaLogisticRegressionBinaryTrainer+Options]::new()\r\n$optTrain.FeatureColumnName = \"Features\"\r\n$optTrain.LabelColumnName = \"Label\"\r\n\r\n\r\n# this will avoid 'Shuffle input cursor' error, but raise 'Splitter/consolidator' error\r\n$optTrain.Shuffle = $false  \r\n\r\n$trainer = [Microsoft.ML.StandardTrainersCatalog]::SdcaLogisticRegression($mlCOntext.BinaryClassification.Trainers, $optTrain)\r\n\r\n<# fast tree trainer, but getting Splitter/consolidator error again\r\n$topt = [Microsoft.ML.Trainers.FastTree.FastTreeBinaryTrainer+Options]::new()\r\n$topt.FeatureColumnName = \"Features\"\r\n$topt.LabelColumnName = \"Label\"\r\n$trainer = [Microsoft.ML.TreeExtensions]::FastTree($mlCOntext.BinaryClassification.Trainers, $topt)\r\n#>\r\n\r\n\r\n$pipe = [Microsoft.ML.LearningPipelineExtensions]::Append($estimator, $trainer, \"Everything\")\r\n\r\n\r\n$model = $pipe.Fit($trainSet)  # ERROR OCCURS HERE !!!\r\n\r\n# if apply fit on estimator no error will occur and predict/evaluate block will work (with some dummy results)\r\n\r\n# $model = $estimator.Fit($splitDataView.TrainSet)\r\n\r\n$predict = $model.Transform($TestSet)\r\n\r\n$mlCOntext.BinaryClassification.Evaluate($predict, \"Label\")\r\n```\r\n",
+  "closed_at": "2019-05-22T17:49:33Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I tried this and it repro'd.  Looking at the innerexceptions, it couldn't load the native library.  On my MacBook, I copied `libCpuMathNative.dylib` to the same location as `Microsoft.ML.CpuMath.dll` and this worked for me.",
+      "created_at": "2019-05-22T03:43:41Z",
+      "updated_at": "2019-05-22T03:43:41Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Tack another one onto the list for native library loading issues, heh.\r\n\r\nWonder if you package this as a module if we start to hit issues similar to #9488 / #8861?",
+      "created_at": "2019-05-22T03:47:03Z",
+      "updated_at": "2019-05-22T03:47:03Z"
+    },
+    {
+      "author": "mikeTWC1984",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looks like that was it, thanks! It fixed the issue for both Powershell and Core if running on Windows as a script. I get some other error running it on WSL linux, I'll try actual linux machine later today. @vexx32  is right, it doesn't work as a module in Powershell Core (6.2) (getting original error), hope this issue will be fixed on the next release, ml stuff really need to be wrapped as a module to be useful. ",
+      "created_at": "2019-05-22T15:45:35Z",
+      "updated_at": "2019-05-22T15:45:35Z"
+    },
+    {
+      "author": "realpobblebonk",
+      "author_association": "NONE",
+      "body": "If someone could better document the steps in the workaround it would be appreciated. Also has Microsoft acknowledged the issue or do we need to raise this somewhere else to get it on their radar.",
+      "created_at": "2020-04-23T15:42:45Z",
+      "updated_at": "2020-04-23T15:42:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "There is a workaround here now, but it does require a bit of finagling on the part of the module author.\r\n\r\nhttps://github.com/PowerShell/PowerShell/issues/8861#issuecomment-599138174",
+      "created_at": "2020-04-23T17:02:41Z",
+      "updated_at": "2020-04-23T17:02:41Z"
+    }
+  ],
+  "created_at": "2019-05-22T01:33:50Z",
+  "number": 9683,
+  "state": "closed",
+  "title": "Integrating ML.NET with Powershell",
+  "updated_at": "2020-04-23T17:02:42Z"
+}

@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12387",
+  "author": "rkitover",
+  "body": "In UNIX shells it is common to refer to the home directories of specific users as `~username`, this is very convenient for many things.\r\n\r\nCurrently this doesn't work on either Windows or Linux in powershell.\r\n\r\nFollowing up on discussion in #11386.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "You can use the \"~\" character just fine, like this:\r\n\r\n```powershell\r\nPS C:\\Windows> Set-Location -Path ~\r\nPS C:\\foo> Get-ChildItem -path ~\\xml\r\n...\r\n```\r\n\r\nAnd to set that path in advance, you can do this:\r\n\r\n```powershell\r\n$Provider = Get-PSProvider Filesystem\r\n$Provider.Home=\"c:\\foo\"\r\n```\r\nSeems to me you have what you are asking for already.\r\n\r\n",
+      "created_at": "2020-04-20T10:27:17Z",
+      "updated_at": "2020-04-20T10:27:17Z"
+    },
+    {
+      "author": "rkitover",
+      "author_association": "CONTRIBUTOR",
+      "body": "@doctordns no this is a different thing, `~` is the profile path of the current user, while `~user` would be the profile path of a specific user, e.g. `~bob/` would be `C:\\Users\\bob`.",
+      "created_at": "2020-04-20T10:30:28Z",
+      "updated_at": "2020-04-20T10:30:28Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "That is going to be hard, I suspect. \r\n\r\nIf you want **~\\<username>**, what format is user name going to take and how would you differentiate a domain vs local user? `~\\domain\\user` probably would not work for obvious reasons, also `~\\User@domain` is also possibly problematic.\r\n\r\nWhat is the use case?\r\n\r\nSeems to me you could just do a variation on this:\r\n```powershell\r\n$Cred = Get-Credential    # Enter the username/password\r\n$Location = Invoke-Command -computername localhost -credential $Cred -scriptblock {cd ~;Get-location}\r\n```\r\n",
+      "created_at": "2020-04-20T11:31:20Z",
+      "updated_at": "2020-04-20T11:31:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@rkitover,  can you please make the following clear in the original post?\r\nWe're talking about more fully emulating  `~` expansion for _native utilities_ (external programs), so that it works like in POSIX-like shells.\r\n\r\n@doctordns, the use case is to have a convenient shorthand for referring to a different user's home directory path.\r\n\r\n(For _PowerShell_ commands, `~` works fundamentally differently: in the native-utility emulation, it is the _engine_ that expands the `~`, whereas in the case of PowerShell commands the command / provider receives the `~` as-is, and it is then _its_ responsibility to interpret the `~` as _its_ home location. That is, to provider-based PowerShell commands `~` does _not_ necessarily refer to `$HOME` (the file-system), and to other commands `~` has no special meaning. Note that some providers do _not_ define home locations; compare `Get-Item filesystem::~` to `Get-Item variable::~`. In short: the `FileSystem` provider specifically would have to implement the `~<username>` logic.)\r\n\r\nWhile the desired behavior on Unix-like platforms is clear (make it work like in POSIX-like shells such as `bash`), @doctordns has a point about needing to define the appropriate behavior on _Windows_.\r\n\r\nNote that one option is _not_ to support this on Windows.\r\nWhile the asymmetry would be somewhat unfortunate, we already _have_ asymmetries: on Windows, when calling _external programs_, `~` is _not_ expanded, and globbing (wildcard expansion) is _not_ performed; e.g., `someutility *.txt` passes matching filenames on Linux, while `someutility.exe *.txt` on Windows performs no expansion and passes `*.txt` verbatim; then again, perhaps that asymmetry is also worth revisiting.\r\n\r\nIf we do want to support this on Windows (which is preferable for cross-platform consistency), I suppose one potential approach could be:\r\n\r\n* support mere user names only, i.e.. without a domain component; e.g, `~jdoe`, but _not_ `~foo\\jdoe` or `~jdoe@foo.com`\r\n\r\n* support the names of local users and those in the current user's logon domain, if applicable (don't know how expensive such a lookup would be)\r\n   * Note that POSIX-like shells pass `~jdoe` through as-is, if a local `jdoe` user doesn't exist, so in order to emulate this behavior we'd need to know if the given user name refers to an existing user.\r\n\r\n* if a custom home directory is configured for a given target user, that would have to be taken into account as well.\r\n\r\n\r\n",
+      "created_at": "2020-04-20T14:18:19Z",
+      "updated_at": "2020-04-20T15:24:41Z"
+    },
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 makes a good point and I see what the OP is driving at. I am not familiar with Linux sufficiently!\r\n\r\nIn the cases I've seen, the '~' is part of a file path that is provided to the -Path parameter  (or similar). So it makes sense for consistency if nothing else is if the ~ as provided to one of the path parameters is handled by PowerShell (ie without any username syntax). That is the current behaviour.\r\n\r\nCould PowerShell use the --% parameter to pass the ~ to the program/command without expansion for the program to handle (eg: `someothercommand --% -Path ~\\markmike\\foo`). That would just pass the '~' as is? \r\n\r\n\r\n\r\n\r\nIs this a case where --% style logic might work?  ",
+      "created_at": "2020-04-20T15:11:58Z",
+      "updated_at": "2020-04-20T15:12:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "While you _can_ use `--%` to pass an unquoted `~` as-is, all you need to do is to _quote_ the `~` when calling an external program, which tells the engine to treat it literally: `/bin/echo '~'` passes `~` verbatim. \r\n\r\n(Generally,  `--%` is a stopgap with many limitations, especially on Unix. You could argue that `--%` should do the _opposite_ and that `--%` should be the required _opt-in_ for emulating the platform-native shell's features (`~` expansion, globbing), but that ship has sailed.)\r\n\r\nIn POSIX-like shells `~` is purely a shell construct, and it is the shell that expands it before target programs see the paths - the target programs are _not_ expected to interpret `~` themselves.\r\n\r\nOn Unix, PowerShell already emulates this POSIX-shell function with unquoted `~` _alone_ (though doesn't always recognize it properly - see #11386), and **this issue asks that the emulation be made _more complete_, by also supporting `~<user>`** - do note that there's _no_ path separator between `~` and `<user>`.\r\n\r\nif we limit ourselves to supporting `~` expansion for external programs on _Unix_ - as we have so far - there's nothing more to do.\r\n\r\n---\r\n\r\nIf we want to bring this functionality to _Windows_ too:\r\n\r\n* To extend the existing `~` support, which is limited to  _provider-based cmdlets only_ (and can refer to non-file-system locations), the `FileSystem` provider would have to recognize and resolve `~<user>` paths - _whether they're quoted or not_, because `Get-Item ~` works the same as `Get-Item '~'` - that'll have to remain a difference to the native emulation.\r\n\r\n* Also bringing `~` support to calling _external programs_ on Windows - which isn't currently supported, just as globbing isn't - would amount to a _breaking change_, unfortunately.\r\n\r\n  * It would change the behavior of existing command lines that have unquoted `~` arguments; e.g., `someutility.exe ~` would no longer pass `~` verbatim; in addition to the technical change, this is problematic because`~` is primarily a Unix construct and on Windows cannot generally be assumed to be a stand-in for the user's home directory.\r\n\r\n  * The same applies if, for consistency, we tried to bring native globbing to Windows as well: ` `someutility.exe *.txt` currently passes `*.txt` verbatim and would suddenly start passing  multiple file-name arguments.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-04-20T16:11:19Z",
+      "updated_at": "2020-04-20T16:15:58Z"
+    }
+  ],
+  "created_at": "2020-04-20T06:40:45Z",
+  "number": 12387,
+  "state": "open",
+  "title": "Implement ~username expansion on Windows and Linux",
+  "updated_at": "2020-04-22T17:18:38Z"
+}

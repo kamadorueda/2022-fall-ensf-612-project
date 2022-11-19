@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13488",
+  "author": "mklement0",
+  "body": "Follow-up from https://github.com/PowerShell/PowerShell/issues/1995#issuecomment-676617510.\r\nRelated: #13489, #6360, #6291\r\n\r\nIn short: Using an expression (via `(...)`, the grouping operator) as part of an argument normally causes the output from that expression to be passed as a _separate_ argument (which in itself may be surprising - see #6467).\r\n\r\nThis is _not_ the case in the following, very specific scenario:\r\n\r\n* An external (native) executable is being called.\r\n\r\n* The start of the argument looks something like `-foo:`, i.e. _looks like_ a named PowerShell argument, though that concept doesn't apply when calling external programs; note that any other prefix before the `(...)` does _not_ trigger the symptom.\r\n\r\nIn that event, the (stringified) `(...)` output is directly attached to `-foo:` to form a single argument, though note that if the output is a _collection_, only the _first_ element is attached.\r\n\r\nThere is no good reason for this anomaly, and the behavior with collections is virtually useless.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n# OK: PowerShell command: the output from (...) is passed as a *separate* argument.\r\nWrite-Output -foo:('bar', 'baz') | Should -BeExactly '-foo:', ('bar', 'baz')\r\n\r\n# On Unix:\r\n# BROKEN: External program: the output from (...) is partially passed as part of `-foo:`, namely \r\n# (only) the *first* array element.\r\nprintf '%s\\n' -foo:('bar', 'baz') | Should -Be '-foo:', 'bar', 'baz'\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe tests should pass.\r\n\r\n## Actual behavior\r\n\r\nThe second test fails:\r\n\r\n```none\r\nExpected @('-foo:', 'bar', 'baz'), but got @('-foo:bar', 'baz')\r\n```\r\n\r\nNote how only _2_ arguments were passed, because the first array element, `bar`, was directly attached to `-foo:`.\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.6\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @JamesWTruher for visibility.\r\n\r\n@mklement0 I half suspect you must spend a lot of time _trying_ to break things around this \ud83d\ude02  (But honestly, thanks; I doubt we'd find half these things if you didn't!)",
+      "created_at": "2020-08-20T17:17:40Z",
+      "updated_at": "2020-08-20T17:17:40Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "The concept of passing named parameter values *does* apply when the external program is `pwsh` that is called to run an existing script.",
+      "created_at": "2020-08-21T03:19:41Z",
+      "updated_at": "2020-08-21T03:19:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@yecril71pl \r\n\r\nNo: That the executable being called happens to be the PowerShell CLI that may eventually, on later parsing the string(s) it receives as arguments, interpret them as named PowerShell argument is incidental to this issue.\r\n\r\n(There _is_ special-casing for the PowerShell CLI when calling from PowerShell itself, but it is not only triggered by passing _script blocks_ and, as an aside, it is currently overeager: #10842)\r\n",
+      "created_at": "2020-08-21T11:49:34Z",
+      "updated_at": "2020-08-21T16:02:56Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "I do not know any other case where a command that receives parameters of the form `-parameter:value` and interprets them as a value given to a parameter.  The GNU syntax is `--parameter=value` for predefined parameters and `parameter=value` for dynamic parameters, where the border between the two is rather fuzzy.  Microsoft tools use `/parameter:value` mostly.  If you pass `-A:(1,2)` to any other command, there is no expectation that `(1,2)` will be interpreted as a value for the parameter **A**, so I find it inappropriate to complain about what happens to those parameters in any context except calling external PowerShell to run a pre&euml;xisting script.",
+      "created_at": "2020-08-21T16:00:33Z",
+      "updated_at": "2020-08-21T16:00:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The point of this issue is: \r\n\r\n* `bareword(...)` is parsed as _two_ positional arguments in _almost all_ cases: `bareword` as one argument and the output from `(...)` as the other (the only exception is if `bareword` is in the form of `-<parameter-name>:` and _binds to a declared parameter_).\r\n\r\n* There is no reason to deviate from this behavior when calling external executables - especially not in this half-broken way (there are no declared parameters in a PowerShell sense when calling external executables, as stated - no assumptions about the parameter syntax of external programs can be made).\r\n\r\nThis is purely a PowerShell parsing issue (lack of consistency) and has nothing to do with what command is being called (assuming the absence of a matching declared parameter, as stated), and whether that command is a PowerShell command or not.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-08-21T16:17:08Z",
+      "updated_at": "2020-08-21T16:17:08Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "When PowerShell calls itself to execute a script, the parameters in PowerShell sense may be declared within the script, so we can reasonably assume that `$A = '1 2'` in the scope of the target script is the best outcome possible.",
+      "created_at": "2020-08-21T16:21:53Z",
+      "updated_at": "2020-08-21T16:21:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "If you want to pass string `'1 2'` to a script's declared parameter `-A` via the CLI (and without using a script block), `-A:(1,2)` is the wrong syntax to use:\r\n\r\n* If the inconsistency described in this issue is resolved - i.e., treat `(...)` _consistently_ as a separate argument -  the (command-line equivalent of) `-A: 1 2` is passed (`1` and `2` are the array elements passed as individual arguments, due to calling an external executable), and causing only `1` to bind to `$A`.\r\n\r\n* The right syntax is to use `-A:$(1,2)`, to trigger interpretation of the whole token as an _expandable string_.\r\n  * However, because of a separate but related issue -  #13489 - this _also_ currently doesn't work, so for now you must use explicit quoting: `-A:\"$(1,2)\"` or `\"-A:$(1,2)\"`.\r\n\r\n---\r\n\r\nNote that if you used the `-c` / `-Command` CLI parameter rather than `-File`, you could pass `1, 2` _as an array_, but again _not_ with `-A:(1,2)`:\r\n\r\n```powershell\r\n# Both of the following work for passing array `1, 2`, but only \r\n# because PowerShell essentially interprets the stitched-together arguments\r\n# as if they had been specified from inside PowerShell.\r\n# What PowerShell *initially* sees are arguments '-A:1,' and '2' / '-A:' and '1,' and '2'\r\npwsh -c ./foo.ps1 -A:1, 2\r\npwsh -c ./foo.ps1 -A: 1, 2\r\n# Of course, you don't need the \":\"\r\npwsh -c ./foo.ps1 -A 1, 2\r\n```\r\n\r\n\r\n",
+      "created_at": "2020-08-21T16:48:12Z",
+      "updated_at": "2020-08-21T20:16:01Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "Actually, the call `PWSH A.PS1 -A:1,2` works as well.",
+      "created_at": "2020-08-21T16:51:55Z",
+      "updated_at": "2020-08-21T16:51:55Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "> `-A:(1,2)` is the wrong syntax to use\r\n\r\nActually, I am more bothered by the results of\r\n```powershell\r\n[INT[]] $A = 1, 2\r\nPWSH A.PS1 -A:$A\r\n```\r\n\r\nWhile you may argue that I was deliberately shooting myself in the foot with the syntax `-A:(1,2)`, I deny any wrongdoing with the syntax  `-A:$A`.",
+      "created_at": "2020-08-21T16:56:24Z",
+      "updated_at": "2020-08-21T16:56:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Actually, the call PWSH A.PS1 -A:1,2 works as well.\r\n\r\nNo, that passes`'1,2'` as single string (i.e, neither string `'1 2'` nor array `1, 2`).\r\n\r\n> I deny any wrongdoing with the syntax -A:$A\r\n\r\nThis is another manifestation of #13489 - it _should_ be treated the same as `\"-A:$A\"` and therefore pass a single argument with verbatim content `-A:1 2`, but it currently behaves the same (broken) way as `-A:(1,2)`.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-08-21T19:48:59Z",
+      "updated_at": "2020-08-21T19:48:59Z"
+    }
+  ],
+  "created_at": "2020-08-20T17:13:32Z",
+  "number": 13488,
+  "state": "open",
+  "title": "Parameter parsing/passing: in native executable calls, arguments that look like named PowerShell arguments do not treat the grouping operator as a separate argument",
+  "updated_at": "2020-08-21T20:16:01Z"
+}

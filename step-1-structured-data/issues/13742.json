@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13742",
+  "author": "cadumi",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\nBehavior reproducible under WS 2016 and 2019 with SEPTEMBER ROLLUP installed.\r\nIssue not reproducible without rollup.\r\n\r\nCustomer is using a Virtual Machine to run the DevOps pipeline, where he is running a powershell script to manage the classic cloud service, he is using the below script: https://gallery.technet.microsoft.com/scriptcenter/Reboot-Cloud-Service-PaaS-b337a06d \r\n\r\nThe error customer is seeing when attempting to call Azure management endpoint (management.core.windows.net) is a TLS/SSL verification failure due to untrusted root in the certificate chain. \"System.Net.Http.HttpRequestException: An error occurred while sending the request. ---> System.Net.WebException: The request was aborted: Could not create SSL/TLS secure channel.\"\r\n\r\n\r\n We got repro in lab even with one cmdlet Import-AzurePublishSettingsFile .\\1.publishsettings\r\nIt created certificate in user storage and removed private key immediately.\r\nI collected IDNA trace and found that  during the running this script powershell.exe calls  ncrypt!NCryptImportKey  and then after some time clr!X509Helper::DeleteKeyContainer\r\n\r\nAs we did not change anything in this script in September, but customer opened ticket on 8th of September,  that means something was changed  on client side.\r\n\r\nI tried to get repro in lab on  W10 1809 with August updates. And everything worked fine with the same script with the same .publishsettings file\r\n\r\nAs soon as i installed 9B cumulative  update for .NET, i got repro with exception.\r\n\r\nIt looks like in .NET 9B update we have a BUG, that causes non-correct work with certificates.\r\n\r\nFor W10 1809 /WS 2019 - this is  https://support.microsoft.com/en-us/help/4576627\r\n\r\nFor W10 1607 /WS2016 - this is  https://support.microsoft.com/en-us/help/4576479\r\n\r\nin our public article regarding the .NET update https://support.microsoft.com/en-us/help/4576479/kb4576479-cumulative-update-for-net-framework\r\n\r\nCLR1 | - Addresses an issue in some 32 bit apps where, in certain scenarios, the JIT might omit a function call - Improved support for cleaning up private temporary certificate keys\r\n\r\ni discussed the issue with Developer(Jeremy Barton), who made fix in September .NET update.\r\n\r\nHis conclusion:\r\n\r\n\r\n\"If the script is loading a certificate from the certificate store and it starts failing after some unpredictable amount of time, it's that whatever loaded the certificate into the certificate store didn't use PersistKeySet and it finally got garbage collected, erasing the \"temporary\" private key file\".\r\n\r\n \r\n\r\nThis behavior is described here:\r\n\r\nhttps://docs.microsoft.com/en-us/troubleshoot/dotnet/framework/install-pfx-file-using-x509certificate\r\n\r\n\r\nCause\r\n\r\nWhen the certificate is installed by using the X509Certificate or X509Certificate2 class, X509Certificate or X509Certificate2 by default creates a temporary container to import the private key. The private key is deleted when there's no longer a reference to the private key.\r\n\r\n\r\n\r\nSo  guess Azure PS PGs should double check the code of all scripts, which use certificate importing functions regarding the  PersistKeySet\r\n\r\nInternal escalation: 206414717\r\n\r\n-- | --\r\n\r\n\r\n\r\n\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\nScript from Devops pipeline should run with update installed as before.\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nThe error customer is seeing when attempting to call Azure management endpoint (management.core.windows.net) is a TLS/SSL verification failure due to untrusted root in the certificate chain. \"System.Net.Http.HttpRequestException: An error occurred while sending the request. ---> System.Net.WebException: The request was aborted: Could not create SSL/TLS secure channel.\"\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\n\r\nVersion: 5.1.14409.1005\r\n\r\n```\r\n",
+  "closed_at": "2020-10-05T12:26:21Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It sounds like this is:\r\n\r\n1. Primarily an issue with Windows PowerShell, which is no longer being developed (does this same issue happen in PowerShell 7? Does the behaviour still vary across Windows patch versions with PowerShell 7?)\r\n2. Not really an issue in PowerShell itself, merely the result of a change in Windows or in the module Windows provides to interact with certificates.\r\n\r\nIs that accurate? If so, I'm not sure there's much the powershell team can do here. \ud83d\ude15 ",
+      "created_at": "2020-10-05T11:47:27Z",
+      "updated_at": "2020-10-05T11:47:27Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Hi @cadumi, it looks like the issue you're experiencing is one with Windows PowerShell, rather than PowerShell 7+, which is what's tracked here.\r\n\r\nFeel free to reach out to me over Teams or email instead so we can redirect you as needed.",
+      "created_at": "2020-10-05T12:26:18Z",
+      "updated_at": "2020-10-05T12:26:18Z"
+    },
+    {
+      "author": "riccom76",
+      "author_association": "NONE",
+      "body": "@rjmholt , here's the issue is more with the Azure PowerShell cmdlets which are failing since the cert chain cannot be found due to the above error.\r\nIt looks like the cert chain, used by the Azure PS commands, was stored without the \"PersistKeySet\".\r\n\r\nThe question is: is this cert chain, used by Azure PS, 1) stored when the Azure PS is installed or when AZ login run? or 2) is this cert chain OS native?\r\nWhether the first is true, we need to store that cert chain using \"PersistKeySet\".",
+      "created_at": "2020-10-05T12:39:42Z",
+      "updated_at": "2020-10-05T12:39:42Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think that would need to be handled inside the Azure module iself? I don't think the powershell team have any control over that.\r\n\r\nMight be better to ask in the [Azure/azure-powershell](/Azure/azure-powershell) repo?",
+      "created_at": "2020-10-05T12:47:33Z",
+      "updated_at": "2020-10-05T12:47:33Z"
+    }
+  ],
+  "created_at": "2020-10-05T09:27:09Z",
+  "number": 13742,
+  "state": "closed",
+  "title": "Powershell script failing with Cannot create TLS/SSL secure channel - managed to restart Cloud Service roles",
+  "updated_at": "2020-10-05T12:47:33Z"
+}

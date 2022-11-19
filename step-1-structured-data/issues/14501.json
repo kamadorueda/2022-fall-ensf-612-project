@@ -1,0 +1,41 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14501",
+  "author": "iRon7",
+  "body": "## TimeSpan to DateTime\r\n\r\nCurrently the following statement produces an error:\r\n\r\n```PowerShell\r\n[DateTime](New-TimeSpan -Days 7)\r\n```\r\n\r\n> `InvalidArgument: Cannot convert the \"7.00:00:00\" value of type \"System.TimeSpan\" to type \"System.DateTime\".`\r\n\r\nThe idea is that it would make more sense if it would actually cast to a **DateTime type relative to now (Get-Date)**.\r\n`(Get-Date).Add(`_&lt;TimeSpan&gt;_`)`, e.g.: `(Get-Date).Add((New-TimeSpan -Days 7))`:\r\n\r\n## Example 1\r\n```PowerShell\r\n[DateTime](New-TimeSpan -Days 7)        # As of Sunday, December 27, 2020 10:13:18 AM\r\nSunday, January 3, 2021 10:13:18 AM     # Wishful thinking\r\n```\r\n\r\n## Example 2\r\n```PowerShell\r\n$After = New-TimeSpan -Days -14\r\n$Before = New-TimeSpan -Days -7\r\nGet-EventLog -LogName System -EntryType Error -After $After -Before $Before\r\n```\r\n\r\n## Example 3\r\n```PowerShell\r\nfunction Get-WeekDay ([DateTime]$Date) {\r\n    \"{0:d MMMM yyyy} is a {0:dddd}.\" -f $Date\r\n}\r\n\r\nGet-WeekDay 'January 1, 2021'\r\n1 January 2021 is a Friday.\r\n\r\nGet-WeekDay (New-TimeSpan -Days 5)      # Instead of: Get-WeekDay (Get-Date).Add((New-TimeSpan -Days 5))\r\n1 January 2021 is a Friday.             # Wishful thinking\r\n```\r\n\r\n## Related\r\n\r\n### #14496 [New OlderThan and NewerThan parameters for Get-ChildItem cmdlet](https://github.com/PowerShell/PowerShell/issues/14496)\r\n\r\nThe added suggestion [_You might also consider to accept (besides a DateTime type) a TimeSpan type:_](https://github.com/PowerShell/PowerShell/issues/14496#issuecomment-750950719) will simply be impliciet:\r\n\r\n```PowerShell\r\n$30DaysAgo = New-TimeSpan -Days -30\r\nGet-ChildItem $Path -Recurse -OlderThan $30DaysAgo\r\n```\r\n\r\n### #12305 [A simple method for creating TimeSpan objects to enable more user-friendly and simple usage of time-dependent Cmdlets](https://github.com/PowerShell/PowerShell/issues/12305)\r\n\r\nAnd together with this purpose it might even get to\r\n(where `-OlderThan` is just a parameter of `[DateTime]` type as orginally purposed):\r\n\r\n```PowerShell\r\nGet-ChildItem $Path -Recurse -OlderThan -30Days\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I guess we could have this as _implicit_ (PowerShell magic) operation to implement #12305 but we have no need the operation as _explicit_ - it will rather cause misunderstandings and will provoke errors in scripts.\r\nAlso we could use a transformation attribute in appropriate places.",
+      "created_at": "2020-12-28T06:43:21Z",
+      "updated_at": "2020-12-28T06:48:58Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "It took me a few hours to figure this prototype out, but finally I was able to write a `ConvertTo` type convertor for the `TimeSpan` type:\r\n\r\n```PowerShell\r\nclass TimeSpan2DateTime : System.Management.Automation.PSTypeConverter\r\n{\r\n    [bool] CanConvertFrom([object]$sourceValue, [Type]$destinationType)\r\n    {\r\n        return $false\r\n    }\r\n\r\n    [object] ConvertFrom([object]$sourceValue, [Type]$destinationType, [IFormatProvider]$formatProvider, [bool]$ignoreCase)\r\n    {\r\n        throw [NotImplementedException]::new()\r\n    }\r\n\r\n    [bool] CanConvertTo([object]$sourceValue, [Type]$destinationType)\r\n    {\r\n        return ($destinationType -eq [datetime])\r\n    }\r\n\r\n    [object] ConvertTo([object]$sourceValue, [Type]$destinationType, [IFormatProvider]$formatProvider, [bool]$ignoreCase)\r\n    {\r\n        return [DateTime]::Now.Add($sourceValue)\r\n    }\r\n}\r\nUpdate-TypeData -TypeName TimeSpan -TypeConverter TimeSpan2DateTime\r\n\r\n[DateTime](New-TimeSpan -Days 7)     # See Example 1\r\n\r\nThursday, January 7, 2021 3:30:32 PM\r\n\r\nGet-WeekDay (New-TimeSpan -Days 5)   # See example 3\r\n\r\n5 January 2021 is a Tuesday.\r\n```\r\n",
+      "created_at": "2020-12-31T14:42:47Z",
+      "updated_at": "2020-12-31T14:50:12Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "Btw., this (see StackOverflow: [Arithmetic with PowerShell Timespans]()), still works:\r\n\r\n```PowerShell\r\n$StartTime = Get-Date\r\nStart-Sleep 1\r\nNew-TimeSpan $StartTime (Get-Date)\r\n```\r\n\r\nBut could now be simplified to:\r\n```PowerShell\r\n$StartTime = Get-Date\r\nStart-Sleep 1\r\nNew-TimeSpan $StartTime    # Using the above PSTypeConverter\r\n```\r\n\r\nSaying that, it would probably also make sense to be able to automatically convert *from* `DateTime` *to* `TimeSpan`, where this would work (returning a negative timespan \"**`TimeSpan` till the given `DateTime`**\": `New-TimeSpan (Get-Date) $StartDate`):\r\n\r\n```PowerShell\r\n$StartTime = Get-Date\r\nStart-Sleep 1\r\n[TimeSpan]$StartTime        # Wishful thinking (not working)\r\n```\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-01-03T15:21:07Z",
+      "updated_at": "2021-01-03T15:24:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> where this would work (returning a negative timespan \"**`TimeSpan` till the given `DateTime`**\": `New-TimeSpan (Get-Date) $StartDate`):\r\n\r\nThis looks like a trick. I don't like such non-obvious things that look more like side effects - this is a path to hidden errors that will be difficult for users to find.\r\n",
+      "created_at": "2021-01-05T14:39:57Z",
+      "updated_at": "2021-01-05T14:39:57Z"
+    }
+  ],
+  "created_at": "2020-12-27T09:42:13Z",
+  "number": 14501,
+  "state": "open",
+  "title": "Type cast TimeSpan to DateTime relative to now (Get-Date)",
+  "updated_at": "2021-01-05T14:39:57Z"
+}

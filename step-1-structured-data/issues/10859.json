@@ -1,0 +1,160 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10859",
+  "author": "rjmholt",
+  "body": "Now that PowerShell has added more syntaxes and more features in other places, and also targets .NET Core 3.0, a challenge is apparent to maintainers of tools, in particular binary modules, that target multiple PowerShell versions.\r\n\r\nFor example, PSScriptAnalyzer currently targets:\r\n\r\n- PowerShell Standard with `netstandard2.0` for PowerShell 6+\r\n- PowerShell reference libraries with `net452` for Windows PowerShell 5.1- (it actually ships one set of DLLs per PowerShell version, making the module quite large)\r\n\r\nBut in PowerShell 7, new syntactic structures with their own ASTs like ternary expressions and pipeline chains have been added.\r\n\r\nPSScriptAnalyzer can't compile an `AstVisitor2` overriding `VisitTernaryExpression()` targeting PSStandard. So then perhaps it can target the PowerShell 7 SDK? Not without retargeting to .NET Core 3.0 from .NET Standard there.\r\n\r\nSo a list of some choices I see:\r\n\r\n- Continue with PSStandard and .NET Standard and be blind to new syntax. This is particularly unfriendly to PSScriptAnalyzer.\r\n- Add a .NET Core 3 compile target. For PSScriptAnalyzer this might be palatable, but in a case like PSES where the explicit move was made to PSStandard, this recomplicates the code and the build again, and if we support a .NET Core target, why not a .NET Framework one?\r\n- Build tooling to dynamically create the relevant methods, while still compiling for .NET Standard. This option prevents build difficulties, but makes writing the code much harder and more dangerous. More importantly, it's something that third party tool creators would have to grapple with (we would need to publish tools to make it possible).\r\n- Include new APIs in PowerShell Standard despite them not existing in old PowerShell versions. This would go against the idea of PSStandard, and is particularly bad since the old platforms won't throw nice exceptions (unlike in .NET Standard where it's the new platform that threw the exception)\r\n- Refactor relevant public parts of PowerShell (like the parser) to make it work with .NET Standard as a standalone (so for example, PSSA could embed it rather than relying on the current PowerShell version's parser). This would (1) be a fair amount of work, (2) mean removing .NET Core-specific code, and (3) change the mandate of these public components from \"works in PS 7\" to \"is backward compatible while still exposing new features\"\r\n\r\nNone of the choices above stands out to me, although there might be others.\r\n\r\nTL;DR: **What is PowerShell's story for exposing new important APIs to .NET libraries targeting multiple PowerShell versions?**\r\n\r\nThis question affects tools like PSScriptAnalyzer and PowerShell Editor Services, but also any other .NET library targeting multiple PowerShells, in particular binary modules and syntax-facing libraries.\r\n\r\n/cc @JamesWTruher @bergmeister @TylerLeonhardt @SeeminglyScience @daxian-dbw @joeyaiello @SteveL-MSFT ",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "It's worth pointing out a refactor could also mean fork - as in - 2 distinct code bases. This could be the simplest option knowing the language is somewhat stable and porting parsing changes should be relatively easy.",
+      "created_at": "2019-10-22T22:03:42Z",
+      "updated_at": "2019-10-22T22:03:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt We already discussed this in #7408. Dup?\r\n",
+      "created_at": "2019-10-23T04:55:23Z",
+      "updated_at": "2019-10-23T04:55:23Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "Given that most of the recent changes to the grammar have been purely additive, I'd be inclined to say:\r\n\r\n - Revisit the decision to change `AstVisitor2`/`ICustomAstVisitor2` rather than extending\r\n - Refactor PS7 Parser implementation with optional \"version-awareness\".\r\n - If user specifies a previous version of the language: emit parse time errors when encountering syntactical components or constructs that fall outside the <7 grammar superset\r\n\r\n(yes, I know there's _a lot_ of work to be done to achieve that) :)",
+      "created_at": "2019-10-23T13:47:37Z",
+      "updated_at": "2019-10-23T13:47:37Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@IISResetMe \r\n\r\n> Revisit the decision to change `AstVisitor2`/`ICustomAstVisitor2` rather than extending\r\n\r\nI would say that it was extended, current visitors will continue to work for the most part, just ignoring the new elements.  The problem is how do you actually account for those new syntax elements without explicitly targeting netcoreapp3.0 and referencing the full SDK.\r\n\r\n@lzybkr \r\n\r\n> It's worth pointing out a refactor could also mean fork - as in - 2 distinct code bases. This could be the simplest option knowing the language is somewhat stable and porting parsing changes should be relatively easy.\r\n\r\nYes please! A separate, publically consumable, standalone package for parsing would be phenomenal.  Bonus, if there are any plans to make breaking changes to AST structure or anything like that (e.g. spanifying/adding trivia) those changes could be demoed much easier in a separate library.",
+      "created_at": "2019-10-23T14:12:21Z",
+      "updated_at": "2019-10-23T14:12:21Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> A separate, publically consumable, standalone package for parsing would be phenomenal. \r\n\r\nPersonally this is my ideal, to have a parser that will parse all PowerShell syntax ever valid, and then for the appropriate runtime to decide whether or not it supports it. (Maybe you won't have a runtime at all, because you're a linter...)\r\n\r\nBut that's a pretty significant change, and we'd need to identify some intermediate steps to make it possible. In the case of Java for example, this was enough work that they built the Eclipse compiler rather than refactor `javac`.\r\n\r\nSo really I think we should work out what the next best plan is if those changes can't be made in PowerShell. Because with PS 7 in LTS, libraries are going to need to support it for some time to come.",
+      "created_at": "2019-10-23T20:43:00Z",
+      "updated_at": "2019-10-23T20:46:54Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> @rjmholt We already discussed this in #7408. Dup?\r\n\r\nThere's definitely overlap, but the scenario here is different and broader. There's a larger number of people for whom addressing this issue is going to be important.",
+      "created_at": "2019-10-23T20:48:31Z",
+      "updated_at": "2019-10-23T20:48:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "From #7408 we see that decoupling Parser in any way is a lot of work. Also we have to sync projects, I guess, manually only. This looks too complicated and unreliable given that over time versions gap will widen, new tools, versions and targets will appear.\r\n\r\nThere was an idea (from Jason?) to implement hosting model to speed up startup scenario. We could adopt the idea for the Parser scenario too. This implies the creation of an intermediate API (REST?) which can easily be PSStandard 2.* compliant. Since these will be separate processes (Tool and Parser) there will be full compatibility with any version (Tool <-> Parser).\r\n\r\n",
+      "created_at": "2019-10-24T04:22:05Z",
+      "updated_at": "2019-10-24T04:22:05Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience\r\n\r\n> I would say that it was extended, current visitors will continue to work for the most part, just ignoring the new elements. \r\n\r\nI think I probably should have qualified \"extended\" in this context: https://en.wikipedia.org/wiki/Open%E2%80%93closed_principle\r\n\r\nObserving the Open/Closed principle would have made this a non-issue: \r\n> The problem is how do you actually account for those new syntax elements without explicitly targeting netcoreapp3.0 and referencing the full SDK.\r\n\r\n:-( \n\n<blockquote><img src=\"/static/favicon/wikipedia.ico\" width=\"48\" align=\"right\"><div><strong><a href=\"https://en.wikipedia.org/wiki/Open%E2%80%93closed_principle\">Open\u2013closed principle - Wikipedia</a></strong></div></blockquote>",
+      "created_at": "2019-10-24T12:57:50Z",
+      "updated_at": "2019-10-24T12:57:52Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think @SteveL-MSFT and team were working on putting together reference libraries for v7 (a la PowerShellStandard.Library) which might make it a bit easier, but even then it's a bit tricky to work with supporting both, for sure.",
+      "created_at": "2019-10-24T13:16:05Z",
+      "updated_at": "2019-10-24T13:16:05Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@IISResetMe Yeah that'd be awesome.  Can you think of a way to apply that to this without taking a large performance hit (and still maintaining backward compatibility)?\r\n\r\nThey have added another method to the visitor classes (at least, I believe so, correct me if I'm wrong @rjmholt @daxian-dbw) called `VisitOther` or `DefaultVisit` that *sort of* allows that.  Though if you want to actually account for the new syntax type, you'd probably need to use reflection.  Of course since that will be new in PSv7, it doesn't really help this specific scenario though.",
+      "created_at": "2019-10-24T14:41:49Z",
+      "updated_at": "2019-10-24T14:41:49Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience The only gotcha is that we obviously complicate the type hierarchy every time we expand the grammar (I discussed with @rjmholt lumping abstract member ast types for a future interface/abstract type implementation in at the same time for this reason, although we didn't really reach a satisfying conclusion).\r\n\r\nWRT version-aware parsing, let me throw together a simple example, will link it here later tonight",
+      "created_at": "2019-10-24T16:02:46Z",
+      "updated_at": "2019-10-24T16:02:46Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "One possibility that strikes me for the AstVisitor problem at least is to have a targetable `ICustomAstVisitor2` with all the up-to-date bits but under .NET Standard.\r\n\r\nAs an interface, there's no override problem. But you don't get the nice `AstVisitor2` logic...\r\n\r\nPerhaps we need an `IAstVisitor2`?",
+      "created_at": "2019-10-24T20:25:28Z",
+      "updated_at": "2019-10-24T20:25:28Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Oops wrong button",
+      "created_at": "2019-10-24T20:25:36Z",
+      "updated_at": "2019-10-24T20:25:36Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Sorry for the late response, I've been off for a while.\r\nPSSA does not use PowerShellStandard (soley). The engine has to reference the SMA package of version 6.1 for getting the APIs that it needs such as e.g. `SemanticVersion`, which was only added in v6. As I've discussed already in issue #10372, newer SMA packages do not allow .Net Standard projects to reference the library, which requires now the specific .net Core version. I opened issue https://github.com/PowerShell/PowerShellStandard/issues/67 for getting PowerShell Standard v6 for references against v6.x only. Similary, we'd  either need a package for v7x only and the conditionally compile against v6 and v7 or just have one package, which is the union of v6/7 (the former would be required only if PSSA has specific rule modiifcations for features only added in v7)\r\nTherefore the first, blocking issue is the lack of proper reference libraries that also support .net standard. This should be solved first and the PS team has ignored community complaints from e.g. @jaykul for a while, now is the time to address them.\r\nSeparating out the parser into it's own project will be a bigger undertaking but maybe a first step would be to try compile SMA against `netstandard2.1` so that usage of the SMA NuGet package for referencing only becomes more useful. Otherwise, we'll probably have to live with conditional compilation for a while.",
+      "created_at": "2019-10-25T17:46:00Z",
+      "updated_at": "2019-10-25T17:48:02Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Separating out the parser into it's own project will be a bigger undertaking but maybe a first step would be to try compile SMA against netstandard2.1 so that usage of the SMA NuGet package for referencing only becomes more useful.\r\n\r\nThe problem there is that `netstandard2.1` doesn't support .NET Framework at all.\r\n\r\nWhereas, S.M.A explicitly uses .NET Core specific APIs now, so it won't compile against `netstandard2.0`.\r\n\r\nThe solution to that is perhaps:\r\n\r\n- Generate reference libraries for SMA APIs that are `netstandard2.0` compliant\r\n- Adopt a `netstandard2.0` public API philosophy (not restrict APIs to that, but ensure that there is a `netstandard2.0` compliant version of each API)\r\n- Have testing to ensure ongoing API support",
+      "created_at": "2019-10-25T18:48:11Z",
+      "updated_at": "2019-10-25T18:48:11Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Therefore the first, blocking issue is the lack of proper reference libraries that also support .net standard. This should be solved first and the PS team has ignored community complaints from e.g. @Jaykul for a while, now is the time to address them.\r\n\r\nMaybe we can consolidate issues here. I opened this issue with precisely these issues in mind. There's no easy solution here, but as PowerShell 7 stabilises, I also feel we need to address them head-on.",
+      "created_at": "2019-10-25T18:52:42Z",
+      "updated_at": "2019-10-25T18:52:42Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "When I look at this issue, there's an emphasis on how PSScriptAnalyzer will work which is a really great example.\r\n\r\nAt least in terms of that, AST-based static analysis, I would love to understand how other linters achieve this (if they do).\r\n\r\nFor example, when I use ESLint the most popular linter for JavaScript, I see that they offer the ability to specify the version of ECMAScript (aka JavaScript) via the [parserOptions.ecmaVersion config](https://eslint.org/docs/user-guide/configuring#specifying-parser-options). I've not yet dug into what parser they're using and how they're using it, but that seems to be a good model from the user's perspective... ",
+      "created_at": "2019-10-25T21:14:49Z",
+      "updated_at": "2019-10-25T21:14:49Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> I would love to understand how other linters achieve this (if they do).\r\n\r\nI'm pretty sure they use a multi-target parser which will recognise all the syntaxes in each version of the language. Then the caller gets to decide based on the AST what works on their platform.\r\n\r\nThe alternative is that they use a different parser on demand, which blows out the size of the thing.\r\n\r\nThis is one of the reasons why syntactic breaking changes are very problematic; we have to work much harder to build/maintain a parser that works with other versions of the language.",
+      "created_at": "2019-10-25T22:05:42Z",
+      "updated_at": "2019-10-25T22:05:42Z"
+    },
+    {
+      "author": "TylerLeonhardt",
+      "author_association": "MEMBER",
+      "body": "It looks like eslint uses [acorn](https://github.com/acornjs/acorn) which seems to also allow for specifying `ecmaVersion`.",
+      "created_at": "2019-10-25T22:40:47Z",
+      "updated_at": "2019-10-25T22:40:47Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I'm going to play the role of API consumer who doesn't care about the implementation details: \r\n\r\nObviously ScriptAnalyzer running in PowerShell 5 doesn't _necessarily_ need to understand syntax that won't work in PowerShell 5 -- but if all of these sorts of tools have to change which API they call in order to support new syntax, that puts a lot of burden on developers, and if those new APIs only work on new compilation targets, that puts a lot more burden on them, forcing the maintenance of maintain multiple incompatible versions of the tools.\r\n\r\n- Is impact on tool developers part of the conversation in the development of features? If not, why not?\r\n- What part of the API surface should remain backward compatible?\r\n- What justifies changing the surface in a breaking manner?\r\n- How much bigger is the justification for changing *compilation targets*?\r\n\r\nIn terms of this specific type of problem:\r\n\r\n- Is there any value in keeping an old parser API if it can't handle the current syntax?\r\n- Can't new tokens be added without breaking changes to the parser API?\r\n- Shouldn't parsers, specifically, be down-level compatible, at least to the previous version?\r\n",
+      "created_at": "2019-10-26T13:39:46Z",
+      "updated_at": "2019-10-26T13:39:46Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I put together an example of how you can sort of polyfill new AST types while still targeting PowerShellStandard and still maintain the same type identity.  It basically works like `netstandard`.\r\n\r\nIt doesn't really help **too much** until we can all target a version that includes `ICustomAstVisitor2.DefaultVisit` but it still may have value.\r\n\r\nhttps://github.com/SeeminglyScience/AstPolyfillExample\r\n\r\nWith support from PowerShell, you could ship a similar reference lib package every time new ASTs are added.  Implementers would just add the new package, and add a new clause to `DefaultVisit`.  The version of PowerShell that actually contains the new types would simply load their version with `TypeForwardedTo` decorations at start up.",
+      "created_at": "2020-07-26T01:35:52Z",
+      "updated_at": "2020-07-26T01:35:52Z"
+    }
+  ],
+  "created_at": "2019-10-21T22:08:24Z",
+  "number": 10859,
+  "state": "open",
+  "title": "How to write cross-PowerShell tools in .NET, particularly AST visitors?",
+  "updated_at": "2021-01-15T18:39:13Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8976",
+  "author": "mklement0",
+  "body": "To be clear: the optimization in question is rarely needed in real life, but it may matter when processing large data sets.\r\n\r\nThis is a regression from Windows PowerShell, unlike related issue #8977.\r\n\r\nNote that there's a related problem of a `[regex]` instance _intentionally_ getting recreated based on an options mismatch - see #8946 - but the test commands below have been crafted to avoid that problem.\r\n\r\n[_Updated_] Even though you can tell [here](https://github.com/PowerShell/PowerShell/blob/5d54f1aa3871a826409496437e25856dc263ccc4/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L2306) that the precompiled / predefined `[regex]` instance _is_ used as-is (currently only if the case-sensitivity option matches), performance doesn't improve.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n# switch -regex with string literal\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  switch -regex (, 'foo' * 1e6) { 'f?(o)' { $true } } \r\n}).TotalSeconds\r\n\r\n# switch -regex with precompiled [regex] instance\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  $re = [Regex]::new('f?(o)', 'Compiled, IgnoreCase, CultureInvariant')\r\n  switch -regex (, 'foo' * 1e6) { $re { $true } } }\r\n).TotalSeconds\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe 2nd `Measure-Command` should be _faster_, due to use of a precompiled  `[regex]` instance.\r\n\r\n# Actual behavior\r\n\r\nSample timings from macOS 10.14.3:\r\n\r\n```none\r\n4.0568081\r\n4.4071708\r\n```\r\n\r\nThe 2nd `Measure-Command` is _slower_ in PowerShell _Core_, on all platforms.\r\n\r\nBy contrast, it _is_ faster in _Windows PowerShell_ (about 25% in my tests).\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core v6.2.0-preview.4 on macOS 10.14.2\r\nPowerShell Core v6.2.0-preview.4 on Ubuntu 18.04.1 LTS\r\nPowerShell Core v6.2.0-preview.4 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.471)\r\n```\r\n",
+  "closed_at": "2019-02-25T20:42:46Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see in debugger that second is processed in the [line](https://github.com/PowerShell/PowerShell/blob/5d54f1aa3871a826409496437e25856dc263ccc4/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L2308)",
+      "created_at": "2019-02-25T17:20:01Z",
+      "updated_at": "2019-02-25T17:20:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps it should be:\r\n```powershell\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n$re = [Regex]::new('f?(o)', 'Compiled, IgnoreCase, CultureInvariant')\r\n(Measure-Command { \r\n  switch -regex (, 'foo' * 1e6) { $re { $true } } }\r\n).TotalSeconds\r\n```",
+      "created_at": "2019-02-25T17:23:08Z",
+      "updated_at": "2019-02-25T17:23:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If compilation of regex is slow it is .Net Core 2 problem and we need measure against .Net Core 3.0.",
+      "created_at": "2019-02-25T17:24:59Z",
+      "updated_at": "2019-02-25T17:24:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: The problem isn't the compilation time of the regex - the variant command you suggest roughly shows the same as the original test. (In fact, moving the `$re = ...` line out of the `Measure-Command` slows things down even further, perhaps because the variable must then be located in a different scope?)\r\n\r\n~~The source-code line you link to (which is also in the OP) shows the real problem: instead of using the predefined `[regex]` instance directly, the static `[Regex]::Match()` method is called with the _stringified value_ of the `[regex]` instance.~~\r\n\r\n\r\n\r\n",
+      "created_at": "2019-02-25T17:40:54Z",
+      "updated_at": "2019-02-25T19:22:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, @IISResetMe pointed out that I had misread the source code: with the case-sensitivity option matching, a predefined `[regex]` instance _is_ used - yet it doesn't result in improved performance; I've already asked @IISResetMe in #8946 if he happens to have an explanation, but perhaps you have a sense too.",
+      "created_at": "2019-02-25T19:28:21Z",
+      "updated_at": "2019-02-25T19:29:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Best way is to measure .Net Core 3.0 implementation. You could create simple test in C#. I expect that result will be better.",
+      "created_at": "2019-02-25T19:32:45Z",
+      "updated_at": "2019-02-25T19:32:45Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I'm not sure it's actually slower, I think [dot-source variable lookup](https://github.com/PowerShell/PowerShell/issues/8911#issuecomment-464954324) (`Measure-Command` doesn't create a new scope) could be affecting those results.\r\n\r\n```powershell\r\n# switch -regex with string literal\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  switch -regex (, 'foo' * 1e6) { 'f?(o)' { $true } } \r\n}).TotalSeconds\r\n\r\n# switch -regex with precompiled [regex] instance\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  $re = [Regex]::new('f?(o)', 'Compiled, IgnoreCase, CultureInvariant')\r\n  switch -regex (, 'foo' * 1e6) { $re { $true } } }\r\n).TotalSeconds\r\n\r\n# switch -regex with precompiled [regex] instance within a new scope\r\n[GC]::Collect(); [GC]::WaitForPendingFinalizers()\r\n(Measure-Command { \r\n  & {\r\n    $re = [Regex]::new('f?(o)', 'Compiled, IgnoreCase, CultureInvariant')\r\n    switch -regex (, 'foo' * 1e6) { $re { $true } } }\r\n  }\r\n).TotalSeconds\r\n```\r\n\r\n```text\r\n4.6255024\r\n5.1760229\r\n3.4601631\r\n```\r\n\r\nIt's possible that the caching done by `Regex.Match` could have received some performance updates, making the two methods comparable speeds.",
+      "created_at": "2019-02-25T20:09:46Z",
+      "updated_at": "2019-02-25T20:09:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Why & is used only in last test?",
+      "created_at": "2019-02-25T20:23:48Z",
+      "updated_at": "2019-02-25T20:23:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good find, thanks, @SeeminglyScience - so it does improve performance (though not drastically; indeed, in general I've found that in .NET _Core_ (unlike with the .NET Framework) repeated `Regex.Match()` use with strings incurs  relatively little overhead thanks to automatic caching of compiled regexes).\r\n\r\n@iSazonov: By using `& { ... }` (a child scope), @SeeminglyScience is demonstrating that the slow-down comes from the variable lookups that are performed in dot-sourced code, as discussed in #8911.\r\n\r\nI'll close this.",
+      "created_at": "2019-02-25T20:42:43Z",
+      "updated_at": "2019-02-25T20:57:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "P.S., @SeeminglyScience  and @iSazonov: I'd love to hear your thoughts on the (updated) #8977",
+      "created_at": "2019-02-25T23:58:01Z",
+      "updated_at": "2019-02-25T23:58:01Z"
+    }
+  ],
+  "created_at": "2019-02-25T16:50:02Z",
+  "number": 8976,
+  "state": "closed",
+  "title": "Performance regression: use of precompiled [regex] instances with switch -regex doesn't result in better performance",
+  "updated_at": "2019-02-27T15:53:31Z"
+}

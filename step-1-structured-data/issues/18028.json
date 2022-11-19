@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/18028",
+  "author": "nightroman",
+  "body": "### Summary of the new feature / enhancement\r\n\r\nThe attached project approximates my use case: PowerShell Core is hosted not by\r\nan application but by its plugin which is dynamically loaded at runtime.\r\n\r\n[TryPSCore.zip](https://github.com/PowerShell/PowerShell/files/9484128/TryPSCore.zip)\r\n\r\nI.e. this straightforward plugin architecture:\r\n\r\n(1) `ClassLibrary1` defines the plugin interface `Class1`.\r\n\r\n(2) `ClassLibrary2` implements this interface as `Class2` and hosts PowerShell\r\nCore in order to use PowerShell.\r\n- post-build calls `dotnet publish -c $(Configuration) -o ..\\bin\\plugin --no-build`\r\n- thus, the result plugin is published in `TryPSCore/bin/plugin`\r\n\r\n(3) The application `TryPSCore` depends on `ClassLibrary1`, loads `ClassLibrary2`\r\nby `LoadFrom`, finds and instantiates found implementation of `Class1` and\r\ncalls its virtual method `Invoke()`.\r\n- its output directory is set to `TryPSCore/bin`, this is our test app.\r\n\r\nThe method `Invoke()` runs the following PowerShell code (see `ClassLibrary2` / `Class2.cs`):\r\n\r\n```powershell\r\n$ErrorActionPreference=1\r\n\r\n'This works.'\r\n\r\n<# Problem 1\r\nAdd-Type @'\r\npublic enum MyEnum {\r\n    MyValue = 0,\r\n}\r\n'@\r\n[MyEnum]::MyValue\r\n#>\r\n\r\n<# Problem 2\r\nGet-CimInstance Win32_Environment\r\n#>\r\n```\r\n\r\n### Problem 0 (solved by `AssemblyResolve`)\r\n\r\nThe test app fails with \"Could not load file or assembly System.Management.Automation\" (rather expectedly).\r\n\r\nI worked around this using `AssemblyResolve` event handler (see the simplified variant in `Class2.cs`).\r\n\r\nThen it works, prints 'This works.' Thus, whatever is built and assembled \"by\r\ndefault\" may perform something in PowerShell. Actually, it mostly works, good.\r\nBut there are several issues, just two of them below.\r\n\r\n> NB After seeing this issue [Make it possible to host PowerShell in a custom assembly load context](https://github.com/PowerShell/PowerShell/issues/17492)\r\nI tried the ALC approach. It seems to have even more issues than using `AssemblyResolve` with a bunch of `LoadFrom`.\r\n\r\n### Problem 1 (solved by copy `ref`?)\r\n\r\nUncomment the snippet `Problem 1`.\r\nThen the test fails with:\r\n\r\n```\r\nCould not find a part of the path 'C:\\Users\\roman.kuzmin\\source\\repos\\TryPSCore\\bin\\ref'.\r\n```\r\n\r\nThen copy\r\n\r\n    ...\\TryPSCore\\bin\\plugin\\ref\r\n\r\nto\r\n\r\n    ...\\TryPSCore\\bin\r\n\r\nAfter this copy step the snippet `Problem 1` works.\r\n\r\n> Is this normal / expected that we have to copy `ref` to the application\r\ndirectory? There are cases when this is not possible, we do not \"own\" this\r\napplication, we only provide the plugin for it.\r\n\r\nMy real use case is more complex. The application is not even .NET, native.\r\nOne of plugins hosts .NET Core and loads another plugin which hosts PowerShell\r\nCore. In this real case the error is different:\r\n\r\n```\r\nCould not find a part of the path 'C:\\Bin\\Far\\x64\\FarNet\\Modules\\PowerShellFar\\runtimes\\win\\lib\\net6.0\\ref'.\r\n```\r\n\r\nThe real location of `ref` after `publish` is this:\r\n\r\n```\r\nC:\\Bin\\Far\\x64\\FarNet\\Modules\\PowerShellFar\\ref\r\n```\r\n\r\nLike I said in Problem 0, my custom `AssemblyResolve` finds all not resolved\r\nassemblies. So it seems PowerShell looks for `ref` in some \"known locations\".\r\nThey are not the same, depending on how an app is built. But in both cases\r\nPowerShell does not check the \"official\" `ref` location created by publish,\r\ni.e. in the publish output directory.\r\n\r\n### Problem 2 (not solved)\r\n\r\nUncomment the snippet `Problem 2`.\r\nThen the test fails with \"method not found\":\r\n\r\n```\r\nSystem.Management.Automation.CmdletInvocationException: The type initializer for 'Microsoft.Management.Infrastructure.Native.OperationCallbacks' threw an exception.\r\n ---> System.TypeInitializationException: The type initializer for 'Microsoft.Management.Infrastructure.Native.OperationCallbacks' threw an exception.\r\n ---> System.MissingMethodException: Method not found: 'System.Reflection.Emit.AssemblyBuilder System.AppDomain.DefineDynamicAssembly(System.Reflection.AssemblyName, System.Reflection.Emit.AssemblyBuilderAccess)'.\r\n   at Microsoft.Management.Infrastructure.Native.OperationCallbacks..cctor()\r\n   --- End of inner exception stack trace ---\r\n   ...\r\n```\r\n\r\n> Is this the PowerShell Core problem? Or should I copy something like in the\r\nProblem 1 or tweak something after the build and publish? Then what exactly\r\nshould I copy? Is this step documented somewhere? I read this:\r\n\r\nhttps://docs.microsoft.com/en-us/powershell/scripting/dev-cross-plat/choosing-the-right-nuget-package?view=powershell-7.2\r\n\r\n### Is this even a valid use case?\r\n\r\nIs hosting PowerShell Core in a plugin a valid use case? Like I said, it mostly\r\nworks with described tweaks. But I worry that it works by chance, it is not\r\nsupposed to work, it is not officially supported and tested, etc. And on any\r\nPowerShell update my plugin may stop working.\r\n\r\nWhat is the official opinion, should this use case work normally?\r\nAt least with some documented extra post build / publish steps.\r\n\r\n\r\n\r\n### Proposed technical implementation details (optional)\r\n\r\nI am not sure what to propose because the use case might be not quite supported yet.\r\n\r\nBut at least (perhaps) the internal resolution of the folder `ref` could be better. As described, it looks like PS Core does not look for it in the location created by `publish`. Maybe it could with some extra tweak. One headache less for PS Core in a plugin.",
+  "closed_at": "2022-09-19T13:15:48Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "`Add-Type` relies on reference assemblies to build the resulting assembly.  PS7 ships the reference assemblies in `$PSHome/ref`.  If you're hosting PS7, then you need to either make these ref assemblies available for `Add-Type` or use the `Add-Type -ReferencedAssemblies` parameter to specify them.",
+      "created_at": "2022-09-12T18:11:57Z",
+      "updated_at": "2022-09-12T18:11:57Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT `dotnet publish` makes these assemblies available as the directory `ref` in the publish destination. The issue I am describing is that PS Core does not look for this \"natural\" location. According to clear error messages with expected paths, PS Core looks for the folder `ref` in different locations and does not check the \"natural\" `dotnet publish` location (which should be easy to calculate by relative paths).\r\n\r\nThus, to work around this issue I have to manually relocate this `ref` folder to the location from PS Core errors messages. This does not look quite right.\r\n",
+      "created_at": "2022-09-12T19:37:51Z",
+      "updated_at": "2022-09-12T19:40:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@nightroman ok, now i see what you are saying.  See https://github.com/PowerShell/PowerShell/blob/736cf3ecbf441af05baec72ac31bad9619a2b3e2/src/Microsoft.PowerShell.Commands.Utility/commands/utility/AddType.cs#L622-L633",
+      "created_at": "2022-09-12T20:37:36Z",
+      "updated_at": "2022-09-12T20:37:36Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "Well, I'd say it's a bug, i.e. your wrong assumption about location of the `ref` produced by `dotnet publish`\r\nPer your code and in my case it is this (`typeof(PSObject).Assembly`):\r\n```\r\nC:\\Bin\\Far\\x64\\FarNet\\Modules\\PowerShellFar\\runtimes\\win\\lib\\net6.0\\System.Management.Automation.dll\r\n```\r\nbut the actual location of `ref` produced by `dotnet publish` is\r\n```\r\nC:\\Bin\\Far\\x64\\FarNet\\Modules\\PowerShellFar\r\n```",
+      "created_at": "2022-09-12T22:39:31Z",
+      "updated_at": "2022-09-12T22:41:03Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "Is `System.Management.Automation.dll` always published to `runtimes\\<os>\\lib\\net<version>`?\r\nIf yes then the correct way to find `ref` is to step 4 folders up from its location.\r\n\r\nNB And the issue is a bug, after all.",
+      "created_at": "2022-09-13T05:08:17Z",
+      "updated_at": "2022-09-13T05:22:12Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT @iSazonov \r\nAny comments on new discoveries? Should this be labeled as a bug, not a question? Or should I open a separate bug issue for the wrong `ref` location assumptions?",
+      "created_at": "2022-09-15T03:18:12Z",
+      "updated_at": "2022-09-15T03:18:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The PowerShell code exactly says that `ref` folder must be in SMA.dll folder for host scenarios. _It is best we can do._\r\n\r\n`dotnet publish` is based on _standard_ MSBuild scripts from .Net SDK and can not address all specific scenarios. You have to customize build process in your prop/target/csproj files as needed and copy `ref` folder in place the SMA.dll expects.",
+      "created_at": "2022-09-15T04:59:55Z",
+      "updated_at": "2022-09-15T04:59:55Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "@iSazonov So by the PowerShell Core design, it fails instead of checking one more location for `ref` as described (4 folders up from SMA.dll) in addition to two already checked. Is this correct?\r\n\r\n",
+      "created_at": "2022-09-15T07:49:23Z",
+      "updated_at": "2022-09-15T07:49:23Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "If this is by design then the required custom build step should be described in\r\nhttps://docs.microsoft.com/en-us/powershell/scripting/dev-cross-plat/choosing-the-right-nuget-package?view=powershell-7.2\r\n\r\nCurrently it omits the very important piece of information and only says:\r\n\r\n> Publishing an application targeting Microsoft.Powershell.SDK will include all these assemblies, and any dependencies PowerShell requires. It will also include other assets that PowerShell required in its build, such as the module manifests for Microsoft.PowerShell.* modules and the ref directory required by [Add-Type](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/add-type).\r\n\r\nIt admits that `ref` is needed and provided but does not tell to copy `ref` to SMA.dll location.\r\n\r\n<blockquote><img src=\"https://docs.microsoft.com/media/logos/logo-powershell-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/powershell/scripting/dev-cross-plat/choosing-the-right-nuget-package\">Choosing the right PowerShell NuGet package for your .NET project - PowerShell</a></strong></div><div>Alongside the executable packages published with each PowerShell release, the PowerShell team also maintains several packages available on NuGet. These packages allow targeting PowerShell as an API platform in .NET.</div></blockquote>",
+      "created_at": "2022-09-15T08:03:10Z",
+      "updated_at": "2022-09-15T08:04:19Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "Also, the design is not quite right (if not just wrong) in the scenario when `Assembly.GetEntryAssembly()` is not null. In this case you require `ref` to be copied to the application executable directory. You assume that this is possible. This is not always the case (you may not own that application or have no right to access its folder).\r\n\r\nAlso, this is not just post-build step required but rather installation/deployment step because a plugin hosting PSCore might be added to already installed application not during the build process.\r\n",
+      "created_at": "2022-09-15T08:13:14Z",
+      "updated_at": "2022-09-15T08:14:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> In this case you require `ref` to be copied to the application executable directory\r\n\r\nNot in the application. In _SMA.dll_ folder.",
+      "created_at": "2022-09-15T12:44:10Z",
+      "updated_at": "2022-09-15T12:44:42Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "> > In this case you require `ref` to be copied to the application executable directory\r\n> \r\n> Not in the application. In _SMA.dll_ folder.\r\n\r\n```\r\nPathType.GetDirectoryName( \r\n         (Assembly.GetEntryAssembly() ?? typeof(PSObject).Assembly).Location), \r\n     \"ref\"); \r\n```\r\n\r\nOn the contrary, in the application folder, if `Assembly.GetEntryAssembly()` is not null. Not in _SMA.dll_ folder.\r\nAnd this application folder may be not available for copying `ref`. This makes some valid scenarios impossible.\r\n",
+      "created_at": "2022-09-15T13:03:26Z",
+      "updated_at": "2022-09-15T13:03:26Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> On the contrary, in the application folder, if `Assembly.GetEntryAssembly()` is not null.\r\n\r\n> My real use case is more complex. The application is not even .NET, **native**.\r\nOne of plugins hosts .NET Core and loads another plugin which hosts PowerShell\r\nCore.\r\n\r\nIs your application _native_? Or I misread your scenario?\r\n",
+      "created_at": "2022-09-15T16:42:48Z",
+      "updated_at": "2022-09-15T16:42:48Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "My sample attached application is .NET. My other application is native. I have all kind of use cases in practice.",
+      "created_at": "2022-09-15T17:04:13Z",
+      "updated_at": "2022-09-15T17:04:13Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "TBH the discussion is getting too long. If the issue remains labeled as question I close it. I got the some answers and the shape of things.\r\n\r\nI think the PS Core design is not quite right. PS Core is not born yesterday. It's really the time to support plugin scenarios. If not fully then at least partially and with some help for users who really need plugins hosting PS Core.\r\n",
+      "created_at": "2022-09-15T17:12:14Z",
+      "updated_at": "2022-09-15T17:12:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I don't see a problem for a native host. If there is a host managed application, it is supposed to be the one that publishes the ref folder. If the SMA is a separate plugin, it is impossible to distinguish between the managed application itself and the plugin.\r\nPerhaps we could check the existence of the folder in those two places.\r\n\r\n@daxian-dbw Could you please comment?",
+      "created_at": "2022-09-15T19:02:02Z",
+      "updated_at": "2022-09-15T19:02:02Z"
+    },
+    {
+      "author": "nightroman",
+      "author_association": "NONE",
+      "body": "NB Semi-related note, this documentation introduces \"another way\" which has nothing to do with use cases when users really have to know where to put the `ref` folder. These use cases do not have `pwsh.dll`.\r\n\r\n> Beginning in PowerShell 7, Add-Type does not compile a type if a type with the same name already exists. Also, Add-Type looks for assemblies in a ref folder under the folder that contains pwsh.dll.\r\n\r\nhttps://docs.microsoft.com/en-us/powershell/module/Microsoft.PowerShell.Utility/Add-Type?view=powershell-7\r\n\r\nThis documentation presumably describes the `pwsh` installation. Interestingly, exactly in this case users do not have to know such a technical detail like the location of `ref`. It comes with `pwsh` out of the box.\n\n<blockquote><img src=\"https://docs.microsoft.com/media/logos/logo-powershell-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/add-type\">Add-Type (Microsoft.PowerShell.Utility) - PowerShell</a></strong></div><div>The Add-Type cmdlet lets you define a Microsoft .NET Core class in your PowerShell session. You can then instantiate objects, by using the New-Object cmdlet, and use the objects just as you would use any .NET Core object. If you add an Add-Type command to your PowerShell profile, the class is available in all PowerShell sessions. You can specify the type by specifying an existing assembly or source code files, or you can specify the source code inline or saved in a variable. You can even specify only a method and Add-Type defines and generates the class. On Windows, you can use this feature to make Platform Invoke (P/Invoke) calls to unmanaged functions in PowerShell. If you specify source code, Add-Type compiles the specified source code and generates an in-memory assembly that contains the new .NET Core types. You can use the parameters of Add-Type to specify an alternate language and compiler, C# is the default, compiler options, assembly dependencies, the class namespace, the names of the type, and the resulting assembly. Beginning in PowerShell 7, Add-Type does not compile a type if a type with the same name already exists. Also, Add-Type looks for assemblies in a ref folder under the folder that contains pwsh.dll. </div></blockquote>",
+      "created_at": "2022-09-16T11:58:02Z",
+      "updated_at": "2022-09-16T11:58:04Z"
+    }
+  ],
+  "created_at": "2022-09-04T06:13:18Z",
+  "number": 18028,
+  "state": "closed",
+  "title": "Hosting PowerShell Core in a plugin, many issues",
+  "updated_at": "2022-09-19T13:15:52Z"
+}

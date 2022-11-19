@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11418",
+  "author": "IanBAdams",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\n```\r\nIssue the following from a new pwsh session:\r\nAdd-Type -AssemblyName System.Windows.Forms\r\n$MainForm = New-Object System.Windows.Forms.Form\r\nTest-Connection 'PC-IAN'\r\n```\r\n\r\n# Expected behavior\r\n\r\n```\r\nTest-Connection should run and produce similar output to the following:\r\n\r\n\r\n   Destination: PC-IAN\r\n\r\nPing Source           Address                   Latency BufferSize Status\r\n                                                   (ms)        (B)\r\n---- ------           -------                   ------- ---------- ------\r\n   1 PC-IAN           fe80::5158:e71e:c447:7e86       0         32 Success\r\n   2 PC-IAN           fe80::5158:e71e:c447:7e86       0         32 Success\r\n   3 PC-IAN           fe80::5158:e71e:c447:7e86       0         32 Success\r\n   4 PC-IAN           fe80::5158:e71e:c447:7e86       0         32 Success\r\n```\r\n\r\n# Actual behavior\r\n\r\n```\r\nThe pwsh session \u2018hangs\u2019 (i.e. doesn\u2019t respond at all after Test-Connection).\r\n\r\nTest-Connection produces the expected results if $MainForm = New-Object System.Windows.Forms.Form IS NOT run beforehand.\r\n\r\n$MainForm = New-Object System.Windows.Forms.Form is successful and the resulting form can be processed if Test-Connection IS NOT run afterwards.\r\n```\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.1\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-01-22T03:19:06Z",
+  "comments": [
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "FWIW, I can reproduce this error.",
+      "created_at": "2019-12-21T10:13:32Z",
+      "updated_at": "2019-12-21T10:13:32Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I haven't got time to verify right at the moment, but this _seems_ like it might be a .net core issue.\r\n\r\nMight be something we need to try to work around in terms of how we're waiting for the Ping response. :thinking: ",
+      "created_at": "2019-12-21T10:54:37Z",
+      "updated_at": "2019-12-21T10:54:37Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The `Form` constructor sets the synchronization context for the current thread which is messing with the async bits behind the scenes.  Here's a work around for now:\r\n\r\n```powershell\r\nAdd-Type -AssemblyName System.Windows.Forms\r\n$MainForm = New-Object System.Windows.Forms.Form\r\n\r\n$oldSyncContext = $null\r\ntry {\r\n    $oldSyncContext = [Threading.SynchronizationContext]::Current\r\n    [Threading.SynchronizationContext]::SetSynchronizationContext($null)\r\n    Test-Connection localhost\r\n} finally {\r\n    if ($null -ne $oldSyncContext) {\r\n        [Threading.SynchronizationContext]::SetSynchronizationContext($oldSyncContext)\r\n    }\r\n}\r\n```",
+      "created_at": "2019-12-23T13:18:39Z",
+      "updated_at": "2019-12-23T13:18:39Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience is that something we can incorporate into the cmdlet itself, perhaps in its Dispose method?",
+      "created_at": "2019-12-23T14:19:06Z",
+      "updated_at": "2019-12-23T14:19:06Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Not sure about that.  It's fine for a workaround, and would fix the deadlock, but I'm not sure what effect it could have on form behavior.\r\n\r\nIn the cmdlet itself, you could just start up a new thread with `Task.Run` before calling `SendPingAsync` (sync context is thread static).  It's possible that could also cause a deadlock if the thread pool limits are set very low though.\r\n\r\nNot sure which one is the lesser evil, or if there's a clearly better solution.  Might be something the PS team needs to weigh in on.",
+      "created_at": "2019-12-23T14:43:01Z",
+      "updated_at": "2019-12-23T14:43:01Z"
+    },
+    {
+      "author": "IanBAdams",
+      "author_association": "NONE",
+      "body": "@SeeminglyScience, many thanks for the work around. A quick test confirms that this gets around the problem for both the localhost and remote hosts.\r\n\r\nI'll need to amend my scripts to build this in temporarily, until a fix become available. However, this allows me to continue in the meantime.\r\n\r\nThanks again.",
+      "created_at": "2019-12-23T14:57:35Z",
+      "updated_at": "2019-12-23T14:57:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw @SteveL-MSFT is this something we should look into resolving for 7.0 GA timeframe, since there seems to be some expectation that at least Windows users may be making use of the GUI components in 7.0 and onwards?",
+      "created_at": "2019-12-23T16:21:32Z",
+      "updated_at": "2019-12-23T16:21:32Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 seems rather risky to be messing with this right before GA",
+      "created_at": "2019-12-23T18:59:29Z",
+      "updated_at": "2019-12-23T18:59:29Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@vexx32 @SeeminglyScience I submitted #11517 to fix this dead lock, please take a look when you have time.",
+      "created_at": "2020-01-08T01:00:36Z",
+      "updated_at": "2020-01-08T01:00:36Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11517, which has now been successfully released as `v7.1.0-preview.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.1)\n",
+      "created_at": "2020-03-26T17:46:39Z",
+      "updated_at": "2020-03-26T17:46:39Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11517, which has now been successfully released as `v7.0.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.1)\n",
+      "created_at": "2020-05-14T22:52:42Z",
+      "updated_at": "2020-05-14T22:52:42Z"
+    }
+  ],
+  "created_at": "2019-12-21T08:30:29Z",
+  "number": 11418,
+  "state": "closed",
+  "title": "Test-Connection 'hangs' after New-Object System.Windows.Forms.Form",
+  "updated_at": "2020-05-14T22:52:42Z"
+}

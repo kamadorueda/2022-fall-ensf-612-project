@@ -1,0 +1,174 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15331",
+  "author": "Scordo",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n\r\n## Steps to reproduce\r\n\r\nLink to a related Problem in GitLab:\r\nhttps://gitlab.com/gitlab-org/gitlab-runner/-/issues/27830#note_564599211\r\n\r\nTest.ps1:\r\n```powershell\r\n$ErrorActionPreference = 'Stop'\r\njust bogus\r\nWrite-Host 'hello'\r\n```\r\n\r\nBatch-Call (working correctly with file)\r\n```none\r\npwsh -File Test.ps1\r\n```\r\nExit-Code: 1\r\n\r\nBatch-Call (working correctly with stdin)\r\n```none\r\ntype Test.ps1 | pwsh -noprofile -noninteractive -command \"$input | iex\"\r\n```\r\nExit-Code: 1\r\n\r\nBatch-Call (not working correctly with stdin)\r\n```none\r\ntype Test.ps1 | pwsh -Command -\r\n```\r\nExit-Code: 0\r\n\r\n\r\n\r\n## Expected behavior\r\n\r\n```none\r\nPowershell quits with non zero exit code and does not print \"hello\", but an exception for \"just bogus\"\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nPowershell does execute all statement even though $ErrorActionPreference is set to \"stop\"\r\n```\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good catch.\r\n\r\nUnfortunately `-Command -` (and `-File -` too) have fundamental problems: #3223\r\n\r\nIt is the line-by-line (statement-by-statement) execution described in the linked issue that explains the behavior.",
+      "created_at": "2021-04-30T15:52:56Z",
+      "updated_at": "2021-04-30T15:53:56Z"
+    },
+    {
+      "author": "Scordo",
+      "author_association": "NONE",
+      "body": "Maybe you should introduce new parameters in 7.2 to fix the issues and remain compatible to all the usages living with the current buggy behavior.",
+      "created_at": "2021-04-30T18:59:40Z",
+      "updated_at": "2021-04-30T18:59:57Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Scordo I think a new parameter would be a better solution than making changes to how `-Command -` and `-File -` work today as someone else may be dependent on that behavior.  So it seems the desire is to have a `-Stdin` switch that reads the entirety of stdin and executes as a single script rather than line by line and have a non-zero exit code if `$?` is $false indicating an error happened?",
+      "created_at": "2021-04-30T19:02:58Z",
+      "updated_at": "2021-04-30T19:03:36Z"
+    },
+    {
+      "author": "Scordo",
+      "author_association": "NONE",
+      "body": "Yes `-stdin` as a new parameter would be fine. It should behave exactly the same as when running a .ps1 file. Respecting $ErrorActionPreference and so on. It would be perfect if we could also pass parameters to the script that was provided via `-stdin.",
+      "created_at": "2021-04-30T19:09:49Z",
+      "updated_at": "2021-04-30T19:09:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT, the current behavior of `-Command -` and especially `-File -` is unlikely to be relied upon in code with long-term stability concerns - it isn't suited to robust scripting.\r\n\r\nTherefore, let me suggest we consider fixing the existing parameters an acceptable [bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) breaking change.\r\n\r\n To minimize the impact, fixing  `-File -` to work as @Scordo  describes would be sufficient - though I suggest including argument support while we're at it (`-Command -` has no counterpart in POSIX-compatible shells; `-` as the (positionally implied) script file name treats stdin input as if it were the content of a script).\r\n\r\nConversely, a `-Stdin` parameter would not only be nonstandard (not aligned with POSIX-compatible shells), but add to the already sizable number of parameters.\r\n\r\n\r\n",
+      "created_at": "2021-04-30T19:16:25Z",
+      "updated_at": "2021-04-30T19:17:24Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "I think in this case, you could use a trap statement - here's an example of something that may serve you.\r\n\r\n```\r\nPS /> echo \"trap { write-host `$_; exit 2 } `$ErrorActionPreference = 'stop';get-date;just bogus;get-location\" | pwsh -nopro -command -       \r\n\r\nFriday, April 30, 2021 12:57:55 PM\r\nThe term 'just' is not recognized as a name of a cmdlet, function, script file, or executable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n\r\nPS /> $LASTEXITCODE                                                                                                                    \r\n2\r\n```\r\n\r\nor a more complicated example:\r\n```\r\nPS /> echo \"trap { write-host `$_;if ( `$ErrorActionPreference -eq 'continue') {continue}else{exit 2} } `$ErrorActionPreference = 'continue';get-date;just bogus;get-location\" | pwsh -nopro -command -  \r\n\r\nFriday, April 30, 2021 12:59:53 PM\r\nThe term 'just' is not recognized as a name of a cmdlet, function, script file, or executable program.\r\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n\r\nDrive        : /\r\nProvider     : Microsoft.PowerShell.Core\\FileSystem\r\nProviderPath : /\r\nPath         : /\r\n\r\n\r\nPS /> $LASTEXITCODE                                                                                                                                                                                    \r\n0\r\n```",
+      "created_at": "2021-04-30T20:00:48Z",
+      "updated_at": "2021-04-30T20:02:20Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "You could also try running it in it's own scriptblock like the following.\r\n\r\n```\r\nPS /> echo '& { $ErrorActionPreference = \"stop\"; get-date; just bogus; get-location }' | pwsh -nopro -command -\r\n```\r\n\r\nThis will encapsulate the command you want to run as 1 scriptblock and execute that rather than each statement as 1 line.",
+      "created_at": "2021-04-30T20:10:32Z",
+      "updated_at": "2021-04-30T20:11:53Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The `Enter-AzShell` cmdlet from the powershell sub kernel in .NET Interactive [depends on](https://github.com/dotnet/interactive/blob/2fb7a259874b2d3341d0145ec9485d0a8d0f74ce/src/Microsoft.DotNet.Interactive.PowerShell/AzureShellConnection.cs#L158-L160) the current behavior of `-File -`. It depends on the behavior that `-File -` prints the prompt to detect the end of a command line execution.\r\n\r\nThere may be other uses that depend on the current behavior of `-command -` and `-file -`, so I think we should keep it unchanged and adding new syntax for reading the whole stdin content as file content. Maybe `-file --`?",
+      "created_at": "2021-04-30T23:21:16Z",
+      "updated_at": "2021-04-30T23:23:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw:\r\n\r\n(On a technicality, I claim that the silence promised in https://github.com/PowerShell/PowerShell/pull/10238#issuecomment-830406280, doesn't take effect until after 11:59:59 PM US EDT.)\r\n\r\nWhile I can appreciate your due diligence here, what you're pointing out here is evidence of a fundamentally broken culture:\r\n\r\nA different department _in the same company_ decided to release an _official feature_ based on _working around obviously broken/useless  behavior_ in a product released by a different department in the same company - rather than seeking a shared understanding and joint resolution.\r\n\r\n",
+      "created_at": "2021-05-01T01:57:46Z",
+      "updated_at": "2021-05-01T01:57:46Z"
+    },
+    {
+      "author": "pedropombeiro",
+      "author_association": "NONE",
+      "body": "> You could also try running it in it's own scriptblock like the following.\r\n> \r\n> ```\r\n> PS /> echo '& { $ErrorActionPreference = \"stop\"; get-date; just bogus; get-location }' | pwsh -nopro -command -\r\n> ```\r\n> \r\n> This will encapsulate the command you want to run as 1 scriptblock and execute that rather than each statement as 1 line.\r\n\r\nThis might work for small scripts, but if one is running 3rd-party scripts (such as in a CI solution), there's no telling how long those lines could become, so this doesn't seem like an all-round solution.",
+      "created_at": "2021-05-01T06:12:56Z",
+      "updated_at": "2021-05-01T06:12:56Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "It doesn\u2019t matter, you don\u2019t even need to have it in one line. The fact that it\u2019s wrapped in `& { ... }` means it\u2019s parsed as scriptblock and executed like a normal scriptblock. You can have literal new lines just like any other sbk.\r\n\r\nThis is the same behaviour if you were to copy and paste the same contents that span multiple lines.",
+      "created_at": "2021-05-01T07:25:55Z",
+      "updated_at": "2021-05-01T07:29:14Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "It seems like this feature was very specifically designed to enable emulating an interactive REPL over stdin. I doubt `Enter-AzShell` is the only thing depending on this behavior.",
+      "created_at": "2021-05-01T15:46:17Z",
+      "updated_at": "2021-05-01T15:46:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's a good point, @SeeminglyScience, but to me a stdin-based REPL emulation only makes sense ~~with the _`-Command`_ parameter~~, not with the _`-File`_ parameter.\r\n\r\nTo fundamentally change the semantics of `-File` only because the file's content happens to come from stdin (`-`) to me is a broken feature.\r\n\r\nAnd once you allow others to build features on top of broken features, the backward-compatibility trap has sprung shut, as has happened here.\r\n\r\nIt appears to be yet another instance of the legacy of having trained users to expect not to be listened to and to not expect fixes, and these users then building their solutions with workarounds that _rely on the broken behavior_, and which a fix would therefore break - #1995 is a prime example.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-05-01T17:12:02Z",
+      "updated_at": "2021-05-09T14:04:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "[_Update_: The exercise below notwithstanding, I think the proper solution is to have a dedicated parameter for the distinct REPL-via-stdin functionality, such as `-ReplServerMode`, in line with the existing `-*server` parameters (which would essentially render `-Command -` unnecessary).]\r\n\r\nAnd here's a quick prototype showing that what Azure does with `-File -` can at least in principle also be done with the current `-Command -` functionality:\r\n\r\nInstead of:\r\n\r\n```sh\r\nstty -echo && cat | pwsh -noninteractive -f -\r\n```\r\n\r\nplus redefinition of the `prompt` function in the session, you can use an `awk` command to do your own prompt simulation  and let `-commmand -c` merely output the results (using default prompt string `PS> ` in this example; works with macOS `awk`, GNU `awk` (`gawk`) and `mawk`, though `gawk` complains about a broken pipe on exit):\r\n\r\n```sh\r\n# Run from a POSIX-compatible shell, e.g. `bash`.\r\nawk 'BEGIN { pr=\"PS> \"; printf pr; cmd=\"pwsh -noninteractive -c -\" } { print $0 \"; [Console]::Write(\\\"\" pr \"\\\")\" | cmd; fflush(cmd) } END { close(cmd) }'\r\n```\r\n\r\nThe only wrinkle - which sounds like it can be overcome - is that the simulated prompt string doesn't print / print properly with _tabular_ output without / with associated formatting data; the former problem sounds like our old friend, the async 300-msec delay for determining column widths, which is definitely worth fixing: see #13985 and #4594.\r\n",
+      "created_at": "2021-05-01T19:39:47Z",
+      "updated_at": "2021-08-16T18:44:00Z"
+    },
+    {
+      "author": "Scordo",
+      "author_association": "NONE",
+      "body": "> It doesn\u2019t matter, you don\u2019t even need to have it in one line. The fact that it\u2019s wrapped in `& { ... }` means it\u2019s parsed as scriptblock and executed like a normal scriptblock. You can have literal new lines just like any other sbk.\r\n> \r\n> This is the same behaviour if you were to copy and paste the same contents that span multiple lines.\r\n\r\nSorry that's simply wrong. I've already tried it.\r\n\r\nPut the following lines in a file called Test1.ps1:\r\n```\r\n& {\r\n    $ErrorActionPreference = 'Stop'\r\n    just bogus\r\n    Write-Host 'hello'\r\n}\r\n```\r\nAnd execute it on windows like that:\r\n`type Test1.ps1 | pwsh -noprofile -noninteractive -command -`\r\n\r\nWhen having the surrounded script block, nothing is printed/done at all.",
+      "created_at": "2021-05-02T14:11:39Z",
+      "updated_at": "2021-05-02T14:11:39Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Looks like the logic for handling `IncompleteInput` parse errors isn't there.  That should probably be it's own issue (if it isn't already).  Also probably should print parse errors for that matter.",
+      "created_at": "2021-05-02T14:15:49Z",
+      "updated_at": "2021-05-02T14:15:49Z"
+    },
+    {
+      "author": "Scordo",
+      "author_association": "NONE",
+      "body": "Found out, that with 2 linebreaks behind the command it is working:\r\n```\r\n& {\r\n    $ErrorActionPreference = 'Stop'\r\n    just bogus\r\n    Write-Host 'hello'\r\n}\r\n\r\n\r\n```\r\n\r\nJust 2 empty lines behind the closing bracket and it is working.\r\n\r\nThe other working one is:\r\n```\r\n$pwshcode = {\r\n    $ErrorActionPreference = 'Stop'\r\n    just bogus\r\n    Write-Host 'hello'\r\n}\r\n\r\n& $pwshcode\r\n```",
+      "created_at": "2021-05-02T14:30:41Z",
+      "updated_at": "2021-05-02T14:31:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@Scordo, to quote from the previously linked #3223, with respect to `-Command -` and `-File -`\r\n\r\n> they require pipelines that are spread across multiple lines  for readability to be terminated with _two_ newlines (see below) - as would be necessary _interactively_, if `PSReadLine` weren't loaded.\r\n\r\nI'm stating this in order to bring closure to my rants above (apologies if they were too harsh, but there was some pent-up frustration):\r\nWe have known about these issues for 4+ years, yet nothing was done.\r\n\r\nAlso, revisiting the comments there @iSazonov made an interesting point at https://github.com/PowerShell/PowerShell/issues/3223#issuecomment-487820506:\r\n\r\n> `-File -` is not documented so we could change its behavior as we need.\r\n\r\nUnfortunately, it _has_ since been documented.\r\n\r\nThat is, instead of fixing the broken behavior, it was made official.\r\n\r\nI think I've said all I have to say, and I'm unsubscribing from this thread.\r\n\r\n\r\n\r\n",
+      "created_at": "2021-05-02T15:00:44Z",
+      "updated_at": "2021-05-02T15:00:44Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> Found out, that with 2 linebreaks behind the command it is working\r\n\r\nAh that is right I remember coming across this and being confused as to why this failed for us, we stripped the new lines. So by adding the 2 new lines at the end it started working for us which was annoying :(. Thanks for clarifying.",
+      "created_at": "2021-05-02T21:34:17Z",
+      "updated_at": "2021-05-02T21:34:17Z"
+    },
+    {
+      "author": "erinlah-ms",
+      "author_association": "NONE",
+      "body": "> Maybe you should introduce new parameters in 7.2 to fix the issues and remain compatible to all the usages living with the current buggy behavior.\r\n\r\nI mean, 5.1 -> 6.0 already borked all our scripts with the heavy breaking changes. Honestly, this would just as likely fix a script the user didn't realize was broken.",
+      "created_at": "2021-05-19T17:59:06Z",
+      "updated_at": "2021-05-19T17:59:06Z"
+    },
+    {
+      "author": "FaustinCarter",
+      "author_association": "NONE",
+      "body": "Is there any movement on this? This is making using pwsh on docker containers in Gitlab completely unusable.",
+      "created_at": "2022-01-19T22:24:48Z",
+      "updated_at": "2022-01-19T22:24:48Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I wouldn't say it's completely unusable there are workarounds that make this entirely possible. The method I usually use is this\r\n\r\n```bash\r\ndocker run \\\r\n  --rm \\\r\n  --interactive \\\r\n  mcr.microsoft.com/powershell pwsh -Command - << 'EOF'\r\n& {\r\n    if ($true) {\r\n        echo \"hi\"\r\n    }\r\n}\r\n\r\nEOF\r\n\r\nBasically make sure there is an empty line between `}` and `EOF` so the input is accepted by pwsh and also put all your code inside a `&{}` block to ensure it is run as 1 script rather than the line by line parser that is the standard console input code.",
+      "created_at": "2022-01-19T22:48:59Z",
+      "updated_at": "2022-01-19T22:49:16Z"
+    },
+    {
+      "author": "FaustinCarter",
+      "author_association": "NONE",
+      "body": "That's fine for when I'm the one launching the image. The real issue is when I'm trying to use GitLab's pipeline features where I don't really have control over how they launch the image and inject the script. I just get to add lines to a script tag in a yaml file that gets executed by a runner.",
+      "created_at": "2022-01-20T05:32:18Z",
+      "updated_at": "2022-01-20T05:32:18Z"
+    }
+  ],
+  "created_at": "2021-04-30T13:47:08Z",
+  "number": 15331,
+  "state": "open",
+  "title": "Script via STDIN does not exit with error code and does not stop correctly",
+  "updated_at": "2022-01-20T05:32:18Z"
+}

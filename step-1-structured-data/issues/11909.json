@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11909",
+  "author": "jazzdelightsme",
+  "body": "Seems this error comes from PowerShellCore_format_ps1xml.cs, from a handful of script blocks that look like this:\r\n\r\n```csharp\r\n.AddScriptBlockColumn(@\"\r\n    if ($_.PrivateData -and $_.PrivateData.PSData)\r\n    {\r\n            $_.PrivateData.PSData.PreRelease\r\n    }\")\r\n```\r\n\r\nAnd of course `PreRelease` will not be defined for many (most?) modules that are out there.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n$error.Clear()\r\nSet-StrictMode -Version Latest\r\nNew-ModuleManifest .\\foo.psd1\r\nipmo .\\foo.psd1\r\nGet-Module foo | Out-Null\r\n$error\r\n```\r\n\r\n# Expected behavior\r\n\r\nThere should be no errors in `$error`, so there should be no output from the repro steps.\r\n\r\n```none\r\n<no output>\r\n```\r\n\r\n# Actual behavior\r\nError!\r\n\r\n```none\r\nPropertyNotFoundException:\r\nLine |\r\n   4 |                                      $_.PrivateData.PSData.PreRelease\r\n     |                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n     | The property 'PreRelease' cannot be found on this object. Verify that the property exists.\r\n```\r\n\r\nAlthough it doesn't show up in normal output, if you look into`$error`, it's there, making you wonder what went wrong. If you are looking into `$error`, you are probably trying to troubleshoot some problem, and you only want to see \"real\" errors in `$error`, and not be distracted or confused by things that just look like bugs in PowerShell.\r\n\r\nLooking at it another way: I didn't run some command with `-ErrorAction SilentlyContinue`, and I didn't see an error from the command... so why in the world is an error showing up in `$error`? (That's why I described it as \"polluting `$error`\"--it seemingly is not an error; just the result of some internal PS bug scribbling useless and distracting information into it.)\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-preview.7\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-preview.7\r\nOS                             Microsoft Windows 10.0.19570\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2020-05-27T22:43:02Z",
+  "comments": [
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "I can repro. The only question is whether we think it's worth it to make things go slower for everyone in order to avoid errors for people who ...  run in StrictMode \ud83d\ude16\r\n\r\nBecause the only way to write that which won't cause problems in strict mode requires a lot more testing:\r\n```PowerShell\r\nif ($_.PrivateData -and \r\n    $_.PrivateData.ContainsKey(\"PSData\") -and \r\n    $_.PrivateData.PSData.ContainsKey(\"PreRelease\")) {\r\n    $_.PrivateData.PSData.PreRelease\r\n}\r\n```\r\n\r\nEasy fix though...",
+      "created_at": "2020-02-21T03:20:53Z",
+      "updated_at": "2020-02-21T03:31:06Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "These are all hashtables, aren't they? Don't dictionaries typically just return null if you access a nonexistent key via the indexer?\r\n\r\nMight be able to just swap the property syntax for key-access syntax and call it a day. \ud83d\ude42 ",
+      "created_at": "2020-02-21T03:40:39Z",
+      "updated_at": "2020-02-21T03:40:39Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The only question is whether we think it's worth it to make things go slower for everyone in order to avoid errors for people who ... run in StrictMode\r\n\r\nIMO: it is *absolutely* worth it, yes. And in fact, if we don't keep the core \"strict-mode clean\", we might as well delete the feature. I think strict mode is very valuable, and I recommend it to everyone.\r\n\r\nWhat's the status of those fancy new null-related operators? Because if those were turned on, you could say something like:\r\n\r\n```powershell\r\n${_}?.PrivateData?['PSData']?['PreRelease']\r\n```",
+      "created_at": "2020-02-21T04:54:56Z",
+      "updated_at": "2020-02-21T04:54:56Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jazzdelightsme The title mentions `$error` but it is not discussed in the body. Can you expand on this? (or, I suppose, change the title if it's not really relevant?) Thanks.",
+      "created_at": "2020-02-22T00:55:05Z",
+      "updated_at": "2020-02-22T00:55:05Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "@bpayette line 5 of the repro steps is \"`$error`\"",
+      "created_at": "2020-02-22T06:33:54Z",
+      "updated_at": "2020-02-22T06:33:54Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "Actually @vexx32 has a point. Strict mode doesn't complain about indexing into null, and indexing a hashtable is **faster** than fake property access anyway, so this **should** just be:\r\n\r\n```csharp\r\n.AddScriptBlockColumn(\"$_.PrivateData['PSData']['PreRelease']\")\r\n```",
+      "created_at": "2020-02-22T06:46:46Z",
+      "updated_at": "2020-02-22T06:48:01Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Strict mode doesn't complain about indexing into null\r\n\r\nYes, but if you go one leap beyond that, it is still an error (`InvalidOperation: Cannot index into a null array`), so it's still better to do the full checks (because what if there is no PSData element?).",
+      "created_at": "2020-02-24T17:52:27Z",
+      "updated_at": "2020-02-24T17:52:27Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jazzdelightsme  \r\n> line 5 of the repro steps is \"$error\"\r\n\r\nYes and the title also mentions polluting `$error` but it's not discussed in the expository text. `$error` is a running log of *all* the errors (except for `-ignore`) so I'm not sure what you mean by \"polluted\".\r\n\r\n@Jaykul \r\nWRT trying to access members that don't exist in a hash table, it'd expected `?.` to handle this but it doesn't\r\n```powershell\r\n@{a=13}?.zork\r\nPropertyNotFoundException: The property 'zork' cannot be found on this object. Verify that the property exists.\r\n```\r\nIt only works for `$null` which is unfortunate (ok - and a little bit weird.)",
+      "created_at": "2020-02-25T19:44:40Z",
+      "updated_at": "2020-02-25T19:44:40Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "@bpayette okay, added some more explanation.\r\n\r\n",
+      "created_at": "2020-02-25T22:13:01Z",
+      "updated_at": "2020-02-25T22:13:01Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11943, which has now been successfully released as `v7.1.0-preview.4`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.4)\n",
+      "created_at": "2020-06-25T19:07:38Z",
+      "updated_at": "2020-06-25T19:07:38Z"
+    }
+  ],
+  "created_at": "2020-02-21T02:56:19Z",
+  "number": 11909,
+  "state": "closed",
+  "title": "Get-Module is polluting $error (from formatting script) (when strict mode on)",
+  "updated_at": "2020-06-25T19:07:38Z"
+}

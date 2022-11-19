@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7755",
+  "author": "iSazonov",
+  "body": "On Windows PowerShell Core use file extentions from PATHEXT env variable to run the file as executable.\r\nOn Unix we ignore `PATHEXT` but it can be useful. (See #7697.)\r\n\r\nFrom https://github.com/PowerShell/PowerShell/pull/7697#issuecomment-418901923\r\n> @PowerShell/powershell-committeeTeam members are private reviewed this and it seems that $env:PATHEXT can provide utility on Unix systems if the user creates the environment variable. Example is if user has foo.py and wants PowerShell to execute foo, they can use this.\r\n",
+  "closed_at": "2019-02-06T23:33:10Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Is it possile to implement this on Linux and MacOs in a standard way or shebang is single option?",
+      "created_at": "2018-09-11T04:05:28Z",
+      "updated_at": "2018-09-11T04:05:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "**The `PATHEXT` feature doesn't fit into the Unix world, and my vote is for _not_ trying to implement it there** - in other words: I think your original PR should be merged.\r\n\r\nOn Unix, it is solely a file's executable permissions bits that determine whether a file is executable _by the current user_.\r\nThat is, the executable permission bits grant the ability to execute to a given user, a given user group, or the reset of the world, in any combination - see https://en.wikipedia.org/wiki/Chmod\r\n\r\nIf we make files executable just by their filename extension, **we're bypassing this security mechanism** - the file would invariably become executable by _everyone_.\r\n\r\nThe next hurdle is that the file-association mechanisms (what application to pass a file to based on its filename extension):\r\n * are not standardized across Linux distros\r\n * the ones that exist in macOS and freedesktop.org-compliant Linux distros such as Ubuntu are geared toward _opening documents in GUI apps_, not _executing shell scripts in terminals_.\r\n\r\nOn macOS, for instance, it seems that the only types of applications you can associate with filename extensions are `*.app` bundles, i.e., GUI applications.\r\n\r\nTherefore, **for this to work, PowerShell would have to implement its own extension-to-interpreter mapping**, which sounds ill-advised.\r\n\r\nAlso note the existing file-association mechanisms on Unix require the use of a _helper CLI_ from other shells (`open` on macOS, `xdg-open` on Ubuntu), given that the underlying OS will refuse to execute files that don't have the executable permission bits set. That is, the document to open cannot be invoked _directly_ - only PowerShell enables that by using these helper CLIs behind the scenes.\r\n\r\n---\r\n\r\nThe concept of what is _executable_ on Unix-like platforms is unrelated to filename extensions, and that is arguably the right approach, given that what (scripting) language an executable is implemented is an _implementation detail_ that shouldn't be reflected in the filename.\r\n\r\nThe concept of the Unix shebang line allows keeping this implementation detail inside the file.\r\n\r\nThe direct (in-process) execution of `.ps1` files that PowerShell supports is a defensible exception, given that it's limited to PowerShell's _own_ scripts. \r\n\r\n---\r\n\r\nAs an aside: Currently, `$env:PATHEXT` _tab-completes_ on Unix, even though it doesn't actually exist (doesn't show in the `env:` drive), as it shouldn't by default.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-09-11T15:07:47Z",
+      "updated_at": "2018-09-11T15:07:47Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 I believe the intent is that we would still check that it has the executable bit.  It was really to allow `foo` to be an alias to `foo.py`.  My expectation is that if we decide to support this on Unix systems, then based on the command the user typed, we would look through `PATHEXT` to see if such a thing with extensions exists.  If it's not executable, I would expect the app associated with that extension to open rather than execute (like typing `test.txt` today opens notepad or textedit).\r\n\r\nI believe when @PowerShell/powershell-committee discussed this, we didn't look at the code and did not understand the work needed to enable this scenario on non-Windows.  Let's review again in light of more complete information.",
+      "created_at": "2018-09-11T21:14:47Z",
+      "updated_at": "2018-09-11T21:14:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Thanks for great comment! It is very useful.\r\n\r\nMy first thought was that PowerShell Committee requested something like `Invoke-Item` linked with PATHEXT. It turns out that this would violate the security model Unix.\r\n\r\nI think that currently `Invoke-Item` support execution bit and shebang by means of using a shell/Bash in Process.Start() (UseShellExecute = true). _The question is whether we want to implement this logic directly in PowerShell Core._ If we want to see systems on which the only shell is PowerShell then we need to do this.",
+      "created_at": "2018-09-12T03:32:47Z",
+      "updated_at": "2018-09-12T03:32:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SteveL-MSFT and @iSazonov.\r\n\r\n> I think that currently `Invoke-Item` support execution bit \r\n\r\nYes, but that currently results in _asynchronous_ execution, which is not suitable for shell scripts.\r\n\r\nAlso, if you use the exact filename (_with_ extension) - which you must for `Invoke-Item` - you don't need `Invoke-Item` at all - just invoke the file directly - whether or not there is an extension and whatever that extension may be; all that matters on Unix is the executable bit.\r\n\r\n> My expectation is that if we decide to support this on Unix systems, then based on the command the user typed, we would look through PATHEXT to see if such a thing with extensions exists.\r\n\r\nPragmatically speaking:\r\n\r\nAs stated, we'd have to maintain our own extension-to-executable-name/path mappings on Unix platform, which sounds cumbersome and brittle, and would require us to give users a way to _manage_ these PowerShell-only mappings, which sounds like a substantial effort.\r\n\r\nConceptually speaking:\r\n\r\nIf we also require the executable bit to be set, that amounts to an awkward blending of worlds (Unix and Windows) that may confuse the denizens of either.\r\n\r\nHowever, I can see the cross-platform appeal of sharing files with Windows, where you _must_ name your script file `foo.py`, for instance, for it to be recognized as a Python file - and the need for that extension is the very thing that makes the invocation cumbersome on Unix.\r\n\r\nBut note that even if we implemented `$env:PATHEXT` logic,  there is still the additional manual effort of setting the executable bit - unless you always retrieve your cross-platform files from a source where the bit is already set, such as a Git repository.\r\n\r\n---\r\n\r\nOther environments have solved this problem by approaching it _from the Unix side_:\r\n\r\nNode.js makes Unix-style extension-less files with shebang lines executable on Windows by creating _wrapper batch files_ that explicitly invoke the original file with the executable specified in its shebang line - see [this SO answer](https://stackoverflow.com/a/44468968/45375).\r\n\r\nOf course, this is not a perfect solution, because absolute paths to executables, such as `#!/usr/bin/python`, do not work on Windows, so the best approximation on Windows is to look for `python` in `$env:PATH`.\r\n\r\n---\r\n\r\nThe opposite approach - starting with Windows files with extensions and providing extension-less `sh` wrapper scripts - is not an option, unfortunately, because you're again faced with having no built-in way to map filename extensions such as `.py` to its executable, `python`.\r\n\r\n---\r\n\r\nConceivably, we could build shebang-line support _into PowerShell_ on _Windows_, so that cross-platform developers can use Unix-style extension-less files with shebang lines even on Windows - as long as they invoke them from PowerShell.\r\n\r\nHowever, that would make `$env:PATH` lookups by executable name without extension much more expensive, because all extension-less files in the `$env:PATH` would then have to be _read_ (at least the first line ) in order to detect them as executable scripts.\r\n\r\n(The existing `$env:PATHEXT` mechanism would have to be given precedence, so that this shebang-line support would only apply to extension-_less_ scripts.)\r\n\r\nAlso, mostly hypothetically, plain-text files that just so happen to contain a first line that looks like a well-formed shebang line could inadvertently be executed.\r\n",
+      "created_at": "2018-09-12T17:48:35Z",
+      "updated_at": "2018-09-14T03:30:14Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this further.  There is some utility to help Windows customers moving to Linux to have a consistent experience, however, we would need to maintain a registry of the extensions with handlers on non-Windows which exists in the registry on Windows.  There is also a concern about perf impact doing additional lookups.  Current decision is to remove the variable as it should not exist on non-Windows.  If there is customer request to have a capability to run `foo.py` as `foo` in PowerShell, we can revisit how to implement.",
+      "created_at": "2019-02-06T23:33:10Z",
+      "updated_at": "2019-02-06T23:33:10Z"
+    }
+  ],
+  "created_at": "2018-09-11T04:03:42Z",
+  "number": 7755,
+  "state": "closed",
+  "title": "Use PATHEXT env var on Unix",
+  "updated_at": "2019-02-06T23:33:10Z"
+}

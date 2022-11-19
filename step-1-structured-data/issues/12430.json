@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12430",
+  "author": "SeeminglyScience",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nWhen assigning a struct to a variable, some checks are done to determine if the struct is mutable.  The current code path checks if there are:\r\n\r\n1. Any public instance fields\r\n1. Any public instance properties with a set accessor\r\n1. Any public instance methods\r\n\r\nThis can be simplified by checking if the struct is decorated with the `IsReadOnlyAttribute`.  This would allow PS to assume any struct that wasn't declared explicitly as read only with the C# `readonly` modifier ([SharpLab example](https://sharplab.io/#v2:D4AQzABATgpghgEwPYDsA2BPCBnALlAVwGNcIBZDAZX2NIG8BfIA)) to be mutable.  This would also probably result in *less* false positives because most structs have a public field (even if `initonly`) or a public method, even these explicitly `readonly` structs.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nThis method:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/947bddfe0474429672745b939d0ec511392e5879/src/System.Management.Automation/engine/runtime/Binding/Binders.cs#L2030-L2063\r\n\r\nShould be changed like this:\r\n\r\n```diff\r\ndiff --git a/src/System.Management.Automation/engine/runtime/Binding/Binders.cs b/src/System.Management.Automation/engine/runtime/Binding/Binders.cs\r\nindex b54fbdfd5..7a0254ccb 100644\r\n--- a/src/System.Management.Automation/engine/runtime/Binding/Binders.cs\r\n+++ b/src/System.Management.Automation/engine/runtime/Binding/Binders.cs\r\n@@ -2034,32 +2034,7 @@ namespace System.Management.Automation.Language\r\n                 return false;\r\n             }\r\n \r\n-            // If there are any fields, the type is mutable.\r\n-            if (type.GetFields(BindingFlags.Public | BindingFlags.Instance).Any())\r\n-            {\r\n-                return true;\r\n-            }\r\n-\r\n-            // If there are any properties with setters, the type is mutable.\r\n-            var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance);\r\n-            for (int index = 0; index < properties.Length; index++)\r\n-            {\r\n-                var property = properties[index];\r\n-                if (property.CanWrite)\r\n-                {\r\n-                    return true;\r\n-                }\r\n-            }\r\n-\r\n-            // If there are any methods other than the property getters, the type might\r\n-            // be mutable, so assume the type is mutable.\r\n-            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance);\r\n-            if (methods.Length != properties.Length)\r\n-            {\r\n-                return true;\r\n-            }\r\n-\r\n-            return false;\r\n+            return !type.IsDefined<System.Runtime.CompilerServices.IsReadOnlyAttribute>();\r\n         }\r\n \r\n         private static readonly ConcurrentDictionary<Type, bool> s_mutableValueTypesWithInstanceMembers =\r\n```\r\n\r\nRelated issue #12411\r\n\r\n/cc @mklement0 ",
+  "closed_at": "2020-12-10T20:34:18Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We need to compare performance - IsDefined() method may be too costly.",
+      "created_at": "2020-04-23T03:21:12Z",
+      "updated_at": "2020-04-23T03:26:47Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "True, though I would be very surprised if it was slower than all of the other reflection calls it would replace.",
+      "created_at": "2020-04-23T03:23:15Z",
+      "updated_at": "2020-04-23T03:23:15Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I don't see using IsReadOnlyAttribute in .Net Runtime repo https://github.com/dotnet/runtime/search?l=C%23&q=IsReadOnlyAttribute",
+      "created_at": "2020-04-23T03:29:56Z",
+      "updated_at": "2020-04-23T03:29:56Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Check out the right hand side of [this SharpLab example](https://sharplab.io/#v2:C4LglgNgPgAgzAAgE4FMCGATA9gOwgTwQGdgkBXAY2AQFl8BlUy6gbwF8g==).  When a struct has the `readonly` modifier applied to it, it is decorated with that attribute.",
+      "created_at": "2020-04-23T03:41:26Z",
+      "updated_at": "2020-04-23T03:42:24Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Eh complicating it a bit is that the attribute isn't in `netstandard2.0`. Libraries that target netstandard2.0 will turn this:\r\n\r\n```csharp\r\npublic readonly struct MyStruct { }\r\n```\r\n\r\ninto\r\n\r\n```csharp\r\nnamespace System.Runtime.CompilerServices\r\n{\r\n    [EditorBrowsable(EditorBrowsableState.Never)]\r\n    [AttributeUsage(AttributeTargets.All, Inherited = false)]\r\n    internal sealed class IsReadOnlyAttribute : Attribute\r\n    {\r\n    }\r\n}\r\n\r\n[IsReadOnly]\r\npublic struct MyStruct { }\r\n```\r\n\r\nThat makes it a little bit more tricky, and may need to match based on type full name:\r\n\r\n```csharp\r\nforeach (Attribute attribute in type.GetCustomAttributes(inherit: false))\r\n{\r\n    if (attribute.GetType().FullName.Equals(\"System.Runtime.CompilerServices.IsReadOnlyAttribute\", StringComparison.Ordinal))\r\n    {\r\n        return true;\r\n    }\r\n}\r\n```\r\n\r\nThat makes performance more of a concern, but it still replaces a lot of reflection calls so hopefully performance is very similar if not better.  Either way, it's cached statically per type so I believe it's worth it.",
+      "created_at": "2020-04-23T04:08:39Z",
+      "updated_at": "2020-04-23T04:10:19Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ">  the attribute isn't in netstandard2.0\r\n\r\n.Net runtime does not address the issue in IsDefine()?",
+      "created_at": "2020-04-23T04:16:05Z",
+      "updated_at": "2020-04-23T04:16:05Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "So because the attribute isn't in netstandard2.0, roslyn adds the code to define it as an internal type within the library declaring a readonly struct.\r\n\r\nSo if my module declares a readonly struct while targeting netstandard2.0, it'll be decorated with `System.Runtime.CompilerServices.IsReadOnlyAttribute, MyModuleAssembly` not `System.Runtime.CompilerServices.IsReadOnlyAttribute, System.Private.CoreLib`",
+      "created_at": "2020-04-23T04:42:34Z",
+      "updated_at": "2020-04-23T04:42:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I guess IsDefine() knows about this?",
+      "created_at": "2020-04-23T04:55:36Z",
+      "updated_at": "2020-04-23T04:55:36Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Hmm not sure what you mean.  Can't use that method because it only takes a `Type` object, which has assembly identity built into it.",
+      "created_at": "2020-04-23T04:57:12Z",
+      "updated_at": "2020-04-23T04:57:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I guess IsDefined() understand custom IsReadOnlyAttribute() and I hope we have no need a workaround.",
+      "created_at": "2020-04-23T05:03:56Z",
+      "updated_at": "2020-04-23T05:03:56Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Docs https://docs.microsoft.com/en-us/dotnet/api/system.componentmodel.readonlyattribute?view=net-5.0 suggest use reflection.\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/api/system.componentmodel.readonlyattribute\">ReadOnlyAttribute Class (System.ComponentModel)</a></strong></div><div>Specifies whether the property this attribute is bound to is read-only or read/write. This class cannot be inherited. </div></blockquote>",
+      "created_at": "2020-04-23T11:16:52Z",
+      "updated_at": "2020-04-23T17:57:47Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "That's a different attribute from `IsReadOnlyAttribute`.\r\n\r\nIf `IsDefined` accounted for this scenario it would be lying, and would lose a ton of performance for the typical case.  If I pass it a `typeref` of `System.Runtime.CompilerServices.IsReadOnlyAttribute, System.Private.CoreLib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=7cec85d7bea7798e` and it returns true for `System.Runtime.CompilerServices.IsReadOnlyAttribute, MyRandomAssembly, Version=1.0.0.0, Culture=neutral, PublicKeyToken=` then that would be pretty confusing for any attribute outside of these edge cases.  Plus, it would have to just do a full name compare like we're doing here.",
+      "created_at": "2020-04-23T11:23:02Z",
+      "updated_at": "2020-04-23T11:23:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "In the case I wonder why the attribute is automatically defined for <netstandard2.0.",
+      "created_at": "2020-04-23T16:32:49Z",
+      "updated_at": "2020-04-23T16:32:49Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Mainly because the other option is to not support `readonly struct` until netstandard2.1\r\n\r\nThat said, it has zero runtime effect.  It not working with `IsDefined` is impactful for us because we're working with *runtime* types. Static compilers like roslyn already can't use `IsDefined` because they're dealing with `System.Reflection.Metadata` constructs. So they are already mostly just string matching (I guess runtime type reflection is too, it's just cached internally by the CLR).",
+      "created_at": "2020-04-23T16:58:27Z",
+      "updated_at": "2020-04-23T16:58:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Ah, it is for to allow compilation.\r\n\r\nIf we think about <netstandard2.0 we need to keep workarounds in IsValueTypeMutable() but enhance it with IsDefined() - if no IsReadOnlyAttribute presents we continue the analysis. ",
+      "created_at": "2020-04-23T18:03:38Z",
+      "updated_at": "2020-04-23T18:03:38Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "We can also just check that attribute type full name like roslyn does.  I would predict it's at least comparable (to what is currently checked) in terms of both performance and allocations. Even if it's more though, it's cached per type per session so unlikely to be measurable imo.",
+      "created_at": "2020-04-23T18:10:07Z",
+      "updated_at": "2020-04-23T18:18:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience Do you want to pull a PR?",
+      "created_at": "2020-04-24T04:29:40Z",
+      "updated_at": "2020-04-24T04:29:40Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Nah you can mark it up for grabs.",
+      "created_at": "2020-04-24T11:21:56Z",
+      "updated_at": "2020-04-24T11:21:56Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #12495, which has now been successfully released as `v7.2.0-preview.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.2)\n",
+      "created_at": "2020-12-15T21:38:50Z",
+      "updated_at": "2020-12-15T21:38:50Z"
+    }
+  ],
+  "created_at": "2020-04-22T18:22:29Z",
+  "number": 12430,
+  "state": "closed",
+  "title": "Improve mutable struct detection",
+  "updated_at": "2020-12-15T21:38:51Z"
+}

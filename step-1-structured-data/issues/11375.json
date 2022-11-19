@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11375",
+  "author": "vasily-codefresh",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\nHi,\r\n\r\nIn [discussion with VSCode team](https://github.com/microsoft/vscode/issues/86856) I've found out that somehow PowerShell does not expand `~` paths for external commands (but does it for internal ones). It's a bug that affects usability very much.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nls ~/.gitconfig\r\ncode ~/.gitconfig\r\n```\r\n\r\n# Expected behavior\r\n\r\n* `ls` lists the file in home directory\r\n* `code` opens file in home directory\r\n\r\n# Actual behavior\r\n\r\n* `ls` lists file in home directory\r\n* `code` opens file at `%HOME%/~` directory instead\r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nPSVersion                      7.0.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.1\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2019-12-17T20:54:06Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point; the problem is already being tracked in #10675",
+      "created_at": "2019-12-17T15:57:44Z",
+      "updated_at": "2019-12-17T15:57:44Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "The problem with resolving everything that starts with a `~` as a path is that you can't pass anything starting with a `~` to an external program. Quoting isn't sufficient to suppress this because you may want to do `~`-expansion in a name with a space in it and that requires quoting the path. The PowerShell workaround (from V1 on) has been to use the `Resolve-Path` command (`rvpa`) to do the expansion as in \r\n```powershell\r\ncode  (rvpa ~\\Documents\\WindowsPowerShell\\profile.ps1) \r\n```\r\nOf course some commands on Windows are smart enough to do their own `~`-expansion like `vim`. For example,\r\n```powershell\r\ngvim  ~\\Documents\\WindowsPowerShell\\profile.ps1\r\n```\r\njust works (one of the reasons `vim` is my favourite text editor :-) ). `code`, however, does not currently do this but it would be nice if it did. In the meantime, you can create you're own wrapper for `code` which calls `rvpa` under the covers.",
+      "created_at": "2019-12-17T19:27:21Z",
+      "updated_at": "2019-12-17T19:27:21Z"
+    },
+    {
+      "author": "vasily-codefresh",
+      "author_association": "NONE",
+      "body": "thanks for such a workaround, but it doesn't work with newly created files. that is: if I don't have `~/.gitconfig` yet, `rvpa ~/.gitconfig` will fail.\r\n\r\nvscode folks are not willing to implement this, they just closed my ticket, blaming PowerShell.\r\n\r\nas for passing `~/` or `~\\` directly to program as a start of an argument -- do any actual users need it? Unix users had been living with such restrictions for 35 years and I didn't hear anyone suffered from it.\r\n\r\nand yes, from my point of view it's reasonable enough not to expand quoted strings (again, the same as on Unix). at least, it's better than current behavior. my reasoning is: users usually need `~` completion for short paths, if that involves a space or many letters, they will use tab completion, thus expanding `~`.",
+      "created_at": "2019-12-17T19:41:29Z",
+      "updated_at": "2019-12-17T19:43:46Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> as for passing ~/ or ~\\ directly to program as a start of an argument -- do any actual users need it?\r\n> Unix users had been living with such restrictions for 35 years an\r\n\r\nThere is no restriction, as POSIX-like shells determine based on whether the initial `~` is _quoted or not_ whether `~` should be expanded to the user's home dir.\r\n\r\n```sh\r\n$ echo ~/sub  # ~ (and /) unquoted -> expanded\r\n/home/jdoe/sub\r\n\r\n$ echo '~/sub'  # quoted as a whole-> verbatim\r\n~/sub\r\n\r\n# POSIX-like shells allow you to compose a string by mixing unquoted and quoted parts:\r\n$ echo ~/'foo bar'/baz  # ~ (and /) unquoted -> expanded\r\n/home/jdoe/foo bar/baz\r\n```\r\n\r\nAs you can see, quoting the _whole_ argument suppresses `~` expansion, but\r\nit's easy to have `~` expanded even if the remaining path (or parts of it) needs quoting.\r\n\r\n**PowerShell currently _partially_ emulates this behavior** when calling native utilities, but **only on _Unix_**:\r\n\r\n```powershell\r\nPS> /bin/echo ~/sub # ~ (and /) unquoted -> expanded\r\n/home/jdoe/sub\r\n\r\nPS> /bin/echo '~/sub' # whole string quoted -> verbatim\r\n~/sub\r\n\r\n# !! This does currently NOT work the way it does in POSIX-like shells:\r\nPS> /bin/echo ~/'foo bar'/baz\r\n~/foo bar/baz  # !! Even though ~/ was unquoted, no expansion took place.\r\n```\r\n\r\n**PowerShell should _fully_ emulate this behavior**, and **on _Windows_ too.** \r\nHowever, the automatic globbing feature already implemented on Unix (e.g., unquoted `*.txt` expanding to the list of matching files) is _not_ appropriate for Windows, as discussed in the linked issue [here](https://github.com/PowerShell/PowerShell/issues/10675#issuecomment-537547306).\r\n",
+      "created_at": "2019-12-17T20:10:25Z",
+      "updated_at": "2019-12-17T20:10:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@vasily-codefresh:\r\n\r\n* Given that @SteveL-MSFT  opened #10675, you can assume that there's a fundamental willingness to support `~` expansion on Windows too, so I suggest we continue the conversation there.\r\n\r\n* As for the incomplete emulation of the current, Unix-only `~` expansion discussed in my previous comment, I've created #11386\r\n\r\nTherefore, I suggest closing this issue.",
+      "created_at": "2019-12-17T20:47:10Z",
+      "updated_at": "2019-12-17T20:47:10Z"
+    },
+    {
+      "author": "vasily-codefresh",
+      "author_association": "NONE",
+      "body": "yeah, I think that's a duplicate, so closing",
+      "created_at": "2019-12-17T20:54:06Z",
+      "updated_at": "2019-12-17T20:54:06Z"
+    }
+  ],
+  "created_at": "2019-12-17T10:56:14Z",
+  "number": 11375,
+  "state": "closed",
+  "title": "PowerShell does not expand `~` for external commands",
+  "updated_at": "2019-12-17T20:54:07Z"
+}

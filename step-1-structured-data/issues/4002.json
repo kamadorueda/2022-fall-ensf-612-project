@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4002",
+  "author": "mklement0",
+  "body": "<sup>Closely related to #3996 and #11133</sup>\r\n\r\nThe current behavior of calling external programs _without_ stderr redirection is being discussed in the linked issue.\r\n\r\nEither way, simply adding `2>$null` or `2>&1` - indeed, _any_ redirection of stderr (`2>...`) - to a command shouldn't fundamentally change its error-handling behavior.\r\n\r\nNote that when a host other than the console host is involved (e.g., when in the _ISE_ or when _remoting_), the  difference described below does _not_ occur, but the behavior is fundamentally different (and presumably undesired  - see #3996).\r\n\r\nNote: \r\n\r\n* Even though the repro steps use external programs, PowerShell commands are equally affected (e.g., `& { $ErrorActionPreference = 'stop'; Get-Item NosuchFile 2>$null }` unexpectedly produces an error, whereas `-ErrorAction SilentlyContinue` would not). \r\n\r\n* Similarly, using `2>` with an actual file as the target is also affected (e.g., `& { $ErrorActionPreference = 'stop'; whoami badarg 2>stderr.txt }` aborts, and `stderr.txt` is empty).  \r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nOn Unix, replace `cmd /c` with `sh -c`.\r\n\r\n```powershell\r\n& { $ErrorActionPreference = 'stop'; cmd /c nosuch; $? }\r\n& { $ErrorActionPreference = 'stop'; cmd /c nosuch 2>$null; $? }\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nBoth commands should fundamentally behave the same, which, based on the current default behavior in the console, is to _not_ report an error, with stderr output _passed through_  in the 1st command and stderr output getting _suppressed_ in the other.\r\n\r\n```none\r\n'nosuch' is not recognized as an internal or external command,\r\noperable program or batch file.\r\nFalse\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n* The 1st command behaves as expected.\r\n\r\n```none\r\n'nosuch' is not recognized as an internal or external command,\r\noperable program or batch file.\r\nFalse\r\n```\r\n\r\n* The 2nd command _terminates the statement_ and outputs the _first stderr line only_ in _red_ (note that in _Windows PowerShell_ you get the usual, full error output):\r\n\r\n```none\r\n'nosuch' is not recognized as an internal or external command,\r\n```\r\n\r\nThe 2nd half of the error message, `operable program or batch file.`, is missing.\r\n\r\nPresumably, this happens because:\r\n  * as usual, each individual stderr _line_ becomes its own `[System.Management.Automation.ErrorRecord]` instance, \r\n  * and the very 1st line by itself triggers termination of the statement (in this particular case, the `cmd` error message happens to span _2_ lines).\r\n\r\nNote that _any_ `2>` redirection causes the symptom, such as `2>&1` or `2>err.txt`.\r\n\r\nSeemingly, the following happens:\r\n\r\n* Despite _redirection_ of the error stream, the stderr lines are apparently still _passing through_  it, as evidenced by them showing up in `$Error` afterwards.  \r\n\r\n* With `$ErrorActionPreference = 'stop'` in effect, anything getting written to PowerShell's error stream instantly triggers a function/script-terminating error.\r\n\r\nAgain, note that without a redirection, stderr lines neither show up in `$Error` nor do they cause the script to be terminated based on `$ErrorActionPreference = 'stop'`.\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.4 on macOS 10.12.5\r\nPowerShell Core v6.0.0-beta.4 on Ubuntu 16.04.2 LTS\r\nPowerShell Core v6.0.0-beta.4 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.413 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2020-07-29T22:47:28Z",
+  "comments": [
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I am able to repro this.  This does look like inconsistent behavior.  If the default out-putter is configured then the error message is just displayed.  But if error is redirected to a pipe then it goes through MshCommandRuntime processing and ErrorActionPreference is effective, and the stop exception is thrown.\r\n\r\nThis is done here:\r\nhttps://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/NativeCommandProcessor.cs#L634\r\n",
+      "created_at": "2017-06-13T23:42:18Z",
+      "updated_at": "2017-06-13T23:42:18Z"
+    },
+    {
+      "author": "BurtHarris",
+      "author_association": "NONE",
+      "body": "I disagree w/ expected behavior.   I don't think the expected behavior of `2>$null` is documented anywhere.   It was an intentional edge-case while I was searching for potential extensions to redirection syntax.   You can find other similar cases, e.g. \r\n\r\n    try {cmd /c whamo! 2>$()} catch { \"Dang!\" }\r\n",
+      "created_at": "2017-06-14T01:32:40Z",
+      "updated_at": "2017-06-14T01:32:40Z"
+    },
+    {
+      "author": "BurtHarris",
+      "author_association": "NONE",
+      "body": "P.S.   What @mklement0 is referring to as \"the 2nd half of the message\" is not \"missing\", or if so then I found it...   It's not coming from the native command, it's a PowerShell ErrorRecord that get's it's own slot.\r\n\r\n    PS> $error.Clear()\r\n    PS> cmd /c whamo! 2>$()\r\n    PS> $error.Count\r\n    2\r\n    PS> $error[0]\r\n    operable program or batch file.\r\n    PS> $error[1]\r\n    cmd : 'whamo!' is not recognized as an internal or external command,\r\n    At line:1 char:1\r\n    + cmd /c whamo! 2>$()\r\n    + ~~~~~~~~~~~~~~~~~~~\r\n        + CategoryInfo          : NotSpecified: ('whamo!' is not...ternal command,:String) [], RemoteException\r\n        + FullyQualifiedErrorId : NativeCommandError\r\n    \r\n",
+      "created_at": "2017-06-14T01:46:29Z",
+      "updated_at": "2017-06-14T01:46:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BurtHarris  I've revised the expected-behavior description in the original post in light of the discussion in the linked issue: if the consensus is that stderr output should never generate an error, then the expected behavior is as _now_ described in the initial post.\r\n\r\nYes, _any_ `2>` redirection triggers the symptom, presumably for the reasons @PaulHigin states.\r\n\r\nWithout `$ErrorActionPreference = 'Stop'` in the mix, you do indeed get _all_ stderr lines recorded in `$Error`, as an _error record each_, but _with_ `$ErrorActionPreference = 'Stop'`, the _1st_ line triggers termination of the pipeline, so the 2nd line never gets recorded in `$Error`.\r\n\r\n> I don't think the expected behavior of 2>$null is documented anywhere.\r\n\r\nIndeed, [about_Redirection](https://msdn.microsoft.com/en-us/powershell/reference/5.1/microsoft.powershell.core/about/about_redirection) doesn't mention redirecting to `$null`, but if it does anything other than _silently discarding the stream_ (as it does with the _success stream_, for instance), we have a problem - as evidenced by this issue.\r\n\r\nThe unfortunate interaction with `$ErrorActionPreference = 'Stop'` is one thing, but the fact that output that you're asking to have _suppressed_ is _still getting recorded_ somewhere - in `$Error` - is absolutely counter-intuitive.",
+      "created_at": "2017-06-14T02:09:58Z",
+      "updated_at": "2017-06-14T02:12:08Z"
+    },
+    {
+      "author": "zjrunner",
+      "author_association": "NONE",
+      "body": "Where is this issue?  I've been able to repro it across an upgrade of a build version and wonder if I'm missing something since this is such an old thread.\r\n\r\nrepro: powershell v5.1.17763.316, OS 10.0.17763\r\nno-repro: powershell v5.1.16299.967, OS 10.0.16299\r\n\r\nIs the upgrade from 16299 to 17763 going to pull this in, and any projection of a fix?  We've seen unreliability in our CI builds bailing out at odd times when they hit a machine with this newer powershell installed.",
+      "created_at": "2019-03-11T15:49:17Z",
+      "updated_at": "2019-03-11T15:49:17Z"
+    },
+    {
+      "author": "joaoe",
+      "author_association": "NONE",
+      "body": "Hi.\r\nLet me chime in.\r\n\r\nI have a script which cheks if a python module is installed\r\n```\r\npython -c \"import blah\" 2>$null\r\nif ($?) {\r\n  # Run expensive installations\r\n}\r\n```\r\nthen I enabled strict error handling `$ErrorActionPreference = \"stop\"` and whenever that line runs (and the module is not setup), the whole script aborts instead of running the following steps.\r\nI tried also with `python -c ... 2>&1 | out-null` and the `NativeCommandError` is always there.\r\nThis seems like a clear bug to me. If the error stream is being redirected to `$null`, that means that the user is explicitly ignoring any errors.\r\nSo far, the only work around is to use `try{} catch{}`.\r\n\r\nTestcase\r\n```\r\nWrite-Host You should not see an error\r\n$ErrorActionPreference = \"stop\"\r\npython -c \"import notfound_foobar\" 2>$null\r\nWrite-Host PASS\r\n```\r\n",
+      "created_at": "2019-11-27T14:53:25Z",
+      "updated_at": "2019-11-27T14:53:25Z"
+    },
+    {
+      "author": "andrewducker",
+      "author_association": "NONE",
+      "body": "Have just hit this myself.  Calling an exe and redirecting the errorstream to a file (it doesn't actually contain an error, just additional info), and had been happily using it for a year or two.  I turned ErrorActionPreference to \"Stop\" globally, and suddenly it fails, despite there not being any actual errors.",
+      "created_at": "2020-01-23T15:42:28Z",
+      "updated_at": "2020-01-23T15:42:28Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "Related to #3996, want to address similarly",
+      "created_at": "2020-07-13T22:17:42Z",
+      "updated_at": "2020-07-13T22:17:42Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "We discussed this in the @PowerShell/powershell-committee and agreed this is a dupe of #3996 ",
+      "created_at": "2020-07-29T22:47:28Z",
+      "updated_at": "2020-07-29T22:47:28Z"
+    }
+  ],
+  "created_at": "2017-06-13T20:43:48Z",
+  "number": 4002,
+  "state": "closed",
+  "title": "Redirecting stderr / the error stream can trigger script-terminating errors",
+  "updated_at": "2020-07-29T22:47:28Z"
+}

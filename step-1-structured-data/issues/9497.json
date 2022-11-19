@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9497",
+  "author": "mklement0",
+  "body": "Currently, _stdin_ input streamed to `pwsh` _from the outside_:\r\n\r\n* does _not_ automatically become pipeline input;\r\n  * accessing stdin input currently requires constructing a separate pipeline in PowerShell code using `$Input`\r\n\r\n* only automatically becomes input to _interactive prompts_, such as `Read-Host` calls or the automatic prompts displayed when mandatory arguments are missing.\r\n\r\nThis has the following implications:\r\n\r\n**You cannot directly pipe data to PowerShell commands from the outside:**\r\n\r\nContrast the following two commands:\r\n\r\n```sh\r\n# Bash:\r\n# stdin input is \"relayed\" to the 'wc' utility\r\n$ printf 'one\\ntwo' | bash -c 'wc'\r\n2\r\n```\r\n\r\n```powershell\r\n# PowerShell:\r\nPS> printf 'one\\ntwo' | pwsh -noprofile -c 'Measure-Object -Word | % Words'\r\n0 # !! Measure-Object did NOT receive stdin input.\r\n\r\n# Explicit reference to $Input in an internal pipeline is required:\r\nPS> printf 'one\\ntwo\\n' | pwsh -noprofile -c '$Input | Measure-Object -Word | % Words'\r\n2\r\n```\r\nprintf 'one\\ntwo\\n' | pwsh -noprofile -c 'Measure-Object -Word'\r\n\r\n**If you're calling an _advanced script that binds pipeline input_, it cannot be invoked with just `-File`, because it won't receive pipeline input**:\r\n\r\n```powershell\r\n# Create an advanced script that echoes each pipeline input enclosed in [...]\r\n'[CmdletBinding()] param([Parameter(ValueFromPipeline)] $var) process { \"[$var]\" }' > t.ps1\r\n\r\n# Call from either Bash or PowerShell (same behavior).\r\nPS> echo hi | pwsh -noprofile -file t.ps1\r\n[]  # !! t.ps1 did NOT receive stdin input\r\n\r\n# The workaround is again non-obvious and cumbersome:\r\nPS> echo hi | pwsh -noprofile -command '$Input | ./t.ps1'\r\n[hi]  # OK\r\n```\r\n\r\n**Similarly, if you author a pipeline-binding advanced script as _shebang-line-based script on Unix_, it cannot receive stdin input directly**:\r\n\r\n```powershell\r\n# Create a shebang-line-based script...\r\n@'\r\n#!/usr/bin/env pwsh\r\n[CmdletBinding()] param([Parameter(ValueFromPipeline)] $var) process { \"[$var]\" }\r\n'@ > foo\r\n\r\n# ... and make it executable.\r\nchmod +x foo\r\n\r\n# Call from either Bash or PowerShell (same behavior).\r\nPS> 1..2 | ./foo\r\n[]  # !! Pipeline input wasn't bound, not even with pipeline input from PowerShell.\r\n``` \r\n\r\n---\r\n\r\nPowerShell's behavior here is at odds with traditional shells and arguably makes the typical use case unnecessarily difficult.\r\n\r\nNote: **I'm unclear on whether this can be fixed without breaking existing behavior.**\r\n\r\nThe challenge is to know when to provide stdin input via an _implied PowerShell pipeline_, and when to use stdin input line by line, on demand, to respond to _interactive prompts_.\r\n\r\nE.g., the following currently works - the two distinct `Read-Host` prompts are \"answered\" by 1 stdin input line each:\r\n\r\n```powershell\r\n$ 'one\\ntwo\\n' | pwsh -noprofile -c 'read-host first; get-date;  read-host second'\r\nfirst: one\r\none\r\n\r\nMonday, April 29, 2019 10:52:04 AM\r\nsecond: two\r\ntwo\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 6.2.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "I am hit by the same problem, I have to work with the databricks CLI, which has a terrible UX that requires me to pipe `stdin` to the the native binary and it seems I have to use `bash` for now as I could not translate the following to `PowerShell`:\r\n```\r\ndatabricks configure --token <<EOF\r\nhttps://$(databricks_location).azuredatabricks.net\r\n$(databricks-token)\r\nEOF\r\n```\r\nI've tried piping a string to it\r\n```pwsh\r\n$newline = [System.Environment]::NewLine\r\n\"${newline}https://$DatabricksLocationShort.azuredatabricks.net${newline}$DatabricksToken${newline}\" | databricks configure --token\r\n```\r\nwith variations of `${newline}` or also trying to pipe an array with no luck....",
+      "created_at": "2019-11-14T12:34:53Z",
+      "updated_at": "2019-11-14T12:35:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It sounds like you're describing the _opposite_ direction: piping _to_ an external program.\r\n\r\nIn my experience that usually _does_ work; e.g.:\r\n\r\n```powershell\r\n@'\r\none\r\ntwo\r\nthree\r\n'@ | bash -c 'cat -n'  # outputs the stdin input lines with line numbers\r\n```\r\n\r\nDitto:\r\n\r\n```powershell\r\n'one', 'two', 'three'  | bash -c 'cat -n'  # outputs the stdin input lines with line numbers\r\n```\r\n\r\nIs there something special about the `databricks` utility?\r\n\r\nNote that, as usual, PowerShell uses the `$OutputEncoding` character encoding for sending text to external programs, which in PS Core is now UTF-8.",
+      "created_at": "2019-11-14T12:44:45Z",
+      "updated_at": "2019-11-14T12:47:54Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for the info. Yes, it is piping to an external binary that expects input via stdin as it prompts.\r\nI decided to use authentication via environment variables on the PowerShell process level instead",
+      "created_at": "2019-11-14T12:49:26Z",
+      "updated_at": "2019-11-19T18:10:15Z"
+    },
+    {
+      "author": "mvalikar",
+      "author_association": "NONE",
+      "body": "@bergmeister  Can you share code how you are able to authenticate Databricks through Environment variables. I am pretty much struck in this case ",
+      "created_at": "2019-12-18T02:28:29Z",
+      "updated_at": "2019-12-18T02:28:29Z"
+    },
+    {
+      "author": "bergmeister",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mvalikar You set the DATABRICKS_HOST and  DATABRICKS_TOKEN environment variables as per docs, I suggest to set them only for the current process for security purposes and clean them up at the end\r\nhttps://docs.databricks.com/dev-tools/cli/index.html\r\n\r\n<blockquote><img src=\"../../_static/favicon.ico\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.databricks.com/dev-tools/cli/index.html\">Databricks CLI \u2014 Databricks Documentation</a></strong></div><div>Learn how to install and configure your environment to run the Databricks command-line interface.</div></blockquote>",
+      "created_at": "2019-12-18T08:11:49Z",
+      "updated_at": "2019-12-18T08:12:08Z"
+    },
+    {
+      "author": "jiasli",
+      "author_association": "NONE",
+      "body": "The same happens when directly calling `ps1`.\r\n\r\n## Bash\r\n\r\n`test.sh` has\r\n\r\n```\r\npython -c \"print(input())\"\r\n```\r\n\r\nWe can call it interactively:\r\n\r\n```\r\n$ ./test.sh\r\nsometext  < input here\r\nsometext\r\n```\r\n\r\nWhen piping to `test.sh`, the inner `python` receives from `stdin` automatically:\r\n\r\n```sh\r\n$ echo \"sometext\" | ./test.sh\r\nsometext\r\n```\r\n\r\n## PowerShell\r\n\r\n\r\n`test.ps1` have the same content:\r\n\r\n```\r\npython -c \"print(input())\"\r\n```\r\n\r\nInteractive input works:\r\n\r\n```\r\n> ./test.ps1\r\nsometext  < input here\r\nsometext\r\n```\r\n\r\nBut when piping to `test.ps1`, the inner `python` can't receive from `stdin` and waits for user input.\r\n\r\n```pwsh\r\n> echo \"sometext\" | ./test.ps1\r\n<waiting for user input>\r\n```\r\n\r\nIf we explicitly pipe [`$input`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_automatic_variables?view=powershell-7.2#input) to `python` in `test.ps1`:\r\n\r\n```pwsh\r\n$input | python -c \"print(input())\"\r\n```\r\n\r\nNow piping works:\r\n\r\n```pwsh\r\n> echo \"sometext\" | ./test.ps1\r\nsometext\r\n```\r\n\r\nbut interactive input fails:\r\n\r\n```\r\n> ./test.ps1\r\nTraceback (most recent call last):\r\n  File \"<string>\", line 1, in <module>\r\nEOFError: EOF when reading a line\r\n```\r\n",
+      "created_at": "2022-09-14T03:16:56Z",
+      "updated_at": "2022-09-14T06:51:00Z"
+    },
+    {
+      "author": "jiasli",
+      "author_association": "NONE",
+      "body": "A workaround I can think of is to check if `$input` is empty:\r\n\r\n- If `$input` is not empty, pipe it to python\r\n- If `$input` is empty, don't pipe it to python and leave python to read `stdin` from TTY\r\n\r\n(We need to save `$input` to another variable `$stdin` since `$input` is an enumerator and can be accessed only once.)\r\n\r\n```ps1\r\n$stdin = \"$input\"\r\nif ($stdin) {\r\n    $stdin | python -c \"print(input())\"\r\n}\r\nelse {\r\n    python -c \"print(input())\"\r\n}\r\n```\r\n\r\nThis solution requires additional efforts and is cumbersome. It is also fundamentally different from Bash since we are deciding **whether to connect `stdin` to `python` based on the content of `stdin`**, instead of **whether piping is used**. \r\n\r\nIn Bash, the behavior can be expressed as:\r\n\r\n- If a `sh` script is directly called, the inner executable's `stdin` is connected to TTY\r\n- If a `sh` script is called with pipe `|`, the output of the source is sent to inner executable's `stdin`\r\n\r\nFor example, in Bash, even when piping is used with empty content, it leads to failure:\r\n\r\n```\r\n$ python -c \"print('', end='')\" | ./test.sh\r\nTraceback (most recent call last):\r\n  File \"<string>\", line 1, in <module>\r\nEOFError: EOF when reading a line\r\n```\r\n\r\nbut the above workaround doesn't work as expected for empty pipe and falls back to interactive input:\r\n\r\n```\r\n> python -c \"print('', end='')\" | ./test.ps1\r\nuserinput  < input here\r\nuserinput\r\n```\r\n\r\nSo questions are:\r\n\r\n- Can we detect if piping is used from `$input`?\r\n- How can we detect if `$input` is empty (pipe is not used) or `$input` is empty string (an empty pipe is used)?\r\n- What if `stdin` contains binary stream?",
+      "created_at": "2022-09-14T07:07:58Z",
+      "updated_at": "2022-09-14T08:36:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Can we detect if piping is used from `$input`?\r\n\r\nUse `$MyInvocation.ExpectingInput`\r\n\r\n```powershell\r\n& { $MyInvocation.ExpectingInput } # -> $false\r\n1 | & { $MyInvocation.ExpectingInput } # -> $true\r\n```\r\n\r\n> How can we detect if [...] `$input` is empty string  (an empty pipe is used)?\r\n\r\nIf it's OK to collect all input up front:\r\n\r\n```powershell\r\npython -c \"print('', end='')\" | & { $allLines = @($Input); $allLines.Count -eq 0 }\r\n```\r\n\r\nOtherwise:\r\n\r\n```powershell\r\n# -> $true\r\npython -c \"print('', end='')\" | & { begin { $emptyInput = $true } process { $emptyInput = $false  } end { $emptyInput }  }\r\n```\r\n\r\nNote that _without_ pipeline input, the `process` block is also called, namely exactly _once_.\r\n\r\n\r\n> What if stdin contains binary stream?\r\n\r\nPowerShell currently has _no_ support for binary data in its pipelines when communicating with _external programs_ - everything is treated as _text_ - both on sending and receiving - see \r\n* #1908\r\n\r\n\r\n\r\n",
+      "created_at": "2022-09-14T14:38:57Z",
+      "updated_at": "2022-09-14T14:38:57Z"
+    },
+    {
+      "author": "jiasli",
+      "author_association": "NONE",
+      "body": "@mklement0, thanks a lot for the insights.\r\n\r\nThis solution you mentioned doesn't seem to work. It returns `True` even with empty `stdin`  (scenario 2):\r\n\r\n```powershell\r\n# 1. pipeline is not used\r\n> & { $allLines = @($Input); $allLines.Count -eq 0 }\r\nTrue\r\n\r\n# 2. pipeline is used, but empty\r\n> python -c \"print('', end='')\" | & { $allLines = @($Input); $allLines.Count -eq 0 }\r\nTrue\r\n\r\n# 3. pipeline is used, with some chars in it\r\n> python -c \"print('a', end='')\" | & { $allLines = @($Input); $allLines.Count -eq 0 }\r\nFalse\r\n```\r\n\r\nThe other solution also has some unexpected behavior:\r\n\r\n```powershell\r\n> & { begin { $emptyInput = $true } process { $emptyInput = $false  } end { $emptyInput }  }\r\nFalse\r\n> python -c \"print('', end='')\" | & { begin { $emptyInput = $true } process { $emptyInput = $false  } end { $emptyInput }  }\r\nTrue\r\n> python -c \"print('a', end='')\" | & { begin { $emptyInput = $true } process { $emptyInput = $false  } end { $emptyInput }  }\r\nFalse\r\n```\r\n\r\nThe expected result is to return \r\n\r\n- `False` if pipeline is not used (scenario 1)\r\n- `True` is pipeline is used (scenario 2, 3)\r\n\r\n(Or otherwise - doesn't really matter.)",
+      "created_at": "2022-09-15T03:39:37Z",
+      "updated_at": "2022-09-15T04:23:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I answered your questions in isolation, You need to combine your logic with `$MyInvocation.ExpectingInput` as needed, to distinguish the pipeline from the non-pipeline scenarios.\r\nApart from that, I see no unexpected behavior. ` & { $allLines = @($Input); $allLines.Count -eq 0 }` is designed to return _`$true`_ if there is either no input from the pipeline at all or  if that input is empty.\r\n`& { begin { $emptyInput = $true } process { $emptyInput = $false  } end { $emptyInput }  }` is designed to return `$true` only if there's pipeline input and it is empty.",
+      "created_at": "2022-09-15T08:14:57Z",
+      "updated_at": "2022-09-15T08:14:57Z"
+    }
+  ],
+  "created_at": "2019-04-29T15:05:19Z",
+  "number": 9497,
+  "state": "open",
+  "title": "CLI: Stdin input does not implicitly become pipeline input",
+  "updated_at": "2022-09-15T08:14:57Z"
+}

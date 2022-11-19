@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14508",
+  "author": "Tomalak",
+  "body": "## Issue\r\n\r\nThe commonly-used pattern for reading XML files goes like this:\r\n\r\n```ps\r\n$doc = [xml](Get-Content xyz.xml)\r\n```\r\n\r\nIt's fast, convenient, ubiquitous and ... wrong.\r\n\r\nIt does not pay attention to XML file encodings and happily (and silently) mangles data from XML files that do not happen to be in the expected encoding (i.e. UTF-8), or in an encoding that mandates a BOM (i.e. UTF-16 and friends). See #14505 and #14404 for more in-depth discussion.\r\n\r\nSadly this usage pattern is not going anywhere. Far too many examples all over the Internet show wrong usage, far too few people are aware of - or care about - how XML implements encodings.\r\n\r\nThe ideal solution would be to teach people how to do it correctly, the pragmatic solution is to make the pattern above do the right thing.\r\n\r\n## Proposal\r\n\r\nMake `Get-Content` recognize XML files and switch file encodings on-the-fly. This is what XML parsers do as well.\r\n\r\nIt's easy, since the first line of the file will contain the XML declaration `<?xml version=\"...\" encoding=\"...\"?>` which has the necessary encoding information.\r\n\r\nIn the absence of an XML declaration, assuming UTF-8, i.e. exactly what `Get-Content` normally does, is correct. \r\n\r\n## Proposed technical implementation details\r\n\r\nAn implementation for `Get-Content` encoding sniffing should go like this\r\n\r\n- if there's a BOM, use that (that's already happening)\r\n- otherwise, if there is an `-Encoding` parameter, use that\r\n- otherwise, look at the first couple of bytes of the file as ASCII\r\n  - if it starts with an XML declaration `<?xml`, parse out the `encoding=\"...\"` value\r\n    - if it's a recognized encoding name, switch the file stream to a new encoding for the rest of the file\r\n    - otherwise, default to UTF-8\r\n  - otherwise, assume plain text in UTF-8 (that's already happening)\r\n  - not sure if viable, but nice to have: In the \"UTF-8 assumed\" case, if there are decode errors, rewind stream & fall back to the system's default ANSI encoding (might already happen, I haven't checked)\r\n\r\nActual implementation details can be derived from the way `System.Xml.XmlDocument` implements it in its `.Load()` method, I'm sure there are some corner cases.\r\n\r\n## Benefits\r\n\r\n- It would make things transparently correct for existing scripts without breaking any of them.\r\n- It would make things transparently correct for anyone copying code off of the Internet/who's not deep enough into the details of how XML implements file encodings.\r\n- All the thousands of bad examples from the Internet would be fine on one sweep.\r\n- It would help people who naively (or for performance reasons) process XML data line-wise as plain text.",
+  "closed_at": "2022-01-20T18:43:14Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for writing this up; a couple of suggestions:\r\n\r\n> if there is an `-Encoding` parameter, use that\r\n\r\nTo be consistent with current behavior, `-Encoding` should only be respected _if there's no BOM_. \r\nFor instance, currently, if you have a UTF-8-with-BOM file and try to read it with `Get-Content -Encoding utf32`, the `-Encoding` argument is ignored.\r\n\r\n> not sure if viable, but nice to have: if there are decode errors, rewind stream & assume system default ANSI encoding as fallback (might already happen, I haven't checked)\r\n\r\nGiven that we don't do that currently, I don't think we need to worry about this case (and if we did, ANSI would be an awkward, platform-specific fallback; that PowerShell Core still doesn't support `-Encoding Ansi` (which in _Windows PowerShell_ is `-Encoding Default`, and the default for `Get-Content` / `Set-Content` as well as source code) is a separate story - see #6562).\r\n\r\n`Get-Content` simply uses `\ufffd` (REPLACEMENT CHARACTER, [`U+FFFD`](http://www.fileformat.info/info/unicode/char/fffd)) to replace invalid-as-UTF-8 byte sequences (which would happen with a by-definition BOM-less ANSI-encoded file with non-ASCII chars.), and I don't think doing something special for XML files is called for (as you point out, the proposed accommodation is motivated by pragmatism, not conceptual purity).\r\n\r\nSeparately, however, we may want to think about generically introducing a switch such as `-Strict` on `Get-Content` and `Set-Content` (possibly others, but for comprehensive coverage you'd either need a for-file-processing-cmdlets-only common parameter or a preference variable, which comes with dynamic-scoping challenges) that _errors out_ on decoding/encoding errors.\r\n\r\n\r\n",
+      "created_at": "2020-12-29T14:17:08Z",
+      "updated_at": "2020-12-29T14:17:08Z"
+    },
+    {
+      "author": "Tomalak",
+      "author_association": "NONE",
+      "body": "@mklement0 Amended the checklist accordingly.\r\n\r\nThe \"ANSI fallback\" is certainly up for debate. I've had my share of situations where trying UTF-8 and falling back to Windows-1252 was a successful strategy, but I admit this can hardly be generalized.\r\n\r\nWhen `\ufffd` appears in the output, it pretty much means that the file is a single-byte encoding wrongly interpreted as UTF-8, and optimistically falling back to the system default encoding has a good chance of producing the right result, pragmatically speaking.\r\n\r\nThe bigger question is if baking such a hidden assumption into the standard behavior of `Get-Content` is a good idea in the first place, or if leaving errors in the output (or throwing exceptions) and letting the user explicitly nail it down is better.\r\n\r\nPersonally, if `Get-Content` silently fixes it for me, I'm happier than when it silently breaks it for me. And when I did not bother to specify an `-Encoding`, then one wrong character is as good as another. Falling back to the wrong single-byte encoding probably does not wreak more havoc than not falling back at all.",
+      "created_at": "2020-12-29T16:04:23Z",
+      "updated_at": "2020-12-29T16:07:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Interesting questions, @Tomalak, but if we wanted to make changes in this area, they wouldn't be specific to the XML accommodation, so it would again call for a _new_ proposal - assuming you feel strongly enough about this.\r\n\r\nA few more thoughts, but we should probably continue any discussion in a new proposal, should one be created:\r\n\r\n* A simple test for the presence of `\ufffd` when using the default encoding is ``Select-String -Quiet \"`u{fffd}\"  file.txt``\r\n\r\n* As stated, having an opt-in to explicitly _fail_ on encountering decoding errors might be helpful - not least because a properly decoded file could contain `\ufffd` as an actual character, in which case the `Select-String` test would yield a false positive.\r\n\r\n* While falling back to ANSI on Windows is probably helpful more often than not, such magic can also lead to subtle failures, such as when a Windows-1251-encoded file is read on a system where Windows-1252 is the active ANSI code page. By contrast, `\ufffd` has the advantage of being a single, visually conspicuous indicator that something went wrong.\r\n\r\n",
+      "created_at": "2020-12-29T21:20:40Z",
+      "updated_at": "2020-12-29T21:20:40Z"
+    },
+    {
+      "author": "Tomalak",
+      "author_association": "NONE",
+      "body": "@mklement0 Yeah, I don't feel strongly enough about this to make yet another proposal out of it. It's a messy topic and there is no way my assumptions aren't biased. The more complex this gets, the higher the chance to introduce unpredictable behavior or new bugs.",
+      "created_at": "2020-12-30T08:28:27Z",
+      "updated_at": "2020-12-30T08:28:27Z"
+    },
+    {
+      "author": "jdhitsolutions",
+      "author_association": "COLLABORATOR",
+      "body": "The Cmdlet Working Group recognizes the challenge in this issue. However, after deliberation and testing, feel that the best course of action is a change to the `[xml]` type accelerator to introduce a new `Load()` method, which could be used to handle the XML document type. No changes would be made to `Get-Content` and this would not affect `[xml.document]`, only the `[xml]` type accelerator.",
+      "created_at": "2022-01-20T18:43:14Z",
+      "updated_at": "2022-01-20T18:43:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@jdhitsolutions Should we open new issue for `[xml]` type accelerator with more clear specifications what we should add?",
+      "created_at": "2022-01-21T03:41:10Z",
+      "updated_at": "2022-01-21T03:41:10Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A type accelerator is merely a short type-name alias for convenience; `[xml]` is short for `[System.Xml.XmlDocument]` - in other words: the two are - and should remain - equivalent.\r\n\r\nSaid type already has a `.Load()` method, and _avoiding its awkwardness in PowerShell_:\r\n* `$x = [xml]::new(); $x.Load((Convert-Path 'file.xml'))` (note the need to resolve to a _full path_) \r\n*  vs. making the existing (PowerShell-idiomatic and convenient) widespread practice, `[xml] (Get-Content file.xml)`, _robust_ \r\n\r\nis the motivation for this feature request.",
+      "created_at": "2022-01-23T21:19:45Z",
+      "updated_at": "2022-01-23T21:19:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "From the WG conclusion it is not clear what is new suggestion to resolve the issue.",
+      "created_at": "2022-01-24T03:49:31Z",
+      "updated_at": "2022-01-24T03:49:31Z"
+    }
+  ],
+  "created_at": "2020-12-28T19:40:02Z",
+  "number": 14508,
+  "state": "closed",
+  "title": "Make Get-Content recognize XML file encodings",
+  "updated_at": "2022-01-24T03:49:31Z"
+}

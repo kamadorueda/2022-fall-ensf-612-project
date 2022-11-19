@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/16567",
+  "author": "danubie",
+  "body": "### Prerequisites\n\n- [X] Write a descriptive title.\n- [X] Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\n- [X] Search the existing issues.\n- [X] Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\n- [X] Refer to [Differences between Windows PowerShell 5.1 and PowerShell](https://docs.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell).\n\n### Steps to reproduce\n\nI'm running PS Core on a Ubuntu container which is not domain joined.\r\nWhen (accidentally) configuring a connection string having \"...;Integrated Security=True\" the PS-session crashes.\r\n\r\n```\r\n\t$SqlCmd = New-Object  System.Data.SqlClient.SqlCommand\r\n\t$SqlCmd.CommandType = [System.Data.CommandType]::Text\r\n\t$SqlCmd.Connection = \"server=**servername**;database=**database**;Integrated Security=True\"\r\n\t$SqlCmd.CommandText = \"select 1\"\r\n\t$SqlAdapter = New-Object System.Data.SqlClient.SqlDataAdapter($SqlCmd)\r\n\t$DataSet = New-Object System.Data.DataSet\r\n\t[Void] $SqlAdapter.Fill($DataSet)\r\n\t$SqlCmd.Connection.Close()\r\n\t$DataSet\r\n```\n\n### Expected behavior\n\n```console\nThowing an exception like when user is unknown\r\n\r\nMethodInvocationException: /workspace/test/bugreport.ps1:7:2\r\nLine |\r\n   7 |      [Void] $SqlAdapter.Fill($DataSet)\r\n     |      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n     | Exception calling \"Fill\" with \"1\" argument(s): \"Login failed for user 'unknown'.\"\r\n```\n```\n\n\n### Actual behavior\n\n```console\nThe PS-Session crashes immediately\n```\n\n\n### Error details\n\n_No response_\n\n### Environment data\n\n```powershell\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0\r\nOS                             Linux 5.10.60.1-microsoft-standard-WSL2 #1 SMP Wed Aug 25 23:20:18 UTC 2021\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\nImage: mcr.microsoft.com/powershell:ubuntu-18.04\n```\n\n\n### Visuals\n\n_No response_",
+  "closed_at": "2021-12-15T19:00:44Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@danubie Can you create simple C# app to test the scenario? If you could catch the exception this.",
+      "created_at": "2021-12-07T16:49:48Z",
+      "updated_at": "2021-12-07T16:49:48Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@danubie What error message or exit code did you get when pwsh crashed?\r\n\r\nIf you are able to consistently reproduce the issue, can you please collect a crash dump by following the instructions from https://docs.microsoft.com/en-us/dotnet/core/diagnostics/dumps#collect-dumps-on-crash?\r\nPlease use `MiniDumpWithFullMemory` as the dump type, by setting `DOTNET_DbgMiniDumpType` to `4`.\r\n",
+      "created_at": "2021-12-09T00:34:39Z",
+      "updated_at": "2021-12-09T00:34:56Z"
+    },
+    {
+      "author": "danubie",
+      "author_association": "NONE",
+      "body": "@iSazonov \r\nI narrowed it down a bit. The error is on opening the SQLConnection. The exception can not be caught in Powershell.\r\n```\r\n$SqlConnection = New-Object  System.Data.SqlClient.SqlConnection\r\n$SqlConnection.Connectionstring = \"server=***server***;database=***database***;Integrated Security=True\"\r\n$SqlConnection.Open()   # <<< kills the session\r\n```\r\nHere ist the corresponding C# program I've done. The exception can be caught. This is the version without try/catch.\r\nBTW: This was my first experience with C# on Linux :-)\r\n```\r\nnamespace BugReport\r\n{\r\n    class Program\r\n    {\r\n        static void Main(string[] args)\r\n        {\r\n            Console.WriteLine(\"Hello World!\");\r\n            SqlConnection sqlConnection = new SqlConnection();\r\n            sqlConnection.ConnectionString = \"server=***server***;database=***database***;Integrated Security=True\";\r\n            sqlConnection.Open();\r\n            sqlConnection.Close();\r\n            Console.WriteLine(\"We are done!\");\r\n        }\r\n    }\r\n}\r\n```\r\nOutput:\r\n```\r\nroot@7fb3e1fffd2a:/workspace/hello# dotnet BugReport.dll console -o\r\nHello World!\r\nUnhandled exception. System.Data.SqlClient.SqlException (0x80131904): Cannot authenticate using Kerberos. Ensure Kerberos has been initialized on the client with 'kinit' and a Service Principal Name has been registered for the SQL Server to allow Kerberos authentication.\r\nErrorCode=InternalError, Exception=Interop+NetSecurityNative+GssApiException: GSSAPI operation failed with error - Unspecified GSS failure.  Minor code may provide more information (SPNEGO cannot find mechanisms to negotiate).\r\n   at System.Net.Security.NegotiateStreamPal.GssInitSecurityContext(SafeGssContextHandle& context, SafeGssCredHandle credential, Boolean isNtlm, ChannelBinding channelBinding, SafeGssNameHandle targetName, GssFlags inFlags, Byte[] buffer, Byte[]& outputBuffer, UInt32& outFlags, Boolean& isNtlmUsed)\r\n   at System.Net.Security.NegotiateStreamPal.EstablishSecurityContext(SafeFreeNegoCredentials credential, SafeDeleteContext& context, ChannelBinding channelBinding, String targetName, ContextFlagsPal inFlags, Byte[] incomingBlob, Byte[]& resultBuffer, ContextFlagsPal& outFlags)\r\n   at System.Data.SqlClient.SNI.SNIProxy.GenSspiClientContext(SspiClientContextStatus sspiClientContextStatus, Byte[] receivedBuff, Byte[]& sendBuff, Byte[] serverName)\r\n   at System.Data.SqlClient.SNI.TdsParserStateObjectManaged.GenerateSspiClientContext(Byte[] receivedBuff, UInt32 receivedLength, Byte[]& sendBuff, UInt32& sendLength, Byte[] _sniSpnBuffer)\r\n   at System.Data.SqlClient.TdsParser.SNISSPIData(Byte[] receivedBuff, UInt32 receivedLength, Byte[]& sendBuff, UInt32& sendLength)\r\n   at System.Data.SqlClient.SqlInternalConnectionTds..ctor(DbConnectionPoolIdentity identity, SqlConnectionString connectionOptions, SqlCredential credential, Object providerInfo, String newPassword, SecureString newSecurePassword, Boolean redirectedUserInstance, SqlConnectionString userConnectionOptions, SessionData reconnectSessionData, Boolean applyTransientFaultHandling, String accessToken)\r\n   at System.Data.SqlClient.SqlConnectionFactory.CreateConnection(DbConnectionOptions options, DbConnectionPoolKey poolKey, Object poolGroupProviderInfo, DbConnectionPool pool, DbConnection owningConnection, DbConnectionOptions userOptions)\r\n   at System.Data.ProviderBase.DbConnectionFactory.CreatePooledConnection(DbConnectionPool pool, DbConnection owningObject, DbConnectionOptions options, DbConnectionPoolKey poolKey, DbConnectionOptions userOptions)\r\n   at System.Data.ProviderBase.DbConnectionPool.CreateObject(DbConnection owningObject, DbConnectionOptions userOptions, DbConnectionInternal oldConnection)\r\n   at System.Data.ProviderBase.DbConnectionPool.UserCreateRequest(DbConnection owningObject, DbConnectionOptions userOptions, DbConnectionInternal oldConnection)\r\n   at System.Data.ProviderBase.DbConnectionPool.TryGetConnection(DbConnection owningObject, UInt32 waitForMultipleObjectsTimeout, Boolean allowCreate, Boolean onlyOneCheckConnection, DbConnectionOptions userOptions, DbConnectionInternal& connection)\r\n   at System.Data.ProviderBase.DbConnectionPool.TryGetConnection(DbConnection owningObject, TaskCompletionSource`1 retry, DbConnectionOptions userOptions, DbConnectionInternal& connection)\r\n   at System.Data.ProviderBase.DbConnectionFactory.TryGetConnection(DbConnection owningConnection, TaskCompletionSource`1 retry, DbConnectionOptions userOptions, DbConnectionInternal oldConnection, DbConnectionInternal& connection)\r\n   at System.Data.ProviderBase.DbConnectionInternal.TryOpenConnectionInternal(DbConnection outerConnection, DbConnectionFactory connectionFactory, TaskCompletionSource`1 retry, DbConnectionOptions userOptions)\r\n   at System.Data.ProviderBase.DbConnectionClosed.TryOpenConnection(DbConnection outerConnection, DbConnectionFactory connectionFactory, TaskCompletionSource`1 retry, DbConnectionOptions userOptions)\r\n   at System.Data.SqlClient.SqlConnection.TryOpen(TaskCompletionSource`1 retry)\r\n   at System.Data.SqlClient.SqlConnection.Open()\r\n   at BugReport.Program.Main(String[] args) in C:\\Users\\WagnerW\\source\\repos\\BugReport\\BugReport\\Program.cs:line 14\r\nClientConnectionId:32487f75-f6ac-414a-8724-fb0cda06a0dd\r\nAborted\r\n```\r\n@daxian-dbw : I'll try to mange the dump within the next days",
+      "created_at": "2021-12-09T17:41:39Z",
+      "updated_at": "2021-12-09T17:41:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The exception can not be caught in Powershell.\r\n\r\n@danubie Thanks for your investigations! Have you tried try-catch in the script?",
+      "created_at": "2021-12-10T02:48:35Z",
+      "updated_at": "2021-12-10T02:48:35Z"
+    },
+    {
+      "author": "danubie",
+      "author_association": "NONE",
+      "body": "Yes, but it does not catch. It still crashes.",
+      "created_at": "2021-12-10T03:11:54Z",
+      "updated_at": "2021-12-10T03:13:06Z"
+    },
+    {
+      "author": "ajansveld",
+      "author_association": "NONE",
+      "body": "@danubie Does the following show a 139 exit code when run from bash or pwsh (substituting your server name)?\r\n\r\n```\r\npwsh -NoProfile -Command \"[System.Data.SqlClient.SqlConnection]::new('server=***server***;database=***database***;Integrated Security=True').Open()\"\r\n\r\necho $? $LASTEXITCODE\r\n```",
+      "created_at": "2021-12-12T21:05:09Z",
+      "updated_at": "2021-12-12T21:05:09Z"
+    },
+    {
+      "author": "danubie",
+      "author_association": "NONE",
+      "body": "Your estimation is correct\r\n```\r\nroot@7fb3e1fffd2a:/workspace# pwsh -NoProfile -Command \"[System.Data.SqlClient.SqlConnection]::new('server=***;database=***;Integrated Security=True').Open()\"\r\nSegmentation fault\r\n\r\nroot@7fb3e1fffd2a:/workspace# echo $? $LASTEXITCODE\r\n139\r\n```",
+      "created_at": "2021-12-14T11:25:17Z",
+      "updated_at": "2021-12-14T11:25:17Z"
+    },
+    {
+      "author": "ajansveld",
+      "author_association": "NONE",
+      "body": "Ok, then I think we are dealing with this issue: https://github.com/dotnet/SqlClient/issues/1390.\r\n",
+      "created_at": "2021-12-14T18:03:10Z",
+      "updated_at": "2021-12-14T18:03:10Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Thanks @ajansveld!\r\n\r\nThe .NET 6.0.2 will ship the fixes to `SqlClient`, see https://github.com/dotnet/SqlClient/issues/1390#issuecomment-980313907.\r\nI think we may need to do a servicing release for 7.2.0 when .NET 6.0.2 comes out in Feb 2022. /cc @TravisEz13 @adityapatwardhan @anmenaga @PaulHigin ",
+      "created_at": "2021-12-14T18:13:40Z",
+      "updated_at": "2021-12-14T18:16:01Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as external and has not had any activity for **1 day**. It has been be closed for housekeeping purposes.",
+      "created_at": "2021-12-15T19:00:43Z",
+      "updated_at": "2021-12-15T19:00:43Z"
+    },
+    {
+      "author": "ajansveld",
+      "author_association": "NONE",
+      "body": "> The .NET 6.0.2 will ship the fixes to `SqlClient`, see [dotnet/SqlClient#1390 (comment)](https://github.com/dotnet/SqlClient/issues/1390#issuecomment-980313907). I think we may need to do a servicing release for 7.2.0 when .NET 6.0.2 comes out in Feb 2022. /cc @TravisEz13 @adityapatwardhan @anmenaga @PaulHigin\r\n\r\nAccording to that thread the fix will actually not ship in .NET. To get the fix we will need to switch to Microsoft.Data.SqlClient, see https://github.com/PowerShell/PowerShell/issues/16156.",
+      "created_at": "2022-02-10T18:50:36Z",
+      "updated_at": "2022-02-10T18:50:36Z"
+    }
+  ],
+  "created_at": "2021-12-07T15:49:20Z",
+  "number": 16567,
+  "state": "closed",
+  "title": "System.Data.SqlClient.SqlCommand crashes Powershell session using \"Integrated Security=True\" on Linux-Container (not joined to a domain)",
+  "updated_at": "2022-02-10T18:50:36Z"
+}

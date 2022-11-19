@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14036",
+  "author": "mklement0",
+  "body": "Note: This is a relatively minor issue with an easy workaround, but it would be good to understand if there are other ramifications and a fix would certainly be nice.\r\n\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n([pscustomobject] @{ 1 = 'foo ' }).1 | Should -BeExactly 'foo '\r\n([pscustomobject] @{ 1 = 'foo ' }).1.Trim() | Should -BeExactly 'foo'\r\n```\r\n\r\n## Expected behavior\r\n\r\nBoth tests should succeed.\r\n\r\n## Actual behavior\r\n\r\nThe 2nd test fails, because the `.1` is apparently no longer recognized as a property access in combination with the `.Trim()` call:\r\n\r\n```none\r\nParserError:\r\nLine |\r\n   1 |  ([pscustomobject] @{ 1 = 'foo ' }).1.Trim() | Should -BeExactly 'foo'\r\n     |                                     ~\r\n     | Missing property name after reference operator.\r\n```\r\n\r\nNote: \r\n\r\n* If the property name cannot be parsed as a _number_ literal, the problem doesn't surface (e.g., `.a1`).\r\n\r\n* A **related problem** is trying to use a property name that _starts with_ a digit; e.g.,\r\n`([pscustomobject] @{ '1a' = 'foo ' }).1a` _breaks_, unless `.'1a'` is used instead.\r\n\r\n* **Workarounds**:\r\n\r\n  * Quote the property name (thanks, @jantari): `([pscustomobject] @{ 1 = 'foo ' }).'1'.Trim()`\r\n  * Enclose the original property access in `(...)`:  `(([pscustomobject] @{ 1 = 'foo ' }).1).Trim()`\r\n      * This workaround also works when accessing  _hashtables_ that have actual numeric keys via property syntax, such as with the automatic `$Matches` variable:\r\n           * `$null = 'foo bar' -match '^(foo\\s)'; ($Matches.1).Trim()`\r\n  * As @BrucePay points out, enclosing just the property name / key in `(...)` also works in both scenarios:\r\n    * `([pscustomobject] @{ 1 = 'foo ' }).(1).Trim()`\r\n    * `$null = 'foo bar' -match '^(foo\\s)'; $Matches.(1).Trim()`\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0-rc.2\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jantari",
+      "author_association": "NONE",
+      "body": "Although you're probably aware of it I just want to mention for others who have this issue that this can be worked around for now by quoting the property:\r\n\r\n    ([pscustomobject] @{ 1 = 'foo ' }).1.Trim() # FAILS\r\n    ([pscustomobject] @{ 1 = 'foo ' }).'1'.Trim() # WORKS\r\n\r\nThis also works for other property-names that make PowerShell misbehave, such as properties starting with a '#' etc.",
+      "created_at": "2020-11-11T18:02:54Z",
+      "updated_at": "2020-11-11T18:02:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @jantari - I've added the workaround to the OP. Note that `(...)` works in all cases, because quoting isn't an option when you access _hashtables_ with truly numeric keys with property syntax, which can happen with the automatic `$Matches` variable - I've added that to the OP too.",
+      "created_at": "2020-11-11T20:49:25Z",
+      "updated_at": "2020-11-11T20:49:25Z"
+    },
+    {
+      "author": "bpayette",
+      "author_association": "CONTRIBUTOR",
+      "body": "There is actually a lexical ambiguity here. Consider `data.1.0`. Is this a nested index or indexing with the double `1.0`?  In practice, we do a shift instead of a reduce so it becomes indexing with a float. I think that with `data.1.b`, shifting results in an invalid number ultimately resulting in the error you see (I haven't actually checked the code so I don't have the exact details.) Anyway, you can eliminate the ambiguity by putting the number in parens:\r\n```powershell \r\n([pscustomobject] @{ 1 = 'foo ' }).(1).Trim()\r\n```",
+      "created_at": "2020-11-13T20:48:59Z",
+      "updated_at": "2020-11-13T20:48:59Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Sort of? Property access tends to convert basically everything to a string in most cases, because most properties can only have strings for the property name. PSObject / PSCustomObject creates objects with string property names, not integer ones. So, yes, that works... incidentally only. `$obj.PSObject.Properties.Name.GetType()` on that object you create there will tell you the property name is still a string.\r\n\r\nThere's no reason not to assume a string value is being used for the property name IMO. The only exception is dictionaries/hashtables having non-string key types. Regular objects have strings for property names, I don't think there are really any exceptions to that. It's already true in some cases that you must use `$table[$value]` to index some kinds of keys, this wouldn't be a new thing.",
+      "created_at": "2020-11-13T21:02:37Z",
+      "updated_at": "2020-11-13T21:02:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Agreed, @vexx32: \r\n\r\n* For a non-`IDictionary` object, it is unequivocally _unhelpful_ to try to parse the member name as a number, given that property names are always strings.\r\n\r\n* For an `IDictionary`, recognizing `[double]`s is a feature - even though it's hard to imagine that it would see much use:\r\n\r\n```powershell\r\nPS>  @{ 1.5 = 'foo ' }.1.5.Trim()\r\nfoo\r\n```\r\n\r\nIf we were to maintain strict backward compatibility, we can't take this feature away.\r\n\r\nHowever, I've never seen a `[double]`-keyed dictionary in the wild, and the precision issues around binary floating-point representations alone make this an ill-advised thing to do (and the syntax does _not_ work with `[decimal]`-typed keys).\r\n\r\nGiven the presumed rarity of `[double]`-keyed dictionaries  and the fact that users will most likely expect _all_ `.` chars. to be member-access operators, my vote is to consider this a [bucket 3](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) change and **always stop parsing a property name / key when a(n unquoted) `.` is encountered**.\r\n\r\n  * If there really is a need to use a `[double]` key, one must then use `$dict.(1.5).Trim()`, as @BrucePay suggests, or use `$dict[1.5]`, as you suggest.\r\n\r\nIf preserving backward compatibility is paramount, an alternative that at least ameliorates the problem - if technically feasible - would be to _fall back_ to considering something like `1.b` property / key `1`, whose `b` property is to be accessed , after failing to parse `1.b` as a `[double]`.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-11-13T22:09:10Z",
+      "updated_at": "2020-11-15T14:06:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It occurred to me that the parsing in question presumably happens during the _lexical_ analysis phase, where distinguishing by data type being operated on isn't an option. I've revised the previous comment accordingly - again: I think simply not supporting `[double]` keys with (unquoted, non-expression) property syntax is the best solution.",
+      "created_at": "2020-11-15T14:08:56Z",
+      "updated_at": "2020-11-26T16:16:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Longer-term, if we ever get to break backward compatibility more substantially, my recommendation would be, for conceptual simplicity and for avoiding edge cases:\r\n\r\n* Only ever treat _bareword_ property names such as `.1` and `.1l` as _strings_ and _always_ treat an unquoted `.` as the member-access operator.\r\n\r\n* For everything else, either require an explicit expression context (`.(...)`, `.$propName`) or index-based access instead, in which case the intent to use an _expression_ is unequivocally signaled.\r\n\r\n(To soften the blow, the automatic `$Matches` variable could be converted to an `[ordered]` hashtable whose default keys are the stringified indices, so that something like `$Matches.1` continues to work); the added benefit is that you _both_  indexed (`$Matches[1]`) and named-capture-group property then work `$Matches.foo`).\r\n",
+      "created_at": "2020-11-26T16:39:26Z",
+      "updated_at": "2020-11-27T15:43:38Z"
+    },
+    {
+      "author": "catthehacker",
+      "author_association": "NONE",
+      "body": "Not sure if it's directly related but in below example nested properties also doesn't work unless put in quotes\r\n```PowerShell\r\n$l=@{I=1;V=5;X=10;L=50;C=100;D=500;M=1000}\r\n$a='IVXLLD'\r\n\r\n$l[$a[3]]\r\n# Result:\r\n\r\n$l[\"$($a[3])\"]\r\n# Result: 50\r\n```",
+      "created_at": "2021-02-13T17:42:30Z",
+      "updated_at": "2021-02-13T17:42:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@catthehacker, no, this is a different problem: `[hashtable]` keys must be matched _type-exactly_ during lookup.\r\n\r\nYour keys are `[string]`-typed, despite comprising only a single character (e.g., `L` - quoting optional in hashtable literals; the quoting style makes no difference, unlike in C#): PowerShell has no _literal_ `[char]` type.\r\n\r\nBy contrast, `'IVXLLD'[3]` _does_ return a `[char]` instance, and that's why the lookup fails, and only succeeds with stringification; `$l[[string] 'IVXLLD'[3]]` would work too.",
+      "created_at": "2021-02-13T17:49:28Z",
+      "updated_at": "2021-02-13T17:49:28Z"
+    },
+    {
+      "author": "catthehacker",
+      "author_association": "NONE",
+      "body": "@mklement0 Thanks a lot, that's awfully helpful.",
+      "created_at": "2021-02-13T20:10:21Z",
+      "updated_at": "2021-02-13T20:10:21Z"
+    }
+  ],
+  "created_at": "2020-11-11T17:43:05Z",
+  "number": 14036,
+  "state": "open",
+  "title": "Nested member access (dot notation) on a number-like property name fails",
+  "updated_at": "2022-06-11T13:11:26Z"
+}

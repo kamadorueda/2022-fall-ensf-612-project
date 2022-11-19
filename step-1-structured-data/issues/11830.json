@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11830",
+  "author": "mklement0",
+  "body": "`Get-Content -ReadCount 0` is a convenient way to request that all lines be read _at once, into an array_ and to have that array be output _as a single_ object to the success stream.\r\n\r\nWhen combined with `-First` aka `-TotalCount` aka `-Head`, this sensibly allocates an array for and outputs _only the requested number of lines_ from the beginning, not for _all_ lines.\r\nNote: Meaningfully combining `-First` with `-ReadCount 0` was only recently implemented, in #10749.\r\n\r\nWhile combining `-Last` aka `-Tail` with `-ReadCount 0` is _functional_,  performance timings suggest that _all_ lines are needlessly being read into an array behind the scenes, before only the sub-array of interest is output.\r\n\r\nIn other words: while `-Tail <n> -ReadCount 0` _should_ be the same as `-Tail <n> -ReadCount <n>` (explicitly setting the the read count to the same number as the number of trailing lines requested), it currently isn't in terms of _performance and memory use_.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n# Create a temporary file with 1 million lines\r\n$f = [IO.Path]::GetTempFileName(); (, 'foo') * 1e6 > $f\r\n# Warm up the cache.\r\n$tmp = gc $f -ReadCount 0\r\n\r\n# Read 1000 lines from the end, as a single array\r\n$n = 1000\r\n{ $v = gc $f -Tail $n -ReadCount $n },\r\n{ $v = gc $f -Tail $n -ReadCount 0  }, \r\n{ $v = gc $f          -ReadCount 0  } <# control: read all lines #> |  % {\r\n  \"$_`: \" + (Measure-Command $_).TotalSeconds \r\n}\r\n\r\nRemove-Item $f\r\n```\r\n\r\n# Expected behavior\r\n\r\n`-Tail $n -ReadCount $n` and `-Tail $n -ReadCount 0` should perform virtually the same and should be faster than `-ReadCount 0` by itself.\r\n\r\n# Actual behavior\r\n\r\n`-Tail $n -ReadCount 0` is not only slower than `-Tail $n -ReadCount $n` , but also slower than `-ReadCount 0`  by itself, suggesting that _all_ lines were read behind the scenes.\r\n\r\n```none\r\n $v = gc $f -Tail $n -ReadCount $n : 0.1515997\r\n $v = gc $f -Tail $n -ReadCount 0  : 0.2118531\r\n $v = gc $f          -ReadCount 0  : 0.209674\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-rc.2\r\n```\r\n",
+  "closed_at": "2020-03-14T04:57:05Z",
+  "comments": [
+    {
+      "author": "NoMoreFood",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looked into this a bit.  I think you discovered an interesting issue / circumstance.  In PowerShell Core, the `[IO.Path]::GetTempFileName(); (, 'foo') * 1e6 > $f` command produces a UTF-8 file without a byte-order-marker (BOM).  Side note: This differs from Windows PowerShell which produces a UTF-16 with a BOM.  When processing UTF-8 data with no BOM, the Get-Content cannot detect the file encoding when the file is read in reverse.  As a result, it does a forward search which enumerates the whole file (albeit in different chunk sizes depending on ReadCount -- which might explain your performance differences).  Can you confirm that doing the following changes the behavior for you?\r\n\r\n```\r\n$f = [IO.Path]::GetTempFileName()\r\n(, 'foo') * 1e6 | Set-Content -Encoding utf8BOM -LiteralPath $f\r\n```",
+      "created_at": "2020-02-19T20:38:02Z",
+      "updated_at": "2020-02-19T20:38:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Intriguing, @NoMoreFood, thanks for the sleuthing - using a file _with a BOM_ indeed makes a big difference in the resulting performance (and even seems to make `-ReadCount 0` marginally faster than `-ReadCount $n`)\r\n\r\nI would never expect `Get-Content` to _detect_ encodings, however: if a BOM is present, the encoding is unambiguously specified; in the absence of a BOM, the _default_ encoding should be _assumed_ (UTF-8 in PS Core), so there is no good reason for this variation in behavior.\r\n",
+      "created_at": "2020-02-19T21:23:16Z",
+      "updated_at": "2020-02-19T21:23:16Z"
+    },
+    {
+      "author": "NoMoreFood",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yeah, I think you're right and I believe I see the detection bug in the code.  More to come....",
+      "created_at": "2020-02-19T22:24:32Z",
+      "updated_at": "2020-02-19T22:24:32Z"
+    },
+    {
+      "author": "NoMoreFood",
+      "author_association": "CONTRIBUTOR",
+      "body": "Pull Request to resolve this issue has been created.",
+      "created_at": "2020-02-21T08:12:42Z",
+      "updated_at": "2020-02-22T21:58:14Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11899, which has now been successfully released as `v7.1.0-preview.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-preview.1)\n",
+      "created_at": "2020-03-26T17:48:24Z",
+      "updated_at": "2020-03-26T17:48:24Z"
+    }
+  ],
+  "created_at": "2020-02-11T18:56:39Z",
+  "number": 11830,
+  "state": "closed",
+  "title": "Get-Content -ReadCount 0  combined with -Last / -Tail seems to read ALL lines internally",
+  "updated_at": "2020-03-26T17:48:24Z"
+}

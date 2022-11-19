@@ -1,0 +1,90 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7336",
+  "author": "mklement0",
+  "body": "On Unix-like platforms, plain-text files that are marked as executable require a shebang line (`#!...`) for meaningful interpretation; in the absence of a (valid) shebang line, it is unclear what interpreter to pass the file to.\r\n\r\nOn _macOS_ (but not on Linux) PowerShell currently _fails quietly_ when attempting to invoke an executable plain-text without (valid) shebang line, _presumably_ because the invocation is delegated to a system call that fails.\r\n\r\nNote that while POSIX-like shells such as `bash` have a _fallback mechanism_ that makes them execute such files either themselves or by passing it to `/bin/sh`, I think the more sensible behavior is to _fail_.\r\n\r\nEither way, the current quiet failure is problematic (though `$?` and `$LASTEXITCODE` do indicate failure).\r\n\r\nAlso, I suspect that the quiet failure is not limited to shebang-lacking plain-text executable files and may surface for any invalid executable (such as a corrupted binary or one for a different architecture), regardless of the cause.\r\n\r\n_Update_: In fact, a likelier scenario that also surfaces the problem is if a shebang line _is_ present, but happens to reference a _non-existent interpreter_.\r\n\r\nSteps to reproduce (macOS only)\r\n------------------\r\n\r\n```powershell\r\n# Create a plain text file without a shebang line (content is otherwise irrelevant),\r\n# make it executable, and try to execute it.\r\n'ls' > t  \r\nchmod a+x t\r\n./t\r\n```\r\n\r\nNote: The same behavior applies to invocation with `&` (unsurprisingly), and also `.`\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nA _statement-terminating error_ should be reported, detailing the inability to execute the file (with the message possibly coming from a platform-native system call).\r\n\r\nActual behavior\r\n---------------\r\n\r\nNo error _message_ is output.\r\n\r\nHowever, `$?` _is_ set to `$FALSE` and `$LASTEXITCODE` is `8`, so it is at least possible to detect the failure programmatically.\r\n\r\n`8` is `ENOEXEC`, which is a standard error code defined as follows (from `man 2 intro` on macOS):\r\n\r\n>    8 ENOEXEC Exec format error.  A request was made to execute a file that,\r\n>         although it has the appropriate permissions, was not in the for-\r\n>         mat required for an executable file.\r\n\r\nIt makes more sense to treat this as a statement-terminating error, just as trying to invoke a _non-existent_ executable is (while still setting `$LASTEXITCODE`).\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core 6.1.0\r\n```\r\n",
+  "closed_at": "2021-03-17T16:14:18Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Maybe it will be interesting to you.",
+      "created_at": "2018-07-23T05:05:40Z",
+      "updated_at": "2018-07-23T05:05:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Seems it will be a breaking change if we add a terminating error.",
+      "created_at": "2018-07-23T05:06:24Z",
+      "updated_at": "2018-07-23T05:06:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nTechnically, I suppose it is breaking, but given how exotic this scenario is and how unhelpful the current behavior is, it strikes me as an obvious case of a [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) change.",
+      "created_at": "2018-07-23T11:26:26Z",
+      "updated_at": "2018-07-23T11:26:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "In the case of PowerShell, if the command is not a script nor a cmdlet, it runs it as a `NativeCommand`.  This means it attempts to start a new process with that name ( 't' in the local directory in the sample above ).  Create process on \"./t\" fails since it's not a binary executable.\r\n\r\nLooking at the bash source, they have a helper to look into executables to determine if it's likely a script or a binary and if a script (meaning all printable characters up to the newline) it processes it as a script.  PowerShell, of course, only processes the file if it ends in .ps1.\r\n\r\nI don't think we want to special case this and check for an exit code of 8.  This seems to be an edge case that would be handled by https://github.com/PowerShell/PowerShell/issues/3415",
+      "created_at": "2018-07-26T04:47:30Z",
+      "updated_at": "2018-07-26T04:47:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> they have a helper to look into executables to determine if it's likely a script or a binary and if a script (meaning all printable characters up to the newline) it processes it as a script. \r\n\r\nYes, that's the behavior I suggest we _avoid_, because in the absence of a shebang line it is a tenuous assumption for a shell to make that the file must be written in _that shell's_ language - to me, it's not a reasonable default behavior (and it sounds like we agree on that).\r\n\r\nHowever, what _is_  shell's job - any shell's - is to report an error in the event of _fundamental inability to invoke an external executable_.\r\n\r\nThis is different from fundamentally successful invocation (in that the process could be _created_), which may then be followed by the successfully launched external executable _itself_ indicating failure (via its _exit code_ and typically also stderr output).\r\n\r\nHere we're talking about the _system call_ that attempts to _create the new process_ indicating failure _to the shell_, which it should surface.\r\n\r\nSo, thinking about this some more, **I'm not asking to special-case error code `8`, I'm asking PowerShell to surface _any_ error condition indicated by the underlying system call when trying to launch an external executable** (which presumably is ultimately from the `exec` family of functions, whose errno values are defined by POSIX [here](http://pubs.opengroup.org/onlinepubs/9699919799/functions/exec.html#tag_16_111_05)).\r\n\r\nIt's important for the inability to even launch an external program to fail conspicuously:\r\n\r\n* PowerShell already reports a statement-terminating error for a _non-existent_ command (executable); e.g., `PS> nosuchexe -h`\r\n\r\n  * It just so happens that PowerShell _itself_ makes the determination whether a command exists rather than relying on a system call (right?).\r\n\r\n* A non-existent command is just _one_ reason for the invocation to fail fundamentally, and I don't see a reason to treat others - such as an invalid executable file - differently.\r\n\r\nOnce we have a shared understanding, I'm happy to amend the title and OP to reflect the broader scope.\r\n\r\n",
+      "created_at": "2018-07-26T18:20:54Z",
+      "updated_at": "2018-07-26T18:23:17Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 the problem is that from PowerShell perspective, the process started but had an exit code of 8:\r\n\r\n```powershell\r\nPS /Users/steve/test> $si = [System.Diagnostics.ProcessStartInfo]::new()\r\nPS /Users/steve/test> $si.FileName = \"/Users/steve/test/t\"\r\nPS /Users/steve/test> [System.Diagnostics.Process]::Start($si)\r\n\r\n NPM(K)    PM(M)      WS(M)     CPU(s)      Id  SI ProcessName\r\n ------    -----      -----     ------      --  -- -----------\r\n      0     0.00       0.00       0.00   37291   0 \r\n```\r\n\r\nSo although I agree with what you are saying, the change would need to be in corefx to throw an exception.  A non-existing file results in an exception from [Process]::Start().  Similarly, a non-executable also throws an exception.",
+      "created_at": "2018-07-27T02:26:20Z",
+      "updated_at": "2018-07-27T02:26:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT:\r\n\r\nThanks for digging deeper - I've created https://github.com/dotnet/corefx/issues/31519 in the CoreFX repo.\r\n\r\nI guess we can label this issue `Resolution-External`.",
+      "created_at": "2018-07-31T19:08:24Z",
+      "updated_at": "2018-07-31T19:08:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for adding the label, @SteveL-MSFT, but shouldn't the issue then remain _open_ until the external resolution comes?",
+      "created_at": "2018-07-31T19:59:10Z",
+      "updated_at": "2018-07-31T19:59:10Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Changed the labels, we can leave this open for now.",
+      "created_at": "2018-07-31T20:42:51Z",
+      "updated_at": "2018-07-31T20:42:51Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT: \r\n\r\nOn the plus side: It turns out that the problem exists on macOS only - my bad for not checking initially (I've updated the title and original post)\r\n\r\nThe less good news that a far less exotic scenario than the one initially described (missing shebang line) also surfaces the problem: if a shebang line _is_ present, but happens to reference a _non-existent interpreter_.\r\n\r\nThe discussion at https://github.com/dotnet/corefx/issues/31519 is ongoing, but what it comes down to that we currently don't know how to fix the problem _technically_ - macOS lacks a system call that is used on Linux, where the problem doesn't occur.\r\n\r\nIf you happen to know macOS / BSD system-programming experts, could you point them to the issue? Thanks. \r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-09-26T16:59:19Z",
+      "updated_at": "2018-09-26T16:59:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As of at least v7.1 the problem no longer occurs, and you now get a meaningful `` error message:\r\n\r\n```\r\nResourceUnavailable: Program 't' failed to run: Exec format errorAt line:1 char:1\r\n```",
+      "created_at": "2021-03-17T16:14:18Z",
+      "updated_at": "2021-03-17T16:14:18Z"
+    }
+  ],
+  "created_at": "2018-07-23T02:11:04Z",
+  "number": 7336,
+  "state": "closed",
+  "title": "Invoking an executable plain-text file that lacks a shebang line fails quietly on macOS",
+  "updated_at": "2021-03-17T16:14:18Z"
+}

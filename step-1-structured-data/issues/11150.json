@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11150",
+  "author": "emgerner-msft",
+  "body": "Hey folks,\r\n\r\nI'm trying to setup a powershell connection to retry for longer than 4 minutes on network failure. I looked at [pssessionoptions ](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/new-pssessionoption?view=powershell-6) and tried IdleTimeout and MaxConnectionRetryCount, but I didn't think those would be right and they weren't... still the 4 minutes. Is there some other setting in here I've misunderstood the docs for, or is there another way of doing this?\r\n\r\nFor clarification, the message I get is below. I'd like rather than 4 minutes to try something like 10 minutes as I know the server is going to be back soon.\r\n\r\nWARNING: The network connection to xx.xxx.xx.xx has been interrupted. Attempting to reconnect for up to 4 minutes...",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "You could set OpenTimeout property.",
+      "created_at": "2019-11-22T18:45:04Z",
+      "updated_at": "2019-11-22T18:45:04Z"
+    },
+    {
+      "author": "emgerner-msft",
+      "author_association": "NONE",
+      "body": "I don't think that has anything to do with reconnect -- just initial connect. I'm not an expert though. In any case, I did just try it anyways and I get the same old output about attempting to reconnect for 4 minutes.",
+      "created_at": "2019-11-22T21:35:57Z",
+      "updated_at": "2019-11-22T21:36:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I found that the 4 min MaxRetryConnectionTime come from WSMAN but I did not found that PowerShell sets the parameter.\r\nPerhaps @PaulHigin could add more info.",
+      "created_at": "2019-11-23T09:54:09Z",
+      "updated_at": "2019-11-23T09:54:09Z"
+    },
+    {
+      "author": "alexandair",
+      "author_association": "CONTRIBUTOR",
+      "body": "AFAIK, that value is hard-coded and cannot be set up.",
+      "created_at": "2019-11-24T22:29:08Z",
+      "updated_at": "2019-11-24T22:29:08Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "As mentioned, the connection retry timeout is performed at the WinRM layer.  There is an undocumented registry key that let's you set the retry timeout.  However, it was added to decrease the retry timeout for testing purposes.  I don't know if you can use it to increase the retry timeout to a value greater than than the default max of 4 mins, but you can experiment with it and find out.\r\n\r\n`HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WSMAN\\Client`\r\n`DWORD max_retry_timeout_ms`\r\n",
+      "created_at": "2019-11-25T16:33:45Z",
+      "updated_at": "2019-11-25T16:33:45Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "You need to restart the WinRM service after setting the key value.\r\n```\r\nRestart-Service WinRM\r\n```",
+      "created_at": "2019-11-25T16:34:52Z",
+      "updated_at": "2019-11-25T16:34:52Z"
+    },
+    {
+      "author": "emgerner-msft",
+      "author_association": "NONE",
+      "body": "@PaulHigin Thanks Paul, I'll give that a shot.\r\n\r\nIs there a different way of dealing with temporary network outages that is more generally used? I tried the whole Receive-PsSession thing but found the docs (or my understanding of them) a little bit lacking and what I came up with has some limitations. If there's a sample laying around somewhere I can checkout that would be great.",
+      "created_at": "2019-11-25T17:09:45Z",
+      "updated_at": "2019-11-25T17:09:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "You could do reconnect in explicit cycle.",
+      "created_at": "2019-11-26T09:46:42Z",
+      "updated_at": "2019-11-26T09:46:42Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@emgerner-msft \r\nI am not sure what docs you have read but this does a pretty good job describing PowerShell remoting disconnect/reconnect.\r\n\r\nhttps://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_remote_disconnected_sessions?view=powershell-6\r\n\r\nIf a PowerShell remote connection is dropped due to network problems, it goes into a disconnect mode for a certain period of time (idle timeout) during which you can manually reconnect to the server either from the original client or another client.  The above article talks about how the disconnect/reconnect works.\n\n<blockquote><div><strong><a href=\"https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_remote_disconnected_sessions\">about_Remote_Disconnected_Sessions - PowerShell</a></strong></div></blockquote>",
+      "created_at": "2019-11-26T15:49:21Z",
+      "updated_at": "2019-11-26T15:49:23Z"
+    },
+    {
+      "author": "emgerner-msft",
+      "author_association": "NONE",
+      "body": "@PaulHigin Thanks Paul, I had read through that. Here's the parts that threw me a bit:\r\n\r\n1) How to get the results:\r\n\r\n> \"You can use Receive-PSSession rather than using the Connect-PSSession cmdlet. If the session is already reconnected, Receive-PSSession gets the results of commands that ran when the session was disconnected. If the PSSession is still disconnected, Receive-PSSession connects to it and then gets the results of commands that ran while it was disconnected. Receive-PSSession can return the results in a job (asynchronously) or to the host program (synchronously). Use the OutTarget parameter to select Job or Host. The default value is Host. However, if the command that's being received was started in the current session as a Job, it's returned as a Job by default.\"\r\n\r\nThe return value of Receive-PSSession was unclear to me from this. Reading this, I thought that unless I specified out target as a job, it would return either the results of the command I invoked via Invoke-Command or attempt to reconnect and return nothing if the job hadn't finished. However, when I actually tested I saw I got a job even though I did *not* specify out target as a job. Is that expected?\r\n\r\n2. State and Availability properties\r\n\r\nIn this section all the examples of busy sections were disconnected and busy was defined as:\r\n>A value of Busy indicates that you can't connect to the PSSession because it's connected to another session.\r\n\r\nSo, when I waited a bit on the job I got from Receive-PsSession I was pretty confused when I got a session that was opened/busy. I'm assuming that's because when the session reconnected the invoke-command I had run previously would continue meaning I couldn't send more to the session, but I'm still not certain I get the semantics here.\r\n\r\n3. Based on 2, it seems like the job I get finishes when *both* the session reconnects and the previous command I invoked via invoke-command finishes. Assuming this is correct, it's mildly annoying now to do a reconnect timer because the job is waiting on both those things to finish -- not just the session reconnect. It's surmountable of course with a small window where I check if the session is now opened but the job is still busy, but it's much less simple than passing a simple timeout.\r\n\r\nHere's roughly what I ended up with after *a lot* of fiddling. I've seen it work correctly a few times as far as I can tell from the print statements.\r\n\r\n```\r\n$results = Invoke-Command -Session $session -ScriptBlock {...}\r\n\r\nwhile ($session.State -like \"Disconnected\")\r\n{\r\n        Write-Warning \"Attempting to reconnect for up to 6 more minutes...\"\r\n\r\n        # Reconnect waiting 6 more minutes on top of the standard 4 (10 total)\r\n        $job = Receive-PSSession $session\r\n        for($i = 0; $i -lt 6 -and $session.State -like \"Disconnected\"; $i++)\r\n        {\r\n            Write-Warning \"Continue attempting to reconnect to $($session.ComputerName) ...\"\r\n            Wait-Job $job -Timeout 60\r\n        }\r\n        \r\n        # If the session has reconnected, continue to wait for the test to finished\r\n        if ($session.State -like \"Opened\")\r\n        {\r\n            Write-Warning \"The network connection to $($session.ComputerName) has been restored.\"\r\n            $results = Receive-Job $job -Wait\r\n        }\r\n        else\r\n        {\r\n            break\r\n        }\r\n}\r\n```\r\n\r\n\r\n\r\n",
+      "created_at": "2019-11-26T17:31:56Z",
+      "updated_at": "2019-11-26T17:31:56Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "`Receive-PSSession` will return a job by default if the original session was created as a job, or otherwise it just returns the output data.  But you can always ensure what form you get by using the `-OutTarget` parameter.\r\n\r\n```powershell\r\nReceive-PSSession -OutTarget <Host | Job>\r\n```\r\n\r\nYes, unfortunately the PSSession state during a disconnect/reconnect is very confusing.  We tried to squeeze disconnect semantics into existing State and Availability fields.  Anyway, here is what each combination means:\r\n\r\n`State==Opened, Availability==Busy`            ->  Client is connected to Target and Target is running\r\n`State==Opened, Availability==Available`     ->  Client is connected to Target and Target is idle\r\n`State==Disconnected, Availability==None`   ->  Client is disconnected from Target but can connect\r\n`State==Disconnected, Availability==Busy`    ->  Target is connected to some other client.  This client cannot connect.\r\n\r\nWhen a session is disconnected (for whatever reason, network flakiness or manually), if script/command is running on the Target, it will continue to run although in a 'disconnected' state.  This is complicated if the script returns data.  The data can't be transferred to the client so it will be cached on the Target but only up to 1MB (I think is the limit).  After that the script will block and cannot continue until a client connects to receive data.  Unless you opted for a PSSession with `-OutBufferMode` set to 'Drop', in which case the Target script continues to run but output data is dropped after the cache is filled.\r\n\r\nIn any case, once you reconnect a client to a Target PSSession, if that session was/is running it needs to complete before you can run more script commands on it.  'Complete' may mean the script actually needs to finish running, or it may mean that cached output data needs to be transferred to the client.  Once both those things occur then the script 'completes' and the session becomes available for more work:\r\n\r\n`State==Opened, Availability==Available`\r\n\r\n",
+      "created_at": "2019-11-26T21:49:01Z",
+      "updated_at": "2019-11-26T21:49:01Z"
+    },
+    {
+      "author": "emgerner-msft",
+      "author_association": "NONE",
+      "body": "Okay, sounds like I should probably set the out target and then I can be certain this will run reliably. That does clarify things for the session state/availability. It looks like I lucked into the right explanation. I haven't set out buffer mode but we don't return all that much data -- basically just test output. \r\n\r\nWish there was an easier way to do this but thanks for the help. I'll close the issue.",
+      "created_at": "2019-11-26T21:54:09Z",
+      "updated_at": "2019-11-26T21:54:09Z"
+    },
+    {
+      "author": "emgerner-msft",
+      "author_association": "NONE",
+      "body": "Hey folks, I've been running this a while now with the code I pasted above and I'm still having issues. Only main change was specifying -OutTarget Job per the discussion and adding logging on session state when I started seeing problems. Sometimes this code seems to work, and other times I get something like the below. The session says it's disconnected, but when I try to run Receive-PsSession it indicates it's not and I don't get a job back per the log line below. The connection is now opened and busy probably running the command I sent it, but now i don't have a way to wait on the results of my command. What's the expected workflow and is there something else I missed in my above code? What am I supposed to do in this case?\r\n\r\nWARNING: The network connection to 10.128.xx.xx has been interrupted. Attempting to reconnect for up to 4 minutes...\r\nWARNING: Attempting to reconnect to 10.128.xx.xx ...\r\nWARNING: Attempting to reconnect to 10.128.xx.xx ...\r\nWARNING: Attempting to reconnect to 10.128.xx.xx ...\r\nWARNING: Attempting to reconnect to 10.128.xx.xx ...\r\nWARNING: Attempting to reconnect to 10.128.xx.xx ...\r\nWARNING: The reconnection attempt to 10.128.xx.xx failed. Attempting to disconnect the session...\r\nWARNING: Computer 10.128.27.28 has been successfully disconnected.\r\nWARNING: 12/10/2019 2:35:31 PM: [ERR] Network connectivity to 10.128.xx.xx has been lost and the reconnection attempt failed. Please repair the network connection and reconnect using Connect-PSSession or Receive-PSSession.\r\nWARNING: 12/10/2019 2:35:31 PM: [WRN] Attempting to reconnect for up to 6 more minutes...\r\nWARNING: 12/10/2019 2:35:40 PM: [ERR] Reconnect attempt failed. Session state: Opened, session availability: Busy, exception: There is no disconnected command associated with this runspace.",
+      "created_at": "2019-12-11T03:56:02Z",
+      "updated_at": "2019-12-11T03:56:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "At first look you need add OutTarget parameter:\r\n`$job = Receive-PSSession $session -OutTarget Job`",
+      "created_at": "2019-12-11T07:06:19Z",
+      "updated_at": "2019-12-11T07:06:19Z"
+    },
+    {
+      "author": "emgerner-msft",
+      "author_association": "NONE",
+      "body": "Per the second sentence of my above message, I already did. ;)",
+      "created_at": "2019-12-11T17:48:42Z",
+      "updated_at": "2019-12-11T17:48:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I have only one idea - to add -AsJob to `Invoke-Command -Session $session -ScriptBlock {...}`",
+      "created_at": "2019-12-11T18:23:22Z",
+      "updated_at": "2019-12-11T18:23:22Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "I don't fully understand the scenario.  You say you get a successful disconnect message above, but after you try to reconnect with `Receive-PSSession -OutTarget Job`, it fails?  Can you provide more details in how it fails?\r\n\r\nIt should return a Job object that is `running`, or an error.",
+      "created_at": "2019-12-12T15:48:40Z",
+      "updated_at": "2019-12-12T15:48:40Z"
+    },
+    {
+      "author": "emgerner-msft",
+      "author_association": "NONE",
+      "body": "Yes, exactly. I'm stumped. To be clear, this happens <1/10 times -- most of the time it works just fine. I see the standard disconnect messages, and my code actually even checks that the session is disconnected before running the Receive, but then receive tells me I'm no longer disconnected and the session state agrees. The logs I get are above, word for word minus xx'ing out the IP. The error message I get when I try to run Receive-PsSession is incorporated in the last log line I pasted: \"There is no disconnected command associated with this runspace.\" -- all I did is also include the session state when I logged that. I don't have multiple sessions and I'm not doing anything in parallel outside of this script or anything. Pasting the updated code below so you can map it to the log output, but the only change truly is logging and the -OutTarget Job change.\r\n\r\n```\r\n$results = Invoke-Command -Session $session -ScriptBlock {...}\r\n\r\nwhile ($session.State -like \"Disconnected\")\r\n{\r\n        Write-Warning \"Attempting to reconnect for up to 6 more minutes...\"\r\n\r\n        # Reconnect waiting 6 more minutes on top of the standard 4 (10 total)\r\n        try\r\n        {\r\n            $job = Receive-PSSession $session -OutTarget Job\r\n        }\r\n        catch\r\n        {\r\n            LogError \"Reconnect attempt failed. Session state: $($session.State), session availability: $($session.Availability), exception: $_\"\r\n            break\r\n        }\r\n\r\n        for($i = 0; $i -lt 6 -and $session.State -like \"Disconnected\"; $i++)\r\n        {\r\n            Write-Warning \"Continue attempting to reconnect to $($session.ComputerName) ...\"\r\n            Wait-Job $job -Timeout 60\r\n        }\r\n        \r\n        # If the session has reconnected, continue to wait for the test to finished\r\n        if ($session.State -like \"Opened\")\r\n        {\r\n            Write-Warning \"The network connection to $($session.ComputerName) has been restored.\"\r\n            $results = Receive-Job $job -Wait\r\n        }\r\n        else\r\n        {\r\n            break\r\n        }\r\n}\r\n```",
+      "created_at": "2019-12-12T17:17:19Z",
+      "updated_at": "2019-12-12T17:17:19Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@emgerner-msft \r\n\r\nThanks for persisting with this.  From your information I was able to find a simple repro on my machine, and this is definitely a regression bug.  This works in Windows PowerShell but not in recent versions of PowerShell Core.\r\n\r\nMore Info:\r\nWhen an Invoke-Command session is disconnected, a temporary job object is created to facilitate a session running command re-connection.  The bug is that the temporary job object is not created correctly.\r\n\r\nPossible workaround:\r\nThe reconnect should work if you run Invoke-Command as a job:\r\n```powershell\r\n$results = Invoke-Command -session $session -Script {...} -AsJob | Receive-Job -Wait\r\n...\r\n```",
+      "created_at": "2019-12-13T00:03:35Z",
+      "updated_at": "2019-12-13T00:03:35Z"
+    }
+  ],
+  "created_at": "2019-11-21T23:08:34Z",
+  "number": 11150,
+  "state": "open",
+  "title": "Session Reconnection Timeout",
+  "updated_at": "2019-12-13T00:04:28Z"
+}

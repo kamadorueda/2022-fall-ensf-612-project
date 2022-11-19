@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3831",
+  "author": "mklement0",
+  "body": "Note: Perhaps this is by design (although there's at least a buggy inconsistency), given that there's currently no _PowerShell_ mechanism for _in-session_ switching to another culture. If so, it should at least be documented.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n[pscustomobject] @{ Test = 'initial'; Name = (Get-Culture).Name}\r\n[cultureinfo]::currentculture = 'fr-FR'; [pscustomobject] @{ Test = '$PSCulture'; Name =$PSCulture }, [pscustomobject] @{ Test = 'GetCulture'; Name = (Get-Culture).Name }, [pscustomobject] @{ Test = '$host.CurrentCulture'; Name = $host.CurrentCulture.Name }, [pscustomobject] @{ Test = '.NET'; Name = [cultureinfo]::currentculture.name }\r\n```\r\n\r\nNote: \r\n*  If you try the above _interactively_, be sure to execute the 2nd line above _on a single line_.\r\n* The output below:\r\n  * assumes that `en-US` is the initial culture at session startup time.\r\n  * differs between PowerShell Core and Windows PowerShell: in Core, `Get-Culture` and `$host.CurrentCulture` reflect the switch, but `$PSCulture` doesn't, whereas in Windows PowerShell none of the PS cmdlets/properties do.\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n\r\n```none\r\nTest                 Name \r\n----                 ---- \r\ninitial              en-US\r\n$PSCulture           fr-FR\r\nGetCulture           fr-FR\r\n$host.CurrentCulture fr-FR\r\n.NET                 fr-FR\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n* PowerShell Core: Windows, macOS, Ubuntu\r\n\r\n```none\r\nTest                 Name \r\n----                 ---- \r\ninitial              en-US\r\n$PSCulture           en-US\r\nGetCulture           fr-FR\r\n$host.CurrentCulture fr-FR\r\n.NET                 fr-FR\r\n```\r\n\r\n* Windows PowerShell 5.1\r\n\r\n```none\r\nTest                 Name \r\n----                 ---- \r\ninitial              en-US\r\n$PSCulture           en-US\r\nGetCulture           en-US\r\n$host.CurrentCulture en-US\r\n.NET                 fr-FR\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta (v6.0.0-beta.1) on macOS 10.12.5\r\nPowerShell Core v6.0.0-beta (v6.0.0-beta.1) on Ubuntu 16.04.1 LTS\r\nPowerShell Core v6.0.0-beta (v6.0.0-beta.1) on Microsoft Windows 10 Pro (64-bit; v10.0.14393)\r\nWindows PowerShell v5.1.14393.1198 on Microsoft Windows 10 Pro (64-bit; v10.0.14393)\r\n```\r\n",
+  "closed_at": "2019-10-07T09:17:12Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell does not follow the changes in .Net. This is true for changing current directory too.",
+      "created_at": "2017-05-20T17:31:01Z",
+      "updated_at": "2017-05-20T17:31:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well, as you can see, in Core it _does_ reflect .NET-level changes  in `Get-Culture`, but not in `$PSCulture`.\r\n\r\nAlso, with respect to the current directory: there's justification for PowerShell \"doing its own thing\", because it has its own system of drives, the majority of which have no .NET counterpart.\r\n\r\nThe same justification doesn't apply to culture settings, which are shared by both worlds, especially given that cmdlets _do_ already respect in-session switching; e.g.:\r\n\r\n```powershell\r\n> [cultureinfo]::currentculture = 'fr-FR'; Get-Date\r\n\r\nsamedi 20 mai 2017 13:39:08\r\n\r\n```",
+      "created_at": "2017-05-20T17:40:54Z",
+      "updated_at": "2017-05-20T17:40:54Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "That means we have to make sure PowerShell \"not doing its own things\" for Culture.",
+      "created_at": "2017-05-20T18:01:23Z",
+      "updated_at": "2017-05-20T18:01:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov - yes, and that condition appears to be met (I haven't dug into the source). Do you know something to the contrary? Or are you just saying that an investigation / official feedback is needed?",
+      "created_at": "2017-05-20T18:13:43Z",
+      "updated_at": "2017-05-20T18:13:43Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Please see Get-Culture code.",
+      "created_at": "2017-05-20T18:50:30Z",
+      "updated_at": "2017-05-20T18:50:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looking at the source code, it looks like `Get-Culture` simply delegates to `$host.CurrentCulture`, which is consistent with the (updated) findings above.\r\n\r\nIn the case of a console host, this seems to lead [to `ConsoleHost.cs`](https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.ConsoleHost/host/msh/ConsoleHost.cs#L867), which has the following:\r\n\r\n```csharp\r\n        public override System.Globalization.CultureInfo CurrentCulture\r\n        {\r\n            get\r\n            {\r\n                lock (hostGlobalLock)\r\n                {\r\n#if !CORECLR\r\n                    return NativeCultureResolver.Culture;\r\n#else\r\n                    return CultureInfo.CurrentCulture;\r\n#endif\r\n                }\r\n            }\r\n        }\r\n```\r\n\r\n* That explains why _Core's_ `Get-Culture` / `$host.CurrentCulture` is always in sync with `[cultureinfo]::CurrentCulture`.\r\n\r\n* For _Windows_ PowerShell, the [value is _cached_ in `NativeCultureResolver.cs`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/hostifaces/NativeCultureResolver.cs#L195), which explains why it can get out of sync with the thread's changed-after-session-startup culture.\r\n\r\nSo we can explain the disparity, but the question is _what the design intent was_ and, therefore,  _how the inconsistency should be resolved_ (my vote is to always reflect the thread's then-current culture).\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2017-05-21T02:38:31Z",
+      "updated_at": "2017-05-21T02:38:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I agree that a consistency should be. After quickly view codes, it seems PowerShell use  Cultureinfo.CurrentCulture without caching.",
+      "created_at": "2017-05-21T14:59:43Z",
+      "updated_at": "2017-05-21T14:59:43Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Could you please update a status of the issue? Should we consider a fix for $PSCulture?",
+      "created_at": "2018-10-21T12:17:43Z",
+      "updated_at": "2018-10-21T12:17:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nThe status hasn't changed. Yes, I think we should fix `$PSCulture` to reflect the culture in effect for the thread (session) at hand, to be consistent with `Get-Culture` and `$host.CurrentCulture`.\r\n\r\nIt is a departure from Windows PowerShell, however, so it needs to be documented.\r\n(Note that backward compatibility is _already_ broken, due to `Get-Culture` and `$host.CurrentCulture` acting differently than in Windows PowerShell).\r\n",
+      "created_at": "2018-10-21T13:25:07Z",
+      "updated_at": "2018-10-21T13:25:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT We need PowerShell Committee conclusion.",
+      "created_at": "2018-10-21T16:37:58Z",
+      "updated_at": "2018-10-21T16:37:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "See also: the related discussion in https://github.com/PowerShell/PowerShell/issues/3833#issuecomment-431837446",
+      "created_at": "2018-10-22T15:50:48Z",
+      "updated_at": "2018-10-22T15:50:48Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov it would help @PowerShell/powershell-committee if you or @mklement0 could summarize the question you want @PowerShell/powershell-committee to answer",
+      "created_at": "2018-10-23T22:50:48Z",
+      "updated_at": "2018-10-23T22:50:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT:\r\n\r\nIn Windows PowerShell:\r\n\r\n * `Get-Culture` reflects _the current user's persistently defined culture_, irrespective of (transient) in-session changes.\r\n * `$PSCulture` and `$host.CurrentCulture` reflect the same value.\r\n\r\nIn PowerShell Core:\r\n\r\n* `Get-Culture` always reflects the _current thread's_ culture, which may or may not have been changed in-session.\r\n\r\n* `$host.CurrentCulture` reflects the same value, whereas `$PSCulture` reflects the culture that was in effect at session-startup time.\r\n\r\nThe suggestion is to correct this inconsistency and have `$PSCulture` reflect the same value as `Get-Culture` and `$host.CurrentCulture`.\r\n\r\nAs an aside: The above shows that we've already broken backward compatibility, though it won't typically surface, as changing the culture in-session is not common.\r\nWhen it comes to introducing `Set-Culture` to PS Core, the difference becomes more problematic - see https://github.com/PowerShell/PowerShell/issues/3833#issuecomment-431837446.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-10-24T04:15:32Z",
+      "updated_at": "2018-10-24T04:15:32Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "`$PSCulture` and `$PSUICulture` are implemented as specific subclasses of  `PSVariable` . For example `$PSCulture` is defined in CultureVariable.cs and looks like:\r\n```csharp\r\n    /// <summary>\r\n    /// A variable that represents $PSCulture\r\n    /// </summary>\r\n    internal class PSCultureVariable : PSVariable\r\n    {\r\n        /// <summary>\r\n        /// Constructs an instance of the variable.\r\n        /// </summary>\r\n        internal PSCultureVariable()\r\n            : base(SpecialVariables.PSCulture, true, ScopedItemOptions.ReadOnly | ScopedItemOptions.AllScope,\r\n                   RunspaceInit.DollarPSCultureDescription)\r\n        {\r\n        }\r\n\r\n        /// <summary>\r\n        /// Gets or sets the value of the variable.\r\n        /// </summary>\r\n        ///\r\n        public override object Value\r\n        {\r\n            get\r\n            {\r\n                DebuggerCheckVariableRead();\r\n                return System.Globalization.CultureInfo.CurrentCulture.Name;\r\n            }\r\n        }\r\n    }\r\n```\r\n\r\nAs you can see, it's not a cached value and should reflect the current culture.",
+      "created_at": "2018-11-26T18:55:25Z",
+      "updated_at": "2018-11-26T18:55:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay: That can't be the whole story, as the following test demonstrates:\r\n\r\n```powershell\r\n# With en-US in effect *at session startup*:\r\nPS> [cultureinfo]::CurrentCulture = 'de-dE'; [cultureinfo]::CurrentCulture.Name; $PSCulture\r\nde-DE\r\nen-US  # !! session-startup value is still in effect\r\n```",
+      "created_at": "2018-11-26T19:22:28Z",
+      "updated_at": "2018-11-26T19:22:28Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "I suspect there's a bug where the special binding for `$PSCulture` is being replaced by a regular `PSVariable`. I'm still investigating to what's going on.  ",
+      "created_at": "2018-11-26T22:37:25Z",
+      "updated_at": "2018-11-26T22:37:25Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "And yes there is a bug right in the initialization code.  In SessionStateScope.cs:SetVariable(), the code takes the carefully constructed custom-type object, extracts the basic information, creates a new vanilla PSVariable and inserts that into session state instead of using the custom variable. I would guess this has been broken for forever. Fixing it to use the original variable is technically a breaking change but it's probably worth it. ",
+      "created_at": "2019-01-22T23:00:41Z",
+      "updated_at": "2019-01-22T23:00:41Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  We agree the intent is that `Get-Culture` and `$PSCulture` have the same behavior and reflects the current thread culture.  This looks like a long standing bug.",
+      "created_at": "2019-01-23T23:30:31Z",
+      "updated_at": "2019-01-23T23:30:31Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #10138, which has now been successfully released as `v7.0.0-preview.5`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.5)\n",
+      "created_at": "2019-10-23T19:08:19Z",
+      "updated_at": "2019-10-23T19:08:19Z"
+    }
+  ],
+  "created_at": "2017-05-20T16:44:13Z",
+  "number": 3831,
+  "state": "closed",
+  "title": "Get-Culture and $PSCulture do not (consistently) reflect in-session changes to another culture",
+  "updated_at": "2019-10-23T19:08:19Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10433",
+  "author": "xGord",
+  "body": "I'm not able to run the command _Get-CimInstance_ from a net core console application with PowerShell 7 sdk (preview 3). The error I get is \r\n\r\n> System.Management.Automation.CommandNotFoundException: The term 'Get-CimInstance' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\n> Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n\r\nTo reproduce create a net core 3.0 preview 8 console application.  Add nuget Microsoft.PowerShell.SDK and System.Management.Automation. \r\nThis is the code running\r\n\r\n    using (PowerShell powerShell = PowerShell.Create())\r\n    {\r\n     powerShell.AddCommand(\"Get-CimInstance\").AddArgument(\"win32_PnPSignedDriver\");\r\n     var drivers = powerShell.Invoke().ToList();\r\n     foreach (var driver in drivers)\r\n     {\r\n       Console.WriteLine(driver.Members[\"Description\"].Value);\r\n     }\r\n    }\r\n\r\nWhen adding powershell referenceassemblies for version 5 this runs perfect. \r\n\r\nAnyone one what the problem is?\r\n",
+  "closed_at": "2021-02-03T19:03:06Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "When running PowerShell from the API for v6+ PowerShell can't realistically make any assumptions about where modules may be installed -- PowerShell can now be installed basically _anywhere_ on a computer, so there's no guarantee that the modules are in any specific location.\r\n\r\nYou'll need to populate the `$env:PSModulePath` variable before executing most commands. \ud83d\ude42 ",
+      "created_at": "2019-08-23T13:21:14Z",
+      "updated_at": "2019-08-23T13:21:14Z"
+    },
+    {
+      "author": "xGord",
+      "author_association": "NONE",
+      "body": "Thanks for your answer. I have added the path `C:\\Program Files\\PowerShell\\7-preview\\Modules` to the PSModulePath environment variable. There is however a difference between the paths in this environment variable in windows and the paths when running `$env:PSModulePath` in powershell. But both of the are having the above path in them. Do I need to somehow load these modules in the code? \r\n",
+      "created_at": "2019-08-26T08:05:56Z",
+      "updated_at": "2019-08-26T08:05:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "You may need to set the variable from the PowerShell session, I'm not entirely sure how that gets populated. @SteveL-MSFT does PowerShell load that variable from the existing environment variables when it starts?",
+      "created_at": "2019-08-26T13:00:37Z",
+      "updated_at": "2019-08-26T13:00:37Z"
+    },
+    {
+      "author": "xGord",
+      "author_association": "NONE",
+      "body": "I have read some issues around some problems for powershell core on this variable. However this breaks my thoughts around powershell core. I need powershell core to be supplied with the single exe I am publishing and not be dependant on what version is installed on the OS. After fighting a lot of issues I'm not sure that this will be possible yet? ",
+      "created_at": "2019-08-27T07:27:02Z",
+      "updated_at": "2019-08-27T07:27:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think you can package everything with your application if you use the Microsoft.PowerShell.SDK package? If you're doing that it should be functioning based on the version of the SDK you have included in your project build.",
+      "created_at": "2019-08-27T11:12:25Z",
+      "updated_at": "2019-08-27T11:13:20Z"
+    },
+    {
+      "author": "xGord",
+      "author_association": "NONE",
+      "body": "I'm using Microsoft.PowerShell.SDK but I got some further about the investigation of this. You are more or less right about the PSModulePath but together with this it seems to me that for Powershell 7 and probably 6 you need to create a runspace. \r\nFor PowerShell 5 this was not necessary and all you had to do was\r\n\r\n     using (var powerShell = PowerShell.Create())\r\n     {\r\n           powerShell.AddScript(<yourscript>).Invoke();\r\n     }\r\n\r\nBut for PowerShell 7 (and probably 6) you need to create a runspace, At least this works for me. \r\n\r\n               using (var runspace = RunspaceFactory.CreateRunspace())\r\n                {\r\n                    runspace.Open();\r\n\r\n                    var proxy = runspace.SessionStateProxy;\r\n\r\n                    using (var ps = PowerShell.Create())\r\n                    {\r\n                        ps.Runspace = runspace;\r\n\r\n                        ps.AddCommand(\"Get-CimInstance\").AddArgument(\"win32_PnPSignedDriver\");\r\n                        \r\n                        var drivers = ps.Invoke().ToList();\r\n\r\n                        foreach (var driver in drivers)\r\n                        {\r\n                            Console.WriteLine(driver.Members[\"Description\"].Value);\r\n                        }\r\n                    }\r\n                }\r\n\r\nThe next thing is to make sure that the modules path is available in the environment variable PSModulePath. But the values in the PSModulePath in windows and when queried in powershell are different. So it wont help to add the path in Windows->Environment Variables->PSModulePath. You need to do it programmatically. \r\n\r\n    var psModulePath = proxy.GetVariable(\"env:PSModulePath\");\r\n    proxy.SetVariable(\"env:PSModulePath\", $@\"{psModulePath};C:\\Program Files\\PowerShell\\7-preview\\Modules\");\r\n\r\nIt also seems that the PSModulePath is automatically populated with the path your .exe is running from. If you print out \r\n\r\n    Console.WriteLine($\"PSModulePath environmentvariable:  {proxy.GetVariable(\"env:PSModulePath\")}\");\r\n\r\nyou will see that this contains (\r\n\r\n- C:\\Users\\username\\Documents\\PowerShell\\Modules;\r\n- C:\\Program Files\\PowerShell\\Modules;\r\n- **c:\\users\\username\\appdata\\local\\temp\\\\.net\\appname\\e2dw1dvd.tkt\\Modules;**\r\n- C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules\r\n\r\nSo by adding the Modules folder to your application you can make it self-contained without the need for adding a path to the environment variable. Note that this path for me is a temp path cause I'm running it on a remote computer with psexec. \r\n\r\nProbably there is a bug that these variables differ. \r\n\r\nMy next issue is that the powershell commands does not work on windows 7. \r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-08-28T08:47:39Z",
+      "updated_at": "2019-08-28T08:47:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @adityapatwardhan ",
+      "created_at": "2019-08-28T20:34:41Z",
+      "updated_at": "2019-08-28T20:34:41Z"
+    },
+    {
+      "author": "lenoln",
+      "author_association": "NONE",
+      "body": "Hi, I am trying to transcribe this query **\"SELECT DeviceId FROM Win32_PnPSignedDriver WHERE DeviceClass = 'DISPLAY'\"** to Runspace. I followed the @xGord example and added the parameters. Now I would like to use 'WHERE for DeviceClass', but I can't do it. Can anybody help me?",
+      "created_at": "2019-09-09T19:57:35Z",
+      "updated_at": "2019-09-09T19:57:35Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@lenoln not exactly sure what you are asking, but this works:\r\n\r\n```powershell\r\nGet-CimInstance -Query \"SELECT DeviceId FROM Win32_PnPSignedDriver WHERE DeviceClass = 'DISPLAY'\"\r\n```\r\n",
+      "created_at": "2019-09-16T16:36:09Z",
+      "updated_at": "2019-09-16T16:36:09Z"
+    },
+    {
+      "author": "adityapatwardhan",
+      "author_association": "MEMBER",
+      "body": "Verified with PowerShell SDK version `7.1.1` and it seems to work fine.\r\n\r\n*Project file:*\r\n```\r\n<Project Sdk=\"Microsoft.NET.Sdk\">\r\n\r\n  <PropertyGroup>\r\n    <OutputType>Exe</OutputType>\r\n    <TargetFramework>net5.0</TargetFramework>\r\n  </PropertyGroup>\r\n\r\n  <ItemGroup>\r\n    <PackageReference Include=\"Microsoft.PowerShell.SDK\" Version=\"7.1.1\" />\r\n    <PackageReference Include=\"Microsoft.WSMan.Management\" Version=\"7.1.1\" />\r\n  </ItemGroup>\r\n\r\n</Project>\r\n```\r\n\r\n*Code:*\r\n```csharp\r\nclass Program\r\n{\r\n    static void Main(string[] args)\r\n    {\r\n        var ps = System.Management.Automation.PowerShell.Create();\r\n        var result = ps.AddCommand(\"Get-CimInstance\").AddArgument(\"Win32_OperatingSystem\").Invoke();\r\n\r\n        foreach(dynamic r in result)\r\n        {\r\n            Console.WriteLine($\"{r.Name}\");\r\n        }\r\n    }\r\n}\r\n```\r\n\r\n*Output:*\r\n```\r\n\u276f dotnet run\r\nMicrosoft Windows 10 Pro|C:\\WINDOWS|\\Device\\Harddisk0\\Partition3\r\n```",
+      "created_at": "2021-02-03T19:03:06Z",
+      "updated_at": "2021-02-03T19:03:06Z"
+    }
+  ],
+  "created_at": "2019-08-23T13:08:15Z",
+  "number": 10433,
+  "state": "closed",
+  "title": "Get-CimInstance is not recognized as the name of a cmdlet -PowerShell 7 SDK",
+  "updated_at": "2021-02-03T19:03:07Z"
+}

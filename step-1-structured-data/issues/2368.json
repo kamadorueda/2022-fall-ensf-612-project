@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2368",
+  "author": "iSazonov",
+  "body": "I need help in creating the tests.\n\nI am ready to fix #2327 but blocked by the lack of tests. \nNow tests for Get-WinEvent is dummy. https://github.com/PowerShell/PowerShell/tree/master/test/powershell/Modules/Microsoft.PowerShell.Diagnostics\n\nThe problem is that it is needed to check the \"UserData\" section of events as a separate case among other tests. This section only is in logs which is empty by default. These logs is:\nMicrosoft-Windows-AppLocker/EXE and DLL\nMicrosoft-Windows-AppLocker/MSI and Script\nMicrosoft-Windows-PrintService/Operational\nMicrosoft-Windows-PrintService/Admin\n\nAs an alternative, I assume that we can exploit the method used in the test of upgrading help system.\nhttps://github.com/PowerShell/PowerShell/blob/master/test/powershell/engine/HelpSystem.Tests.ps1\nIn other words, create a .evtx file or files with the necessary events and use them instead of real system logs.\n\nWhat are your thoughts?\n",
+  "closed_at": "2016-10-07T19:17:28Z",
+  "comments": [
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "I think that if you need specific events to be present, you can't assume that any eventlog file on our CI system will have what you need. I think the best approach is to provide a the specific .evtx file that you need (an additional file for use by a test should go into the `assets` directory where the `Pester` script is.\n\nI'll be adding a few more Get-WinEvent tests shortly\n",
+      "created_at": "2016-09-28T20:21:53Z",
+      "updated_at": "2016-09-28T20:21:53Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@JamesWTruher Thanks for the quick help!\n\nThus  .evtx file.\nHere I have one doubt. If we use predetermined file it will be too difficult to maintain and easy to break. The best way to create the evtx on-the-fly from the auxiliary text file containing events in XML format. This requires writing provider on C#. I'm not sure that the solution already exists.\n\nI found another way to meet the task of testing event filters:\n\n> Enable and clear PrintService log\n> Create three dummy printers\n> Print to the printers\n> Make filter test\n\nI suppose it is easier than evtx (but is not so universally).\n\nSamle code:\n\n```\nContext 'Get-WinEvent FilterHashtable parameter' { \n        # for this set of tests we need to have a log which has multiple events with UsedData section (ex. PrintService log)\n\nBeforeAll {\n   if ( ! $IsWindows ) { return } # @JamesWTruher you dont mentioned in your test guide fot \"Context\"\n\n   // PrintService/Operational is Disabled by default\n   // Required admins rights\n   // wevtutil sl <logname> /e:true\n   $EventLog = Get-WinEvent -LogName Microsoft-Windows-PrintService/Operational\n   if ( $EventLog.IsEnabled )\n   {\n      $IsEventLogEnabled = $true\n   } else\n   {\n      $EventLog.IsEnabled = $true\n      $EventLog.saveChanges()\n      $IsEventLog = $false\n   }\n   # Is this possible in a test environment?\n   Clear-EventLog -LogName Microsoft-Windows-PrintService/Operational\n\n   # Create dummy printers\n   rundll32 printui.dll,PrintUIEntry /if /b \"Test Null Printer 1\" /f \"%systemroot%\\inf\\ntprint.inf\" /r \"nul:\" /m \"Generic / Text Only\" /z\n   rundll32 printui.dll,PrintUIEntry /if /b \"Test Null Printer 2\" /f \"%systemroot%\\inf\\ntprint.inf\" /r \"nul:\" /m \"Generic / Text Only\" /z\n   rundll32 printui.dll,PrintUIEntry /if /b \"Test Null Printer 3\" /f \"%systemroot%\\inf\\ntprint.inf\" /r \"nul:\" /m \"Generic / Text Only\" /z\n\n   # Create print events\n   \"Test text 1\" | Out-Printer -Name \"Test Null Printer 1\"\n   \"Test text 2\" | Out-Printer -Name \"Test Null Printer 1\"\n   \"Test text 3\" | Out-Printer -Name \"Test Null Printer 1\"\n   \"Test text 1\" | Out-Printer -Name \"Test Null Printer 2\"\n   \"Test text 2\" | Out-Printer -Name \"Test Null Printer 2\"\n   \"Test text 3\" | Out-Printer -Name \"Test Null Printer 2\"\n   \"Test text 1\" | Out-Printer -Name \"Test Null Printer 3\"\n   \"Test text 2\" | Out-Printer -Name \"Test Null Printer 3\"\n   \"Test text 3\" | Out-Printer -Name \"Test Null Printer 3\"\n}\n\nAfterAll {\n   # By default Disable PrintService log\n   if ( !$IsEventLogEnabled )\n   {\n      $EventLog.IsEnabled = $false\n      $EventLog.saveChanges()\n   }\n\n   # Delete dummy printers\n   rundll32 printui.dll,PrintUIEntry /dl /n \"Test Null Printer 1\"\n   rundll32 printui.dll,PrintUIEntry /dl /n \"Test Null Printer 2\"\n   rundll32 printui.dll,PrintUIEntry /dl /n \"Test Null Printer 3\"\n\n}\n```\n",
+      "created_at": "2016-09-29T05:50:54Z",
+      "updated_at": "2016-09-29T05:50:54Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "If a evtx file works on all platforms we support, I think it's reasonable to use a fixed file, but I do like the idea of generating one as well as long as it's easy to control exactly what goes in it.\n\nYour sample uses printers - I don't think that would work everywhere we might test PowerShell, e.g. on Nano.\n\nI have a [simple example](https://gist.github.com/lzybkr/6e4436d300a9050ef398a2f15554fc12) of creating an EventSource in PowerShell. I think it's possible to adapt this sample so it produces events for the event log, but I haven't tried, so that's on approach I'd look into.\n\nThe `Windows PowerShell` events are also a good source of events to generate the evtx from, but that could be a tiny bit more fragile depending on how you test and on any changes we might make in generating events.\n",
+      "created_at": "2016-09-29T17:24:46Z",
+      "updated_at": "2016-09-29T17:24:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr Thanks for comments.\n\nClear about Nano and printers.\n\nNow @JamesWTruher made evtx. This is some trick. And it can only be supported by Powershell team. :confused:\n\nI'd like to see something that the community can support themselves without the ability to break current tests and waiting help from Powershell team.\nThe simplest way to log needed events is New-WinEvent. In this case, we only need to register custom provider which will support events of the desired format (event templates). I'm not sure what New-EventLog is suitable.\n",
+      "created_at": "2016-09-30T08:38:19Z",
+      "updated_at": "2016-09-30T08:40:57Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Resolved via PR #2373\n",
+      "created_at": "2016-10-07T19:17:28Z",
+      "updated_at": "2016-10-07T19:17:28Z"
+    }
+  ],
+  "created_at": "2016-09-27T14:11:33Z",
+  "number": 2368,
+  "state": "closed",
+  "title": "Need tests for Get-WinEvent",
+  "updated_at": "2017-03-15T06:49:56Z"
+}

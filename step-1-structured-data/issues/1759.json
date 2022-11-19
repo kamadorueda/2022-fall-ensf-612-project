@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/1759",
+  "author": "SteveL-MSFT",
+  "body": "1. Create a script with the following code:\r\n\r\n```powershell\r\nfunction foo\r\n{\r\n    [CmdletBinding()]\r\n    param()\r\n\r\nprocess\r\n{\r\n    try\r\n    {\r\n        Write-Error 'boo'\r\n    }\r\n    finally { }\r\n}\r\n\r\n}\r\n\r\nfunction bar\r\n{\r\n    foo -ErrorAction Ignore\r\n}\r\n```\r\n\r\n1. Dot-source that script to import the function definitions.\r\n2. Call the \"bar\" function.\r\n\r\nExpected result:\r\n    Nothing (no output; no error--bar is calling foo with \"-ErrorAction Ignore\").\r\n\r\nActual result:\r\n    I get an error, and it's not even the one written by foo:\r\n\r\n```\r\nWrite-Error : The value Ignore is not supported for an ActionPreference variable. The provided value should be used only as a value for a preference\r\nparameter, and has been replaced by the default value. For more information, see the Help topic, \"about_Preference_Variables.\"\r\nAt E:\\temp\\ps_ea_ignore_2.ps1:11 char:13\r\n-             Write-Error 'boo'\r\n-             ~~~~~~~~~~~~~~~~~\r\n  - CategoryInfo          : NotSpecified: (:) [Write-Error], NotSupportedException\r\n  - FullyQualifiedErrorId : System.NotSupportedException,Microsoft.PowerShell.Commands.WriteErrorCommand\r\n```\r\n\r\nDan Thompson:\r\nIn addition to being annoying for straight-up calling advanced functions (you can't use \"-ErrorAction Ignore\" with them), this also hampers meta-programming (you can't do \"& $someCmd -ErrorAction Ignore\", because you might not know if $someCmd is an advanced function or not).\r\n",
+  "closed_at": "2019-10-22T00:34:26Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "TFS:6868128\n",
+      "created_at": "2016-09-29T20:21:05Z",
+      "updated_at": "2016-09-29T20:21:05Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "This kinda stinks, but it's been there for a long time. I'm going to put it in the DevEx Project, and we can triage it against everything there. ",
+      "created_at": "2017-05-24T17:16:54Z",
+      "updated_at": "2017-05-24T17:16:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "More specifically, I think what's going on is (disclaimer: haven't looked at the source code):\r\n\r\nWhen an advanced function is called, the `-ErrorAction` _parameter value_ is translated into the `$ErrorActionPreference` _variable value_ in the scope of the function, presumably so as to propagate the setting to calls to other cmdlets made inside the same function.\r\n\r\nThe above is the cause of the problem: `Ignore` is not supported as a value of the preference _variable_, and the error message to that effect is triggered _whenever something inside the advanced function writes to the error stream_, including `Write-Error` itself.\r\n\r\nA simplified example:\r\n\r\n```powershell\r\nfunction Get-Foo {\r\n    [CmdletBinding()] param ()\r\n    # Output the function-scope $ErrorActionPreference variable's value.\r\n    # NOTE: Only set if -ErrorAction ... was passed.\r\n    (Get-Variable -Scope 0 ErrorActionPreference).Value\r\n    # Trigger an error; if -ErrorAction Ignore was passed, this will\r\n    # provoke the spurious \"The value Ignore is not supported for an ActionPreference variable.\"\r\n    # error.\r\n    1 / 0\r\n  }\r\n```\r\n\r\nSourcing this function and invoking it as `Get-Foo -ErrorAction Ignore` shows the problem.\r\n\r\n",
+      "created_at": "2017-12-15T22:29:04Z",
+      "updated_at": "2017-12-15T22:29:04Z"
+    },
+    {
+      "author": "schittli",
+      "author_association": "NONE",
+      "body": "> \u2026, but it's been there for a long time. \u2026\r\n\r\n**Just because something was there for a long time \r\nshould never be an argument to decide a software development question.**\r\nIt's just a question of a short time until any maintained Software gets a new release and in PowerShell, a Script can define the least expected runtime version.\r\n\r\nSo, it's no problem to let design errors disappear slowly and user-friendly :-)",
+      "created_at": "2018-09-13T08:40:53Z",
+      "updated_at": "2018-09-13T08:40:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, it would be nice to get that fixed soon.\r\n\r\nIn the meantime, here is a **workaround**:\r\n\r\nPlace the following statement at the start [of the `begin` block] of your advanced function:\r\n\r\n```powershell\r\nif ($ErrorActionPreference -eq 'Ignore') { \r\n  $ErrorActionPreference = 'Ignore' # create *local* variable with *string* value\r\n}\r\n```\r\n\r\nThis **takes advantage of _another_ bug, #3483**:\r\nIf you create a preference variable in a non-global scope, it isn't type-constrained, so the local `$ErrorActionPreference` instance truly contains the _string_ `'Ignore'`.\r\n\r\nDespite being a _string_, the value _does_ take effect and, because the check that causes the unwanted error expects an instance of the proper enumeration type, `[System.Management.Automation.ActionPreference]`, the check is effectively _suppressed_.\r\n\r\n",
+      "created_at": "2018-11-29T17:13:20Z",
+      "updated_at": "2019-03-15T16:07:20Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "The better workaround is to call `$PSCmdlet.WriteError` instead -- which is how binary cmdlets report errors.\r\n\r\nI say it's strange insisting that one not use `Ignore` for the preference variable.",
+      "created_at": "2019-03-15T15:54:31Z",
+      "updated_at": "2019-03-15T15:54:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I say it's strange insisting that one not use `Ignore` for the preference variable.\r\n\r\nAgreed.\r\n\r\n---\r\n\r\n> The better workaround is to call `$PSCmdlet.WriteError` instead -- which is how binary cmdlets report errors.\r\n\r\nIt's better in the sense that it doesn't exploit _another_ bug the way that the above one-time execution of `if ($ErrorActionPreference -eq 'Ignore') { $ErrorActionPreference = 'Ignore' }` does, but it's certainly a lot more cumbersome:\r\n\r\n```powershell\r\nWrite-Error 'boo'\r\n```\r\n\r\nvs. the _roughly_ equivalent:\r\n\r\n```powershell\r\n$PSCmdlet.WriteError(\r\n    [Management.Automation.ErrorRecord]::new(\r\n        'boo',\r\n        $null,\r\n        [Management.Automation.ErrorCategory]::NotSpecified,\r\n        $null\r\n    )\r\n)\r\n```\r\n\r\n",
+      "created_at": "2019-03-15T16:27:17Z",
+      "updated_at": "2019-03-15T16:27:17Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "Exactly what I meant by \"better\". You get that working even if the other bug is fixed...\r\n\r\n> ```powershell\r\n> if ($ErrorActionPreference -eq 'Ignore') { $ErrorActionPreference = 'Ignore' }\r\n> ```\r\n\r\nOr we could use\r\n\r\n```powershell\r\n$local:PSDefaultParameterValues = @{ 'ErrorAction' = $ErrorActionPreference.ToString() }\r\n```\r\n",
+      "created_at": "2019-03-15T16:34:58Z",
+      "updated_at": "2019-03-15T16:34:58Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I was just reading the code behind this, and I have to ask: given how common parameters work in PowerShell today, setting action preference variables to ensure that the desired behavior propagates to other commands, isn't this a PSScriptAnalyzer problem that is inappropriately being handled internally within PowerShell code?\r\n\r\nFor reference, see [this comment in ExecutionContext.cs](https://github.com/PowerShell/PowerShell/blob/d80154430d600a52a1d1e3a9f3ecf032b36185d4/src/System.Management.Automation/engine/ExecutionContext.cs#L577-L578).\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/d80154430d600a52a1d1e3a9f3ecf032b36185d4/src/System.Management.Automation/engine/ExecutionContext.cs#L577-L578\r\n\r\nThat feels very wrong to me, and it gets in the way of being able to do something really useful (using `-ErrorAction Ignore` as appropriate when invoking advanced functions).\r\n\r\nIMHO the best solution to this issue is to allow people to shoot themselves in the foot, but ensure that the tools they should be using (PSScriptAnalyzer directly or integrated into an editor like VS Code) properly flag that as red and identify that you should never set an action preference variable to `Ignore`, with proper guidance on how they should handle such things.\r\n\r\nThat solution fixes this issue, and is positioned to do a much better job educating the scripter so that they know better in the future.",
+      "created_at": "2019-04-18T14:17:07Z",
+      "updated_at": "2019-04-18T18:26:25Z"
+    },
+    {
+      "author": "scott1138",
+      "author_association": "NONE",
+      "body": "Another use case - when running Pester tests it's useful to not have any output and let Pester handle the test case reporting.",
+      "created_at": "2019-08-18T05:40:45Z",
+      "updated_at": "2019-08-18T05:40:45Z"
+    },
+    {
+      "author": "adamedx",
+      "author_association": "NONE",
+      "body": "Just adding to the chorus asking for a fix -- whatever the cause of the issue, the behavior makes no sense and hampers many scenarios. Please fix in PowerShell 6 and 7.",
+      "created_at": "2019-09-25T15:17:47Z",
+      "updated_at": "2019-09-25T15:17:47Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "The fix for this was added to PowerShell 7 preview 4. This issue can be closed.",
+      "created_at": "2019-09-25T15:47:39Z",
+      "updated_at": "2019-09-25T15:47:39Z"
+    },
+    {
+      "author": "adamedx",
+      "author_association": "NONE",
+      "body": "No 6 then? Whatever, I'll take it in 7 -- thanks!",
+      "created_at": "2019-09-25T15:49:51Z",
+      "updated_at": "2019-09-25T15:49:51Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Any changes to 6 at this point would only be made for security reasons.",
+      "created_at": "2019-09-25T15:52:44Z",
+      "updated_at": "2019-09-25T15:52:44Z"
+    },
+    {
+      "author": "adamedx",
+      "author_association": "NONE",
+      "body": "yay",
+      "created_at": "2019-10-22T03:38:16Z",
+      "updated_at": "2019-10-22T03:38:16Z"
+    },
+    {
+      "author": "daverickdunn",
+      "author_association": "NONE",
+      "body": "Still an issue in 7.1...\r\n\r\n```\r\nName             : ConsoleHost\r\nVersion          : 7.1.0-preview.2\r\nInstanceId       : d67d4374-65bd-4b90-b638-f51a4d71cd03\r\nUI               : System.Management.Automation.Internal.Host.InternalHostUserInterface\r\nCurrentCulture   : en-GB\r\nCurrentUICulture : en-US\r\nPrivateData      : Microsoft.PowerShell.ConsoleHost+ConsoleColorProxy\r\nDebuggerEnabled  : True\r\nIsRunspacePushed : False\r\nRunspace         : System.Management.Automation.Runspaces.LocalRunspace\r\n```",
+      "created_at": "2020-05-14T10:06:33Z",
+      "updated_at": "2020-05-14T10:06:33Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@daverickdunn I'm not seeing it in 7.1preview2; can you share what you're doing that's making that show up for you?",
+      "created_at": "2020-05-14T11:31:03Z",
+      "updated_at": "2020-05-14T11:31:03Z"
+    }
+  ],
+  "created_at": "2016-08-12T19:44:11Z",
+  "number": 1759,
+  "state": "closed",
+  "title": "-ErrorAction Ignore doesn't work for calling advanced functions",
+  "updated_at": "2020-05-14T11:31:03Z"
+}

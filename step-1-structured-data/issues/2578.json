@@ -1,0 +1,132 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2578",
+  "author": "powercode",
+  "body": "The current implementation for getting the parent id of the current process if extremely slow:\r\nThe parent Id is not even cached, but is retrieved over and over again. On several systems I see module load times of 5+ seconds, where almost all of the time is spent blocking on the wmi call, waiting for WmiPrvSe to enumerate all processes.\r\nThe Id of the process that created us will not change, so cache it and/or use a more efficient method of getting the parent id.\r\n\r\nThe check for process start time would still have to be done (not in the example).\r\n\r\n\r\n\r\n```csharp\r\n/// suggested alternative (about 100 times faster)\r\npublic static class ProcessInfoUtil\r\n{\r\n\tpublic static System.Diagnostics.Process GetParentProcess() { return ParentProcessId == 0 ? null : System.Diagnostics.Process.GetProcessById(ParentProcessId); }\r\n\r\n\tpublic static readonly int ParentProcessId = GetParentProcessId();\r\n\r\n\tprivate static int GetParentProcessId()\r\n\t{\r\n\t\tvar pi = new PROCESS_BASIC_INFORMATION();\r\n\t\tint actual;\r\n\t\tif (0 == NativeMethods.NtQueryInformationProcess(new IntPtr(-1), 0/*processbasicInformation*/, ref pi, pi.Size, out actual))\r\n\t\t{\r\n\t\t\treturn (int)pi.InheritedFromUniqueProcessId;\r\n\t\t}\r\n\t\telse \r\n\t\t{\r\n\t\t\treturn 0;\r\n\t\t}\r\n\t}\r\n\r\n\t[StructLayout(LayoutKind.Sequential, Pack = 1)]\r\n\tprivate struct PROCESS_BASIC_INFORMATION\r\n\t{\r\n\t\tpublic IntPtr ExitStatus;\r\n\t\tpublic IntPtr PebBaseAddress;\r\n\t\tpublic IntPtr AffinityMask;\r\n\t\tpublic IntPtr BasePriority;\r\n\t\tpublic UIntPtr UniqueProcessId;\r\n\t\tpublic IntPtr InheritedFromUniqueProcessId;\r\n\r\n\t\tpublic int Size { get { return Marshal.SizeOf(typeof(PROCESS_BASIC_INFORMATION));}}\r\n\t}\r\n\r\n\tstatic class NativeMethods\r\n\t{\r\n\t[DllImport(\"NtDll\", SetLastError=true)]\r\n\tpublic static extern int NtQueryInformationProcess(IntPtr ProcessHandle, int processInformationClass, ref PROCESS_BASIC_INFORMATION ProcessInformation, int processInformationLength, out int returnLength);\r\n\t}\r\n}\r\n```\r\n\r\n```csharp\r\n/// this is the current implementation\r\n string wmiQuery = String.Format(CultureInfo.CurrentCulture,\r\n                                            \"Select * From Win32_Process Where Handle='{0}'\",\r\n                                            current.Id);\r\n\r\n            using (CimSession cimSession = CimSession.Create(null))\r\n            {\r\n                IEnumerable<CimInstance> processCollection =\r\n                    cimSession.QueryInstances(\"root/cimv2\", \"WQL\", wmiQuery);\r\n\r\n                int parentPid =\r\n                    processCollection.Select(\r\n                        cimProcess =>\r\n                        Convert.ToInt32(cimProcess.CimInstanceProperties[\"ParentProcessId\"].Value,\r\n                                        CultureInfo.CurrentCulture)).FirstOrDefault();\r\n\r\n                if (parentPid == 0)\r\n                    return null;\r\n...\r\n```",
+  "closed_at": "2017-04-26T01:07:55Z",
+  "comments": [
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Just synced head and saw that a faster implementation is committed instead of the WMI one.\n\nNtQueryInformationProcess will still be much faster, but it is perhaps fast enough already.\n",
+      "created_at": "2016-11-01T15:53:52Z",
+      "updated_at": "2016-11-01T15:53:52Z"
+    },
+    {
+      "author": "mirichmo",
+      "author_association": "MEMBER",
+      "body": "@SteveL-MSFT Please comment\n",
+      "created_at": "2016-11-01T21:32:13Z",
+      "updated_at": "2016-11-01T21:32:13Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "The WMI Query was replaced.  If @powercode believes NtQueryInformationProcess is faster, I would suggest prototyping it and measuring the perf.  I do agree that caching it would be something we should do eventually.\n",
+      "created_at": "2016-11-01T21:57:17Z",
+      "updated_at": "2016-11-01T21:57:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "[MSDN](https://msdn.microsoft.com/en-us/library/windows/desktop/ms684280%28v=vs.85%29.aspx) say:\n\n> NtQueryInformationProcess may be altered or unavailable in future versions of Windows.\n\nSo perhaps it's enough to make caching.\n",
+      "created_at": "2016-11-02T05:00:58Z",
+      "updated_at": "2016-11-02T05:00:58Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "I am working on a pull request for the caching. Promising results so far.\n",
+      "created_at": "2016-11-02T11:52:10Z",
+      "updated_at": "2016-11-02T11:52:10Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@powercode should I assign this to you since you are working on it?\n",
+      "created_at": "2016-11-02T15:53:56Z",
+      "updated_at": "2016-11-02T15:53:56Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT I submitted a pull request that referenced this issue. #2588 \n",
+      "created_at": "2016-11-02T15:58:31Z",
+      "updated_at": "2016-11-02T15:58:31Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "From my point of view, this is done. Are there any remaining issues?",
+      "created_at": "2016-11-21T17:53:15Z",
+      "updated_at": "2016-11-21T17:53:15Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@powercode once the PR is merged, this issue should be closed",
+      "created_at": "2016-11-21T17:54:28Z",
+      "updated_at": "2016-11-21T17:54:28Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "We're just waiting on final sign-off from @LeeHolmes.",
+      "created_at": "2016-11-21T22:05:41Z",
+      "updated_at": "2016-11-21T22:05:41Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "How long does it take for a fix like this to reach a FullClr release?\r\n\r\nI have a startup time of PowerShell that often exceeds half a minute, since our IT department added ExecutionPolicy ByPass in a GPO.\r\n\r\n```\r\nLoading personal and system profiles took 32682ms.\r\n```\r\nIt really is painful! ",
+      "created_at": "2016-11-21T22:40:59Z",
+      "updated_at": "2016-11-21T22:40:59Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@powercode the change to replace the WMI query was accepted into servicing already so that should be available in Dec (I believe early flights can get it in Nov as preview).  The caching code you provided is not planned to be taken back for PS5.",
+      "created_at": "2016-11-21T23:28:34Z",
+      "updated_at": "2016-11-21T23:28:34Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "Well, at least there will be an improvement!",
+      "created_at": "2016-11-21T23:43:18Z",
+      "updated_at": "2016-11-21T23:43:18Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@powercode Thank you very much for bringing this to my attention.  \r\n\r\n> @powercode the change to replace the WMI query was accepted into servicing already so that should be available in Dec (I believe early flights can get it in Nov as preview). \r\n\r\n@SteveL-MSFT Can you tell me how I can tell whether this change has been applied to a computer?\r\n\r\n`ccmexec.exe` (the System Center Configuration Manager client) currently suffers terribly from the slow loading of PowerShell.exe.  `ccmexec.exe` can use powershell scripts as detection methods for Applications.  `ccmexec.exe` launches a new `powershell.exe` for each script.  Some of our clients run about 300 hundred of these powershell detection scripts on each detection run.  That means that `ccmexec.exe` spends approximately 120 minutes executing 300 detection scripts on an i7 Surface Pro 3.  Because `powershell.exe` (or something it invokes) pins one of the CPUs that represents about 70% of the battery life of the device just to detect which applications are installed.  I'm really hopeful that this fix will solve it, and I'd like to test it (and the caching), if possible.",
+      "created_at": "2016-12-15T20:22:48Z",
+      "updated_at": "2016-12-15T20:22:48Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@alx9r I believe it's rolled into the patch Tuesday this month, so if you get the latest updates, I believe you should have it (powershell.exe will have a more recent date).",
+      "created_at": "2016-12-15T23:41:31Z",
+      "updated_at": "2016-12-15T23:41:31Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "Since upgrading to PSVersion 5.1.14409.1005 launching powershell.exe seems to launch almost immediately.  It looks promising that [the worst manifestations of this problem that I was seeing](https://github.com/PowerShell/PowerShell/issues/2578#issuecomment-267433848) are resolved.  Thanks to whomever made that happen.  \ud83d\udc4d",
+      "created_at": "2017-02-03T17:49:16Z",
+      "updated_at": "2017-02-03T17:49:16Z"
+    },
+    {
+      "author": "nickolay",
+      "author_association": "NONE",
+      "body": "I came across this issue while troubleshooting slow script execution (`powershell -NoProfile -ExecutionPolicy Bypass -file path\\to\\script.ps1`) in PowerShell (5.1.17134.165). I narrowed it down to `Get-ExecutionPolicy` being slow (~5 sec); and it got resolved by restarting the computer.\r\n\r\nJudging from the commit here it seems that if one has the GPO setting for ExecutionPolicy (i.e. `Get-ExecutionPolicy -List` displays MachinePolicy as something other than Undefined), powershell still does the parent process check when first executing a script, which can take a few seconds (with many processes running?).",
+      "created_at": "2018-08-26T20:54:00Z",
+      "updated_at": "2018-08-26T20:54:00Z"
+    }
+  ],
+  "created_at": "2016-11-01T12:38:19Z",
+  "number": 2578,
+  "state": "closed",
+  "title": "Slow module load caused by inefficient PSUtils.GetParentProcess",
+  "updated_at": "2018-08-30T00:24:24Z"
+}

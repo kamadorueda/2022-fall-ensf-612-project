@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17335",
+  "author": "powercode",
+  "body": "### Summary of the new feature / enhancement\n\nUsing dependency injection in PowerShell is hard today. (I'm thinking about C# modules)\r\n\r\nI'm considering adding an IServiceProvider property to Runspace/SessionState (and InitialSessionState) to help with getting hold of an IServiceProvider in a way that is accessible from cmdlets, and also easy to inject when writing tests.\r\n\r\nIs this something that has already been considered?\r\n\r\nWorth a PR?\n\n### Proposed technical implementation details (optional)\n\n_No response_",
+  "closed_at": "2022-05-29T10:00:44Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@powercode More description about the scenario with examples would be helpful.",
+      "created_at": "2022-05-13T16:23:04Z",
+      "updated_at": "2022-05-13T16:23:04Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "#17349 shows possible implementations.\r\n\r\nThe bigger context is being able to write testable modules in C#, where common services can be injected into cmdlets.\r\nNormally, things like this are done by injection into the constructors, but since PowerShell owns the construction of cmdlets, we can at least be able to resolve services via an IServiceProvider.\r\n\r\nI want to be able to have a common base class library for the things that are common across our modules, for example, logging, telemetry, and default implementations for things that are abstracted for testing, such as IFileSystem, IEnvironment, and a native process abstraction we have to make testing easier.\r\n\r\nTests are often run in parallel, and having the serviceprovider for each test (often with mocked interface implementations) injected into each powershell would really make it easier.\r\n\r\n",
+      "created_at": "2022-05-16T14:48:53Z",
+      "updated_at": "2022-05-16T14:48:53Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@powercode   Please provide examples of how this would be used.",
+      "created_at": "2022-05-23T20:09:18Z",
+      "updated_at": "2022-05-23T20:09:18Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "To be able to test code like this, that depends on things that needs to be mocked for testing:\r\n\r\n```csharp\r\n\r\n\r\npublic interface IDateProvider\r\n{\r\n    DateTime Now { get; }\r\n    DateTime UtcNow { get; }\r\n}\r\n\r\n\r\n[Cmdlet(VerbsCommon.Get, \"Date\")]\r\n[OutputType(typeof(DateTime))]\r\npublic class GetDateCommand : PSCmdlet\r\n{\r\n    private IDateProvider DateProvider => SessionState.ServiceProvider.GetRequiredService<IDateProvider>();\r\n    private ILogger<GetDateCommand> Logger => SessionState.ServiceProvider.GetRequiredService<ILogger<GetDateCommand>>();\r\n\r\n    protected override void EndProcessing()\r\n    {\r\n        var logger = Logger;\r\n        \r\n        var date = DateProvider.Now;\r\n\r\n        logger.LogInformation(\"Getting date {now}\", date);\r\n        \r\n        WriteObject(date);\r\n    }\r\n}\r\n```\r\n\r\nA host could do the following:\r\n\r\n```csharp\r\n\r\npublic class DefaultDateProvider : IDateProvider\r\n{\r\n    public DateTime Now => DateTime.Now;\r\n    public DateTime UtcNow => DateTime.UtcNow;\r\n}\r\n\r\nclass Program\r\n{\r\n    public static int Main(string[] args)\r\n    {\r\n        var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection()\r\n            .AddLogging(builder => { builder.AddEventSourceLogger(); })\r\n            .AddSingleton(new DefaultDateProvider());\r\n                        \r\n        var iss = InitialSessionState.Create();\r\n        iss.ServiceProvider = services.BuildServiceProvider();\r\n\r\n        var exitCode = Microsoft.PowerShell.ConsoleShell.Start(iss, \"Banner\", \"Help\", args);\r\n        return exitCode;\r\n    }\r\n}\r\n```\r\n\r\nAnd test could look like this:\r\n```csharp\r\n\r\n[TestClass]\r\npublic class DateTests\r\n{\r\n    [TestMethod]\r\n    public void TestGetUtcDate()\r\n    {\r\n        var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection()\r\n            .AddLogging(builder => { builder.AddDebug(); })\r\n            .AddSingleton(GetMockedDateProvider(\r\n                () => new DateTime(2022, 10, 10, 11, 12, 13, DateTimeKind.Utc),\r\n                () => new DateTime(2022, 10, 10, 11, 12, 13, DateTimeKind.Local)));\r\n\r\n        var iss = InitialSessionState.CreateDefault();\r\n        iss.ServiceProvider = services.BuildServiceProvider;\r\n\r\n        iss.Commands.Add(new SessionStateCmdletEntry(\"Get-Date\", typeof(GetDateCommand), null));\r\n\r\n        using var ps = PowerShell.Create(iss);\r\n        ps.AddCommand(new CmdletInfo(\"Get-Date\", typeof(GetDateCommand)));\r\n        var actual = ps.Invoke<DateTime>().First();\r\n        var expected = new DateTime(2022, 10, 10, 11, 12, 13, DateTimeKind.Utc);\r\n        Assert.AreEqual(expected, actual);\r\n    }\r\n    \r\n    IDateProvider GetMockedDateProvider(Func<DateTime> utcFunc, Func<DateTime> nowFunc)\r\n    {\r\n        var dateMock = new Moq.Mock<IDateProvider>();\r\n        dateMock.Setup(d => d.UtcNow).Returns(utcFunc());\r\n        dateMock.Setup(d => d.Now).Returns(nowFunc());\r\n        return dateMock.Object;\r\n    }\r\n}\r\n\r\n```\r\n\r\n\r\n",
+      "created_at": "2022-05-24T18:58:01Z",
+      "updated_at": "2022-05-24T18:58:01Z"
+    },
+    {
+      "author": "powercode",
+      "author_association": "COLLABORATOR",
+      "body": "If we need to use the default host, we can fall back to something like:\r\n\r\n```csharp\r\nprivate IDateProvider DateProvider => SessionState.ServiceProvider.GetService<IDateProvider>() ?? new DefaultDateProvider();\r\n```",
+      "created_at": "2022-05-24T18:58:59Z",
+      "updated_at": "2022-05-24T18:58:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The Engine WG discussed this yesterday. We agree that there is value in providing a uniform way to use dependency injection in PowerShell, but we would need an alternate proposal that solves the conflict issue described in [#17349 (comment)](https://github.com/PowerShell/PowerShell/pull/17349#discussion_r874075860). We would need a way to ensure that a module author could obtain an `IServiceProvider` that is unique to their module (or group of modules).\r\n\r\nFor now we recommend utilizing the pattern suggested in [#17349 (comment)](https://github.com/PowerShell/PowerShell/pull/17349#discussion_r873888306).",
+      "created_at": "2022-05-27T15:17:33Z",
+      "updated_at": "2022-05-27T15:17:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Isn't this the same problem with isolating modules using the same library? We discussed this for a long time and came to the consensus that it is the task of the author of the module to provide isolation. Perhaps the DJ already supports this? If not, perhaps this should be discussed in the .Net repository?",
+      "created_at": "2022-05-28T05:44:22Z",
+      "updated_at": "2022-05-28T05:44:22Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as declined and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2022-05-29T10:00:43Z",
+      "updated_at": "2022-05-29T10:00:43Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Isn't this the same problem with isolating modules using the same library? We discussed this for a long time and came to the consensus that it is the task of the author of the module to provide isolation.\r\n\r\nTechnically you could get around this with ALC isolation but I wouldn't say it's the same issue. Considering how much trouble related issues have been, I don't think it's a good idea to add more on that pile. Especially since the use of DI is not blocked, I gave an example of a working pattern one can use today.\r\n\r\n> Perhaps the DJ already supports this? If not, perhaps this should be discussed in the .Net repository?\r\n\r\nA service provider is mostly intended to be used by a single author + maybe the framework that is being utilized. I'm unsure what their answer would be other than recommending a different service provider per author, but you're welcome to start a discussion there.",
+      "created_at": "2022-06-02T19:31:52Z",
+      "updated_at": "2022-06-02T19:31:52Z"
+    }
+  ],
+  "created_at": "2022-05-13T15:54:47Z",
+  "number": 17335,
+  "state": "closed",
+  "title": "Let each RunSpace have an IServiceProvider",
+  "updated_at": "2022-06-02T19:31:52Z"
+}

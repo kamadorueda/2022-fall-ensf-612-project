@@ -1,0 +1,405 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/1908",
+  "author": "be5invis",
+  "body": "Currently PowerShell parses STDOUT as string when piping from an EXE, while in some cases it should be preserved as a byte stream, like this scenario:\n\n``` powershell\ncurl.exe http://whatever/a.png > a.png\n```\n\nor\n\n``` powershell\nnode a.js | gzip -c > out.gz\n```\n\nAffected patterns include: `native | native`, `native > file` and (maybe) `cat file | native`.\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "be5invis",
+      "author_association": "NONE",
+      "body": "@vors @lzybkr \nThe current `NativeCommandProcessor` breaks:\n- LF line endings.\n- Non-ASCII text within UTF-8 without BOM header.\n- Binary file redirects (like `curl.exe`\u2019s output).\n- `>` layouts text into 80 columns by default.\n",
+      "created_at": "2016-08-18T23:28:51Z",
+      "updated_at": "2016-08-18T23:28:51Z"
+    },
+    {
+      "author": "ForNeVeR",
+      "author_association": "NONE",
+      "body": "Maybe add a cmdlet/operator to call native command and get its raw output (as a byte array / stream?), something like this:\n\n``` powershell\n# Consider ^& operator is an alias for Get-CommandRawOutputStream; this is just an example syntax\n$output = ^& curl.exe http://whatever/a.png # $output now is a byte array or stream\n$output > C:\\Temp\\file.png # file.png now is a valid image file\n\n# This should be valid, too:\n^& curl.exe http://whatever/a.png > C:\\Temp\\file.png\n```\n\nThis opens an opportunity for some additional usage patterns (you can put this raw content into variables, and pipe raw content from native commands to managed cmdlets).\n",
+      "created_at": "2016-08-25T04:04:41Z",
+      "updated_at": "2016-08-25T04:23:29Z"
+    },
+    {
+      "author": "ForNeVeR",
+      "author_association": "NONE",
+      "body": "But maybe we could add a special kind of redirection operator (like `2>&1`, `3>&1`, `*>&1` we already have), something like this (where `%>&1` is a new redirection operator that redirects command \"raw output\" without processing it as a string):\n\n``` powershell\n$output = curl.exe http://whatever/a.png %>&1\n$output > C:\\Temp\\file.png\n\n# Or even this:\ncurl.exe http://whatever/a.png %> C:\\Temp\\file.png # which is just awesome\n```\n\nOverall: I don't think that this kind of redirection should be tied to only native commands or some limited list of usage patterns (e.g. `native | native`).\n",
+      "created_at": "2016-08-25T04:11:07Z",
+      "updated_at": "2016-08-25T04:28:45Z"
+    },
+    {
+      "author": "be5invis",
+      "author_association": "NONE",
+      "body": "@ForNeVeR My proposal is that:\n1. For `native | native`, keep the bytes as-is. This is already purposed by @vors.\n2. For `ps | native`, add a set of cmdlets which encodes PS objects into bytes, perhaps `ps | encode-text utf-8 | native`.\n3. For `native | ps`, we can use the type system to identify whether a cmdlet accepts \u201craw input\u201d. For cmdlets like `out-file` or maybe `decode-text`, it will keep the bytes from `native`, and other cmdlets will use the parsed string as its input.\n",
+      "created_at": "2016-08-25T19:05:25Z",
+      "updated_at": "2016-08-25T19:05:25Z"
+    },
+    {
+      "author": "ForNeVeR",
+      "author_association": "NONE",
+      "body": "@be5invis okay, it seems like this proposal also supports all the relevant use cases I can imagine.\n",
+      "created_at": "2016-08-26T03:20:16Z",
+      "updated_at": "2016-08-26T03:20:16Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "Shouldn't this open up an RFC since this is a breaking change (changes the observed behaviour)?\n\nA workaround for this is to provide a cmdlet that stores the content in a temporary file. A working example is `Use-RawPipeline` in PowerShell Gallery. The current implementation is to store the file, but it could also be streamlined so that the file doesn't have to be stored.\n",
+      "created_at": "2016-09-02T06:05:29Z",
+      "updated_at": "2016-09-02T06:05:29Z"
+    },
+    {
+      "author": "jhclark",
+      "author_association": "NONE",
+      "body": "See also #559, where this appears to be actively discussed and worked on by @vors on the PowerShell team.\n",
+      "created_at": "2016-09-06T16:09:05Z",
+      "updated_at": "2016-09-06T16:09:05Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "Great discussion! Thank you all for the feedback.\n\nI'd like to share my plans about this work:\n- In the scope if this issue we will address only `native | native` and `native > file` behavior. Note, that although it could be seen as a breaking change, it would not be the case for text output. The behavior would be preserved. Byte output would be much more reliable without wrapping bytes in PS strings. We agreed with @lzybkr that it's not breaking, hence no RFC process would be applied.\n- I don't see the immediate need in enhancing `native | ps` case, since PS is able to consume strings only from the native commands. Although, somebody may want to write function like\n\n``` powershell\nfunction foo\n{\n  param([byte[]]$rawBytes)\n}\n```\n\nthey may archive it with a temp file or some other technique as @GeeLaw pointed out.\n- Similarly, `ps | native` case has a well established pattern: when ps objects need to be passed to the native command, we apply implicit `Out-String` and pass everything as a text.\n  Because PS doesn't use byte streams as a primitive for pipeline, I don't think we should develop special sugar to support it in the language directly. If there is a case, when it needs to be done, similar work-arounds can be used.\n\nWe can revisit the last two parts later, but I'd like to set expectations about scope of this issue.\n",
+      "created_at": "2016-09-12T17:41:42Z",
+      "updated_at": "2016-09-12T17:41:42Z"
+    },
+    {
+      "author": "be5invis",
+      "author_association": "NONE",
+      "body": "@vors However the current \u201c>\u201d is identical to `out-file`, so you have to add a special version of `out-file` which takes raw bytes. So why don\u2019t you give the ability to everyone?\n",
+      "created_at": "2016-09-12T20:20:17Z",
+      "updated_at": "2016-09-12T20:20:17Z"
+    },
+    {
+      "author": "masaeedu",
+      "author_association": "NONE",
+      "body": "@vors The change in #2450 greatly improves the experience, but the design still feels a little awkward and inconsistent. It seems to be based on arbitrary patterns rather than consistent behavior of operators and cmdlets with respect to input arguments of particular .NET types.\r\n\r\nAs a user I would expect binary operators like `|` to behave consistently given a LHS expression that evaluates to a byte stream (or some appropriate choice of byte stream-ish object), regardless of whether it is produced by invocation of a native executable, piping from a file, invocation of a PowerShell function/script/cmdlet, or .NET FFI. \r\n\r\nSimilarly, I would expect the `|` operator to behave consistently given a RHS that \"can accept stdin\", for some meaning of accepting stdin appropriate to the RHS expression in question. For native executables and files this is just sending the bytes to the correct file descriptor, for PowerShell invocables perhaps it would be `param([Stream]$rawBytes)` as you suggested.\r\n\r\nIf there is no way to overload `|`'s behavior so that this is not a breaking change, then we should have a different piping operator for raw streams, and cmdlets for converting between byte streams and guessed-encoding-decoded lines (similar to `$` and `~` from @GeeLaw's [`Use-RawPipeline`](https://psguy.me/modules/Use-RawPipeline/) project).",
+      "created_at": "2017-06-07T18:38:13Z",
+      "updated_at": "2017-06-07T18:38:13Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "Oh, https://psguy.me/modules/Use-RawPipeline/ is very interesting, thank you for the link.\r\n\r\nThere are 2 conversations going on here:\r\n1. just `native | native` (or `native > file`)\r\n2. `native | ps` and `ps | native`\r\n\r\nThey are highly related and it's true that solving (2) in a general way will buy us (1) automatically.\r\nHowever the scope of the work for (2) is much broader and includes RFC and what not, while the (1) is a low hanging fruit: it can be done in a non-breaking manner, greatly improve perf for common cases and the changes itself are very modest. Note that to achieve perf parity with bash, we would need (1) in one form or another.\r\n\r\nThat's why I think that it make sense to separate these two tasks.",
+      "created_at": "2017-06-07T20:05:35Z",
+      "updated_at": "2017-06-07T20:05:46Z"
+    },
+    {
+      "author": "masaeedu",
+      "author_association": "NONE",
+      "body": "@vors What I mean is that IMHO `native`, `ps` etc. shouldn't be distinct, first class concepts in the first place. It makes the language conceptually simpler if it consists only of expressions that can produce and consume .NET values and operators that can wire such expressions together. PowerShell is after all strongly typed, if not statically typed.\r\n\r\nChanging the language so that `(ping.exe 1.2.3.4).GetType()` is `Stream` (or some similar type with suitable metadata about the process) would be a way to synthesize native commands with the rest of Powershell in a less inconsistent way.\r\n\r\n> That's why I think that it make sense to separate these two tasks.\r\n\r\nDo you know if there's already an RFC or issue for the latter task?",
+      "created_at": "2017-06-07T20:39:42Z",
+      "updated_at": "2017-06-07T20:40:26Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "FYI `Use-RawPipeline` has been reworked to allow streamlined experience instead of having to store the content in a file and wait before the previous process ends to perform the next piped process. Its source code is available from https://github.com/GeeLaw/Use-RawPipeline",
+      "created_at": "2018-01-20T13:29:41Z",
+      "updated_at": "2018-01-20T13:29:41Z"
+    },
+    {
+      "author": "btjwork",
+      "author_association": "NONE",
+      "body": "There seems to be an assumption throughout this that PowerShell's philosophy that \"everything is a pipeline\" is OK.  However, I think there might be some value in thinking of the use case of \"PowerShell as a legacy native command launcher\" as distinct.  Would it be possible to allow the redirection operators to have their traditional meaning of redirecting the native command's stdout directly to the raw file instead of piping its output back to PowerShell?  Even if all of the encoding issues are resolved for general piping, giving a command a pipe when it expects a physical file is still a semantic change.\r\n\r\nRequiring a user to know that they need to specify special obscure options to say \"don't change the output of this command\" seems error-prone at best.  I'm arguing that redirecting a simple command directly to a file should be data-preserving by default.\r\n\r\nOr, is the philosophy that if someone wants to use non-text native commands that they should just switch back to a traditional cmd window?",
+      "created_at": "2018-02-28T18:12:40Z",
+      "updated_at": "2018-02-28T18:12:40Z"
+    },
+    {
+      "author": "guhuajun",
+      "author_association": "NONE",
+      "body": "@SteveL-MSFT \r\n\r\nFollowing command will be broken due to this issue.\r\ndocker save microsoft/windowsservercore:ltsc2016 > msft_wsc_ltsc2016.tar\r\n\r\nYou have to use docker save -o instead.\r\n",
+      "created_at": "2018-09-09T02:16:50Z",
+      "updated_at": "2018-09-09T02:16:50Z"
+    },
+    {
+      "author": "mpawelski",
+      "author_association": "NONE",
+      "body": "I have hard time understanding what #2450 actually fix. Because even though command like `ping.exe github.com | grep.exe Reply` works. The command:\r\n`curl.exe \"https://i.redd.it/dntes9fqy3x11.jpg\" > test1.jpg`\r\nstill works only in cmd/WSL's bash/git bash.\r\n\r\nI was trying to use `git show ref:path/to/file.png > file.png` and it looks that it's still not possible to use it in powershell. Are there any serious plans to fix it?",
+      "created_at": "2018-11-08T23:14:37Z",
+      "updated_at": "2018-11-08T23:15:02Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@mpawelski\r\n\r\n#2450 fixes the problem of requiring upstream native command to finish before piping the output downstream. It does not address PowerShell\u2019s parsing byte stream from native output and reserializing object to byte stream. Please take some time to learn about how object-oriented pipes work and you will learn the problem is really hard to solve consistently. For that purpose, please use a native redirection/piping utility, e.g., Command Prompt, Start-Process, or Use-RawPipeline.",
+      "created_at": "2018-11-08T23:20:43Z",
+      "updated_at": "2018-11-08T23:20:43Z"
+    },
+    {
+      "author": "be5invis",
+      "author_association": "NONE",
+      "body": "@GeeLaw So you think PS should break simple, native-exe piping, **on purpose??????**",
+      "created_at": "2018-12-22T20:09:24Z",
+      "updated_at": "2018-12-22T20:09:24Z"
+    },
+    {
+      "author": "GeeLaw",
+      "author_association": "NONE",
+      "body": "@be5invis which post are you replying to?\r\n\r\nIf you are replying to a post 2+ months ago, I pointed out the necessity of RFC and developed a workaround.\r\n\r\nIf you are replying to a post ~1 month ago, I was explaining to @mpawelski that #2450 does **not** address this specific issue. The additional point (this issue is hard to solve consistently) re-enforces the necessity of RFC (and probably additional documentation explaining the new/old behaviors), and provides pointers to workarounds in current versions of PowerShell.\r\n\r\nAs for breaking exe piping, I interpret current implementation as mistakenly breaking it with some intention behind the scene (for other use cases). Improvement (coming up with a more intuitive conversion rule, implementing it, and documenting it, which are the RFC part) and education (making people aware of the nuances) are both important \u2014 one should know and currently cannot choose to ignore the difference between native utilities and cmdlets.",
+      "created_at": "2018-12-22T20:24:56Z",
+      "updated_at": "2018-12-22T20:24:56Z"
+    },
+    {
+      "author": "megapro17",
+      "author_association": "NONE",
+      "body": "Edited by @joeyaiello: As a reminder, please be respectful and follow our [Code of Conduct](https://github.com/powershell/powershell#code-of-conduct) when commenting on issues or PRs. ",
+      "created_at": "2020-07-04T03:00:13Z",
+      "updated_at": "2020-07-09T22:12:37Z"
+    },
+    {
+      "author": "potatoqualitee",
+      "author_association": "NONE",
+      "body": "Re-requesting eval due to this being a blocker for Linux users who want to make pwsh their default shell in Linux.\r\n\r\n> One of the main reasons why I haven\u2019t swapped over to pwsh over bash is due to the pipelining issues. Pwsh doesn\u2019t work well when you pipe raw bytes between native apps which is a fairly common scenario ",
+      "created_at": "2021-05-17T06:41:34Z",
+      "updated_at": "2021-05-17T06:41:34Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Re-assigned to @JamesWTruher, who will work on this in 7.3 development cycle.",
+      "created_at": "2021-06-24T22:59:41Z",
+      "updated_at": "2021-06-24T22:59:41Z"
+    },
+    {
+      "author": "AE1020",
+      "author_association": "NONE",
+      "body": "I am interested to know how many people who want the \"as-is\" bytes are also in the camp of people who are using LF instead of CR LF on their Windows PowerShell scripts...\r\n\r\nI've proposed a mode that guides behavior based on detection of LF vs. CR LF of the script containing the pipe/redirect:\r\n\r\n[Option for LF vs CR LF Piping To Match Line Endings of Running Script #16511](https://github.com/PowerShell/PowerShell/issues/16511)\r\n\r\nIt *may* be (?) that someone's feelings about the importance of \"as-is\" redirection vs CR LF is effectively captured by their git autocrlf setting.  So this would piggyback on that.",
+      "created_at": "2021-11-24T02:17:45Z",
+      "updated_at": "2021-11-24T02:18:47Z"
+    },
+    {
+      "author": "UberKluger",
+      "author_association": "NONE",
+      "body": "Perhaps a useful implementation would recognise the historical significance of a `[byte]` stream as it pertains to native applications. Three scenarios would need to be considered:\r\n\r\n1) Whenever a stream of *actual* `[byte]`s is passed into a pipeline to a native program (e.g. `Get-Content -AsByteStream somefile | native`) then no `Out-String` conversion is applied, the bytes are streamed *as-is*. It seems unlikely that many native apps would be expecting a sequence of decimal representations of the value of the byte, one per line, and this could easily be created by simply converting the `[byte]` stream into an `[int]` stream (which would then still use `Out-String`). Of course, there would be no practical way for PS to know that a stream consists entirely of `[byte]`s unless the (single) object passed were a `[byte[]]` (which would then be enumerated into a `[byte]` stream). It would be a matter for debate as to whether only this particular case would trigger the special behaviour or any stream with an initial `[byte]` would trigger it but then throw a terminating error if a non-`[byte]` were passed (similar to `Set-Content -AsByteStream` which has the same issue when taking input `[object]`s from the pipeline).\r\n\r\n2) For the case where a native program is the pipeline input to a cmdlet (e.g. `native | Sort-Object`), the current behaviour is retained since often (if not mostly) the native program's output will be (typ. ASCII) text. Bytes are converted to unicode characters by whatever mapping is appropriate and then collected into `[string]`s which are passed to the cmdlet. However, similar to the way commandline arguments are parsed into objects but the original text is retained in case a native command is being invoked, each `[string]` object would be wrapped in a `[psobject]` (or just have an added property) which would contain the original `[byte]`s received from the native program (maybe a `[byte[]]` or a `[string]` with the original `[byte]`s collected but not mapped to unicode equivalents). This would be invisible to existing cmdlets (possibly directly accessible if desired via a public property) but a new filter cmdlet (`ConvertTo-ByteStream`  or `cbs` perhaps) would be provided which would restore the original output into a `[byte]` stream which could then be passed into the remaining pipeline. This would also cover the case of saving native output into a file by simply doing `native | ConvertTo-ByteStream | Set-Content -AsByteStream` (the behaviour of `>` would be unaltered to minimise potential breaking changes). Of course, for native programs that produced raw binary data (i.e. not character strings of any form), very big (but unused) `[string]`s could be produced, potentially impacting upon both processor and memory usage. Whether some limit would be imposed on the size of `[string]`s built from native output is a topic for debate. Any such limit would not affect true `[byte]` streams, just the form of `[string]`s built from that stream which might terminate before an \"end of line\" (a meaningless term for raw binary data).\r\n\r\n3) For `native | native ( | native ...)`, I would suggest that the basic ethos of the PS pipeline (passing objects) is totally inappropriate as such programs are not suited for (nor even aware of) the PS pipeline. For this case (only), the original `cmd` (and Unix&trade;) behaviour should be restored. Each program would be started in its own process (as currently) with a (Windows/Unix&trade;) anonymous byte stream pipe connecting StdOut of each to StdIn of the next (if any). Any sequence of `native | native (| native ...)` within a larger pipeline would be treated as a single native program with one input stream from the PS pipeline and one output stream back to the PS pipeline as per items 1 and 2 above, e.g.\r\n   ```\r\n   Get-Content -AsByteStream somefile | native | native | native | Sort-Object | more\r\n   ```\r\n   would be treated as\r\n   ```\r\n   Get-Content -AsByteStream somefile | ( one native doing 3 things ) | Sort-Object | more\r\n   ```\r\n   While this might seem to be the breakingest change possible, I suspect that the vast majority of native programs (with input / output suitable for piping) would have been designed around this behaviour (byte stream pipes, the type obtained from kernel APIs). Certainly, anything intended for invocation by `cmd` would expect it. In particular, `find.exe`, `findstr.exe` and `sort.exe` do (and also don't like Unicode). Other programs that might have the ability to process Unicode would either utilise a command line option, a BOM (LE / BE) as the first two bytes read or (less predictable) DBCS heuristics, e.g. expecting a lot of alternating 0 bytes for mostly ASCII characters or maybe a LE/BE-Unicode Space, TAB or new-line within the first 100 byte pairs (I'm looking at you, `Scripting.FileSystemObject`), but they would still read a byte stream (as paired bytes). Further on the \"make it work like `cmd`/Unix&trade;\", any redirections of file handles ***within*** a native pipeline grouping (native | native | ...) would need to operate on the actual process handles as there would be no \"PS pipeline\" within the grouping, e.g.\r\n   ```\r\n   Get-Content -AsByteStream infile | native1 2> native1.err | native2 2> native2.err | ConvertTo-ByteStream | Set-Content -AsByteStream outfile\r\n   ```\r\n   Here, native1.err and native2.err are connected directly to file handle 2 of native1 and native2, respectively. Alternately,\r\n   ```\r\n   Get-Content -AsByteStream infile | native1 2>&1 | native2 2>&1 | ConvertTo-ByteStream | Set-Content -AsByteStream outfile\r\n   ```\r\n   In this case, streams are merged with file handle 2 of both native1 and native2 being duplicated from each's file handle 1 (their respective anonymous output pipes). Whether (on Unix&trade; like systems) being able to open/redirect/merge file handles other than 2 (&agrave; la sh(1) and derivatives) would be desirable (feasible?) *within* a native pipeline grouping is less clear. There would be few, if any, native programs (on any system) that expected anything beyond StdIn, StdOut and StdErr.\r\n\r\nI believe that the preceding could go a long way toward resolving the apparent discontinuity between (legacy) program simple byte oriented CLI I/O and the more powerful but more complicated object oriented PS pipeline. While some potentially breaking changes are involved, I suspect these would mostly affect strategies (kludges?) used to work around the incompatibility issues addressed here. Further, the changes proposed allow original (incompatible) behaviour to be maintained at the PS script level. For native output, no change will occur unless the new `ConvertTo-ByteStream` cmdlet is used. For input, simply changing a `[byte]` stream to an `[int]` stream (of the same values) will restore previous behaviour. For native to native pipes, interposing an explicit `Out-String` between each native in the pipeline should restore previous behaviour by passing the data through PS, with the associated conversions (not 100% sure about this one).",
+      "created_at": "2021-12-26T08:39:30Z",
+      "updated_at": "2021-12-26T09:12:01Z"
+    },
+    {
+      "author": "huettenhain",
+      "author_association": "NONE",
+      "body": "One way to avoid any magic would be that PowerShell inspects a list of exceptions that the user can configure themselves. It could be as simple as a JSON file stored at a specific location in your user profile:\r\n```json\r\n{\r\n    \"exceptions\": [\r\n        {\r\n            \"path\": \"C:\\\\Python39\\\\python.exe\",\r\n            \"stdin\": \"native\",\r\n            \"stdout\": \"native\",\r\n            \"stderr\": \"native\"\r\n        },\r\n    ]\r\n}\r\n```\r\nObviously, the exact format and location of the configuration isn't so relevant, but this would make it an easy to configure opt-in feature that does not disrupt the way PowerShell works by default. ",
+      "created_at": "2022-01-22T18:52:03Z",
+      "updated_at": "2022-01-22T18:52:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> One way to avoid any magic would be that PowerShell inspects a list of exceptions \r\n\r\nGeneral proposal is in #13428",
+      "created_at": "2022-01-24T04:51:08Z",
+      "updated_at": "2022-01-24T04:51:08Z"
+    },
+    {
+      "author": "hez2010",
+      "author_association": "CONTRIBUTOR",
+      "body": "Any updates? Seems that without this we cannot use gzip to compress data stream:\n\n```pwsh\ncat -AsByteStream a.js | gzip > a.gz\n```\n\nThe data stream will be corrupted by the `>`. \n\nThis command works on every shell except PowerShell. ",
+      "created_at": "2022-03-07T05:05:42Z",
+      "updated_at": "2022-03-07T05:06:15Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@JamesWTruher is this still on your radar?",
+      "created_at": "2022-03-07T05:46:46Z",
+      "updated_at": "2022-03-07T05:46:46Z"
+    },
+    {
+      "author": "hez2010",
+      "author_association": "CONTRIBUTOR",
+      "body": "Can we expect this being committed in 7.3? Whenever I want to write bytes to native executables via pipeline, I have to launch a cmd or bash shell to achieve this, which makes PowerShell really hard to use, and, useless in the scenario where binary data processing against native executables is usual in a script. ",
+      "created_at": "2022-05-05T08:58:27Z",
+      "updated_at": "2022-05-05T09:01:58Z"
+    },
+    {
+      "author": "lewis-yeung",
+      "author_association": "NONE",
+      "body": "This has annoyed me for a long time. \ud83d\udca2 I believe there are more PS users feeling confused about it. However it's so frustrating that PR #15861 was closed. It's 2022 now, and unfortunately we still cannot get rid of the object-based stream redirection for native executables. \ud83d\ude2d",
+      "created_at": "2022-05-24T13:38:36Z",
+      "updated_at": "2022-05-24T13:38:36Z"
+    },
+    {
+      "author": "mitchcapper",
+      "author_association": "NONE",
+      "body": "lewis-yeung,  it can be quite the pain. The workaround of  https://github.com/GeeLaw/PowerShellThingies/tree/master/modules/Use-RawPipeline requires rewriting your commands but can deliver performance for many situations I have found.\n\n<blockquote><img src=\"https://opengraph.githubassets.com/63db5c40ce26c654ac0718d21d54b04b34ff72cd7e7381ed89fff6e5cd7038d1/GeeLaw/PowerShellThingies\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/GeeLaw/PowerShellThingies\">PowerShellThingies/modules/Use-RawPipeline at master \u00b7 GeeLaw/PowerShellThingies</a></strong></div><div>My PowerShell thingies. Contribute to GeeLaw/PowerShellThingies development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2022-05-24T18:50:01Z",
+      "updated_at": "2022-05-24T18:50:03Z"
+    },
+    {
+      "author": "lewis-yeung",
+      "author_association": "NONE",
+      "body": "@mitchcapper Thank you. I noticed this amazing work by [GeeLaw](https://github.com/GeeLaw). Hope that a built-in implementation can be applied to the syntax (`>`/`>>` operator) in future PowerShell releases. \ud83d\ude4f",
+      "created_at": "2022-05-25T02:52:08Z",
+      "updated_at": "2022-05-25T02:52:08Z"
+    },
+    {
+      "author": "btjwork",
+      "author_association": "NONE",
+      "body": "I guess this reinforces my general frustration with PowerShell - we need an intrusive work-around to actually use it as a shell (i.e., running command lines consisting only of EXEs with the same input/output semantics as cmd).\r\n\r\nCan anybody summarize what the hold-up is? Are there some remaining issues that I've overlooked in the discussion, or is it some difficulty in the implementation details?",
+      "created_at": "2022-05-25T16:51:48Z",
+      "updated_at": "2022-05-25T16:51:48Z"
+    },
+    {
+      "author": "AE1020",
+      "author_association": "NONE",
+      "body": "> Hope that a built-in implementation can be applied to the syntax (>/>> operator) in future PowerShell releases.\r\n\r\n(+1)  I don't know if it's true for everyone, but if it just required using a different operator to get the effect--that would be fine with me!\r\n\r\ne.g. My concern isn't so much \"the specific | and > characters don't have the right behavior\" as it is *\"can't seem to do it at all\"*.\r\n\r\nEverything in PowerShell has (to me) a very foreign syntax, so one more adjustment would not be a problem.",
+      "created_at": "2022-05-26T09:03:47Z",
+      "updated_at": "2022-05-27T03:37:08Z"
+    },
+    {
+      "author": "vors",
+      "author_association": "COLLABORATOR",
+      "body": "> However it's so frustrating that PR https://github.com/PowerShell/PowerShell/pull/15861 was closed.\r\n\r\nThank you for sharing this PR!\r\nI made a build to see how well it works and it hit a problem for me immidiatlly:\r\n\r\n```\r\nPS /Users/vors/src/PowerShell> cat ./README.md | grep CODE\r\nResourceUnavailable: Program 'cat' failed to run: StandardError has not been redirected.At line:1 char:1\r\n+ cat ./README.md | grep CODE\r\n+ ~~~~~~~~~~~~~~~.\r\n```\r\n\r\nMaybe this is because I'm using MacOs, not sure.",
+      "created_at": "2022-05-27T03:29:51Z",
+      "updated_at": "2022-05-27T03:29:51Z"
+    },
+    {
+      "author": "mpawelski",
+      "author_association": "NONE",
+      "body": "It's sad that this issue is not prioritized more. \ud83d\ude41 I think the team was planning to improve on \"interactive shell experience\" on the last roadmap. Having pipeline operator work \"as expected\" for native executables is definitely in spirit of improving shell experience. I understand it might be hard to add it and coexist with standard \"objects pipeline\" of Powershell, but to be honest,  it's a basic functionality of a shell to handle native command and pipes.\r\n\r\nAs on external user I feel the progress of improving Powershell has slowed down recently. When Powershell got opensources I got excited it'll get improvements for its quirks and warts. And we get some (like `&&` operator and some works on PSNativeCommandArgumentPassing) but the progress is much slower than I hoped for and the communication with community is not that good as [others already had noticed](https://github.com/PowerShell/PowerShell/issues/15143#issuecomment-839995245) in other places.",
+      "created_at": "2022-05-31T08:45:40Z",
+      "updated_at": "2022-05-31T08:45:40Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I got a proof of concept of this working a few days ago. There's *a lot* more left to be done, it still needs some abstraction, error handling, redirections in general, and a lot of testing. You would be correct to call this a bug fix, but from a planning and expectations standpoint (i.e. the amount of time it'll take me to finish) it's more in the realm of a feature.\r\n\r\nThat said, so far so good!\r\n\r\n![image](https://cdn.discordapp.com/attachments/746323350288334878/979845918851465236/unknown.png)\r\n",
+      "created_at": "2022-05-31T17:18:53Z",
+      "updated_at": "2022-05-31T18:28:23Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "On the topic of passing bytes as is to native commands, can anyone think of a real world scenario where you would be doing `$varWithRawBytesInIt | someNativeCommand` and actually **want** each byte to be stringified and passed one by one?",
+      "created_at": "2022-05-31T19:52:23Z",
+      "updated_at": "2022-05-31T19:52:23Z"
+    },
+    {
+      "author": "btjwork",
+      "author_association": "NONE",
+      "body": "Nope. Excellent question though.\r\n\r\nMy reasoning (in case others can spot a flaw): In .NET, char and byte are unambiguously distinct types (not even described on the same page in Microsoft's reference). So, if I even managed to create a \"raw bytes\" variable in the first place, I could assume I got that as the output from a previous native command and/or by reading a file in \"raw\" mode. In both of those cases, I'd want the semantics to be the same as if I had redirected/piped that original source directly into my native command in a single command line. Sort of a mathematical \"transitive property\" I suppose.\r\n\r\nEven in my past C# programming, if I ever resorted to creating some sort of \"collection of byte\", the reason was always to indicate \"don't touch/modify this data in any way\".\r\n\r\nIf someone were to even present a hypothetical case where they would want it processed, I'd lean towards saying the user should explicitly pipe it through some sort of \"stringify\" PowerShell command such as Select-Object, since I would expect that to be such a rarely desired semantic.\r\n\r\nTangent, slightly off-topic:\r\n\r\nit would be more intuitive to me to use Get-Content to do the explicit data conversion since it has the concept of splitting raw data into lines based on a delimiter and an encoding, but apparently it is prohibited from reading from ~stdin~ the input pipeline for some reason.\r\n\r\n`Get-Content: The input object cannot be bound to any parameters for the command either because the command does not take pipeline input or the input and its properties do not match any of the parameters that take pipeline input.`",
+      "created_at": "2022-05-31T20:52:11Z",
+      "updated_at": "2022-05-31T22:03:42Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "> If someone were to ... want it processed, ... the user should explicitly pipe it through some sort of \"stringify\" PowerShell command\r\n\r\n^ Agreed.\r\n\r\n> apparently it is prohibited from reading from stdin for some reason\r\n\r\nPowerShell itself does not support reading from stdin.  From the help topic `about_Redirection`:\r\n\r\n```\r\n  [!IMPORTANT] The SUCCESS and ERROR streams are similar to the stdout and\r\n  stderr streams of other shells. However, stdin is not connected to the\r\n  PowerShell pipeline for input.\r\n```\r\n  \r\n`Get-Content` is tied up with the architectural idea of `providers` which represent access to structured data like a file system, the registry, certificate store, etc.  Not all providers support the interface (IContentCmdletProvider) used by Get-Content.  But Get-Content does work with providers other than the file system provider.  Try these commands some time:\r\n```\r\nGet-Content env:\\PATH\r\nGet-Content function:\\prompt\r\n```",
+      "created_at": "2022-05-31T21:35:19Z",
+      "updated_at": "2022-05-31T21:35:19Z"
+    },
+    {
+      "author": "btjwork",
+      "author_association": "NONE",
+      "body": "Ah, my apologies @rkeithhill, I'm guessing I should have said \"input pipeline\" instead of \"stdin\". Still struggling with the lingo.\r\n\r\nAnyway, I was looking for any PowerShell command that satisfies \"read a byte stream from the pipeline and convert it to an array of strings based on any `-Delimiter` and `-Encoding` parameters\". `Get-Content` was tantalizingly close.",
+      "created_at": "2022-05-31T22:00:27Z",
+      "updated_at": "2022-05-31T22:00:27Z"
+    },
+    {
+      "author": "CleverCoder",
+      "author_association": "NONE",
+      "body": "Wow... just wow. I found another scenario that bit me for a few hours tonight. I was trying to compare the AWS \"fingerprint\" for a private key I had to determine what key went with what file. Long story short, due to this unexpected behavior the following commands produced different results between Git bash and PS. (It's more an issue now that I'm trying to embrace Powershell more, and it's becoming the default terminal in many IDE's):\r\n\r\nIncorrect value using Powershell pipe:\r\n```\r\nPS D:\\dev\\AWS Keys> openssl pkcs8 -in .\\private.pem -nocrypt -topk8 -outform DER | openssl sha1 -c\r\n(stdin)= 8a:cb:c5:84:4d:a6:a3:5f:ed:03:67:f6:f6:88:a0:bd:02:8e:b5:dc\r\n```\r\n\r\nCorrect value using Git bash:\r\n```\r\n$ openssl pkcs8 -in .\\private.pem -nocrypt -topk8 -outform DER | openssl sha1 -c\r\n(stdin)= 89:e3:a5:d2:84:33:ba:ac:64:55:38:e5:5b:52:1f:9e:42:bf:e5:c2\r\n\r\n```\r\nAny seasoned programmer would expect the output stream of bytes to flow between processes. This has me baffled, but I'm glad I've been made aware of this oddity!",
+      "created_at": "2022-07-30T02:52:42Z",
+      "updated_at": "2022-07-30T02:52:42Z"
+    },
+    {
+      "author": "aress31",
+      "author_association": "NONE",
+      "body": "Any progress or fix on the issue, it is about time to give us the option to pipe bytestream...",
+      "created_at": "2022-07-30T03:31:15Z",
+      "updated_at": "2022-07-30T03:31:15Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yep plenty of progress, just a large change with a lot of design considerations.\r\n\r\nSpeaking of, anyone know of a command that emits binary data to std**err**? My current thinking is to just not touch stderr and leave it to it's current string reading ways.\r\n\r\nAnd in the same vein, I'm thinking that redirecting stderr to stdout (e.g. `2>&1`) should fall back to current string reading behavior for both stdout and stderr. Can anyone think of scenarios where that would not be desirable?",
+      "created_at": "2022-08-02T16:16:39Z",
+      "updated_at": "2022-08-02T16:16:39Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience I think it's reasonable to assume stderr always emits text. Can you maybe create a draft PR with your changes so far?",
+      "created_at": "2022-08-02T17:12:35Z",
+      "updated_at": "2022-08-02T17:12:35Z"
+    },
+    {
+      "author": "AE1020",
+      "author_association": "NONE",
+      "body": "> Speaking of, anyone know of a command that emits binary data to stderr?\r\n\r\nMy issue would not be emitting binary data, but wanting to preserve the sense of CR/LF line endings.\r\n\r\nIf the program writing to stderr did not put CR in its output, I don't want to see it in the receiving programs or if written to a file.",
+      "created_at": "2022-08-02T20:06:08Z",
+      "updated_at": "2022-08-02T20:06:08Z"
+    },
+    {
+      "author": "mpawelski",
+      "author_association": "NONE",
+      "body": "> Speaking of, anyone know of a command that emits binary data to std**err**? My current thinking is to just not touch stderr and leave it to it's current string reading ways.\r\n> \r\n> And in the same vein, I'm thinking that redirecting stderr to stdout (e.g. `2>&1`) should fall back to current string reading behavior for both stdout and stderr. Can anyone think of scenarios where that would not be desirable?\r\n\r\nIMO it's not that critical to avoid current \"string reading behavior\" in this case because when you use `2>&1` you most likely deal with text output, not binary. \r\n\r\nThough I agree with @AE1020 that it's not just about binary data, even when program output text I want to pipe it or redirect \"as is\" without any changes by Powershell. \r\n\r\nI think this would be unnecessary exception to \"we don't parse native executables output as text in pipelines and redirections\" feature. It would be another Powershell gotcha, where it behaves slightly different is some corner case.",
+      "created_at": "2022-08-03T11:38:24Z",
+      "updated_at": "2022-08-03T11:38:24Z"
+    },
+    {
+      "author": "btjgit",
+      "author_association": "NONE",
+      "body": "I agree with the recent comments. If I write a command line that consists only of native executables, all piping and redirection should be as-is, no parsing of anything as text. If a command is ending lines with newlines only on Windows, that should be preserved when I redirect that output to a file or another executable.\r\n\r\nI know this goes against the historical architecture of PowerShell, but my expectation would be that parsing things as text would be only done as a \"last resort\" if/when the output of a binary executable is being _read_ by a cmdlet, rather than thinking of it as something to decide when the output is _written_.\r\n\r\nAnd, the idea of merging stderr into stdout and having that \"taint\" how stdout behaves sounds like a particularly confusing idea.",
+      "created_at": "2022-08-03T17:06:25Z",
+      "updated_at": "2022-08-03T17:06:25Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Draft PR is up #17857",
+      "created_at": "2022-08-05T22:09:40Z",
+      "updated_at": "2022-08-05T22:09:40Z"
+    },
+    {
+      "author": "hut8",
+      "author_association": "NONE",
+      "body": "One thing that I haven't seen mentioned here is perhaps introducing a new operator. This would be a breaking change simply because the `|` and `>` and other redirection operators change meaning, right?\r\n\r\nThe functionality in https://github.com/GeeLaw/PowerShellThingies/tree/master/modules/Use-RawPipeline is something that should be part of absolutely any shell. As others have mentioned, the main drawback is that it requires `run native.exe | ...` instead of just `native.exe`. Today I thought, \"why not just define a new infix operator myself to smooth over the usage of that module?\" I am no PowerShell expert but I believe you can only define a prefix operator, not infix or postfix.\r\n\r\nSo if you just want a \"raw pipe\", what about keeping the `|` operator as-is and and calling it something like `|!` ?\r\n\r\nAside from the parsing issues, my other main issue is memory. If I want to do `program | tee big.txt` in bash, practically no memory is used. In powershell, `program | tee-object big.txt` will crash the system with an OOM if the output is big enough. This sort of thing totally prevents me from using powershell as my daily driver.\n\n<blockquote><img src=\"https://opengraph.githubassets.com/dafc60f4a2ca55e13922d9260bba2a4b2b6f2462ac7cc29323f58275cfa43d74/GeeLaw/PowerShellThingies\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/GeeLaw/PowerShellThingies\">PowerShellThingies/modules/Use-RawPipeline at master \u00b7 GeeLaw/PowerShellThingies</a></strong></div><div>My PowerShell thingies. Contribute to GeeLaw/PowerShellThingies development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2022-10-24T01:31:52Z",
+      "updated_at": "2022-10-24T01:31:54Z"
+    },
+    {
+      "author": "mitchcapper",
+      "author_association": "NONE",
+      "body": "One thing of note here is that I believe native-to-native pipe operators could be updated without really any breaking changes (minus the feed rate).  I think the primary breaking changes are when powershell commands are fed the output (if one was to update `|`).",
+      "created_at": "2022-10-24T05:15:30Z",
+      "updated_at": "2022-10-24T05:15:30Z"
+    },
+    {
+      "author": "btjgit",
+      "author_association": "NONE",
+      "body": "> One thing of note here is that I believe native-to-native pipe operators could be updated without really any breaking changes (minus the feed rate). I think the primary breaking changes are when powershell commands are fed the output (if one was to update `|`).\r\n\r\nYes, I'm getting a little lost as to why new responses keep popping up implying there is some sort of fundamental problem with fixing this. As has been hashed out for six years now, the goal is to limit the scope of this change to only affect output from binary executables going directly to other binary executable or directly to files, while not affecting any behavior where Cmdlets are involved.\r\n\r\nWe shouldn't need a new operator or some kind of special syntax to allow binary (some might say \"real\") commands to behave as their authors expected. It seems the challenge is the implementation and historical PowerShell design more than the objective. Let's not lose track of the objective due to implementation detail.\r\n\r\nPowerShell has \"Shell\" in the name, yet it seems that it treats launching native commands as a secondary use case compared to being a programming language. And Microsoft installs it on Windows as a replacement for cmd.exe in the start menu, not as an optional alternative for advanced users. A user who doesn't know or care about Cmdlets shouldn't be forced to learn a whole new way of writing command lines to avoid subtle data corruption. We're not talking about breaking important functionality, we're talking about a surgical bug fix.",
+      "created_at": "2022-10-25T03:57:51Z",
+      "updated_at": "2022-10-25T03:57:51Z"
+    },
+    {
+      "author": "ravindUwU",
+      "author_association": "NONE",
+      "body": "![sleepy cat with the PowerShell logo on its little head, captioned \"I WOULD BE UNSTOPPABLE\" \"IF NOT FOR THE BYTE STREAMS\"](https://pbs.twimg.com/media/Ffaa_IcagAEy9qj?format=jpg&name=900x900)",
+      "created_at": "2022-10-26T12:02:02Z",
+      "updated_at": "2022-10-26T12:02:02Z"
+    },
+    {
+      "author": "Shayan-To",
+      "author_association": "NONE",
+      "body": "> We shouldn't need a new operator or some kind of special syntax ...\r\n\r\nIf PowerShell is ever to introduce a way to get the binary output stream of a binary command (or pipe it into a Cmdlet), through, say, a `Stream` object, then maybe a new operator would be needed, and that might complicate things here as well.",
+      "created_at": "2022-10-26T12:29:33Z",
+      "updated_at": "2022-10-26T12:29:33Z"
+    },
+    {
+      "author": "btjgit",
+      "author_association": "NONE",
+      "body": "> > We shouldn't need a new operator or some kind of special syntax ...\r\n> \r\n> If PowerShell is ever to introduce a way to get the binary output stream of a binary command (or pipe it into a Cmdlet), through, say, a `Stream` object, then maybe a new operator would be needed, and that might complicate things here as well.\r\n\r\n@Shayan-To, you left out the rest of my paragraph, which I believe encapsulates my counter-argument:\r\n\r\n>...It seems the challenge is the implementation and historical PowerShell design more than the objective. Let's not lose track of the objective due to implementation detail.\r\n\r\nLet's elevate this to user experience, and put aside the implementation challenges for the moment...\r\n\r\nMy crude analogy: most GUI systems have a clipboard mechanism for transferring data from one application to another.\r\n\r\nOne approach would be to say only UTF-16 text is supported, and would be captured via a Ctrl+C keystroke. If the source data wasn't really text, then the data would be \"transformed\" into that format, even if it resulted in a loss/change of information. The end user would get _something_, but it might not be what they expect. The burden of dealing with that _could_ be put on the user, and (for example) we could expect them to learn that if they want to copy HTML and paste it to an HTML-aware application and preserve the mark-up, they should know to instead know to use Alt+Ctrl+C to do the copy, and so on for each possible data format. That would be roughly equivalent to creating an assortment of new pipe operators in PowerShell.\r\n\r\nHowever, another approach would be something similar to what Windows has done with its clipboard: if the sender has a preferred/native non-text format, and the receiver has indicated that it can accept that format, then a direct transfer is done in that format. And, the user can just use Ctrl+C (or the | operator) in all cases, and in most cases will get the expected result.\r\n\r\n(I'm intentionally leaving out the implementation detail of how the clipboard accomplishes this - it's a user experience example, not an implementation example, and a different implementation would likely be more appropriate for PowerShell.)\r\n\r\nSo, my understanding of this baby-step proposal is:\r\n* If both the sender and receiver are binary executables, use a byte stream (or equivalent).\r\n* If the sender is binary and the receiver is a file, then use whatever the sender prefers (i.e., connect its output directly to the file, or equivalent).\r\n* Otherwise, continue to use the current \"powerful\" PowerShell behavior.\r\n* Most importantly, don't force the _casual_ PowerShell user to manually make that choice by choosing different operators, options, or syntax when an as-is transfer is possible. Transforming/inferring the data type should be a last resort rather than a required step.\r\n\r\nTo be clear: I'm NOT proposing that a full general anything-to-anything system needs to be designed to take this first tiny step (a general solution might not be needed in the end). That could be deferred until if/when something came up in the future, such as the use case you describe. This baby step is just to fix an existing bug, which is that data output from traditional executables is being modified in certain well-defined cases where it doesn't need to be, and **that is an unfortunate impediment to PowerShell adoption.** Let's make PowerShell less of an annoyance so it can be unstoppable. (Poor kitten! \ud83d\ude09)",
+      "created_at": "2022-10-26T20:55:05Z",
+      "updated_at": "2022-10-26T20:55:05Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "There's some great discussion happening here about `native | script` pipes but it may be better suited in a new issue. This thread and the associated PR are explicitly about the `native | native` scenario. This issue will likely be closed when that PR is merged and I don't want to see the discussion lost in that.",
+      "created_at": "2022-10-26T21:09:48Z",
+      "updated_at": "2022-10-26T21:09:48Z"
+    }
+  ],
+  "created_at": "2016-08-18T20:10:07Z",
+  "number": 1908,
+  "state": "open",
+  "title": "Don\u2019t parse the pipeline as text when it is directed from an EXE to another EXE or file. Keep the bytes as-is.",
+  "updated_at": "2022-10-26T21:09:48Z"
+}

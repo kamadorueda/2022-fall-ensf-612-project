@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13644",
+  "author": "mklement0",
+  "body": "Follow-up from #13640.\r\n\r\nPR #12386 introduced _experimental_ feature `PSNativePSPathResolution`, which as of (at least) PowerShell Core 7.1.0-preview.7 has become a _default_ feature.\r\n\r\nIts purpose is to translate _PowerShell-drive-based_ paths to _native filesystem_ paths, because external executables only understand the latter.\r\n\r\n\r\nWhile this is likely helpful in most cases, there are two problems, both stemming from the fact that **PowerShell cannot know whether a given argument passed to an external program indeed represents a file path**:\r\n\r\n* There must be a way to _bypass_ this translation, in case an argument that happens to _look like_ a PSDrive-based path should be passed as-is.\r\n\r\n  * Currently, the only way to bypass the translation is to use _single-quoting_ (e.g, `'temp:foo'` rather than unquoted `temp:foo` or double-quoted `\"temp:foo\"`, but this is problematic for two reasons:\r\n     * This distinction is obscure, because the user is likely to conceive of _both_ `'temp:foo'` and `\"temp:foo\"` as literals, which in any other context they are.\r\n     * More importantly: it only works for _literal_ arguments, and not for variables and expressions. \r\n\r\n* Even with such a mechanism, however, the problem is that bypassing may only be  _situationally_ necessary, depending on what custom PS drives happen to be defined at the time of the external-program call, so **you cannot really anticipate when bypassing is necessary**.\r\n\r\nI see two possible solutions:\r\n\r\n* (a) Roll back the feature, recognizing that it is ultimately too fraught (it hasn't been in any official release yet).\r\n\r\n* (b) Minimize the risk of false positives as follows, but note that their complete elimination isn't possible:\r\n\r\n  * Currently, the translation is triggered by any argument with a prefix that looks like a drive specification of a custom PS drive (e.g., `temp:`) _irrespective of what follows_: that is, it doesn't matter whether the path refers to an _existing item_ or even if the path is syntactically correct.\r\n\r\n  * There will be **far fewer false positives if the translation is only performed if the argument refers to an _existing file-system path_**; e.g., `temp:foo` should only be translated if a file or directory at `temp:/foo` actually exists.\r\n\r\n  * However, this implies:\r\n      * Users may be confused when a non-existing path they expected to exist goes untranslated.\r\n      * Arguments may by design represent not-yet-extant paths, such as when passing an _output_ file path.\r\n      * A bypass mechanism is still needed, one that also supports passing arguments via variables and expressions; though perhaps the need for it will be so rare that the limited `--%` will do.\r\n\r\n\r\n## Steps to reproduce\r\n\r\nThe following is predicated on suggestion (b) above, i.e., only performing translation for _existing_ PSDrive-based paths, and assumes that no file/dir. exists at `temp:/foo`\r\n\r\nOn Unix (use `cmd /c echo` on Windows):\r\n\r\n```powershell\r\n$arg = 'temp:foo'; /bin/echo $arg | Should -be $arg\r\n```\r\n\r\n## Expected behavior\r\n\r\nThe test should pass, because since `temp:foo` doesn't refer to an existing file-system path, it should be passed as-is.\r\n\r\n## Actual behavior\r\n\r\nThe test fails, because the `temp:foo` is translated to `(Get-PSDrive temp).Root + ':/foo'`, even though `temp:/foo` doesn't exist; e.g., on macOS:\r\n\r\n```none\r\nExpected: 'temp:foo' But was:  '/var/folde...'\r\n```\r\n\r\n## Environment data\r\n\r\n\r\n```none\r\nPowerShell Core 7.1.0-preview.7\r\n```\r\n",
+  "closed_at": "2022-07-19T00:25:47Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Since you define the PSNativePSPathResolution feature as \" the current feature is guesswork\", and we see some side effects and haven't a bypass mechanism I think it is better to exclude the feature from 7.1 version.\r\n\r\n/cc @joeyaiello @SteveL-MSFT ",
+      "created_at": "2020-09-17T04:44:19Z",
+      "updated_at": "2020-09-17T04:44:19Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "For 7.1, I think it's best to put it back as an experimental feature, so I'll prep a PR for that",
+      "created_at": "2020-10-02T19:00:31Z",
+      "updated_at": "2020-10-02T19:00:31Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I had looked into this and the problem is by the time the NativeCommandProcessor gets the arg, there is no way to differentiate single vs double quotes.  At this point, it's not worth the effort to fix this so I'm removing this feature altogether as other than the default temp drive, I don't think many people are using custom filesystem psdrives where this feature is useful.",
+      "created_at": "2022-07-12T23:13:45Z",
+      "updated_at": "2022-07-12T23:13:45Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #17670, which has now been successfully released as `v7.3.0-preview.7`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.3.0-preview.7)\n",
+      "created_at": "2022-08-12T00:01:44Z",
+      "updated_at": "2022-08-12T00:01:44Z"
+    },
+    {
+      "author": "KyleKolander",
+      "author_association": "NONE",
+      "body": "Dang @SteveL-MSFT, I recently added several `PSDrive`s to my profile - what a cool and really useful feature!  Then I discovered that they don't work for other command line tools like `git`.  I can use `git log (Convert-Path MyDrive:\\src\\Test.csproj)`, but who wants to always remember to wrap parens around the path and pass it to `Convert-Path`?  I was about to throw in the towel and then I saw your PR to add this experimental feature, turned it on and voila - it works as one would expect it to (within the confines of a PowerShell session).  Then I saw it had been removed for 7.3.  So disappointing.  I get it that you can only support so many different features and have to prioritize based on usage.  Is there is any way you could justify keeping it around as an experimental feature (and document the edge cases to mitigate confusion)?",
+      "created_at": "2022-09-12T04:11:14Z",
+      "updated_at": "2022-09-12T04:11:14Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@KyleKolander maybe someone can take my PR and address the edge cases in the future",
+      "created_at": "2022-09-12T20:31:19Z",
+      "updated_at": "2022-09-12T20:31:19Z"
+    },
+    {
+      "author": "KyleKolander",
+      "author_association": "NONE",
+      "body": "Fair enough.  I had to at least ask.  \ud83d\ude04   I'll use Directory Junctions instead.  Lacks the syntactic sugar of the PSDrive, but it also works across all of Windows (not just within PowerShell).",
+      "created_at": "2022-09-12T22:51:45Z",
+      "updated_at": "2022-09-12T22:51:45Z"
+    }
+  ],
+  "created_at": "2020-09-16T18:37:56Z",
+  "number": 13644,
+  "state": "closed",
+  "title": "Bypassing translation of PSDrive-based path arguments for external (native) executables is obscure and inadequate (PSNativePSPathResolution)",
+  "updated_at": "2022-09-12T22:51:45Z"
+}

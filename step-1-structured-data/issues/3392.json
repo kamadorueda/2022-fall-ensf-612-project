@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3392",
+  "author": "SteveL-MSFT",
+  "body": "Out-Default was incorrectly caching transcription state as the subsequent use was caching the already changed state\r\n\r\nOut-Default needed to implement IDispose pattern so transcription state reverts back on exception in pipeline\r\n\r\nAddresses https://github.com/PowerShell/PowerShell/issues/3390\r\n\r\n<!--\r\n\r\nIf you are a PowerShell Team member, please make sure you choose the Reviewer(s) and Assignee for your PR.\r\nIf you are not from the PowerShell Team, you can leave the fields blank and the Maintainers will choose them for you. If you are familiar with the team, feel free to mention some Reviewers yourself.\r\n\r\nFor more information about the roles of Reviewer and Assignee, refer to CONTRIBUTING.md.\r\n\r\n-->\r\n",
+  "closed_at": "2017-03-27T21:26:29Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl I appreciate the feedback.  I rethought about how BeginProcessing, ProcessRecord, and EndProcessing work and I think I have a solution that remedies your concerns",
+      "created_at": "2017-03-23T19:42:55Z",
+      "updated_at": "2017-03-23T19:42:55Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT I can not think of any problematic cases now, at least `Out-Default` that PowerShell console host implicitly adds to the pipeline will restore `TranscribeOnly` to `false` at the end of command.",
+      "created_at": "2017-03-24T02:30:10Z",
+      "updated_at": "2017-03-24T02:30:10Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl @lzybkr any other feedback preventing signoff?",
+      "created_at": "2017-03-24T22:44:09Z",
+      "updated_at": "2017-03-24T22:44:09Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT I do not see any obvious wrong things. I still can construct the case where host stuck in `TranscribeOnly` state, but it looks more likely shooting your own leg:\r\n```powershell\r\nbegin{\r\n    $sp = {Out-Default -Transcript}.GetSteppablePipeline()\r\n    $sp.Begin($false)\r\n    $sp.Process()\r\n}\r\nend{\r\n    $sp.End()\r\n    $sp.Dispose()\r\n}\r\n```\r\nPossible, the only way to prevent this is to implement `TranscribeOnly` as counter as @lzybkr suggest.\r\nMaybe you should take into account possibility, that cmdlet can be instantiated not for execution, but for parameter/argument completion (not sure if it is the case here as `Out-Default` does not implement dynamic parameters). In that case `BeginProcessing` will not be invoked before disposing, so you will end restoring `TranscribeOnly` when you are not save it.",
+      "created_at": "2017-03-25T06:49:04Z",
+      "updated_at": "2017-03-25T06:49:04Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "I'll rework it to use a counter.  Thanks.",
+      "created_at": "2017-03-25T18:26:09Z",
+      "updated_at": "2017-03-25T18:26:09Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "To think about that. Should not it also properly revert `TranscribeOnly` even if `Dispose` is not called, but `Out-Default` collected by garbage collector?\r\n```powershell\r\n$sp = {Out-Default -Transcript}.GetSteppablePipeline()\r\n$sp.Begin($false)\r\n$sp = $null\r\n[GC]::Collect()\r\n```\r\nI have [idea](https://github.com/PowerShell/PowerShell/compare/master...PetSerAl:transcribeonly-patch) about implementation. Can you look at it?",
+      "created_at": "2017-03-26T11:49:53Z",
+      "updated_at": "2017-03-26T17:21:49Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl I'll look at this today",
+      "created_at": "2017-03-27T16:02:24Z",
+      "updated_at": "2017-03-27T16:02:24Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl I stepped through the debugger and BeginProcessing is always called and ProcessRecord is called where InputObject is empty.  Finally, Dispose() is called.  In both your samples, once the script is complete, Host.UI.TranscribeOnlyCount = 0.  ",
+      "created_at": "2017-03-27T17:06:40Z",
+      "updated_at": "2017-03-27T17:06:40Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT Not sure, what exact code you are referencing as my samples, but I use following code for test:\r\n```powershell\r\nPS> Add-Type @\u2018\r\n>>>     using System;\r\n>>>     using System.Management.Automation;\r\n>>>     [Cmdlet(\"Test\", \"Methods\")]\r\n>>>     public class TestMethods : PSCmdlet, IDisposable {\r\n>>>         public TestMethods() {\r\n>>>             Console.WriteLine(\"Constructor\");\r\n>>>         }\r\n>>>         ~TestMethods() {\r\n>>>             Console.WriteLine(\"Destructor\");\r\n>>>         }\r\n>>>         protected override void BeginProcessing() {\r\n>>>             Console.WriteLine(\"Begin\");\r\n>>>         }\r\n>>>         protected override void ProcessRecord() {\r\n>>>             Console.WriteLine(\"Process\");\r\n>>>         }\r\n>>>         protected override void EndProcessing() {\r\n>>>             Console.WriteLine(\"End\");\r\n>>>         }\r\n>>>         protected override void StopProcessing() {\r\n>>>             Console.WriteLine(\"Stop\");\r\n>>>         }\r\n>>>         public void Dispose() {\r\n>>>             Console.WriteLine(\"Dispose\");\r\n>>>         }\r\n>>>     }\r\n>>> \u2019@ -PassThru | Select-Object -First 1 -ExpandProperty Assembly | Import-Module\r\nPS> $sp = {Test-Methods}.GetSteppablePipeline();\r\nConstructor\r\nPS> $sp.Begin($false)\r\nBegin\r\nPS> $sp = $null\r\nPS> [GC]::Collect()\r\nDestructor\r\nPS>\r\n```\r\nAs you can see, `Dispose` is not called here.",
+      "created_at": "2017-03-27T17:56:03Z",
+      "updated_at": "2017-03-27T17:56:03Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl, by samples, I mean:\r\n\r\n```powershell\r\nbegin{\r\n    $sp = {Out-Default -Transcript}.GetSteppablePipeline()\r\n    $sp.Begin($false)\r\n    $sp.Process()\r\n}\r\nend{\r\n    $sp.End()\r\n    $sp.Dispose()\r\n}\r\n```\r\n\r\nand \r\n\r\n```powershell\r\n$sp = {Out-Default -Transcript}.GetSteppablePipeline()\r\n$sp.Begin($false)\r\n$sp = $null\r\n[GC]::Collect()\r\n```\r\n\r\nIn both of these cases, the `Out-Default` cmdlet's Begin/Process/Dispose are called (where `-Transcript` is passed).  I was trying to incorporate both of these as Pester tests, but didn't observe the expected failing behavior.",
+      "created_at": "2017-03-27T18:03:02Z",
+      "updated_at": "2017-03-27T18:04:03Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT The first sample got fixed, when you implement `TranscribeOnly` as a counter. But second one is still lock console in transcribe only mode, when I test in on [this](https://github.com/PowerShell/PowerShell/pull/3392/commits/a2069d6f9c27252d73f81c7d89735225fee491dd) commit:\r\n```powershell\r\nPS> $sp = {Out-Default -Transcript}.GetSteppablePipeline()\r\nPS> $sp.Begin($false)\r\nPS> $sp = $null\r\nPS> [GC]::Collect()\r\nPS> 1..10\r\nPS> [System.Management.Automation.Host.PSHostUserInterface].GetProperty('TranscribeOnlyCount', [System.Reflection.BindingFlags]'Instance, NonPublic').GetValue($Host.UI) | Write-Host\r\n1\r\nPS>\r\n```",
+      "created_at": "2017-03-27T18:35:34Z",
+      "updated_at": "2017-03-27T18:35:34Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl your proposed change looks good to me, can you submit that as a PR and include the tests I added to this PR?  I'll close this one",
+      "created_at": "2017-03-27T20:35:18Z",
+      "updated_at": "2017-03-27T20:35:18Z"
+    },
+    {
+      "author": "PetSerAl",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT OK. I can do that.",
+      "created_at": "2017-03-27T20:54:35Z",
+      "updated_at": "2017-03-27T20:54:35Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PetSerAl thanks for your help on this",
+      "created_at": "2017-03-27T21:26:29Z",
+      "updated_at": "2017-03-27T21:26:29Z"
+    }
+  ],
+  "created_at": "2017-03-21T23:30:03Z",
+  "number": 3392,
+  "state": "closed",
+  "title": "Out-Default incorrectly staying in transcript state",
+  "updated_at": "2017-06-28T21:18:58Z"
+}

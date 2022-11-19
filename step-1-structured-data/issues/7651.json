@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7651",
+  "author": "BrucePay",
+  "body": "In `ScriptBlock.InvokeAsDelegateHelper()` we pass the result of the execution through `GetRawResult()` which results in a scalar value if the return pipe contains one object. The type conversion on the return value can't deal with the scalar in some case resulting in a run time error. Making this work is important for methods like `[Linq.Enumerable]::SelectMany()` which takes a delegate `[System.Func[TSource,int,System.Collections.Generic.IEnumerable[TResult]]]`\r\n\r\nSteps to reproduce\r\n------------------\r\n```powershell\r\n([func[system.collections.generic.ienumerable[object]]] { 1 }).Invoke()\r\n```\r\nExpected behavior\r\n-----------------\r\n```none\r\n1\r\n```\r\nActual behavior\r\n---------------\r\n```none\r\nException calling \"Invoke\" with \"0\" argument(s): \"Cannot convert the \"1\" value of type \"System.Int32\" to type \"System.Collections.Generic.IEnumerable`1[System.Object]\".\"\r\nAt line:1 char:1\r\n+ ([func[system.collections.generic.ienumerable[object]]] { 1 }).Invoke ...\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : NotSpecified: (:) [], MethodInvocationException\r\n+ FullyQualifiedErrorId : PSInvalidCastException\r\n\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nPSCore (1:102) >  $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.2\r\nPSEdition                      Core\r\nGitCommitId                    v6.1.0-preview.2\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I think part of the problem is there's no conversion path for `T` to `IEnumerable<T>`.  I've had similar issues inheriting classes with abstract methods that return an `IEnumerable<>`.\r\n\r\nA shorter repro is that this doesn't work:\r\n\r\n```csharp\r\n[System.Collections.Generic.IEnumerable[object]]1\r\n```\r\n\r\nBut this does\r\n\r\n```csharp\r\n[System.Collections.Generic.IEnumerable[object]][object[]]1\r\n```\r\n\r\nIn classes the workaround is to force the return value to something already inheriting `IEnumerable<>` like above, but that doesn't seem to work here.",
+      "created_at": "2018-08-29T11:56:45Z",
+      "updated_at": "2018-08-29T11:56:45Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience In this specific case, the code returns a collection, checks to see if it's length 1 then turns it into a scalar. If the cast worked, we'd then take that scalar and turn it back into a collection of 1 element which is not desirable. More generally, you can't cast a scalar to IEnumerable[T] because converting from a scalar to a collection requires creating an instance of the collection and you can't create an instance of IEnumerable[T], only instances of concrete types that implement IEnumerable[T}.  Now we could add a special case (hack but one of many) in the type converter logic that picked a specific concrete type (probably array of T) to do the conversion but I'm not sure it's desirable. Thoughts?",
+      "created_at": "2018-08-30T17:55:22Z",
+      "updated_at": "2018-08-30T17:55:22Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay I think the pattern is common enough that it makes sense.  Maybe even the other collection-like interfaces that `T[]` would implement like `IList<T>`, `ICollection<T>`, etc.\r\n\r\nI don't think it would be desirable to *always* force the result to be an array (you wouldn't want to cast a LINQ method result unnecessarily) but if the target object is not already of the specified cast type, then forcing to `T[]` makes a lot of sense to me.",
+      "created_at": "2018-08-30T19:03:30Z",
+      "updated_at": "2018-08-30T20:30:30Z"
+    },
+    {
+      "author": "IISResetMe",
+      "author_association": "COLLABORATOR",
+      "body": "Isn't this... expected behavior?\r\n\r\n`([func[system.collections.generic.ienumerable[object]]] { Write-Output @(1) -NoEnumerate }).Invoke()` works fine",
+      "created_at": "2019-01-18T11:20:32Z",
+      "updated_at": "2019-01-18T11:20:32Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@IISResetMe it isn't surprising behavior, but I'd argue that it's not desired behavior.\r\n\r\nThe example given only works because the default array return type `object[]` is already `IEnumerable<object>` so it doesn't need to do anything extra.\r\n\r\nFor example:\r\n\r\n```powershell\r\n# Fails\r\n([func[system.collections.generic.ienumerable[int]]] { Write-Output @(1) -NoEnumerate }).Invoke()\r\n\r\n# Works\r\n([func[int[]]] { Write-Output @(1) -NoEnumerate }).Invoke()\r\n\r\n# Fails\r\n([func[System.Collections.Generic.IEnumerable[object]]] { ,[int[]](1) }).Invoke()\r\n```\r\n\r\nThere's a few interfaces that are often used as return types in abstract classes or delegates. Some extra conversion paths would be a nice bit of quality of life.\r\n\r\n",
+      "created_at": "2019-01-20T18:27:19Z",
+      "updated_at": "2019-01-20T18:27:19Z"
+    },
+    {
+      "author": "love2hina-net",
+      "author_association": "NONE",
+      "body": "It was the same situation when I encountered that SelectMany didn't work in PowerShell.\r\n\r\n```\r\nusing namespace System.Collections.Generic\r\nusing namespace System.Text.RegularExpressions\r\nusing namespace System.Linq\r\n\r\n[Match] $match = [Regex]::Match('{#begin condition header:2 footer:1}', '\\{#(\\w+)(?:\\s+(\\S+))*\\}')\r\n$captures = [Enumerable]::SelectMany($match.Groups, [Func[Group, IEnumerable[string]]] {\r\n    param([Group] $g)\r\n    return [Enumerable]::Select($g.Captures, [Func[Capture, string]] {\r\n        param([Capture] $c)\r\n        return [string] $c.Value\r\n    })\r\n})\r\n\r\nforeach ($capture in $captures) {\r\n    Write-Debug $capture\r\n}\r\n\r\nLine |\r\n  14 |  foreach ($capture in $captures) {\r\n     |           ~~~~~~~~\r\n     | Cannot convert the \"{#begin condition header:2 footer:1}\" value of type \"System.String\" to type \"System.Collections.Generic.IEnumerable`1[System.String]\".\r\n```\r\n\r\nI'll leave a comment for this issue that some people actually encountered it. \r\n",
+      "created_at": "2021-08-14T13:39:24Z",
+      "updated_at": "2021-08-14T13:39:24Z"
+    }
+  ],
+  "created_at": "2018-08-28T18:13:17Z",
+  "number": 7651,
+  "state": "open",
+  "title": "The code that creates delegates for scriptblocks can't handle certain return types.",
+  "updated_at": "2021-08-14T13:39:24Z"
+}

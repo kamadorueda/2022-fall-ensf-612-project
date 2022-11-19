@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7510",
+  "author": "vexx32",
+  "body": "Although there *is* a case for bigint parsing in the tokenizer.cs file, it is almost never used, even when it would arguably be preferable to the loss of precision that using double for large integers creates.\r\n\r\nParsing a large integer as a double is pretty hard to fail at, since the double parser will simply treat it as an exponential number. This may be fine for some data entry, but in most cases if you're literally entering a huge integer, you probably want to keep the data intact.\r\n\r\nCurrently one must work around this by surrounding the value in quotes and manually casting that string value to `[bigint]`. In calculations, there is arguably reason to treat such values as double, especially when division is an operation that may create a double value regardless of the initial number type... but when initially parsing the number type it doesn't make sense to automatically treat it as a double. \r\n\r\nThe bigint conversion should be tried first, before double parsing is attempted. (in my opinion)\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\nPS> 99999999999999999999999999999\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```powershell\r\n99999999999999999999999999999\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```powershell\r\n1E+29\r\n```\r\nNote the unnecessary loss of precision.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.4\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0-preview.4\r\nOS                             Microsoft Windows 10.0.17713\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2018-08-16T18:18:50Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Why not `int64`? We convert `long` in `int64`.",
+      "created_at": "2018-08-13T12:40:42Z",
+      "updated_at": "2018-08-13T12:40:42Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`long` *is* `int64` but that also doesn't go nearly as high as `bigint` does.\r\n\r\nWell it does automatically use `int64` up to `Int64.MaxValue` (9223372036854775807) after which.. let's see... seems to convert to `Decimal`. OK... After that max value (79228162514264337593543950335) it automatically goes to `double` which is an *instant* precision loss.\r\n\r\nIf it instead tries to convert to `[bigint]` before jumping to `double` you can retain precision for many significantly large integers. There might be a point at which significant digits is more important than retaining input integrity, but arguably if someone inputs a large integer deliberately in the console or directly in the script (which is what the tokenizer is looking at) they probably *want* to retain the integer integrity and not switch to significant digits.\r\n\r\nSince we have `bigint` available, we should probably use it. Currently the way the tokenizer handles it, purely by order of trying parse methods, it completely skips the `bigint` code branch, from what I can see.\r\n\r\nIt may be worth having it do *both* `double` and `bigint` parsing and trying to compare which is closest to the original, but I don't know if there's a meaningful data type that can check that accurately (if there were... we'd probably be using that instead of either of them!)",
+      "created_at": "2018-08-13T12:53:52Z",
+      "updated_at": "2018-08-13T12:53:52Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If we want to move in this direction (I'm not sure that we want), then we need to implement `long` too. \r\nAlso we will have to solve the overflow problem as conversion to more big type - we do not want to get an exception, do we?\r\n\r\n",
+      "created_at": "2018-08-13T13:18:02Z",
+      "updated_at": "2018-08-13T13:18:02Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "`long` is already implemented:\r\n```powershell\r\nPS> ([long]999999).GetType().Fullname\r\nSystem.Int64\r\n```\r\n\r\nIf you mean in the parsing logic, as I mentioned large integers automatically go through `int64` (aka `long`) before hitting decimal and finally stepping to double.\r\n\r\nSo all we need do is swap the logic around so that it tries to parse `bigint` first. If we do some kind of limit on that (which we may want to do to avoid Out of Memory exceptions) *then* the conversion to `double` should occur and use significant digits.",
+      "created_at": "2018-08-13T13:23:00Z",
+      "updated_at": "2018-08-13T13:23:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "What about decimal?\r\n```powershell\r\n> (999999).GetType().Fullname\r\nSystem.Int32\r\n> (9999999).GetType().Fullname\r\nSystem.Int32\r\n> (99999999).GetType().Fullname\r\nSystem.Int32\r\n> (999999999).GetType().Fullname\r\nSystem.Int32\r\n> (9999999999).GetType().Fullname\r\nSystem.Int64\r\n> (99999999999).GetType().Fullname\r\nSystem.Int64\r\n> (999999999999).GetType().Fullname\r\nSystem.Int64\r\n> (9999999999999).GetType().Fullname\r\nSystem.Int64\r\n> (99999999999999).GetType().Fullname\r\nSystem.Int64\r\n> (999999999999999).GetType().Fullname\r\nSystem.Int64\r\n> (9999999999999999).GetType().Fullname\r\nSystem.Int64\r\n> (99999999999999999).GetType().Fullname\r\nSystem.Int64\r\n> (999999999999999999).GetType().Fullname\r\nSystem.Int64\r\n> (9999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (99999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (9999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (99999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (999999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (9999999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (99999999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (999999999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (9999999999999999999999999999).GetType().Fullname\r\nSystem.Decimal\r\n> (99999999999999999999999999999).GetType().Fullname\r\nSystem.Double\r\n```",
+      "created_at": "2018-08-13T13:54:12Z",
+      "updated_at": "2018-08-13T13:54:12Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "As you demonstrate, decimal also has a maxvalue. As I mentioned. \r\n\r\nIn terms of actually doing calculations, other types are likely preferable, as doubles (for example) are much better to work with for complex mathematical operations. That's fair enough, but if you go to the effort to actually input a ginormous integer in console or script (i.e., where the tokenizer is looking) you probably want that ginormous integer, rather than `1E+40`\r\n\r\nIf you output the value of that lovely big number there at the end, it'll have been rounded to the nearest significant digit.\r\n\r\n```powershell\r\nPS> 99999999999999999999999999999\r\n1E+29\r\nPS> (99999999999999999999999999999).ToString('N')\r\n100,000,000,000,000,000,000,000,000,000.00\r\n```",
+      "created_at": "2018-08-13T14:07:56Z",
+      "updated_at": "2018-08-13T14:36:21Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "Hi @vexx32  As a systems management and automation language, what use cases to do you see for supporting `BigInteger` in PowerShell? Since doing so would increase the complexity of numeric processing and almost certainly have a performance cost, what benefits would accrue to offset these costs? For example, what new scenarios would be enabled? Thanks!",
+      "created_at": "2018-08-13T20:44:19Z",
+      "updated_at": "2018-08-13T20:44:19Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "You can automate counting grains of sand? \r\n\r\nServer stacks?\r\n\r\nHard drives?\r\n\r\nAccurately!\r\n\r\nIn all seriousness, I just think that if the user goes to the effort of actually inputting a huge integer there's not much reason for the parser to assume that only significant digits are needed. If you type out a 50-digit integer, you *damn well want* that 50-digit integer!\r\n\r\nAs long as the overall mathematical operations aren't impeded by this, I don't see a great deal of change here apart from not thwarting the user's efforts to use arbitrarily large integers. \ud83d\ude01 ",
+      "created_at": "2018-08-13T21:04:41Z",
+      "updated_at": "2018-08-13T21:04:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I also think that this is superfluous. Decimal type is big enough to cover all existing needs.\r\n\r\nI think we have enough information for PowerShell Committee conslusion.\r\n\r\n/cc @SteveL-MSFT \r\n",
+      "created_at": "2018-08-14T06:34:50Z",
+      "updated_at": "2018-08-14T06:34:50Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PowerShell/powershell-committee reviewed this. We can revisit this when we see a strong customer case, but right now we think that the change would require some guidance from a performance expert on the team, and we don't think that's worth anyone's time right now. \r\n\r\nLeaving open if people want to stash more discussion or use cases, but we don't plan on revisiting it soon. ",
+      "created_at": "2018-08-15T22:33:25Z",
+      "updated_at": "2018-08-15T22:33:25Z"
+    }
+  ],
+  "created_at": "2018-08-13T04:28:29Z",
+  "number": 7510,
+  "state": "closed",
+  "title": "Parser incorrectly parses large integer values as double, losing precision",
+  "updated_at": "2018-08-16T18:18:50Z"
+}

@@ -1,0 +1,286 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8393",
+  "author": "mklement0",
+  "body": "### Summary of the proposal:\r\n\r\n* Remove the default value for `-Depth`\r\n   * The hard-coded internal limit of `100`, which when exceeded, reports an error, is sufficient to prevent \"runaway\" JSON strings stemming from object trees with cyclic dependencies.\r\n  * Typical input objects will then be fully serialized by default, which is typically the intent.  \r\n\r\n* Use `-Depth` _solely_ at the user's discretion in order to:\r\n  * Intentionally truncate the input object tree at the specified depth.\r\n  * On rare occasions, allow serialization of object trees that are deeper than `100` levels (this could also be a solution to #3181).\r\n\r\n### Motivation\r\n\r\n`-Depth` defaulting to `2` in `ConvertTo-Json` has caused much confusion and frustration over the years; @iRon7 has recently tried to create a \"canonical\" [post on SO](https://stackoverflow.com/q/53583677/45375), which also shows how frequently the issue is arising.\r\n\r\nCurrently, an input object tree that exceeds the (default) depth doesn't cause an _error_, but results in near-useless `.psobject.ToString()` serialization of property values that exceed the depth (see #8381 for a proposal to visualize the cut-off differently).\r\n\r\nIn combination with the low default `-Depth` value of 2, that makes for frequent user frustration, because the behavior frequently amounts to _quiet de-facto failure_ that may not be discovered until later.\r\n\r\nThe seemingly arbitrary and quiet truncation is surprising to most users, and having to account for it in every `ConvertTo-Json` call is an unnecessary burden.\r\n\r\n### Backward-compatibility impact\r\n\r\nThe only way in which I think existing code could be impacted is in that payloads generated with `ConvertTo-Json` could now increase in depth (and size), _if_ users previously relied on the implicit cut-off at depth 2 - that strikes me as a [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) change.\r\n\r\n\r\n\r\n\r\n",
+  "closed_at": "2020-09-28T16:22:41Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @markekraus ",
+      "created_at": "2018-12-04T17:13:20Z",
+      "updated_at": "2018-12-04T17:13:20Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@mklement0, thank for picking this up.\r\nIt is not completely clear to me what happens with the circular references.\r\n\r\n- If you leave them intact up till the hard-coded internal limit of 100, then your **Backward-compatibility impact** might be even higher than expected: Take for example: `get-service | Where-Object {$_.DisplayName -match 'tcp/ip*'} | ConvertTo-Json -Depth 10` where it just concerns a single object (and not even all services) with a depth of 10. Knowing that a depth of 10 for this command takes already several seconds and produces a file of 22Mb (and for `-Depth 12`; 40sec/ 160Mb). \r\n\r\n- At the other hand, if you cut them off at the point where the circular reference is detected, users might lose circular properties (e.g. `$Object.parent.parent.parent.parent`). Which might be a downwards compatibility concern too if the property is within the originally used depth (2).\r\n\r\nMaybe an new (user) parameter something like: `-RecurringDepth = 2` (*default: 2*), in addition to your purpose might help. In this idea, the `-RecurringDepth` will cut off *only recurring* references at the given depth (or below).  \r\nBut would also understand if additional parameters are generally unwanted.\r\n\r\n",
+      "created_at": "2018-12-04T19:25:59Z",
+      "updated_at": "2018-12-04T21:14:17Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iRon7 I don't know the history of `-Depth 2`, but I also suspect it has to do with recursion where .NET objects reference other instances.  The obvious case as you noted is with services which have `DependentServices` and `ServicesDependedOn` creating circular references.  A `-RecurringDepth` parameter seems like a reasonable solution along with a warning if the depth gets hit.  New parameters are fine as long as they make sense and generally help avoid a breaking change.",
+      "created_at": "2018-12-04T21:54:27Z",
+      "updated_at": "2018-12-04T21:54:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7: \r\n\r\nI see the problem with the depth of `100`, but my guess is that it's fine to lower this to a more reasonable number that covers the majority of use cases while preventing infinite recursion.\r\n(Again, only people with excessively deep trees who _rely on default truncation at depth 2_ would be affected, which doesn't strike me as likely.)\r\n\r\nAs for circular references and the default value preventing \"runaway\" strings when serializing _arbitrary .NET types_: \r\nIt doesn't really make sense to use `ConvertTo-Json` for that - use `Export-CliXml` instead.\r\nSo I'm not sure that `-RecurringDepth` is needed, but, as @SteveL-MSFT says, adding parameters is an option.\r\n\r\nHowever, **the gist of my proposal is to bring sane _default_ behavior to `ConvertTo-Json`**, and that won't be possible without what is technically a breaking change - fingers crossed for bucket 3, though.\r\n\r\nThe _typical_ use case is to use _custom-made data-transfer objects_ (\"property bags\"; hashtables or custom objects) that you want _serialized in full_ - the internal hard limit is there as a safety belt.\r\n\r\nCutting off the input object tree at a given depth should always be an _explicit decision_, not quietly applied default behavior that may initially even go unnoticed.\r\n\r\nThat concerns about _incautious, atypical use_ dictate default behavior that:\r\n* defies user expectations to begin with,\r\n* is a challenge to _remember_,\r\n* is a nuisance to work around, because you need to figure out the actual depth of your data and keep the parameter in sync with later changes (unless you go for `-Depth 100`, which shouldn't be necessary)\r\n\r\nhas led to longstanding frustration with the cmdlet.\r\n\r\n\r\n",
+      "created_at": "2018-12-04T23:02:14Z",
+      "updated_at": "2018-12-05T02:35:39Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 assuming your assertion on use case is correct, it would be possible to treat PSCustomObject and HashTables differently from other .NET types, but then we have asymmetric behavior and could be confusing to some users.\r\n\r\nIt would be great if someone could script out some tests to see if other types besides Service has circular references.  If that is the case, it may make more sense to special case that one (maybe output a warning) and increase the depth by default.",
+      "created_at": "2018-12-05T02:14:29Z",
+      "updated_at": "2018-12-05T02:14:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT:\r\n\r\nAs for what use cases are typical:\r\n\r\nMy observations are based on what I came across on Stack Overflow and what makes sense to me, but you could use your Twitter clout to solicit feedback from a wider audience.\r\n\r\nOn a similar note, @iRon7: If you support this proposal at least in essence, please update your SO self-answer to point to my answer, which promotes this proposal. With the current vote tally, users are likely to focus on your _justification of the status quo_.\r\n\r\n\r\n",
+      "created_at": "2018-12-06T02:30:39Z",
+      "updated_at": "2018-12-06T02:30:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for treating `[hashtable]` and `[pscustomobject]` instances differently:\r\n\r\nYes, that could be confusing, so we should avoid it. That said, if too much legacy code turns out to rely on the implicit `-Depth 2` truncation, it may be an option, though.\r\n\r\n> It would be great if someone could script out some tests to see if other types besides Service has circular references.\r\n\r\nGiven that it generally makes no sense to blindly use `ConvertTo-Json` with arbitrary .NET types, I wouldn't be too concerned about that - except with respect to _legacy code_ in order to assess whether the `-Depth 2` should be retained selectively for non-hashtable-non-custom-object instances.\r\n\r\nHere are the ca. 20,000 hits for PowerShell code that calls `ConvertTo-Json` on GitHub:\r\n\r\nhttps://github.com/search?p=5&q=language%3Apowershell+ConvertTo-Json&type=Code\r\n\r\n\r\n\r\n",
+      "created_at": "2018-12-06T03:01:04Z",
+      "updated_at": "2018-12-06T03:01:04Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I have long suspected the default Depth was too low. That was until I experimented with setting the Depth to 100 in `$PSDefaultParameterValues`. The result was a marked increase in execution times for bunch of automation I was responsible for. In some cases, the scripts would execute indefinitely. Large numbers of deep and wide (and sometimes infinitely deep) objects can account for that.  Changing this could result in user complaints that scripts are taking longer after upgrading to a pwsh version where the depth was set too high. In some cases, they may even have scripts that never finish executing.\r\n\r\nWhile I definitely feel the pain of the default depth being low and silently truncating, I disagree with the assertion that this would not be an impactful change.\r\n\r\nI think the default behavior from the beginning should have been to error instead of silently truncate. I agree that 2 is too low. I disagree that increasing the default to 100 is a good idea.\r\n\r\nAs was discussed in another issue or PR, there are 2 concepts at play here: depth and action when that depth is reached. I think for most uses, slightly increasing the default depth and changing the default behavior to error would be sufficient is solving the majority of pain points. This would need to come with the ability to truncate as an option, as without it infinitely deep objects could never be serialized.\r\n\r\nI believe that the assertion that users rarely serialize arbitrary .NET types is false. I have seen plenty of logging that lazily throws any and all objects through `ConvertTo-Json -Compress`. I would caution that this assertion be investigated thoroughly before any decisions are made.",
+      "created_at": "2018-12-07T17:00:00Z",
+      "updated_at": "2018-12-07T17:00:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> I have seen plenty of logging that lazily throws any and all objects through ConvertTo-Json -Compress\r\n\r\nYeah, looking at some of the code here on GitHub seems to confirm the unfortunate reality of lazy `ConvertTo-Json` use being not uncommon.\r\n\r\nIn light of this, @SteveL-MSFT's suggestion is well worth considering; to flesh it out some more:\r\n\r\n* If an input object is a _deliberately constructed DTO (property bag)_, do _not_ apply the default depth (let the internal max. depth prevent infinite recursion); specifically, this applies to:\r\n\r\n  * Hashtables and ordered hashtables\r\n  * `[pscustomobject]` instances whose `.pstypenames` array contains _only_  `System.Management.Automation.PSCustomObject` and `System.Object` (to rule out arbitrary _deserialized_ .NET types)\r\n  * Classes created with PowerShell's `class` construct.\r\n   * Treat the entries / properties of these two types as follows:\r\n      * Serialize primitive .NET types as usual (`[string]`, `[bool]`, `[int]`, ...)\r\n      * Recurse on entries / properties of the same type (nested hashtable / custom object), applying only the overall max. depth)\r\n      * Serialize _any other types with _hard-coded_ per-object depth `1`_  - that is, serialize only the _immediate_ properties of such a type, and represent nested objects as they `.ToString()` values.\r\n          * In general, assume that all properties that matter in the resulting JSON should be spelled out via hashtable / `[pscustomobject]` instances (ultimately) containing properties that have scalar JSON representations - i.e., deliberately constructed as DTOs.\r\n          * The hard-coded per-object depth of 1 ensures that old code that wrapped arbitrary .NET types in hashtables / custom objects continues to work as before (e.g.,\r\n`@{ foo = Get-Item / } | ConvertTo-Json`)\r\n\r\n* With any other input, retain the current behavior.\r\n\r\nThis would alleviate the pain based on straightforward exception rules (the inevitable price to pay for remaining mostly backward-compatible):\r\n\r\n* Lazy piping of arbitrary .NET types to `ConvertTo-Json` would work as before.\r\n\r\n* Deliberately constructed DTOs would no longer be subject to the quiet truncation at depth 2.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-12-10T03:35:48Z",
+      "updated_at": "2018-12-10T16:05:24Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 How would you handle mixed scenarios? For example, depth 1-5 is occupied by property bags, 6 has a .NET Type but 8-11 are property bags again (possible due to ETS)?",
+      "created_at": "2018-12-10T13:04:57Z",
+      "updated_at": "2018-12-10T13:04:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus: What I'm proposing amounts to 3 distinct scenarios:\r\n\r\n* If `-Depth` _is_ present, the behavior will be as it is now, irrespective of the type of input object (quiet truncation at specified depth).\r\n\r\n   * Additionally, for symmetry with #8199, it should be possible to use `-Depth` as an opt-in to depths greater than the internal max. depth of `100`.\r\n\r\n* Otherwise, in the absence of `-Depth`:\r\n\r\n  * If an object is a DTO, as described above:\r\n      * _No_ overall `-Depth` value is implied; only the internal max. depth is in effect (which can be increased with an explicit `-Depth` argument).\r\n      * On a per-nested-non-DTO basis, a _fixed_, non-configurable depth of `1` is applied (note that if it weren't for backward compatibility, it might be better to use `0`, i.e., to only include the immediate properties).\r\n\r\n  * If an object is of any other type, the behavior will be as it is now (default depth `2`).\r\n\r\nTo put it differently: in the absence of `-Depth`, it is the _root_ of a given input object's tree that selects one of _two fundamental behaviors_: \r\n  * A DTO root  is not limited depth-wise (except by the max. depth), except for nested non-DTOs, if any, which themselves are limited to depth 1. \r\n  * A non-DTO root is limited to overall depth 2, as before.\r\n\r\nNote that I've updated the definition of DTO in the previous comment to include classes created with PowerShell's `class` construct.\r\n\r\nAs for the presence of ETS properties: only the base object's type should govern the behavior.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-12-10T16:13:10Z",
+      "updated_at": "2018-12-10T16:13:10Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "I think that proposal of silent asymmetrical behavior will cause more problems than it will solve.\r\n\r\nI really do think there is no decent solution to this that does not involve both a depth parameter and an action to be taken at that depth. I also agree that the default depth could be increased.",
+      "created_at": "2018-12-10T19:27:53Z",
+      "updated_at": "2018-12-10T19:27:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus:\r\n\r\n>  I also agree that the default depth could be increased.\r\n\r\nGiven that lazy to-JSON conversion isn't uncommon, that's not really an option, if you want to avoid \"marked increase in execution times\", as you've stated.\r\nAttempting a lukewarm compromise along the lines of increasing the default depth to say, `4`, is not worth the effort, in my estimation: it can still substantially increase the runtime/memory requirements of lazy conversions while still running the risk of unexpected silent truncation for purposefully constructed DTOs.\r\n\r\n> I think that proposal of silent asymmetrical behavior will cause more problems than it will solve.\r\n\r\nLet's start with the problems that it _does_ solve or _avoids_:\r\n\r\nDeliberately constructed DTOs will serialize as expected - with no depth restriction other than the \"safety belt\" of `100` levels (which you'll be able to override with `-Depth`).\r\n**This will remove the major pain point of the current behavior.**\r\n\r\nBackward-compatibility:\r\n * Old code with explicit `-Depth` will continue to work as-is.\r\n * Old code that lazily serializes non-DTOs _without_ `-Depth` will continue to work as-is.\r\n * The only old code potentially affected is one with explicitly constructed DTOs that _relied on implicit truncation at level `2`_, which strikes me as unlikely.\r\n\r\nWhich problems do you think it will _cause_?\r\n",
+      "created_at": "2018-12-11T02:34:45Z",
+      "updated_at": "2018-12-11T02:40:22Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Which problems do you think it will cause?\r\n\r\n\"Why is my object cut off? this tree of the object goes 20 deep, but this tree stops at 5\"",
+      "created_at": "2018-12-11T02:46:28Z",
+      "updated_at": "2018-12-11T02:46:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@markekraus:\r\n\r\nFundamentally: The basic DTO/non-DTO dichotomy needs to be well-documented, then there's no mystery.\r\n\r\nAs for your specific example: If you _know_ that your object tree is 20 levels deep, the implication is that you've constructed a _DTO_, and no truncation will occur.\r\n\r\nBy contrast, if you lazily pass arbitrary types to `ConvertTo-Json` without worrying about (potentially infinite) serialization depth, you're probably not concerned with details such as serialization depth to begin with.\r\n\r\n\r\n",
+      "created_at": "2018-12-11T02:55:39Z",
+      "updated_at": "2018-12-11T02:55:39Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "@mklement0 I'm referring to a mix of the the two which is common.  top level has a property bag but down one branch there is a .NET type with a depth of its own and in that depth there may be another property bag, but another branch may be property bags all the way down. This is asymmetrical and silent. the user will be very confused no matter how much documentation you write.\r\n\r\nAgain, I think the only real solution to this problem is to add a behavior toggle that affects what happens at dept and change the default behavior to error when depth is reach. \r\n\r\nThe solution in this issue solves one \"why did this happen\" and adds a few others. The behavior is inconsistent. Inconsistent behavior leads to constant slew of bug reports and user issues. If the goal is to reduce SO posts, this solution will not accomplish that.",
+      "created_at": "2018-12-11T13:05:48Z",
+      "updated_at": "2018-12-11T13:05:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "The behavior with such mixed objects is explained with this simple rule:\r\n\r\n* if a property is a DTO, serialize without restriction (except the overall max. depth)\r\n* if it's not, serialize _that object_ with depth 1 (irrespective of whether DTOs happen to be among the properties).\r\n\r\nThis is reasonable, because you generally can't assume that arbitrary non-DTOs convert meaningfully to JSON. Thus, for a predictable conversion, deliberately constructed DTOs shouldn't have _nested_ non-DTOs, and the depth 1 behavior is again a safety feature that prevents \"runaway\" serialization.\r\n\r\nAlso, remember that the proposed change only applies to calls where `-Depth` _isn't_ specified and your scenario _requires `-Depth`_ with the current behavior, so existing code isn't affected.\r\n\r\n**For code going forward, the current confusion would be significantly _lessened_**:\r\n\r\n* Deliberately and properly constructed DTOs will then serialize as expected - it \"just works\".\r\n\r\n* Only if you throw in non-DTOs _and_ don't also specify `-Depth`, i.e., \"lazy\" conversion, can confusion arise - and that confusion can be cleared up with the simple rule above.\r\n\r\nComplementarily, the `ConvertTo-Json` help topic should be updated with _guidance as to when use of the cmdlet is appropriate, the pitfalls of non-DTO serialization, ..._\r\n\r\nThe guidance could be summed as follows (would have to be worded differently):\r\n\r\n* To get predictable to-JSON serialization, deliberately construct your input as DTO trees (a DTO whose descendants are also all DTOs).\r\n     * If your tree is more than 100 levels deep and you want to serialize beyond that, use `-Depth` to bypass the built-in max. depth.\r\n* If you supply non-DTOs, we'll protect you from \"runaway\" serialization by silently truncating their object trees at a default depth.\r\n     * Truncation means that non-primitive property values at a given depth are serialized as their `.ToString()` values instead of further descending into their properties.\r\n     * The default depth is 2 for a non-DTO input object (truncation at the _grandchild_ level), and 1 for non-DTO objects nested inside a DTO input object (truncation at the _child_ level).\r\n\r\n* To explicitly truncate input object trees at a specified depth, use the `-Depth` parameter.\r\n\r\n\r\n---\r\n\r\n> I think the only real solution to this problem is to add a behavior toggle \r\n\r\nThat's not a solution, because it doesn't address the problematic _default_ behavior.\r\n\r\n---\r\n\r\nAs an aside: \r\n\r\nI can easily see how \"lazy\" piping  to `ConvertTo-Json` of non-DTOs stored in a hashtable or custom object (i.e., a DTO root with non-DTO properties) happens - and with the rule above, that would result in effective `-Depth 2`, i.e., the current behavior is retained.  \r\n\r\nI personally haven't come across the mixed scenario you describe, where the non-DTO properties in the scenario above in turn have DTOs as properties and where users would have the expectation that they'll serialize without limitation by default.\r\nCan you explain the use case and perhaps give a few examples?\r\n\r\n",
+      "created_at": "2018-12-11T15:56:33Z",
+      "updated_at": "2018-12-11T15:56:33Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "> That's not a solution, because it doesn't address the problematic default behavior.\r\n\r\nYes, it does. It informs the user that there is a problem, and how to correct it, and the cause of the problem.\r\n\r\nAttempting to futz it and make it _half_ work is bound to be full of little idiosyncrasies that just make it too unpredictable for the majority of people to use.\r\n\r\nIf we were to recommend a _thorough_ solution to a problem like this, I would imagine the code would probably end up needing to do something like this:\r\n\r\n1. Iterate through properties, looking for simple value types. For these, simply write JSON properties directly.\r\n2. Create an empty list to hold object references.\r\n3. Recurse through each reference-type complex object or property bag.\r\n4. **Store a reference** to each reference-type object to check for recursion, calling `ReferenceEquals()` on each and if it matches a previously found one, simply call `.ToString()` or something similar.\r\n5. If it doesn't match a previously discovered object in the tree, store the reference and proceed to recurse through that object as well.\r\n\r\nI don't know whether that would be considered worthwhile, though. \ud83d\ude04 ",
+      "created_at": "2018-12-11T16:21:06Z",
+      "updated_at": "2018-12-11T16:21:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Yes, it does. It informs the user that there is a problem, and how to correct it, and the cause of the problem.\r\n\r\nI missed the part about defaulting to an _error_; yes, that would help, but, given the practice of lazy `ConvertTo-Json` use, would be _a serious breaking change_ - my understanding is that this is considered unacceptable. Even just increasing the default depth is problematic.\r\n\r\n> full of little idiosyncrasies that just make it too unpredictable for the majority of people to use.\r\n\r\nWhat about the simple rules above strikes you as unpredictable?\r\n\r\nAlso note that they only apply to haphazard use of the cmdlet; someone who deliberately constructs DTOs as input won't have any problems.\r\n\r\n\r\n",
+      "created_at": "2018-12-11T16:35:30Z",
+      "updated_at": "2018-12-11T16:35:30Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The inconsistency arises because there are too many rules for too many similar things. Most users don't distinguish heavily between DTOs and regular objects when it comes to serialising them, and would probably<sup>[citation needed]</sup> want them and expect them to behave about the same.",
+      "created_at": "2018-12-11T16:41:05Z",
+      "updated_at": "2018-12-11T16:41:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Most users don't distinguish heavily between DTOs and regular objects when it comes to serialising them\r\n\r\nThey _have to_, if they want sensible results.\r\n\r\nIf they don't care about the specifics of the results, such as piping from `Get-ChildItem`, (a) nothing will change and (b) they won't need to learn the rules.\r\n\r\n> would probably want them and expect them to behave about the same.\r\n\r\nThey _shouldn't_ expect that, and that's where guidance in the help topic comes in.\r\n\r\nThere's a clear dichotomy between:\r\n\r\n* DTOs you deliberately construct, whose depth is readily obvious, and whose composition of primitive values and nested DTOs only gives you the desired JSON output.\r\n\r\n* Arbitrary (non-primitive) non-DTOs, whose depth you typically don't even know and whose serialization may result in useless JSON values, excessive output or even (potentially) infinite loops.\r\n\r\nThe latter, \"lazy\" use may be not uncommon _now_ - hence the need to preserve backward compatibility - but it should be discouraged going forward.\r\n\r\nTo intentionally incorporate non-DTOs in DTOs, say, `Get-ChildItem` output, pass them to `Select-Object` first, selecting the properties of interest, which results in a DTO that serializes predictably and in full.\r\n\r\nIn short:\r\n\r\n* Users who deliberately construct their DTOs - which should be the primary use case - won't be affected - they'll get the expected behavior _by default_, which solves the primary problem.\r\n\r\n* Only users who use `ConvertTo-Json` \"lazily\" with non-DTOs - _if_ they're even unhappy with the default truncation - need to read the help to understand (a) why the truncation is applied and (b) that they must use the `-Depth` parameter (which existing users are likely already familiar with) to serialize in greater (or lesser) depth.\r\n\r\nAs an aside, speaking of lesser depth: arguably, `ConvertTo-Json` should support `-Depth 0` also, so that serialization can be limited to the immediate properties.\r\n ",
+      "created_at": "2018-12-11T20:02:11Z",
+      "updated_at": "2018-12-11T20:02:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83e\udd37\u200d\u2642\ufe0f I offered one potential solution to avoid infinite recursion, and I'm sure there are likely several others. I don't think this is the answer. \ud83d\ude04 ",
+      "created_at": "2018-12-11T20:08:37Z",
+      "updated_at": "2018-12-11T20:08:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "If you want sensible default behavior while preserving backward compatibility, I don't see an alternative.\r\n\r\nAside from that, sure, detecting infinite recursion early is preferable to waiting for the max. depth to kick in (you may run out of memory first) and it's worth implementing, but it doesn't help the issue at hand:\r\n\r\nYou don't need infinite recursion to get into trouble: try `Get-Item file.txt | ConvertTo-Json -Depth 5`, for instance, which runs a good 30 seconds on my machine.\r\n\r\nThus, having a default depth makes sense - for non-DTOs. For DTOs, the depth is finite by definition.\r\nYes, reporting an _error_ on exceeding the default depth rather than performing quiet truncation would be the more sensible default behavior, but that ship has sailed.\r\n\r\n",
+      "created_at": "2018-12-11T20:34:34Z",
+      "updated_at": "2018-12-11T20:34:34Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Maybe, maybe not. I think that while by and large PowerShell tends to backwards compatibility there are cases where it makes sense to break a few eggs to make a better omelet. \ud83d\ude04 \r\n\r\nPerhaps this is one of those cases. \ud83d\ude42 ",
+      "created_at": "2018-12-11T20:37:19Z",
+      "updated_at": "2018-12-11T20:37:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> are cases where it makes sense to break a few eggs to make a better omelet.\r\n\r\nAmen to that. There are many examples where sticking with backward compatibility gets in the way of sensible behavior.\r\n\r\nIn the case at hand, however, I think it's not necessary to break backward compatibility in order to get sensible behavior for the primary use case.\r\n\r\nThat said, if a breaking change _is_ acceptable, after all (which is fine by me, but I suspect not by many others), then we could to the following:\r\n\r\n* Perform _truncation_ only _on request_, via `-Depth`.\r\n\r\n* By default, _error out_ if the fixed max. depth is exceeded; going beyond the fixed max. depth requires `-Depth` (which may still involve truncation).\r\n\r\n* Choose the fixed max. depth carefully (much lower than now) so that it (a) works for _most_ deliberately constructed DTOs, while (b) preventing excessive serialization times / sizes for non-DTOs.\r\n\r\n* I then wouldn't bother with Infinite loop detection, as the fixed max. depth would catch the problem. Alternatively, implement it and _error out_ (early), if `-Depth` isn't also passed.\r\n\r\nThe above would make the special-casing of non-DTOs unnecessary, but the fixed max. depth may need to be so large - to support the primary use case - that non-DTOs blindly sent to `ConvertTo-Json` may still be problematic.\r\n\r\n",
+      "created_at": "2018-12-11T21:53:21Z",
+      "updated_at": "2018-12-13T23:21:54Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "FYI, #6638 (Make ConvertTo-Json detect circular references)",
+      "created_at": "2019-03-17T06:33:15Z",
+      "updated_at": "2019-03-17T06:34:03Z"
+    },
+    {
+      "author": "jszabo98",
+      "author_association": "NONE",
+      "body": "+1\r\n",
+      "created_at": "2019-04-01T17:55:03Z",
+      "updated_at": "2019-04-01T17:55:03Z"
+    },
+    {
+      "author": "CollinChaffin",
+      "author_association": "NONE",
+      "body": "Here's a pretty reasonable argument I'm not hearing enough of:  MY DATA IS GONE.\r\n\r\nI ran this cmdlet and without so much as returning an error, pumping any nested JSON with more than 2 levels into it, changing any value and writing it back to file results in LOST DATA.  This is due to an \"invisible\" default which basically just throws anything at level 3+ in the trash silently.\r\n\r\nNo error, no warning - complete SUCCESSFUL operation....until you actually need that data again and realize it's gone because you forgot what is apparently a MANDATORY param still to this day incorrectly not marked as mandatory, but optional.\r\n\r\nBad. Coding.\r\n\r\nIt is 100% reproducible and has been complained about for YEARS by many.  It should never have been allowed to make it into production builds of Powershell, let alone survived THIS long without an immediate fix.  IMO nobody should EVER use these Powershell cmdlets to manipulate JSON but instead use other means until/unless this is ever properly corrected.\r\n\r\nThe correction should be either simply change the existing param of `depth` to `mandatory`, or leave it an optional param and simply remove the absurd hard-coded default of `2` that in my testing with the exception of the most basic json almost ALWAYS result in silent data loss, leaving the default exactly what is normally the industry standard for cmdlet params with no limiting value assigned that can truncate data - MAXVALUE - which in this case still appears to be 100.  However, note that scenario is the ONLY acceptable one that would then NEVER result in possible silent data loss, because anything over 100 then DOES finally result in notification via warning/error.  \r\n\r\nThen, as is the industry standard for cmdlet params, if the developer wants LESS - then they can add the OPTIONAL `depth` param.  But also consider then adding additional code that at the very least provides the missing warning (or erroraction) feedback today to make clear that the data passed into the cmdlet has in fact exceeded the depth limit and will result in loss - even at the verbose/debug stream level.\r\n\r\nIn the end NO other cmdlet behaves this way and continuing to just leave this behavior in place is tantamount to agreeing this is the acceptable new standard for all cmdlets in this category, and hence changing ConvertTo-CSV, ConvertTo-XML, Add-Content, and Set-Content cmdlets to perform exactly the same as these json cmdlets do today and adding the matching optional `depth` param to those with a default of `2` also, so that everyone's scripts that are missing a `-depth XX` defined (because it's optional and they have no idea) find all their output files exactly two lines long.  If you agree that scenario is absurd and probably wouldn't fly, then perhaps ask yourself - why does this? :)",
+      "created_at": "2019-06-23T07:20:56Z",
+      "updated_at": "2019-06-23T07:20:56Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": ">  consider then adding additional code that at the very least provides the missing warning (or erroraction) feedback today to make clear that the data passed into the cmdlet has in fact exceeded the depth limit and will result in loss\r\n\r\n\ud83d\udc4d  Doing at least this much seems to be a \"no brainer\".",
+      "created_at": "2019-06-23T18:21:17Z",
+      "updated_at": "2019-06-23T18:21:17Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Adding a warning seems reasonable",
+      "created_at": "2019-07-05T21:05:35Z",
+      "updated_at": "2019-07-05T21:05:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "A warning would certainly be an improvement, but amen to @CollinChaffin's comment.\r\n\r\nI have since discovered that the proposed automatic distinction between `[pscustomobject]`-only object graphs (nested DTOs, no depth restriction) and other types (depth restriction to prevent \"runaway\" serialization) is exactly _what PowerShell already does behind the scenes for remoting/background-job related CLIXML serialization_, via [`[System.Management.Automation.PSSerializer]`](https://github.com/PowerShell/PowerShell/blob/d8eca6a729a94c626bc161f94c4e694451d7e4da/src/System.Management.Automation/engine/serialization.cs#L85).\r\n\r\n",
+      "created_at": "2019-10-01T21:33:21Z",
+      "updated_at": "2019-10-01T21:33:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Hello :-) I happened to be here. I investigate #7698 ConvertFrom-Json problem, I was amazed how it works and forced to switch to this ConvertTo-Json cmdlet for consistency.\r\nIn last days I am trying to port ConvertTo-Json cmdlet to new .Net Core Json API. \r\nIt turned out that there are many obstacles to remove all breaking changes and get full compatibility with the current behavior. And after that I found the discussion. (Many thanks to @mklement0 !)\r\nAs you might imagine, I have gained rich experience in recent days and after reading this discussion I can say that:\r\n- We should not crop as @CollinChaffin said. The breaking change is good and must be.\r\n- .Net Core Json API detects cycles and we should not worry about it. It is again vote for the breaking change\r\n- Max depth = 64 (.Net Core default) is good compromise: if there are a problem in a script no hung still exists but user will see a noticeable delay, can investigate and prepare a fix.\r\n\r\nYou can try this in  #11198.\r\n\r\nWhat if there are scenarios that require current behavior?\r\nMy proposals:\r\n- Introduce new parameters -IgnorePropery (string[]) and -IgnoreType (string[])\r\n    - maybe implement (default?) generic converter to string\r\nThis allows us to address scenarios like Get-Service | ConvertTo-Json\r\n- Enhance ETS:\r\n    - Update-TypeData -JsonConverter  (like -TypeConverter).\r\n    - ConvertTo-Json -Converter ... (string[])\r\n",
+      "created_at": "2019-11-26T10:46:50Z",
+      "updated_at": "2019-11-26T10:47:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee for review, the basic problem is that the default `-depth 2` value can end up with \"data truncation\" where the user is not aware they no longer have full fidelity of the original object.  For 7.1, I suggest we add a warning message when the depth is hit.  The DTO vs .NET object serialization I think needs more discussion.  The asymmetric behavior, by default, may be confusing vs introducing a new switch/parameter to make it opt-in.",
+      "created_at": "2020-08-05T20:01:59Z",
+      "updated_at": "2020-08-05T20:01:59Z"
+    },
+    {
+      "author": "RipTornMist",
+      "author_association": "NONE",
+      "body": "hi Steve\u00a0 I am in over my head I have no idea what in doing. I think it needs to be taken away from me but I don't know how to find it. I'm sorrycan you help me please?Sent from my Samsung Galaxy smartphone.\n-------- Original message --------From: Steve Lee <notifications@github.com> Date: 8/5/20  4:03 PM  (GMT-05:00) To: PowerShell/PowerShell <PowerShell@noreply.github.com> Cc: Subscribed <subscribed@noreply.github.com> Subject: Re: [PowerShell/PowerShell] Consider removing the default -Depth value from ConvertTo-Json (#8393)\n@PowerShell/powershell-committee for review, the basic problem is that the default -depth 2 value can end up with \"data truncation\" where the user is not aware they no longer have full fidelity of the original object.  For 7.1, I suggest we add a warning message when the depth is hit.  The DTO vs .NET object serialization I think needs more discussion.  The asymmetric behavior, by default, may be confusing vs introducing a new switch/parameter to make it opt-in.\n",
+      "created_at": "2020-08-05T21:23:20Z",
+      "updated_at": "2020-08-05T22:15:07Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this, we agreed for 7.1, we should emit a warning message when the depth is hit to inform the user that the object has been truncated.\r\n\r\nFor additional enhancements, we should explore those as part of @iSazonov changes to move to .NET JSON APIs as an experimental feature.",
+      "created_at": "2020-08-05T22:30:08Z",
+      "updated_at": "2020-08-05T22:30:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT \r\n\r\n> The DTO vs .NET object serialization I think needs more discussion. The asymmetric behavior, by default, may be confusing vs introducing a new switch/parameter to make it opt-in.\r\n\r\nLet me point out again that the same asymmetry (DTOs serialized with full depth, others cut off at a given depth)  is built into PowerShell's serialization infrastructure.\r\n\r\nThe asymmetry makes sense: limiting the depth is only necessary to prevent \"runaway serialization\" with non-DTOs.\r\n\r\n I've never heard anyone complain about it in the context of serialization, and I suspect the average PowerShell user is unaware of it - despite the fact that loss of information is commonplace (though typically doesn't matter in practice), and the depth (`1`) is not configurable.\r\n\r\nThe asymmetry equally makes sense for `ConvertTo-Json`, and is even more innocuous there:\r\n\r\n* A deliberately constructed DTO as input you'd by definition want to serialize completely, whatever its depth. This is the primary use case for `ConvertTo-Json`.\r\n  * While a warning would be a slight improvement over the current behavior, it is still an extraordinarily cumbersome solution, given that it should \"just work\".\r\n\r\n* Using `ConvertTo-Json` with arbitrary .NET types such as `System.IO.FileInfo` is virtually pointless anyway, but should you attempt it, the depth limit would save you from \"runaway serialization\" (a warning could be issued).\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-08-12T19:25:55Z",
+      "updated_at": "2020-08-12T19:25:55Z"
+    },
+    {
+      "author": "heilkn",
+      "author_association": "NONE",
+      "body": "Hello,\r\n\r\nI would also like to up-vote this issue. Please remove this unexpected behavior. Day to day it costs developers several hours or days to find out the reason for the bugs caused by this.\r\n\r\nI would have even preferred my program to die with an error instead of silently messing with the data structure.\r\n\r\nKind regards\r\n\r\nKonstantin",
+      "created_at": "2020-08-14T13:00:45Z",
+      "updated_at": "2020-08-14T13:03:50Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #13692, which has now been successfully released as `v7.1.0-rc.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.1.0-rc.2)\n",
+      "created_at": "2020-10-21T19:08:23Z",
+      "updated_at": "2020-10-21T19:08:23Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #13692, which has now been successfully released as `v7.2.0-preview.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.2.0-preview.1)\n",
+      "created_at": "2020-11-17T23:02:03Z",
+      "updated_at": "2020-11-17T23:02:03Z"
+    }
+  ],
+  "created_at": "2018-12-04T06:07:25Z",
+  "number": 8393,
+  "state": "closed",
+  "title": "Consider removing the default -Depth value from ConvertTo-Json",
+  "updated_at": "2020-11-17T23:02:03Z"
+}

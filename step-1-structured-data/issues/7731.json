@@ -1,0 +1,188 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7731",
+  "author": "iSazonov",
+  "body": "## PR Summary\r\n\r\nRelated #2230.\r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Change is not breaking](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [ ] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` to the beginning of the title and remove the prefix when the PR is ready.\r\n- **User-facing changes**\r\n    - [x] Not Applicable\r\n    - **OR**\r\n    - [ ] User-facing [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed - Issue link:\r\n- **Testing - New and feature**\r\n    - [x] Not Applicable or can only be tested interactively\r\n    - **OR**\r\n    - [ ] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n        - [ ] [Add `[feature]` if the change is significant or affects feature tests](https://github.com/PowerShell/PowerShell/blob/master/docs/testing-guidelines/testing-guidelines.md#requesting-additional-tests-for-a-pr)\r\n",
+  "closed_at": "2018-11-29T09:58:01Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "I'm not sure this is a good idea - why we would want to use 2 different interpreters?",
+      "created_at": "2018-09-07T06:27:38Z",
+      "updated_at": "2018-09-07T06:27:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I think that it does not make sense to port (update) the code from CoreFX here and it's better to migrate to CoreFX interpreter. I see that it doesn't support Compile() overload with threshold. So first step is to use `Compile(preferInterpretation: true);`.\r\nThe second step is in question. We could use tiered compilation (instead of Compile() overload with threshold) and remove our interpreter. \r\nhttps://blogs.msdn.microsoft.com/dotnet/2018/08/02/tiered-compilation-preview-in-net-core-2-1/\r\nThere already is TieredCompilation_Tier1CallCountThreshold = 30\r\nhttps://github.com/dotnet/coreclr/blob/f6174b93d100d46f4641f040b6de5fa254c1ee71/Documentation/project-docs/clr-configuration-knobs.md\r\n\r\nFrom https://github.com/dotnet/coreclr/issues/4331 I see that we can get [benefits](https://github.com/dotnet/coreclr/issues/4331#issuecomment-416322009) for crossgened code too.\r\n",
+      "created_at": "2018-09-07T06:50:51Z",
+      "updated_at": "2018-09-07T06:56:36Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I see #7729 - grossgen doesn't work with framework-dependent deployment and tired compilation will come in handy.\r\n/cc @SteveL-MSFT ",
+      "created_at": "2018-09-07T07:53:41Z",
+      "updated_at": "2018-09-07T07:54:12Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I checked with PerfView that TC works. Seems the full set of tests is performed on CIs about the same time.",
+      "created_at": "2018-09-07T14:12:00Z",
+      "updated_at": "2018-09-07T14:12:00Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Why do you think it's better to migrate? Do you have data that shows it's faster?\r\n\r\nIt does not jit compile, so loops will be ~50X slower.",
+      "created_at": "2018-09-07T16:05:12Z",
+      "updated_at": "2018-09-07T16:05:12Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov The interpreter in PowerShell was updated to act like the tiered compilation. For a script block or a loop in it that contains less than 300 statements, the script block and the loop will initially be evaluated in the interpreted way (fast startup), and after running for a certain number of times, they will be compiled and executed in the jitted native code (better stable performance).\r\n\r\nThe JIT tiered compilation cannot replace this optimization. The tiered compilation will optimize the `Run` methods from certain instructions, but no matter how JIT is able to optimize those individual methods, the script is still being evaluated in an interpreted way -- fetch an instruction, data gets pushed to a stack in the interpreter, run some C# code, pop the data, save to local variable list, fetch the next instruction, etc. However, after a compiled delegate gets created on demand, the script will be running directly in the jitted native code, and it's possible for the compiled delegate to further benefit from the tiered compilation and get even better performance.\r\n\r\nYou can see it as a 3-tiered compilation.",
+      "created_at": "2018-09-08T05:52:23Z",
+      "updated_at": "2018-09-10T17:22:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I added a commit with test hook to switch interpreter/compiler. \r\nTest script:\r\n```c#\r\n[System.Management.Automation.Internal.InternalTestHooks]::SetTestHook(\"ExpressionCompile\", $true)\r\n\r\n$step1 = measure-command {\r\nfor ($i = 0; $i -lt 30; $i++) {\r\n    $a+=1\r\n}\r\n}\r\n\r\n\r\n[System.Management.Automation.Internal.InternalTestHooks]::SetTestHook(\"ExpressionCompile\", $false)\r\n$step2 = measure-command {\r\nfor ($i = 0; $i -lt 30; $i++) {\r\n    $a+=1\r\n}\r\n}\r\n\r\n$step1.TotalMilliseconds\r\n$step2.TotalMilliseconds\r\n```\r\n\r\nResults (copy-paste the script to console ):\r\n\\<Updated because of a bug in test script>\r\n\r\n| Iterations | TC Crossgened interpreter | TC Crossgened Compiler |Crossgened interpreter | Crossgened Compiler | 6.1 RC\r\n| :-: | :-: | :-: | :-: | :-: | :-:\r\n| 30 | 4 | 9 | 4 | 10 | 4\r\n| 300 | 6 | 10 | 7 | 11 | 6\r\n| 1000 | 17 | 15 | 14 | 13 | 9\r\n| 3000 | 34 | 19 | 34 | 19 | 17\r\n| 30000| 266 | 88 | 296 | 94 | 92\r\n\r\n~The results (although I can not consider these results reliable) show that with current change we get better results then with 6.1 RC.~\r\n\r\nI think it's worth it to study further.\r\n\r\n/cc @powercode maybe you will be interested.",
+      "created_at": "2018-09-10T14:25:25Z",
+      "updated_at": "2018-09-12T15:26:26Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Are you certain your experiment is valid? It's  possible you only execute one code path because of caching.",
+      "created_at": "2018-09-10T14:54:07Z",
+      "updated_at": "2018-09-10T14:54:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr What cache do you mean? I added a test hook to explicitly switch from interpreter (CoreFX) to compiler.",
+      "created_at": "2018-09-10T16:44:40Z",
+      "updated_at": "2018-09-10T16:44:40Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "PowerShell caches script block definitions to avoid recompiling, so I was just asking that you confirm your experiment hits the code paths you expect.\r\n\r\nI measured a 50X slowdown when switching to the CoreFx interpreter and this did not surprise me because their interpreter no longer supports JIT.\r\n\r\nYour results do surprise me - if JIT is happening at some point I'm happy, but I'd like pointers to where that happens or at least a solid explanation of what magic is making the new interpreter faster.",
+      "created_at": "2018-09-10T16:58:40Z",
+      "updated_at": "2018-09-10T16:58:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I run the test script in interactive session by manually copy-paste and use debugger to confirm that Compile(true)/Compile(false) is called after each the copy-paste. \r\nI tied to run the script in cycle and get other results (many times faster). There I guess was a cache.\r\nI am also surprised by these results. So far I'm inclined not to trust myself. Maybe I'm doing something wrong.",
+      "created_at": "2018-09-10T17:32:12Z",
+      "updated_at": "2018-09-10T17:32:12Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "The measurement is too specific and doesn't reflect real scenarios, here are the reasons:\r\n1. The testing script contains minimal statements, so the cost for JIT compiling is low and it doesn't reflect the cost you would get for a real scenario script with relatively many statements.\r\n\r\n2. When there are too many statements in a script block, it would be too expensive to JIT compile it (cause very slow startup). The tradeoff PowerShell takes is to [`NeverCompile`](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/parser/Compiler.cs#L1733) the script block in that case. With the current `CompileOnDemand` policy, even though the script block as a whole will never be compiled, the loops in it will still be JIT compiled after running for certian times, as long as they don't contain too many statements (> 300). However, with your change, nothing will be JIT compiled in that case, and the performance will very likely decrease comparied to the current `CompileOnDemand`.\r\n\r\nAnd BTW, I guess tiered compilation was turned on in your local builds when compared with PS 6.1-RC. That would be another factor that changes the numbers you get from the measurements, even though I don't know how much difference that would make.",
+      "created_at": "2018-09-10T18:05:42Z",
+      "updated_at": "2018-09-10T18:45:33Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, tiered compilation was turned. Now I tested without it and see ~20%  decrease in performance in the scenario.\r\n\r\nMy main concern was that the interpreter would be much faster in the interactive session, but this fear did not materialize. It seems we could use the compilation of even small scripts in an interactive session. We can even get some benefits because even one line script can be an CPU expensive cycle and compile + tiered compilation seem to bring improvements.\r\n\r\nNext test I did for Parser.\r\n```powershell\r\n$text = \"\"\r\nforeach ($file in dir -Recurse -Path .\\test\\powershell\\ -Filter \"*.ps1\") {\r\n    $text = dir -Recurse -Path C:\\Users\\sie\\Documents\\GitHub\\iSazonov\\PowerShell\\test\\powershell\\ -Filter \"*.ps1\" | Get-Content -Raw \r\n}\r\n\r\n\r\nInvoke-Command  -ScriptBlock { for ($j = 0; $j -lt 100; $j++) {\r\n\r\n$step3 = measure-command {\r\nforeach ($t in $text) {\r\n    $tokens = $null\r\n    $errors = $null\r\n    [Management.Automation.Language.Parser]::ParseInput($t, [ref]$tokens, [ref]$errors) | Out-Null\r\n}\r\n}\r\n$step3.Milliseconds\r\n\r\n}} | Measure-Object -Average\r\n```\r\nResults for compile (in TC build) - 659 ms for RC1 and 662 ms for TC build - slower ~0.5%.\r\nResults for interpreter - 673 ms for TC build - slower ~2.0%.\r\n\r\n(I should note that the variance of th TC build is greater in al tests.)\r\n\r\nIn the scenario it seems TC does not give any advantages, but it's more likely that the parser is a high-quality code and crossgen is very good too.\r\n\r\nAlso this test shows that the following test for slow start (@daxian-dbw's  point 2) will show the difference only for compilation or interpretation, because parsing will consume the same time.\r\n",
+      "created_at": "2018-09-11T13:27:15Z",
+      "updated_at": "2018-09-11T13:50:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Test for small script:\r\n```powershell\r\n[System.Management.Automation.Internal.InternalTestHooks]::SetTestHook(\"ExpressionCompile\", $false)\r\n\r\n$step4a = measure-command {\r\n\r\nfor ($j1 = 0l; $j1 -lt 30000; $j1++) {\r\n\r\nInvoke-Command  -ScriptBlock {\r\n\r\n$no = $false\r\nif ($no) {\r\n    # 1\r\n    $a += $a + 1\r\n    $b -= $b - 1\r\n    $c *= $c * 1Mb * 1Kb\r\n    $d /= $d / 1Tb\r\n    $e = \"a,b,c,d\" -split \",\"\r\n    $f = \"a\", \"b\", \"c\", \"d\" -join \";\"\r\n    $g = New-Guid\r\n    $i = [Math]::Max(1234567890, 12345678901234567890)\r\n    $j = (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)[9]\r\n    $k = 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 | Measure-Object\r\n}\r\n\r\n} # end Invoke-Command\r\n\r\n} # end for\r\n\r\n} # end measure-command\r\n\r\n\r\n[System.Management.Automation.Internal.InternalTestHooks]::SetTestHook(\"ExpressionCompile\", $true)\r\n\r\n$step4b = measure-command {\r\n\r\nfor ($j1 = 0l; $j1 -lt 30000; $j1++) {\r\n\r\nInvoke-Command  -ScriptBlock {\r\n\r\n$no = $false\r\nif ($no) {\r\n    # 1\r\n    $a += $a + 1\r\n    $b -= $b - 1\r\n    $c *= $c * 1Mb * 1Kb\r\n    $d /= $d / 1Tb\r\n    $e = \"a,b,c,d\" -split \",\"\r\n    $f = \"a\", \"b\", \"c\", \"d\" -join \";\"\r\n    $g = New-Guid\r\n    $i = [Math]::Max(1234567890, 12345678901234567890)\r\n    $j = (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)[9]\r\n    $k = 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 | Measure-Object\r\n}\r\n\r\n} # end Invoke-Command\r\n\r\n} # end for\r\n\r\n} # end measure-command\r\n\r\n\r\n$step4a.TotalMilliseconds\r\n$step4b.TotalMilliseconds\r\n```\r\nResults:\r\n\\<Updated because of a bug in test script>\r\n\r\n| Iterations | RC1 | Crossgened Interpretator | Crossgened Compile |\r\n| :-: | :-: | :-: | :-: |\r\n| 30 | 11 | 11 | 24 |\r\n| 300 | 32 | 34 | 36 |\r\n| 3000 | 199 | 252 | 190 |\r\n| 30000 | 1863 | 1928 | 1310 |\r\n\r\n~This result shows that even on RC1 we do possibly not need to compile small scripts. Perhaps this is due to a change between .Net Core and Framework.~",
+      "created_at": "2018-09-11T15:36:15Z",
+      "updated_at": "2018-09-12T15:27:14Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Another test:\r\n```powershell\r\n[System.Management.Automation.Internal.InternalTestHooks]::SetTestHook(\"ExpressionCompile\", $false)\r\n$step1 = measure-command {\r\nfor ($ii = 0l; $ii -lt 300; $ii++) {\r\n    $a+=1\r\n    $a += $a + 1\r\n    $b -= $b - 1\r\n    $c *= $c * 1Mb * 1Kb\r\n    $d = 1;$d /= $d / 1Tb\r\n    $e = \"a,b,c,d\" -split \",\"\r\n    $f = \"a\", \"b\", \"c\", \"d\" -join \";\"\r\n    $g = New-Guid\r\n    $i = [Math]::Max(123, 1234)\r\n    $j = (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)[9]\r\n    $k = 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 | Measure-Object}\r\n}\r\n\r\n\r\n[System.Management.Automation.Internal.InternalTestHooks]::SetTestHook(\"ExpressionCompile\", $true)\r\n$step2 = measure-command {\r\nfor ($ii = 0l; $ii -lt 300; $ii++) {\r\n    $a+=1\r\n    $a += $a + 1\r\n    $b -= $b - 1\r\n    $c *= $c * 1Mb * 1Kb\r\n    $d = 1;$d /= $d / 1Tb\r\n    $e = \"a,b,c,d\" -split \",\"\r\n    $f = \"a\", \"b\", \"c\", \"d\" -join \";\"\r\n    $g = New-Guid\r\n    $i = [Math]::Max(123, 1234)\r\n    $j = (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)[9]\r\n    $k = 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 | Measure-Object}\r\n}\r\n\r\n$step1.TotalMilliseconds\r\n$step2.TotalMilliseconds\r\n\r\n```\r\nResults:\r\n\r\n| Iterations | RC1 | Crossgened Interpretator | Crossgened Compile |\r\n| :-: | :-: | :-: | :-: |\r\n| 30 | 11 | 23 | 19 |\r\n| 300 | 50 | 78 | 53 |\r\n| 3000 | 386 | 594 | 411 |\r\n| 5000 | 634 | 978 | 670 |\r\n| 10000 | 1256 | 1923 | 1299 |\r\n| 20000 | 2534 | 3684 | 2522 |\r\n| 30000 | 3747 | 5560 | 3819 |\r\n```",
+      "created_at": "2018-09-12T15:29:23Z",
+      "updated_at": "2018-09-12T15:29:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I updated previous test results bacause of a bug in test script.\r\nNow I see that most likely neither compile nor CoreFX interpreter will not give an improvement.\r\nOn the other hand, TC gives an improvement in performance.",
+      "created_at": "2018-09-12T15:33:55Z",
+      "updated_at": "2018-09-12T15:33:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": ".Net Core team announced .Net Core 2.2.0 Preview2 with TC enabled by default.\r\nhttps://blogs.msdn.microsoft.com/dotnet/2018/09/12/announcing-net-core-2-2-preview-2/\r\n\r\nWe should definitely continue to investigate the effect of TC on PowerShell Core.\r\n",
+      "created_at": "2018-09-13T13:39:57Z",
+      "updated_at": "2018-09-13T13:39:57Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "In my native measurement, there is 7% startup time improvement with crossgen'ed pwsh + tiered compilation enabled.",
+      "created_at": "2018-09-13T21:00:12Z",
+      "updated_at": "2018-09-13T21:00:39Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw In the blog [article](https://blogs.msdn.microsoft.com/dotnet/2018/08/02/tiered-compilation-preview-in-net-core-2-1/) PowerShell startup improvement 20% was mentioned. Could you contact directly men who did the test? Perhaps they had more PowerShell performance tests and could give advices on how to fine-tune TC for PowerShell.\r\n",
+      "created_at": "2018-09-14T03:24:20Z",
+      "updated_at": "2018-09-14T03:24:20Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@iSazonov I asked for details of the measurement, and it turned out the measurement was made with PSCore 6.0 code base built with `release` configuration without crossgen. PowerShell was used as a Fx Dependent application in the measurement and executed by `dotnet .\\bin\\release\\netcoreapp2.0\\win7-x64\\pwsh.dll -command exit`.\r\n\r\nSo, the result of the measurements indicates that with a snapshot of the code base at 6.0 timeframe, the perf improvement in .NET Core 2.1 runtime and tiered compilation combined together offer a 20% startup improvement in the Fx Dependent scenario.\r\n\r\nHowever, we got some degradation in startup time in the 6.1 timeframe, and the rough sources include `TaskbarJumpList`, `Experimental Feautre Flag (configuration file access)` and more. From my naive measurement, without tiered compilation, 6.1 is about 7% slower than 6.0 in startup time (crossgen'ed), and after turning on tiered compilation, 6.1 is about the same as 6.0. I'm looking in to the degradation.",
+      "created_at": "2018-09-18T19:16:00Z",
+      "updated_at": "2018-09-18T19:16:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Thanks! It is interesting!\r\n\r\n> TaskbarJumpList\r\n\r\nI think we could move this to install phase (to msi custom action).",
+      "created_at": "2018-09-19T06:06:26Z",
+      "updated_at": "2018-09-19T06:06:26Z"
+    },
+    {
+      "author": "stale[bot]",
+      "author_association": "NONE",
+      "body": "This PR has been automatically marked as stale because it has not had activity in the last 30 days. It will be closed if no further activity occurs within 10 days.\nThank you for your contributions.\nCommunity members are welcome to grab these works.\n",
+      "created_at": "2018-10-19T06:52:20Z",
+      "updated_at": "2018-10-19T06:52:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Make sense ask CoreFX team to implement `LightCompiler(threshold) ( 3-tiered compilation)`?",
+      "created_at": "2018-10-23T12:03:26Z",
+      "updated_at": "2018-10-23T12:03:26Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "You can certainly ask, though it might be enough to add support for custom instructions in the interpreter.\r\n\r\nToday, PowerShell loops are implemented as a custom instruction which switches to the jit compiled version of the loop after sufficient iterations. Our core interpreter works similarly, but PowerShell loops were just special enough that it was a little easier to create a new instruction.\r\n\r\nIf CoreFX allowed this sort of extension, both loops and entire functions could implement their own tiered compilation strategy.",
+      "created_at": "2018-10-23T17:29:07Z",
+      "updated_at": "2018-10-23T17:29:07Z"
+    },
+    {
+      "author": "stale[bot]",
+      "author_association": "NONE",
+      "body": "This PR has been automatically marked as stale because it has not had activity in the last 30 days. It will be closed if no further activity occurs within 10 days.\nThank you for your contributions.\nCommunity members are welcome to grab these works.\n",
+      "created_at": "2018-11-22T18:21:48Z",
+      "updated_at": "2018-11-22T18:21:48Z"
+    }
+  ],
+  "created_at": "2018-09-07T03:52:10Z",
+  "number": 7731,
+  "state": "closed",
+  "title": "WIP: Use new Compile() overload in CompileTree()",
+  "updated_at": "2018-11-29T09:58:01Z"
+}

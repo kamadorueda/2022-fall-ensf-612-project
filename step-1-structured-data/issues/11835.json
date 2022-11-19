@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11835",
+  "author": "PrzemyslawKlys",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6?view=powershell-6).\r\n\r\n-->\r\n\r\n# Steps to reproduce\r\n\r\nType:\r\n```powershell\r\n get-content -LiteralPath 'c:\\test.html'\r\n```\r\n\r\nContinue typing - and press CTRL+SPACE\r\n\r\n```powershell\r\n get-content -LiteralPath 'c:\\test.html' -\r\n```\r\n\r\n![image](https://user-images.githubusercontent.com/15063294/74325421-dacd4c80-4d88-11ea-8327-c0c42fb08b03.png)\r\n\r\nNotice how RAW is not on the list. If you will choose -R and ctrl+space it will work\r\n\r\n![image](https://user-images.githubusercontent.com/15063294/74325449-e882d200-4d88-11ea-8162-fc892158cd74.png)\r\n\r\nIt behaves like that for all PowerShell versions losing parameters inside. If you don't use `:` inside the string:\r\n\r\n```PowerShell\r\nget-content -LiteralPath 'c\\test.html'\r\n```\r\n![image](https://user-images.githubusercontent.com/15063294/74325500-04867380-4d89-11ea-8bd4-e661e548b306.png)\r\n\r\nAll parameters will be provided. The workaround for this is to type RAW first. I've seen it multiple places not just for get-content where some parameters are missing from parameterset. I was able to track it down to the `:`  being a problem. It may be strictly related to Path/LiteralPath. \r\n\r\n![image](https://user-images.githubusercontent.com/15063294/74325821-90989b00-4d89-11ea-9883-f68d15b5175a.png)\r\n\r\n# Expected behavior\r\n\r\nShould not matter what is inside the string, at least I think it shouldn't. Otherwise, all paths on windows break it. \r\n\r\n# Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.0-rc.2\r\nPSEdition                      Core\r\nGitCommitId                    7.0.0-rc.2\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Distilled repro:\r\n\r\n```powershell\r\n$script = 'Get-Content -Path \"C:\\test\" -'\r\nTabExpansion2 -inputScript $script -cursorColumn $script.Length |\r\n    % { $_.CompletionMatches.CompletionText } |\r\n    Should -Contain '-Raw'\r\n```\r\n\r\nInteresting to note that these pass:\r\n\r\n```powershell\r\n# Bare word argument\r\nGet-Content -Path C:\\test -\r\n\r\n# No drive separator character.  Position in string doesn't matter, always fails if it's present\r\nGet-Content -Path \"C\\test\" -\r\n```",
+      "created_at": "2020-02-13T13:19:29Z",
+      "updated_at": "2020-02-13T13:19:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "`-Raw` is a dynamic parameter added by the PS file-system provider, so by design it should only be offered if the `Get-Content` command can be inferred to be targeting a _file-system_ location.\r\n\r\nHere's how it _mostly_ works at the moment - except for the bug:\r\n\r\n* If the path starts with a reference to a _valid_ drive (e.g, `C:`, `env:`), the target provider is inferred from that.\r\n  * Note that it is only the _drive_'s existence that is considered; whether the rest of the path exists is irrelevant.\r\n\r\n* If the path refers to a _non-existent_ drive, _no_ provider's dynamic parameters are being offered.\r\n\r\n* If there is _no path at all_, or the path _doesn't start with a drive spec_ - including if it starts with a _variable reference_  - completion assumes the _provider underlying the current location_ is being targeted (which explains why `Get-Content -Path \"C\\test\" -` works, as long as the current location is a file-system one).\r\n\r\n  * Caveat re Unix-like platforms: native file-system paths do not use drive specs there, so you cannot _formally_ infer from something like `/tmp` that it refers to a file-system location, and the current behavior appears to be to _always_ defer to the _current location's_ provider - even if the path exists as a file-system path. In effect, on Unix-like platforms _any_ path that doesn't start with a drive spec defers to the current location's provider.\r\n\r\nAided by your repro, @SeeminglyScience, I think the bug is specific to the following scenario:\r\n\r\n* If you type _only_ `-`, and a path that does include a valid file-system drive spec _that is also quoted_ (whether singly or doubly) is specified, it is seemingly not recognized as a valid _file-system_ path, causing the file-system-provider-specific `-Raw` switch _not_ to be offered among the completions. Curiously, typing `-r` makes the bug go away, but typing `-ra` makes it reappear.\r\n",
+      "created_at": "2020-02-13T14:18:09Z",
+      "updated_at": "2020-02-14T03:04:23Z"
+    },
+    {
+      "author": "PrzemyslawKlys",
+      "author_association": "NONE",
+      "body": "So it seems like it's reversed now. It only shows up if there is no -Path/-LiteralPath used. It also shows if no drive is specified. It disappears as soon as the drive is specified.  The bug is in 5.1,6+,7+",
+      "created_at": "2020-02-13T14:23:31Z",
+      "updated_at": "2020-02-13T14:23:54Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It also shows if no drive is specified\r\n\r\nOnly if the current location is a _file-system_ location (which, in fairness, is by far the most common scenario). If you do `Set-Location env:` first, you'll see that it disappears - as it should (see explanation above).\r\n\r\n> It disappears as soon as the drive is specified. \r\n\r\nOnly if the path is _quoted_ - that is the bug.\r\n",
+      "created_at": "2020-02-13T14:52:50Z",
+      "updated_at": "2020-02-13T16:31:43Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "My guess is that the problem is here:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/a578347b5a9d4b7c48f2cd303f876dfa6f27cdce/src/System.Management.Automation/engine/CommandCompletion/PseudoParameterBinder.cs#L1237-L1243\r\n\r\nThe argument should be added as `((StringConstantExpression)ast).Value` instead of as `ast.Extent.Text`.",
+      "created_at": "2020-02-13T15:41:38Z",
+      "updated_at": "2020-02-13T15:41:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's promising, @SeeminglyScience, but it won't work with `VariableExpressionAst` (e.g, `$var`) and `ExpandableStringExpressionAst` (e.g, `$var\\sub`).\r\n\r\nPerhaps simply trimming the quotes explicitly is the solution?\r\n\r\n```csharp\r\nvar unquotedText = System.Text.RegularExpressions.Regex.Replace(\r\n  expressionArgument.Extent.Text, \r\n  @\"^(['\"\"])(.*)\\1$\", \"$2\"\r\n);\r\nargumentsToGetDynamicParameters?.Add(unquotedText);\r\n```\r\n\r\n(I've had to amend the previous comment yet again: a non-existent drive indeed causes _no_ provider's dynamic parameters to expand (which is sensible) - except for the potentially distinct bug described in #11848, which is where my confusion stemmed from.)\r\n",
+      "created_at": "2020-02-14T03:02:53Z",
+      "updated_at": "2020-02-14T03:02:53Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "imo just get dynamic parameters based on current location if it's an expandable string.\r\n\r\nIf you wanted to go the extra mile you could maybe use the `SafeExprEvaluator` but that might be overkill.  Either way, using `Extent.Text` has more issues than the quotes.  It won't translate <kbd>`</kbd> or special character sequences using them either.  Plus here-strings...etc... trying to evaluate based on extent text gets dicey quick.",
+      "created_at": "2020-02-14T03:44:48Z",
+      "updated_at": "2020-02-14T03:44:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> imo just get dynamic parameters based on current location if it's an expandable string.\r\n\r\nThat's certainly one way to resolve it, but it would misbehave in cases such as `OtherProviderDrive:\\sub\\$foo`\r\n\r\nGood point that merely trimming enclosing quotes from `Extent.Text` isn't fully robust, but I feel it would cover more scenarios than simply falling back to the current location's provider in the presence of _any_ expandable string: `` ` ``-escaping  or escape sequences are unlikely to occur in the drive-spec portion of a path, and use of here-strings for path arguments is similarly unlikely.\r\n\r\nEither approach would certainly be an improvement, though.\r\n\r\n(Knowing nothing about `SafeExprEvaluator`, I can't speak to how much more effort a robust solution would require.)",
+      "created_at": "2020-02-14T04:17:56Z",
+      "updated_at": "2020-02-14T04:17:56Z"
+    }
+  ],
+  "created_at": "2020-02-12T10:21:25Z",
+  "number": 11835,
+  "state": "open",
+  "title": "Some parameters are not provided if : is inside the string for at least LiteralPath, Path",
+  "updated_at": "2020-02-14T04:17:56Z"
+}

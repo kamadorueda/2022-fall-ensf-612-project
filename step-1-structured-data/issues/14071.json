@@ -1,0 +1,174 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14071",
+  "author": "mklement0",
+  "body": "Note: I may have a misconception here, but the difference in behavior strikes me as unusual.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\ntry {\r\n\r\n  $ps = [powershell]::Create()\r\n  $ps.Runspace.SessionStateProxy.LanguageMode = 'Restricted'\r\n\r\n  try {\r\n    $ps.AddScript('[regex] \".\"').Invoke()\r\n    $ps.Streams.Error | Write-Warning\r\n  }\r\n  catch { Write-Warning $_ }\r\n\r\n  $ps.Commands.Clear(); $ps.Streams.ClearStreams()\r\n\r\n  try {\r\n    $ps.AddScript('New-Object regex \".\"').Invoke()\r\n    $ps.Streams.Error | Write-Warning\r\n  }\r\n  catch { Write-Warning $_ }\r\n\r\n}\r\nfinally { $ps.Dispose() }\r\n```\r\n\r\n## Expected behavior\r\n\r\nBoth attempts to create a `[regex]` instance should fail,  because it appears that `[regex]` is not on an apparent, but undocumented whitelist of permitted types (the whitelist is only documented for `ConstrainedLanguage`); by contrast, a type such as `[int]` can be constructed successfully with either method (`[int] 0` and `New-Object int`).\r\n\r\n## Actual behavior\r\n\r\nThe cast method fails, whereas the `New-Object` method succeeds:\r\n\r\n```none\r\nWARNING: Exception calling \"Invoke\" with \"0\" argument(s): \"At line:1 char:1\r\n+ [regex] \".\"\r\n+ ~~~~~~\r\n+ The type regex is not allowed in restricted language mode or a Data section.\"\r\n\r\nOptions RightToLeft MatchTimeout\r\n------- ----------- ------------\r\n   None       False -00:00:00.0010000\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.1.0\r\n```\r\n",
+  "closed_at": "2021-03-15T21:04:35Z",
+  "comments": [
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "@mklement0 It affects all accelerators ? I try PSModuleInfo, same\r\n\r\n```\r\ntry {\r\n\r\n  $ps = [powershell]::Create()\r\n  $ps.Runspace.SessionStateProxy.LanguageMode = 'Restricted'\r\n\r\n  try {\r\n    $ps.AddScript('[psmoduleinfo]::new($true)').Invoke()\r\n  }\r\n  catch { Write-Warning $_ }\r\n\r\n  $ps.Commands.Clear(); $ps.Streams.ClearStreams()\r\n\r\n  try {\r\n    $ps.AddScript('New-Object psmoduleinfo $true').Invoke()\r\n  }\r\n  catch { Write-Warning $_ }\r\n\r\n}\r\nfinally { $ps.Dispose() }\r\n```\r\n\r\nSame behavior on PS5.1",
+      "created_at": "2020-11-13T00:29:12Z",
+      "updated_at": "2020-11-13T00:29:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "No, there are types that do work, such as `[int]`.\r\n\r\n[`about_Language_Modes`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_Language_Modes) only talks about a whitelist of permitted types for `ConstrainedLanguage`, but it looks like there is also one - a more restrictive one - for `RestrictedLanguage`, which seems to surface only with the casts (note that you cannot call `::new()` in `RestrictedLanguage` mode, because no member access is allowed).\r\n\r\n(Also, it's not about type _accelerators_ per se; you get the same behavior if you use `[System.Text.RegularExpressions.Regex]`).",
+      "created_at": "2020-11-13T07:44:54Z",
+      "updated_at": "2021-03-08T22:28:43Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "Import-LocalizedData use it.\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/4b9b0788ed28ea6d463ce857d1ed81bd4a977a59/src/Microsoft.PowerShell.Commands.Utility/commands/utility/Import-LocalizedData.cs#L173\r\n\r\nAfter reading the 'about language modes', everything is working as described. You are only allowed to use command. ",
+      "created_at": "2020-11-13T08:10:17Z",
+      "updated_at": "2020-11-13T08:10:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Look at the error message:\r\n\r\n> The type regex is not allowed in restricted language mode or a Data section.\r\n\r\nYet you can create an instance with `New-Object`.\r\n\r\nSo at the very least there is an inconsistency - and I don't know what the true intent is.\r\n",
+      "created_at": "2020-11-13T08:14:52Z",
+      "updated_at": "2020-11-13T08:14:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Also: `[int] 42` works, for instance. Also note that, in addition to commands, _expressions_ are allowed, and a cast is an expression.\r\n\r\nFurthermore: `ConstrainedLanguage`, which is generally _less_ restrictive, does not exhibit the same discrepancy; e.g., both `[System.IO.FileInfo] \"/\"` and `New-Object System.IO.FileInfo \"/\"` trigger the same error: `Only core types are supported in this language mode`\r\n\r\n\r\n",
+      "created_at": "2020-11-13T08:28:17Z",
+      "updated_at": "2021-03-08T22:29:27Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "I was about to raise a similar issue based on the Docs issue [Incomplete Allowed Types list #6884](https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6884) I created yesterday:\r\n\r\n```PowerShell\r\n$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\r\n$test = [System.Collections.Specialized.OrderedDictionary]@{ a = 1 }\r\n```\r\n\r\n>  InvalidArgument: Cannot convert value to type \"System.Collections.Specialized.OrderedDictionary\".\r\n>  Only core types are supported in this language mode.\r\n\r\nBut I am allowed to do this:\r\n```PowerShell\r\n$test = [ordered]@{ a = 1 }\r\n$Test.PSTypeNames\r\nSystem.Collections.Specialized.OrderedDictionary\r\nSystem.Object\r\n```\r\n",
+      "created_at": "2020-11-13T08:42:06Z",
+      "updated_at": "2020-11-13T08:42:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7, it sounds like the _syntactic sugar_ is bypassing the permitted-type check (`[ordered] @{ ... }` isn't a regular cast).",
+      "created_at": "2020-11-13T08:47:05Z",
+      "updated_at": "2021-03-08T22:30:04Z"
+    },
+    {
+      "author": "briantist",
+      "author_association": "NONE",
+      "body": "IIRC (I ran into this years ago), this is also true for `New-Object PSObject` vs `[pscustomobject]@{}`",
+      "created_at": "2020-11-13T16:49:23Z",
+      "updated_at": "2020-11-13T16:49:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I set Issue-Bug and WG-Security until team triages this.",
+      "created_at": "2020-11-13T16:53:40Z",
+      "updated_at": "2020-11-13T16:53:40Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "This sounds like a case where `New-Object` itself should have the same type restrictions applied for restricted language mode -- or else it's just an accepted security hole, which seems... well, odd.",
+      "created_at": "2020-11-13T16:54:18Z",
+      "updated_at": "2020-11-13T16:54:18Z"
+    },
+    {
+      "author": "fMichaleczek",
+      "author_association": "NONE",
+      "body": "@vexx32 there is precheck? and runtime check, i dont think runtime check in restricted mean no object, it only allows a list of cmdlet, some typecode \r\ntype and refuse scriptblock. The default is configured for Data first, so the default whitelist is not the default case, we should have in mind (like class for DSC, using for class,  etc ...\ud83d\ude0f). RestrictedLanguage means  NoLanguage configured for Data and Constrained is another area in the runspace linked to security mode. ",
+      "created_at": "2020-11-14T11:41:28Z",
+      "updated_at": "2020-11-14T11:42:09Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Security group looked at this but we need more time.",
+      "created_at": "2021-01-25T21:56:55Z",
+      "updated_at": "2021-01-25T21:56:55Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "This issue shows that in constraint language mode some objects that aren't allowed by the `New-Object` cmdlet, can be created using an initializer, but the opposite also appears to play: some objects that do exist in constraint language mode can not be recreated by an initializer (which does work in full language mode).\r\n\r\nIn constrained mode I am obviously able to create a specific object collection as a result from e.g. a `where` method:\r\n\r\n```PowerShell\r\n$ExecutionContext.SessionState.LanguageMode = 'Constrained'\r\n$Where = (1..5).Where({ $_ % 2 })\r\n$Where.PSTypeNames\r\nSystem.Collections.ObjectModel.Collection`1[[System.Management.Automation.PSObject, System.Management.Automation, Version=7.1.1.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35]]\r\nSystem.Object\r\n```\r\n\r\nBut I am _not_ allowed to build the same type in constrained mode using an initializer, like:\r\n```PowerShell\r\n$ExecutionContext.SessionState.LanguageMode = 'Constrained'\r\n[Collections.ObjectModel.Collection[psobject]](1, 3, 5)\r\n```\r\n\r\n> InvalidArgument: Cannot convert value to type \"System.Collections.ObjectModel.Collection`1[System.Management.Automation.PSObject]\". Only core types are supported in this language mode.\r\n",
+      "created_at": "2021-02-01T16:31:25Z",
+      "updated_at": "2021-02-01T17:01:55Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@iRon7 \r\nSecurity Working Group:  `.Where` is allowed and the type being return is safe, but we still aren't going to allow you to create it yourself.  This is consistent with how Constrained language (CL) works.\r\n\r\nIn CL you can't run constructors, unless we have done a security evaluation of the type, but other cmdlets or operator can return types that you are not allowed to create yourself, because they don't allow you to run arbitrary constructor.  Instead, they run a constructor that has been evaluated.  ",
+      "created_at": "2021-03-08T22:19:20Z",
+      "updated_at": "2021-03-08T22:19:20Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Security Working Group\r\nThis is not a security issue because restricted language mode does not make a security promise.\r\n\r\nThis is a bug because `new-object` will allow you to create a type but a cast will not allow the same time.\r\n\r\nWhy are you using restricted language mode?  Be aware of the differences in language modes:  https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_language_modes?view=powershell-7.1",
+      "created_at": "2021-03-08T22:23:20Z",
+      "updated_at": "2021-03-08T22:23:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13 \r\n\r\n> This is not a security issue because restricted language mode does not make a security promise\r\n\r\nAren't language modes _all_ about security? If not, what purpose do they serve? Are only _some_ modes security-relevant? If so, which?\r\nThe linked [`about_Language_Modes`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_Language_Modes) conceptual help topic doesn't provide any clues.\r\n\r\n\r\n> This is a bug because new-object will allow you to create a type but a cast will not allow the same time.\r\n\r\nSo what is the resolution here? \r\n\r\n* if you cannot _cast_ to a type, don't allow `New-Object` to instantiate it either?\r\n* if `New-Object` allows you to in instantiate a type, casts should allow it too?\r\n* What is the list of approved types in `RestrictedLanguage` mode, given that the error message `The type regex is not allowed in restricted language mode or a Data section.` implies that there is one?\r\n\r\n\r\n",
+      "created_at": "2021-03-08T22:54:13Z",
+      "updated_at": "2021-03-08T22:54:13Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "> Aren't language modes all about security? If not, what purpose do they serve? Are only some modes security-relevant? If so, which?\r\nThe linked about_Language_Modes conceptual help topic doesn't provide any clues.\r\n\r\nConstrained language mode running under WDAC is a security boundary.\r\nConstrained language mode running under AppLocker is a defense in depth feature.\r\n\r\nThese aren't documented in the language mode because the language mode by in self does not make a security feature.  Only when paired with another security feature.\r\n\r\n> if `New-Object` allows you to in instantiate a type, casts should allow it too?\r\n\r\nI believe this is the correct fix.",
+      "created_at": "2021-03-09T20:27:33Z",
+      "updated_at": "2021-03-09T20:27:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @TravisEz13 \r\n\r\nSo in terms of _documentation_ it sounds like the `about_Language_Modes` topic needs updating to mention which security features the various language modes can / need to be paired with in order to provide actual security.\r\nThe only thing currently mentioned there is \"User Mode Code Integrity (UMCI)\" for Windows RT-based  ARM devices (isn't Windows RT defunct?)\r\n\r\n> > if `New-Object` allows you to in instantiate a type, casts should allow it too?\r\n\r\n> I believe this is the correct fix.\r\n\r\nHowever, given that `New-Object regex '.'` succeeds in `RestrictedLanguage` mode, allowing `[regex] '.'` would directly contradict the error message `The type regex is not allowed in restricted language mode or a Data section.`:\r\n\r\n* Is the error message incorrect?\r\n\r\n* Or is there indeed a whitelist of permitted types that should be enforced? \r\n ",
+      "created_at": "2021-03-09T20:43:23Z",
+      "updated_at": "2021-03-09T20:44:19Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "> The only thing currently mentioned there is \"User Mode Code Integrity (UMCI)\" for Windows RT-based ARM devices (isn't Windows RT defunct?)\r\n\r\nUMCI became [Windows Defender Application Control (WDAC)](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/select-types-of-rules-to-create) which is a Windows 10 feature (you can see UMCI on that WDAC page.)",
+      "created_at": "2021-03-09T20:51:01Z",
+      "updated_at": "2021-03-09T20:51:01Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "> However, given that New-Object regex '.' succeeds in RestrictedLanguage mode, allowing [regex] '.' would directly contradict the error message The type regex is not allowed in restricted language mode or a Data section.:\r\n\r\nI'd recommend someone investigate creating a fix and recommend.  There may be variation type by type and I'm not prepared to answer until I see proposed code changes.",
+      "created_at": "2021-03-09T20:54:29Z",
+      "updated_at": "2021-03-09T20:54:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @TravisEz13.\r\n\r\nI've asked for the docs to be updated in https://github.com/MicrosoftDocs/PowerShell-Docs/issues/7329\r\n\r\nAs for the fix:\r\n\r\nIs there really no one who can speak to the implied original design intent behind `The type <someType> is not allowed in restricted language mode or a Data section.`?",
+      "created_at": "2021-03-09T21:10:07Z",
+      "updated_at": "2021-03-09T21:10:31Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@LeeHolmes Probably can",
+      "created_at": "2021-03-09T21:47:42Z",
+      "updated_at": "2021-03-09T21:47:42Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Security Working Group: The difference of behavior between RestrictedLanguage and ConstrainedLanguage is expected because RestrictedLanguage is used for a different purpose, which no longer exists in PowerShell.  There is no issue with ConstrainedLanguage mode which we rely on for application control, so the decision here is 'Won't Fix'.  ",
+      "created_at": "2021-03-15T21:03:32Z",
+      "updated_at": "2021-03-15T21:03:32Z"
+    }
+  ],
+  "created_at": "2020-11-12T22:34:42Z",
+  "number": 14071,
+  "state": "closed",
+  "title": "In RestrictedLanguage mode, an instance of a given type cannot be created with a cast, but can be created with New-Object",
+  "updated_at": "2021-03-15T21:04:35Z"
+}

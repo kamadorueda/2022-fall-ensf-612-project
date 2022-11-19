@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12236",
+  "author": "1024-Kibibytes",
+  "body": "The following code works in PowerShell 5.1, but throws an error on 7.0 and 7.1.0-preview1\r\n\r\nAdd-Type -AssemblyName System.speech\r\n>> $speak = New-Object System.Speech.Synthesis.SpeechSynthesizer\r\nPS C:\\Users\\User> $speak.Speak(\"This is Windows talking.\")\r\n\r\nOn PowerShell 5.1, the expected result happens, i. e. the system speaks the text. On 7.0 and apparently later, it throws the following error:\r\nMethodInvocationException: Exception calling \"Speak\" with \"1\" argument(s): \"Object reference not set to an instance of an object.\"",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "doctordns",
+      "author_association": "COLLABORATOR",
+      "body": "I get this:\r\n\r\n```powershell\r\nPS C:\\foo> $speak = New-Object System.Speech.Synthesis.SpeechSynthesizer\r\nNew-Object: Cannot find type [System.Speech.Synthesis.SpeechSynthesizer]: verify that the assembly containing this type is loaded.\r\n```\r\nI suspect this class is not part of .NET Core.",
+      "created_at": "2020-04-01T14:11:33Z",
+      "updated_at": "2020-04-01T14:11:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You're correct @doctordns, but note that PowerShell Core lets you load the assembly from the .NET Framework GAC (you need to load the assembly manually even on Windows PowerShell, with  `Add-Type -AssemblyName System.Speech`).\r\n\r\nThe larger question is why PowerShell Core loads assemblies from the GAC when using `Add-Type -AssemblyName` with a simple assembly name such as `System.Speech`, given that they cannot generally assumed to be compatible, and what controls this behavior.\r\n\r\nThe following works in Windows PowerShell; in Core, the assembly with its types is _loaded_, but, clearly, _using_ the `[System.Speech.Synthesis.SpeechSynthesizer]` fails, as reported by @1024-Kibibytes.\r\n\r\n```powershell\r\nAdd-Type -AssemblyName System.Speech\r\n# In PS Core, outputting [System.Speech.Synthesis.SpeechSynthesizer] by itself shows \r\n# that the type was loaded, but instantiating it and calling .Speak() then fails.\r\n[System.Speech.Synthesis.SpeechSynthesizer]::new().Speak('This is Windows talking.')\r\n```\r\n\r\n\r\n",
+      "created_at": "2020-04-01T19:16:08Z",
+      "updated_at": "2020-04-01T19:17:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for a workaround, @1024-Kibibytes (still Windows-only, but also works from PS Core):\r\n\r\n```powershell\r\n(New-Object -ComObject SAPI.SpVoice).Speak('This is Windows talking.')\r\n```",
+      "created_at": "2020-04-01T19:21:49Z",
+      "updated_at": "2020-04-01T19:21:49Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "`System.Speech` uses reflection to access the non-public field `RegistryKey.hkey` which was renamed in core to `_hkey`.  Maybe worth opening an issue on dotnet/runtime to inform them that there's a Microsoft assembly depending on that field name.",
+      "created_at": "2020-04-02T03:04:13Z",
+      "updated_at": "2020-04-02T03:04:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience. Can you shed light on the general questions?\r\n\r\n* Why does PowerShell Core load assemblies from the GAC with `Add-Type -AssemblyName` (with a simple assembly name such as `System.Speech`), given that assemblies there cannot generally assumed to be compatible, correct?\r\n\r\n  * Or is the loading smart to limit itself to assemblies found to indicate .NET Core compatibility? (With the only problem at hand being the one you've explained.) \r\n\r\n * Or does the loading not have to be smart, and does it instead rely on truly incompatible assemblies _failing_ to load?\r\n\r\n* What, if anything,  can a user do to control this behavior? (If the loading is smart or consistently fails in case of incompatibility, there may be no need for such a feature).\r\n\r\n",
+      "created_at": "2020-04-02T03:19:01Z",
+      "updated_at": "2020-04-02T03:37:10Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> * Why does PowerShell Core load assemblies from the GAC with `Add-Type -AssemblyName` (with a simple assembly name such as `System.Speech`), given that assemblies there cannot generally assumed to be compatible, correct?\r\n\r\nThere's a pretty reasonable assumption that a large chunk of assemblies will be compatible.  You can't really guarantee compatibility of anything you don't provide yourself, but that isn't really new with Core.  That said, most assemblies will not be relying on private field names, this is an outlier.\r\n\r\n>   * Or is the loading smart to limit itself to assemblies found to indicate .NET Core compatibility? (With the only problem at hand being the one you've explained.)\r\n\r\nNah there's no way to tell if an assembly is compatible without manual testing.  Also not .NET Core specific.\r\n\r\n> * What, if anything,  can a user do to control this behavior? (If the loading is smart, there may be no need for such a feature).\r\n\r\nSome options, all except the first are sorta complicated:\r\n\r\n* Ship your own copy of the assembly with your module/script/etc\r\n* Custom `AssemblyResolve` event\r\n* Custom `AssemblyLoadContext`",
+      "created_at": "2020-04-02T03:42:56Z",
+      "updated_at": "2020-04-02T03:42:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for opening a .NET Core issue, @lukeb1961.\r\n\r\nThanks for the explanation, @SeeminglyScience; if you'll indulge my curiosity further:\r\n\r\n~~I now see that even .NET Core itself - not just PowerShell - goes looking for assemblies in the GAC on Windows (with the obsolete`System.Reflection.Assembly.LoadWithPartialName()` or - using an assembly's _full_ name - with `System.Reflection.Assembly.Load()`)~~\r\n\r\nHowever, it seems that it only looks in the .NET 4+ GAC (`$env:WinDir\\Microsoft.Net\\assembly`), not also in the .NET 3.x- one (`$env:WinDir\\assembly`), the way WinPS does.\r\n\r\nIs the .NET 3.x- GAC categorically and intentionally excluded? Some assemblies there at least do _load_ in .NET Core if targeted by their full path (their types are listed with `Add-Type -PassThru`).\r\n\r\nWhat determines which .NET Framework assemblies .NET Core can use?\r\n\r\nMy previous understanding was that only .NET Standard assemblies were also usable by .NET Core.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-04-02T17:34:21Z",
+      "updated_at": "2020-04-22T20:37:16Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Is the .NET 3.x- GAC categorically and intentionally excluded? Some assemblies there at least do _load_ in .NET Core if targeted by their full path (their types are listed with `Add-Type -PassThru`).\r\n\r\nOh, I didn't expect that PS would have it's own logic to [crawl the GAC](https://github.com/PowerShell/PowerShell/blob/6b5d6a0075ea87577f658504b66a28464b362258/src/System.Management.Automation/CoreCLR/CorePsAssemblyLoadContext.cs#L331).  The [Fusion](https://docs.microsoft.com/en-us/dotnet/framework/unmanaged-api/fusion/) API should be considered instead.  I'm guessing the current implementation was due to COM interop not being supported at the time, but it is with 3.0.\r\n\r\n> What determines which .NET Framework assemblies .NET Core can use?\r\n\r\nWhether they use any API's that were removed or had breaking changes.  Again not so much specifically a framework vs core thing, though a lot more removals and breaks did happen.\r\n\r\n> My previous understanding was that only .NET Standard assemblies were also usable by .NET Core.\r\n\r\nUsually when you see someone say they have to \"write a version for netstandard\" it really means they depended on something that broke.  If none of the API's they used happened to change, it'll often work fine.",
+      "created_at": "2020-04-02T18:22:26Z",
+      "updated_at": "2020-04-02T18:22:26Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Just to clarify, it's a *whole* lot safer to specifically target netstandard.  The standard is just a declaration of API surface that the different runtimes commit to supporting (or at the very least not throwing JIT time errors for).\r\n\r\nIt's sort like how you can technically use the PS 5.1 version of `PowerShellStandard.Library` to write code for PSv3.  As long as you only actually use API's that also exist in PSv3, it'll be fine.  It's just sort of dangerous because you don't get compile time errors for API's that don't exist in your target.",
+      "created_at": "2020-04-02T18:36:45Z",
+      "updated_at": "2020-04-02T18:36:45Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> I now see that even .NET Core itself - not just PowerShell - goes looking for assemblies in the GAC on Windows (with the obsolete `System.Reflection.Assembly.LoadWithPartialName()` or - using an assembly's full name - with `System.Reflection.Assembly.Load()`)\r\n\r\nThe GAC-probing logic in powershell was added in 6.2 I think, when pwsh targets .NET Core 2.1.\r\n~But I wasn't aware that `Assembly.LoadWithPartialName()` and `Assembly.Load()` is now looking in GAC in 3.1. If so, we probably want to revisit that logic.\r\n@mklement0 Can you please point me to the code/docs about the GAC assembly loading behavior in 3.1? /cc @adityapatwardhan~",
+      "created_at": "2020-04-22T18:07:30Z",
+      "updated_at": "2020-04-22T22:04:18Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw Pretty sure those call your event handler on the default ALC no?",
+      "created_at": "2020-04-22T18:26:04Z",
+      "updated_at": "2020-04-22T18:26:04Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience I thought @mklement0 meant those 2 APIs are probing assemblies in the GAC in general, not in the PowerShell context. Did I misunderstand this? ",
+      "created_at": "2020-04-22T18:51:59Z",
+      "updated_at": "2020-04-22T18:51:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I could be wrong (@mklement0 please correct if I am) but I'm assuming he called those APIs from a PowerShell prompt.  It would be easy (and reasonable) to assume that those APIs wouldn't hit any PowerShell specific code.\r\n\r\nBasically I'm guessing he didn't make a console app on the off chance that it would work that way.",
+      "created_at": "2020-04-22T18:59:13Z",
+      "updated_at": "2020-04-22T18:59:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience - good point: I had only tried `[reflection.assembly]::LoadWithPartialName(\"System.Speech\")` from a PowerShell Core session, and I can confirm that it indeed does _not_ work from a console application.\r\n",
+      "created_at": "2020-04-22T20:52:08Z",
+      "updated_at": "2020-04-22T20:52:08Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience @mklement0 Thank you guys for the clarification! I appreciate it!",
+      "created_at": "2020-04-22T21:55:47Z",
+      "updated_at": "2020-04-22T21:55:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Discussion about Speech API https://github.com/dotnet/runtime/issues/46730\r\nIt is in .Net 6.0 https://github.com/dotnet/runtime/pull/45941\r\n\r\nThe same https://github.com/PowerShell/PowerShell/issues/12160",
+      "created_at": "2021-01-16T06:28:12Z",
+      "updated_at": "2021-01-16T06:28:12Z"
+    }
+  ],
+  "created_at": "2020-04-01T06:53:45Z",
+  "number": 12236,
+  "state": "open",
+  "title": "Speak method appears to be broken in 7 and 7.1.0-preview1",
+  "updated_at": "2021-01-16T06:28:24Z"
+}

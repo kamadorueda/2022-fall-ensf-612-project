@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15523",
+  "author": "Niehweune",
+  "body": "On some of our client's servers, PowerShell sometimes throws an UnauthoziedAccessException when starting.\r\n\r\nIssue is practically the same as mentioned in https://github.com/PowerShell/PowerShell/pull/8627 , however we're not getting an IOException, but an UnauthorizedAccessException.\r\n\r\nRoot cause analysis showed a particular antivirus package (Sophos) was changing the attributes on the __PSScriptPolicyTest_*.psm1 file (and only on that file), presumably to prevent access while the file is being scanned. PowerShell seems to crash if this attribute change happens between the moment that the OS returns a handle for the DELETE operation, and an attempt is made to delete the file.\r\n\r\nAs a workaround, we adding an exception on __PSScriptPolicyTest* files in the antivirus, after which the issue was resolved. However, this is not a good idea from a security point of view, because an attacker might use this file naming scheme to install a malicious workload.\r\n\r\nSo this exception (or maybe any exception) should be caught here too:\r\nhttps://github.com/PowerShell/PowerShell/blob/ea19ceac4a4afac2e8dd456a85a5591aeb2dacb0/src/System.Management.Automation/utils/PathUtils.cs#L442\r\n\r\n## Steps to reproduce\r\n\r\n- Open CMD on the affected (Windows) system\r\n- Start pwsh\r\n\r\n## Expected behavior\r\n\r\nPowerShell should start\r\n\r\n## Actual behavior\r\n\r\nAbout 3 out of 10 times, pwsh.exe crashes with the exception\r\n```\r\nProcess terminated. The type initializer for 'System.Management.Automation.Runspaces.InitialSessionState' threw an exception.\r\n  at System.Environment.FailFast(System.String, System.Exception)\r\n  at Microsoft.PowerShell.UnmanagedPSEntry.Start(System.String[], Int32)\r\n  at Microsoft.PowerShell.ManagedPSEntry.Main(System.String[])\r\nSystem.TypeInitializationException: The type initializer for 'System.Management.Automation.Runspaces.InitialSessionState' threw an exception.\r\n---> System.UnauthorizedAccessException: Access to the path _TempFolderName_\\\\\\_\\_PSScriptPolicyTest\\__RandomString_.psm1' is denied.\r\n   at System.IO.FileSystem.DeleteFile(String fullPath)\r\n   at System.IO.File.Delete(String path)\r\n   at System.Management.Automation.PathUtils.TryDeleteFile(String filepath)\r\n   at System.Management.Automation.Security.SystemPolicy.GetAppLockerPolicy(String path, SafeHandle handle)\r\n   at System.Management.Automation.Security.SystemPolicy.GetLockdownPolicy(String path, SafeHandle handle)\r\n   at System.Management.Automation.Security.SystemPolicy.GetSystemLockdownPolicy()\r\n   at System.Management.Automation.Runspaces.InitialSessionState..cctor()\r\n   --- End of inner exception stack trace ---\r\n   at System.Management.Automation.Runspaces.InitialSessionState.CreateDefault2()\r\n   at Microsoft.PowerShell.UnmanagedPSEntry.Start(String[] args, Int32 argc)\r\n```\r\n\r\nAt the time of crashing a __PSScriptPolicyTest_*.psm1 file is left in the $ENV:TMP folder.\r\n\r\n## Environment data\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.3\r\nPSEdition                      Core\r\nGitCommitId                    7.1.3\r\nOS                             Microsoft Windows 10.0.14393\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n\r\n```\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@Niehweune Please issue template and share more information ($PSVersionTable)",
+      "created_at": "2021-06-04T15:25:20Z",
+      "updated_at": "2021-06-04T15:25:20Z"
+    },
+    {
+      "author": "Niehweune",
+      "author_association": "NONE",
+      "body": "Additional info added, since we now found the root cause (antivirus behavior).\r\n\r\nIssue is for any PowerShell version, really, however earlier versions simply returned just the Exception message, whereas the latest version shows the full stacktrace (which helped us pinpoint the exact issue).\r\n\r\nWe haven't been able to reproduce the issue on other servers than those already affected (4 servers in total).",
+      "created_at": "2021-06-08T11:42:01Z",
+      "updated_at": "2021-06-08T11:42:01Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Some background, these files are used to detect if AppLocker is enabled.  We delete them to keep from leaving garbage around which may slow future scans.\r\n\r\nPersonally, I feel that this is an area that PowerShell can be more resilient at, but this resilience would likely be in the form of leaving these temporary files around as this is in a critical path for PowerShell startup and we don't want to affect startup performance.\r\n\r\nI discussed this with @PaulHigin  and he felt strongly that we should not ignore the deletion failure.  \r\nIf this interfered with our ability to call AppLocker, I would agree.\r\n\r\nFrom the stack trace, this is not the case, but I would encourage you to contact Sophos and report this issue with their product.",
+      "created_at": "2021-06-14T21:43:21Z",
+      "updated_at": "2021-06-14T21:43:21Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We could:\r\n1. repeat the delete like `while (iteration++ < 2)`\r\n2. delay the delete and put the action into background task.\r\n3. create the test files in locked mode, i.e. replace IO.File.WriteAllText() with FileStream FileShare.Read.\r\n",
+      "created_at": "2021-06-15T04:25:19Z",
+      "updated_at": "2021-06-15T04:25:19Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "WG-Security:\r\nSince this occurs during PowerShell start up, we prefer to not perform repeated tasks or create a back ground task.\r\n\r\nWe feel options to fix are:\r\n1. @iSazonov idea to create the test files without share flag to prevent AV from locking it.\r\n1. Catch any exception when removing the test file and leave file on disk.\r\n\r\nThe first is preferable since that should ensure the test files are removed, but needs to be tested.",
+      "created_at": "2021-06-21T21:07:45Z",
+      "updated_at": "2021-06-21T21:07:45Z"
+    }
+  ],
+  "created_at": "2021-06-04T15:19:17Z",
+  "number": 15523,
+  "state": "open",
+  "title": "PowerShell fails to start in case of weird permissions in TEMP/strange behavior of antivirus",
+  "updated_at": "2021-06-21T21:08:21Z"
+}

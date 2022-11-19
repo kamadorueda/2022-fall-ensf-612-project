@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2579",
+  "author": "joeyaiello",
+  "body": "Currently the #1 item on the PowerShell UserVoice: https://windowsserver.uservoice.com/forums/301869-powershell/suggestions/12336204-get-service-should-return-the-user-account-the-ser\r\n\r\nArnaud Petitjean:\r\n> The Get-Service cmdlet should return the service account associated to each service.\r\n\r\n> We can get this information easily from the Win32_Service WMI class, but to me, it should be returned by Get-Service.\r\n\r\nExpected behavior\r\n-----------------\r\n```powershell\r\nGet-Service Spooler | Format-List Name,LogOnAs\r\n\r\nName : Spooler\r\nLogOnAs : Local System\r\n```\r\n\r\nActual behavior\r\n---------------\r\n```powershell\r\nGet-Service Spooler | Format-List Name,LogOnAs\r\n\r\nName : Spooler\r\n```\r\n\r\nEnvironment data\r\n----------------\r\nAll versions of PowerShell",
+  "closed_at": "2017-10-25T11:02:18Z",
+  "comments": [
+    {
+      "author": "copdips",
+      "author_association": "NONE",
+      "body": "please also return StartupType and ServicePath\n",
+      "created_at": "2016-11-01T19:01:35Z",
+      "updated_at": "2016-11-01T19:01:35Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "@copdips StartType as been included in `Get-Service` output since 5.0:  \n\n``` powershell\nC:\\Users\\jaiello> get-service sshd | fl *\n\n\nName                : sshd\nRequiredServices    : {ssh-agent}\nCanPauseAndContinue : False\nCanShutdown         : False\nCanStop             : False\nDisplayName         : sshd\nDependentServices   : {}\nMachineName         : .\nServiceName         : sshd\nServicesDependedOn  : {ssh-agent}\nServiceHandle       :\nStatus              : Stopped\nServiceType         : Win32OwnProcess\nStartType           : Manual\nSite                :\nContainer           :\n```\n",
+      "created_at": "2016-11-04T22:02:23Z",
+      "updated_at": "2016-11-04T22:02:23Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "But yeah, we should probably have `ServicePath` too\n",
+      "created_at": "2016-11-04T22:02:40Z",
+      "updated_at": "2016-11-04T22:02:40Z"
+    },
+    {
+      "author": "charub",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT , @lzybkr  @joeyaiello  : As mentioned, Service Account info as well service path is available from Win32_Service WMI class. Should I get started on this?\n\n![image](https://cloud.githubusercontent.com/assets/18017330/20025565/c509e960-a2ac-11e6-9281-6d5a87da6b38.png)\n",
+      "created_at": "2016-11-04T23:36:26Z",
+      "updated_at": "2016-11-04T23:36:26Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@charub you can always take up issues marked as Backlog, although it's preferred if you can prioritize issues you can fix marked for 6.0.0 milestone\n",
+      "created_at": "2016-11-04T23:43:05Z",
+      "updated_at": "2016-11-04T23:43:05Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Some food for thought: Don't forget the Description property, and consider device drivers as well.\r\n\r\nYears ago when I used to work on PowerGUI (PowerShell v1 days, before StartType was added), we solved this problem like this:\r\n\r\n```PowerShell\r\n$wmiServices = @{}\r\nGet-WmiObject -Namespace root\\cimv2 -Class Win32_Service | ForEach-Object {\r\n\t$wmiServices.Add($_.Name,$_)\r\n}\r\nGet-Service `\r\n\t| ForEach-Object {\r\n\t\t$_ | Add-Member -Name Win32_Service -MemberType NoteProperty -Value $(if ($wmiServices.ContainsKey($_.ServiceName)) {$wmiServices[$_.ServiceName]} else {$null}) -PassThru\r\n\t} `\r\n\t| Add-Member -Name Description -MemberType ScriptProperty -Value {if ($this.Win32_Service) { $this.Win32_Service.Description }} -PassThru `\r\n  \t| Add-Member -Name LogonAs -MemberType ScriptProperty -Value {if ($this.Win32_Service) { $this.Win32_Service.StartName }} -PassThru `\r\n  \t| Add-Member -Name StartupType -MemberType ScriptProperty -Value {if ($this.Win32_Service) { $this.Win32_Service.StartMode }} -PassThru\r\n```\r\n\r\nWhen digging into the details of how Get-Service works way back then, I discovered that you can also get device drivers from Get-Service. Device drivers can be discovered via WMI using the Win32_SystemDriver class. This led to the following proxy function (implemented using pspx) that supports retrieving the additional properties that were missing (although I didn't get the path) and that supports retrieving services, device drivers, or both:\r\n\r\n```PowerShell\r\n# This script creates a proxy function for Get-Service. It adds support for retrieving both\r\n# device drivers (which are services under the covers) and windows services, using wildcards\r\n# or fullnames. It allows you to specify the type of service you are looking for as well with\r\n# the -ServiceType parameter. And lastly, it retrieves the Description, the LogonAs and the\r\n# StartupType properties of the services you enumerate (these properties are not visible with\r\n# the built-in Get-Service cmdlet).\r\n\r\nFix-It Get-Service `\r\n\t-Synopsis 'Gets the Windows services and device driver services on a local or remote computer.' `\r\n\t-Description @'\r\nThe Get-Service command gets objects that represent the services on a local computer or on a remote computer, including running and stopped services.\r\n\r\nYou can direct Get-Service to get only particular services by specifying the service name or display name of the services, or you can pipe service objects to Get-Service.\r\n\r\nServices returned from this command may be Windows services or device driver services. You can direct Get-Service to only return services of a particular type using the ServiceType parameter.\r\n'@ `\r\n\t-Parameter @(\r\n\t\t@{\r\n\t\t\tName = 'ServiceType'\r\n\t\t\tAlias = 'Type'\r\n\t\t\tType = [System.String]\r\n\t\t\tValidateSet = @('Service','DeviceDriver','All')\r\n\t\t\tDescription = @'\r\nGets only services of the specified type. The default is All if you search by name without wildcards, or Service otherwise. \r\n\r\n\tThe valid values for this parameter are: \r\n\r\n\t-- All: Gets all services on a computer.\r\n\t-- Service: Gets standard Windows Services on a computer.\r\n\t-- DeviceDriver: Gets device driver services on a computer.\r\n\r\n'@\r\n\t\t\tDefaultValue = '''All'' if you search by name without wildcards, or ''Service'' otherwise.'\r\n\t\t\tExample = @(\r\n\t\t\t\t@{\r\n\t\t\t\t\tScriptBlock={Get-Service -ServiceType DeviceDriver}\r\n\t\t\t\t\tDescription='This command retrieves all device driver services on the local computer. This example shows that you can enumerate all device driver services.'\r\n\t\t\t\t}\r\n\t\t\t\t@{\r\n\t\t\t\t\tScriptBlock={Get-Service -Name hvboot}\r\n\t\t\t\t\tDescription='This command gets the hvboot device driver service on the local computer. This example shows that you can search for device driver services by name.'\r\n\t\t\t\t}\r\n\t\t\t\t@{\r\n\t\t\t\t\tScriptBlock={Get-Service -ServiceType All}\r\n\t\t\t\t\tDescription='This command gets both standard Windows Services and device driver services on the local computer.'\r\n\t\t\t\t}\r\n\t\t\t)\r\n\t\t}\r\n\t) `\r\n\t-DefaultParameterValue @{\r\n\t\tServiceType = {if ($PSPassThruParameters.ContainsKey('Name') -and ($Name -notmatch '[\\?\\*]')) {'All'} else {'Service'}}\r\n\t} `\r\n\t-Begin {\r\n\t\tfunction ConvertTo-WmiFilter {\r\n\t\t\t[CmdletBinding()]\r\n\t\t\t[OutputType([System.String])]\r\n\t\t\tparam(\r\n\t\t\t\t[Parameter(Mandatory=$true,Position=0)]\r\n\t\t\t\t[ValidateNotNullOrEmpty()]\r\n\t\t\t\t[System.String]\r\n\t\t\t\t$PropertyName,\r\n\r\n\t\t\t\t[Parameter()]\r\n\t\t\t\t[ValidateNotNullOrEmpty()]\r\n\t\t\t\t[System.String[]]\r\n\t\t\t\t$FilterValue,\r\n\r\n\t\t\t\t[Parameter()]\r\n\t\t\t\t[ValidateNotNullOrEmpty()]\r\n\t\t\t\t[System.String[]]\r\n\t\t\t\t$LiteralFilterValue\r\n\t\t\t)\r\n\t\t\t$wmiFilterSet = @()\r\n\t\t\tif ($FilterValue) {\r\n\t\t\t\tforeach ($item in $FilterValue) {\r\n\t\t\t\t\tif ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($item)) {\r\n\t\t\t\t\t\t$wmiEquivalentItem = $item -replace '``','\u00a2' -replace '^\\*','%' -replace '^\\?','_' -replace '([^`]{1}?)\\*','$1%' -replace '([^`]{1}?)\\?','$1_' -replace '`\\*','*' -replace '`\\?','?' -replace '\u00a2','`'\r\n\t\t\t\t\t\t$wmiFilterSet += \"$PropertyName LIKE '$wmiEquivalentItem'\"\r\n\t\t\t\t\t} else {\r\n\t\t\t\t\t\t$wmiEquivalentItem = [System.Management.Automation.WildcardPattern]::Unescape($item)\r\n\t\t\t\t\t\t$wmiFilterSet += \"$PropertyName = '$item'\"\r\n\t\t\t\t\t}\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t\tif ($LiteralFilterValue) {\r\n\t\t\t\tforeach ($item in $LiteralFilterValue) {\r\n\t\t\t\t\t$wmiFilterSet += \"$PropertyName = '$item'\"\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t\t$wmiFilterSet -join ' OR '\r\n\t\t}\r\n\t\t$wmiServices = @{}\r\n\t\t$getWmiObjectParameters = @{\r\n\t\t\tNamespace = 'root\\cimv2'\r\n\t\t\tClass = $(if ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Name')) {'Win32_BaseService'} else {'Win32_Service'})\r\n\t\t}\r\n\t\tif ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('ComputerName')) {\r\n\t\t\t$getWmiObjectParameters['ComputerName'] = $ComputerName\r\n\t\t}\r\n\t\tif ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('ServiceType')) {\r\n\t\t\tswitch ($ServiceType) {\r\n\t\t\t\t'DeviceDriver' {\r\n\t\t\t\t\t$getWmiObjectParameters['Class'] = 'Win32_SystemDriver'\r\n\t\t\t\t\tbreak\r\n\t\t\t\t}\r\n\t\t\t\t'Service' {\r\n\t\t\t\t\t$getWmiObjectParameters['Class'] = 'Win32_Service'\r\n\t\t\t\t\tbreak\r\n\t\t\t\t}\r\n\t\t\t\tdefault {\r\n\t\t\t\t\t$getWmiObjectParameters['Class'] = 'Win32_BaseService'\r\n\t\t\t\t\tbreak\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t}\r\n\t\t$filter = ''\r\n\t\tif ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Name')) {\r\n\t\t\t$filter += '(' + (ConvertTo-WmiFilter -PropertyName Name -FilterValue $Name) + ')'\r\n\t\t\t$filter += ' OR '\r\n\t\t\t$filter += '(' + (ConvertTo-WmiFilter -PropertyName DisplayName -FilterValue $Name) + ')'\r\n\t\t} elseif ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('DisplayName')) {\r\n\t\t\t$filter += '(' + (ConvertTo-WmiFilter -PropertyName DisplayName -FilterValue $DisplayName) + ')'\r\n\t\t}\r\n\t\tif ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Include')) {\r\n\t\t\tif ($filter) {\r\n\t\t\t\t$filter += ' AND '\r\n\t\t\t}\r\n\t\t\t$filter += '(' + (ConvertTo-WmiFilter -PropertyName Name -FilterValue $Include) + ')'\r\n\t\t}\r\n\t\tif ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Exclude')) {\r\n\t\t\tif ($filter) {\r\n\t\t\t\t$filter += ' AND NOT '\r\n\t\t\t}\r\n\t\t\t$filter += '(' + (ConvertTo-WmiFilter -PropertyName Name -FilterValue $Exclude) + ')'\r\n\t\t}\r\n\t\tif ($filter) {\r\n\t\t\t$getWmiObjectParameters['Filter'] = $filter\r\n\t\t}\r\n\t\t$serviceNames = @()\r\n\t\tGet-WmiObject @getWmiObjectParameters | ForEach-Object {\r\n\t\t\tif (-not $wmiServices.ContainsKey($_.__SERVER)) {\r\n\t\t\t\t$wmiServices[$_.__SERVER] = @{}\r\n\t\t\t}\r\n\t\t\tif ($serviceNames -notcontains ($_.Name)) {\r\n\t\t\t\t$serviceNames += $_.Name\r\n\t\t\t}\r\n\t\t\t$wmiServices[$_.__SERVER][$_.Name] = $_\r\n\t\t}\r\n\t\tif ($serviceNames) {\r\n\t\t\t$PSPassThruParameters.Remove('Name') | Out-Null\r\n\t\t\t$PSPassThruParameters.Remove('Include') | Out-Null\r\n\t\t\t$PSPassThruParameters.Remove('Exclude') | Out-Null\r\n\t\t\t$PSPassThruParameters['Name'] = $serviceNames | Sort-Object\r\n\t\t}\r\n\t} `\r\n\t-Process {\r\n\t\tForEach-Object {\r\n\t\t\t$serviceComputerName = $_.MachineName\r\n\t\t\tif (@('127.0.0.1','.','localhost',\"${env:COMPUTERNAME}.${env:USERDNSDOMAIN}\") -contains $serviceComputerName) {\r\n\t\t\t\t$serviceComputerName = $env:COMPUTERNAME\r\n\t\t\t}\r\n\t\t\tif ($wmiServices.ContainsKey($serviceComputerName) -and $wmiServices.$serviceComputerName.ContainsKey($_.ServiceName)) {\r\n\t\t\t\t$_ `\r\n\t\t\t\t\t| Add-Member -Name WmiService -MemberType NoteProperty -Value $wmiServices.$serviceComputerName[$_.ServiceName] -PassThru `\r\n\t\t\t\t\t| Add-Member -Name Description -MemberType ScriptProperty -Value {if ($this.WmiService) { $this.WmiService.Description }} -PassThru `\r\n\t\t\t\t  \t| Add-Member -Name LogonAs -MemberType ScriptProperty -Value {if ($this.WmiService) { $this.WmiService.StartName }} -PassThru `\r\n\t\t\t\t  \t| Add-Member -Name StartupType -MemberType ScriptProperty -Value {if ($this.WmiService) { $this.WmiService.StartMode }} -PassThru `\r\n\t\t\t\t\t| Add-Member -Force -Name ToString -MemberType ScriptMethod -Value {$this.Name} -PassThru\r\n\t\t\t}\r\n\t\t}\r\n\t} `\r\n\t-DefineNow\r\n```\r\n\r\nI just wanted to add this here because it made for easier use of Get-Service that gave back more data properties and that could be used to enumerate device drivers as well.",
+      "created_at": "2017-05-25T22:00:38Z",
+      "updated_at": "2017-05-25T22:00:38Z"
+    },
+    {
+      "author": "jcoffi",
+      "author_association": "NONE",
+      "body": "Whatever happened to this? It looks like it never made it out for public use.",
+      "created_at": "2020-09-22T20:45:38Z",
+      "updated_at": "2020-09-22T20:45:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Try:\r\n```\r\nGet-Service wuauserv | fl * -Force\r\n```",
+      "created_at": "2020-09-23T03:09:48Z",
+      "updated_at": "2020-09-23T03:09:48Z"
+    },
+    {
+      "author": "AndreDP-Developer",
+      "author_association": "NONE",
+      "body": "Found that this works:\r\nGet-WmiObject win32_service -Filter \"Name like 'MSSQL%'\" | Format-Table name, startname \r\n",
+      "created_at": "2021-08-27T07:18:06Z",
+      "updated_at": "2021-08-27T07:18:06Z"
+    },
+    {
+      "author": "Prosper-web",
+      "author_association": "NONE",
+      "body": "bjr\n\n2021-08-27 9:18 UTC+02:00, Andr\u00e9 du Plessis ***@***.***>:",
+      "created_at": "2021-08-27T08:51:54Z",
+      "updated_at": "2021-08-27T18:09:50Z"
+    }
+  ],
+  "created_at": "2016-11-01T17:27:25Z",
+  "number": 2579,
+  "state": "closed",
+  "title": "Get-Service should return the user account the services are running under",
+  "updated_at": "2021-08-27T18:09:50Z"
+}

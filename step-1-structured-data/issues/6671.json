@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6671",
+  "author": "mklement0",
+  "body": "Note: There may be no straightforward solution, but the user experience is certainly confusing.\r\n\r\nIf you try to target a nonexistent drive, PowerShell doesn't invoke the `FileSystem`-provider implementation of `Get-ChildItem` (since no provider can be inferred from the path), and since switches `-Directory` and `-File` are specific to that provider, an error message complaining about nonexistent _parameters_ is reported rather than the nonexistent _drive_.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\nAssume that there's no drive N: (on Windows)\r\n\r\n```powershell\r\nGet-ChildItem 'N:/foo'\r\nGet-ChildItem 'N:/foo' -File\r\nGet-ChildItem 'N:/foo' -Directory\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nGet-ChildItem : Cannot find drive. A drive with the name 'N' does not exist.\r\nGet-ChildItem : Cannot find drive. A drive with the name 'N' does not exist.\r\nGet-ChildItem : Cannot find drive. A drive with the name 'N' does not exist.\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nGet-ChildItem : Cannot find drive. A drive with the name 'N' does not exist.\r\nGet-ChildItem : A parameter cannot be found that matches parameter name 'File'.\r\nGet-ChildItem : A parameter cannot be found that matches parameter name 'Directory'.\r\n```\r\n\r\nThat is, if `-File` or `-Directory` are also specified, the error message changes from complaining about a nonexistent _drive_ to a nonexistent _parameter_.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.2 on macOS 10.13.4\r\nPowerShell Core v6.0.2 on Ubuntu 16.04.4 LTS\r\nPowerShell Core v6.0.2 on Microsoft Windows 10 Pro (64-bit; Version 1709, OS Build: 16299.371)\r\nWindows PowerShell v5.1.16299.251 on Microsoft Windows 10 Pro (64-bit; Version 1709, OS Build: 16299.371)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Does it make sense for us to assume a filesystem drive by default in error scenarios? Or would that break things?",
+      "created_at": "2018-04-17T23:08:47Z",
+      "updated_at": "2018-04-17T23:08:47Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "The non-performant implementation would be to go and look through other provider `*-*Item` cmdlets and see if they have the particular parameters given and then throw the relevant error from whichever we hit first? But there could be a whole host of challenges associated with that.",
+      "created_at": "2018-04-17T23:26:29Z",
+      "updated_at": "2018-04-17T23:26:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Does it make sense for us to assume a filesystem drive by default in error scenarios?\r\n\r\nPragmatically speaking, I'd say yes.\r\n\r\nThe generalized drive metaphor never really gained traction, is my sense (although that could be considered unfortunate).\r\n\r\nIn the Unix world, in the absence of the registry provider, the only provider that really matters is the filesystem provider (what the `alias:`, `env:`, `function:` and `variable:` drives provide is easily covered by other features)\r\n\r\n\r\n",
+      "created_at": "2018-04-18T01:36:19Z",
+      "updated_at": "2018-04-18T01:36:19Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "I would disagree that the generalized drive metaphor didn't gain traction. I've seen dozens of modules that implement it including SQL Server. After SHIPs was released, tons more popped up. \r\n\r\nAs for the fix, the issue happens when specifying other parameters too such as `-Attributes`, `-ReadOnly` but it works for `-Recurse`. \r\n\r\nMy guess is that the parameters that don't work are all for the filesystem. If so, then it needs the drive to determine if it is hitting the filesystem provider to enable them which would explain why it gave the unexpected error. So I wonder if the drive check just needs to happen sooner or catch the parameter error and check if the invalid drive was the cause and throw that instead.\r\n",
+      "created_at": "2018-04-18T06:06:32Z",
+      "updated_at": "2018-04-18T06:06:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@dragonwolf83: \r\n\r\n> I would disagree that the generalized drive metaphor didn't gain traction.\r\n> I've seen dozens of modules that implement it including SQL Server\r\n\r\nFair enough - my personal sense was just that.\r\nWould you agree that filesystem use is by far the most common use, however?\r\n\r\n> but it works for -Recurse.\r\n> that the parameters that don't work are all for the filesystem.\r\n\r\nYes, the problem is that you cannot infer from a nonexistent drive what the target provider is, so it isn't the filesystem provider's cmdlet implementation that is called.\r\n\r\nThe path may _look_ like a filesystem path (on Windows), but if the drive isn't defined, it could be anything (given that you can define PS drives such as `New-PSdrive -PSProvider alias -name N -root alias`).\r\n\r\n> So I wonder if the drive check just needs to happen sooner\r\n\r\nGood idea.\r\n@rjmholt, Given that at least a _formal_ check of the path must already be happening in order to determine the appropriate provider cmdlet, would it be feasible to check the drive's existence at that point?\r\n\r\n\r\n",
+      "created_at": "2018-04-18T11:32:26Z",
+      "updated_at": "2018-04-18T11:32:44Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I don't know the provider code, but checking the path and sending an error earlier seems feasible and I don't imagine changing one error for a more descriptive one will hurt anyone.\r\n\r\nBut two possible complications are:\r\n- If there's some kind of dynamic logic that means we might not know if a drive really exists when we do a first pass (unlikely, but I see it happen all over PowerShell),\r\n- Or, if changing the error thrown means changing any internal parameter binder logic -- the parameter binders are so complicated that anything that doesn't treat them as monolithic will become more effort than it's worth.\r\n\r\nI'll look into it.",
+      "created_at": "2018-04-18T16:22:09Z",
+      "updated_at": "2018-04-18T16:22:22Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "I'm hoping it can be as simple as adding a ValidationAttribute to the `-Path` parameter but I don't know if ParamaterBinding happens first or not.",
+      "created_at": "2018-04-18T16:27:15Z",
+      "updated_at": "2018-04-18T16:27:15Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@dragonwolf83 Parameter binding happens first which is why this error happens. Without the provider metadata, the command knows nothing about \"-File\" and so you get an invalid parameter exception long before the command code gets control.  But I would think the call to get the parameter metadata should generate an error if the provider can't be resolved. Perhaps that's where we can introduce a more useful error.",
+      "created_at": "2018-04-24T01:19:13Z",
+      "updated_at": "2018-04-24T01:19:13Z"
+    },
+    {
+      "author": "dragonwolf83",
+      "author_association": "NONE",
+      "body": "I had a feeling that was the case. It makes sense. ",
+      "created_at": "2018-04-24T02:52:42Z",
+      "updated_at": "2018-04-24T02:52:42Z"
+    },
+    {
+      "author": "arnoschuring",
+      "author_association": "NONE",
+      "body": "This isn't merely an end-user confusing issue, this is a reliability problem, because ParameterBindingExceptions are not covered by ErrorAction Ignore:\r\n\r\n```\r\n# existing directory\r\n> $null = Get-ChildItem -Path 'C:\\WINDOWS\\' -Directory -ErrorAction Ignore\r\n\r\n# non-existing directory\r\n> $null = Get-ChildItem -Path 'D:\\WINDOWS\\' -Directory -ErrorAction Ignore\r\n\r\n# non-existing drive\r\n> $null = Get-ChildItem -Path 'X:\\WINDOWS\\' -Directory -ErrorAction Ignore\r\nGet-ChildItem : A parameter cannot be found that matches parameter name 'Directory'.\r\nAt line:1 char:43\r\n+ $null = Get-ChildItem -Path 'X:\\WINDOWS\\' -Directory -ErrorAction Ign ...\r\n+ ~~~~~~~~~~\r\n+ CategoryInfo : InvalidArgument: (:) [Get-ChildItem], ParameterBindingException\r\n+ FullyQualifiedErrorId : NamedParameterNotFound,Microsoft.PowerShell.Commands.GetChildItemCommand\r\n```\r\n\r\nPersonally, I disagree strongly with the entire premise that it is OK for parameter set validation to operate on any input other than the other parameters given to the command. ParameterBindingExceptions should never be raised by *values* given to those parameters.",
+      "created_at": "2021-11-04T16:23:06Z",
+      "updated_at": "2021-11-04T16:23:06Z"
+    }
+  ],
+  "created_at": "2018-04-17T16:57:13Z",
+  "number": 6671,
+  "state": "open",
+  "title": "Get-ChildItem -File / -Directory with nonexistent drive generates confusing error messages",
+  "updated_at": "2021-11-29T17:47:29Z"
+}

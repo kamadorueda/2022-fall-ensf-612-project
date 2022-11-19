@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7477",
+  "author": "alx9r",
+  "body": "The output and PSDataStreams are available individually from a PowerShell instance.  These individual streams, however, do not seem to contain enough information to determine order of an item in one stream compared with an item in another stream.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n$ErrorActionPreference = 'Continue'\r\n$powershell = [powershell]::Create().AddScript({\r\n    $VerbosePreference = 'Continue'\r\n    'output1'\r\n    Write-Verbose 'verbose1'\r\n    Write-Error 'error1'\r\n    Write-Error 'error2'\r\n    Write-Verbose 'verbose2'\r\n    'output2'\r\n})\r\n\r\n$powershell.Invoke()\r\n$powershell.Streams.Verbose\r\n$powershell.Streams.Error\r\n```\r\n\r\nBehavior I'm looking for\r\n-----------------\r\n\r\n```none\r\noutput1\r\nverbose1\r\n    $VerbosePreference = 'Continue'\r\n    'output1'\r\n    Write-Verbose 'verbose1'\r\n    Write-Error 'error1'\r\n    Write-Error 'error2'\r\n    Write-Verbose 'verbose2'\r\n    'output2'\r\n : error1\r\n+ CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n+ FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException\r\n\r\n    $VerbosePreference = 'Continue'\r\n    'output1'\r\n    Write-Verbose 'verbose1'\r\n    Write-Error 'error1'\r\n    Write-Error 'error2'\r\n    Write-Verbose 'verbose2'\r\n    'output2'\r\n : error2\r\n+ CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n+ FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException\r\nverbose2\r\noutput2\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\noutput1\r\noutput2\r\nverbose1\r\nverbose2\r\n    $VerbosePreference = 'Continue'\r\n    'output1'\r\n    Write-Verbose 'verbose1'\r\n    Write-Error 'error1'\r\n    Write-Error 'error2'\r\n    Write-Verbose 'verbose2'\r\n    'output2'\r\n : error1\r\n+ CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n+ FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException\r\n\r\n    $VerbosePreference = 'Continue'\r\n    'output1'\r\n    Write-Verbose 'verbose1'\r\n    Write-Error 'error1'\r\n    Write-Error 'error2'\r\n    Write-Verbose 'verbose2'\r\n    'output2'\r\n : error2\r\n+ CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n+ FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-preview.4\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0-preview.4\r\nOS                             Microsoft Windows 6.3.9600 \r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2018-08-14T01:31:38Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Seems we discussed this before /cc @mklement0 ",
+      "created_at": "2018-08-08T05:14:53Z",
+      "updated_at": "2018-08-08T05:14:53Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "There isn't a way to correlate the streams but you can use the events on the various streams to insert elements into an explicit single output stream in real time. It's a bit clunky but the code to do this would look something like:.\r\n```powershell\r\n\r\n$p = [powershell]::Create().AddScript{\r\n            \"Output\"        \r\n            $ErrorActionPreference = \"continue\"\r\n            Write-Error \"Error\"\r\n            Write-Verbose -Verbose \"Verbose\"\r\n            \"Output2\"        \r\n            $DebugPreference = \"continue\"\r\n            Write-Debug \"Debug\"\r\n            \"Output3\"        \r\n            $InformationPreference=\"continue\"\r\n            Write-Information \"Information\"\r\n    }\r\n\r\n$output = [System.Management.Automation.PSDataCollection[object]]::new()\r\n\r\n$p.Streams.Error.add_DataAdded{\r\n    $p.Streams.Error.ReadAll().foreach{$output.Add($_)}\r\n}\r\n$p.Streams.Verbose.add_DataAdded{\r\n    $p.Streams.Verbose.ReadAll().foreach{$output.Add($_)}\r\n}\r\n$p.Streams.Debug.add_DataAdded{\r\n    $p.Streams.Debug.ReadAll().foreach{$output.Add($_)}\r\n}\r\n$p.Streams.Information.add_DataAdded{\r\n    $p.Streams.Information.ReadAll().foreach{$output.Add($_)}\r\n}\r\n\r\n$p.Invoke($null, $output)\r\n\r\nforeach ($item in $output)\r\n{\r\n    \"output: $item\"\r\n} \r\n```\r\n\r\nThis will give you a single stream containing all of the records in the order they were written which you can then demultiplex based on type (ErrorRecord, DebugRecord, VerboseRecord, etc.)",
+      "created_at": "2018-08-09T00:19:24Z",
+      "updated_at": "2018-08-09T00:19:24Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@BrucePay That seems pretty good for my purposes.  Can I rely on the `.DataAdded` event handlers to be called in the order that matches the output from the scriptblock?",
+      "created_at": "2018-08-09T14:32:13Z",
+      "updated_at": "2018-08-09T14:32:13Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@alx9r Yes.",
+      "created_at": "2018-08-13T21:22:27Z",
+      "updated_at": "2018-08-13T21:22:27Z"
+    },
+    {
+      "author": "DrDinosaur",
+      "author_association": "NONE",
+      "body": "I'm trying to do the same thing as above in C# with the .NET Framework using this package (https://www.nuget.org/packages/Microsoft.PowerShell.5.ReferenceAssemblies/). I can't seem to access `add_DataAdded` from the PowerShell streams (after creating a PowerShell object using `PowerShell.Create()`). \r\n\r\nDo you know how I can use this? I'm not sure if `add_DataAdded` is only available in what looks like PowerShell or if maybe there's a version difference or something. Thanks. ",
+      "created_at": "2019-03-22T08:29:10Z",
+      "updated_at": "2019-03-22T08:29:10Z"
+    },
+    {
+      "author": "alx9r",
+      "author_association": "NONE",
+      "body": "@DrDinosaur I'm pretty sure I have been using `.DataAdded += myEventHandler` in C# rather than `.add_DataAdded(myEventHandler)`.",
+      "created_at": "2019-04-10T21:25:48Z",
+      "updated_at": "2019-04-10T21:25:48Z"
+    },
+    {
+      "author": "DrDinosaur",
+      "author_association": "NONE",
+      "body": "Yeah, I eventually figured that out. I didn't understand PowerShell was trying to make an event handler with that syntax. ",
+      "created_at": "2019-04-10T21:59:16Z",
+      "updated_at": "2019-04-10T21:59:16Z"
+    },
+    {
+      "author": "Garfius",
+      "author_association": "NONE",
+      "body": "> Yeah, I eventually figured that out. I didn't understand PowerShell was trying to make an event handler with that syntax.\r\n\r\nHow?\u00bf\r\n\r\nThanks.",
+      "created_at": "2019-10-02T07:03:49Z",
+      "updated_at": "2019-10-02T07:03:49Z"
+    },
+    {
+      "author": "DrDinosaur",
+      "author_association": "NONE",
+      "body": "> > Yeah, I eventually figured that out. I didn't understand PowerShell was trying to make an event handler with that syntax.\r\n> \r\n> How?\u00bf\r\n> \r\n> Thanks.\r\n\r\nhttps://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/events/how-to-subscribe-to-and-unsubscribe-from-events\n\n<blockquote><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/events/how-to-subscribe-to-and-unsubscribe-from-events\">How to: Subscribe to and Unsubscribe from Events - C# Programming Guide</a></strong></div></blockquote>",
+      "created_at": "2019-10-02T07:31:07Z",
+      "updated_at": "2019-10-02T07:31:09Z"
+    },
+    {
+      "author": "Garfius",
+      "author_association": "NONE",
+      "body": "> > > Yeah, I eventually figured that out. I didn't understand PowerShell was trying to make an event handler with that syntax.\r\n> > \r\n> > \r\n> > How?\u00bf\r\n> > Thanks.\r\n> \r\n> https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/events/how-to-subscribe-to-and-unsubscribe-from-events\r\n> \r\n> > **[How to: Subscribe to and Unsubscribe from Events - C# Programming Guide](https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/events/how-to-subscribe-to-and-unsubscribe-from-events)**\r\n\r\nNo way?, only error output events are fired.\r\n\r\nAlready tried:\r\n`\r\n            s_ps.Streams.Verbose.DataAdding += delegate (object sender, DataAddingEventArgs e) {\r\n                var records = (PSDataCollection<VerboseRecord>)sender;\r\n                Debug.WriteLine(\"Progress verbose contains {0} records\", records.Count);\r\n            };\r\n\r\n            s_ps.Streams.Progress.DataAdding += delegate (object sender, DataAddingEventArgs e) {\r\n                var records = (PSDataCollection<ProgressRecord>)sender;\r\n                Debug.WriteLine(\"Progress verbose contains {0} records\", records.Count);\r\n            };\r\n\r\n            s_ps.Streams.Verbose.DataAdding += delegate (object sender, DataAddingEventArgs e) {\r\n                var records = (PSDataCollection<VerboseRecord>)sender;\r\n                Debug.WriteLine(\"Progress verbose contains {0} records\", records.Count);\r\n            };\r\n\r\n            s_ps.Streams.Debug.DataAdding += delegate (object sender, DataAddingEventArgs e) {\r\n                var records = (PSDataCollection<DebugRecord>)sender;\r\n                Debug.WriteLine(\"Progress debug contains {0} records\", records.Count);\r\n            };\r\n\r\n            s_ps.Streams.Error.DataAdding += delegate (object sender, DataAddingEventArgs e) {\r\n                var records = (PSDataCollection<ErrorRecord>)sender;\r\n                Debug.WriteLine(\"Progress error contains {0} records\", records.Count);\r\n            };\r\n            s_ps.Streams.Warning.DataAdding += delegate (object sender, DataAddingEventArgs e) {\r\n                var records = (PSDataCollection<WarningRecord>)sender;\r\n                Debug.WriteLine(\"Progress warning contains {0} records\", records.Count);\r\n            };\r\n\r\n`\r\nAlso tried creating runspace events:\r\n`\r\npipaLinia = s_ps.Runspace.CreatePipeline();\r\n\r\npipaLinia.Output.DataReady += new EventHandler(Output_DataReady);\r\n\r\npipaLinia.Error.DataReady += new EventHandler(Error_DataReady);\r\n\r\n`\r\n\r\nI am lost :(\n\n<blockquote><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/events/how-to-subscribe-to-and-unsubscribe-from-events\">How to: Subscribe to and Unsubscribe from Events - C# Programming Guide</a></strong></div></blockquote>",
+      "created_at": "2019-10-02T10:15:08Z",
+      "updated_at": "2019-10-02T10:15:10Z"
+    }
+  ],
+  "created_at": "2018-08-07T22:21:51Z",
+  "number": 7477,
+  "state": "closed",
+  "title": "Is there a way to capture interleaved output and PSDataStreams from a PowerShell instance?",
+  "updated_at": "2019-10-02T10:15:10Z"
+}

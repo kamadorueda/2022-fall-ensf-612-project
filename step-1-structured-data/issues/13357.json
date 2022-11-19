@@ -1,0 +1,97 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13357",
+  "author": "yecril71pl",
+  "body": "<!--\r\n\r\nFor Windows PowerShell 5.1 issues, suggestions, or feature requests please use the following link instead:\r\nWindows PowerShell [UserVoice](https://windowsserver.uservoice.com/forums/301869-powershell)\r\n\r\nThis repository is **ONLY** for PowerShell Core 6 and PowerShell 7+ issues.\r\n\r\n- Make sure you are able to repro it on the [latest released version](https://github.com/PowerShell/PowerShell/releases)\r\n- Search the existing issues.\r\n- Refer to the [FAQ](https://github.com/PowerShell/PowerShell/blob/master/docs/FAQ.md).\r\n- Refer to the [known issues](https://docs.microsoft.com/powershell/scripting/whats-new/known-issues-ps6).\r\n\r\n-->\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\n[PSCUSTOMOBJECT] @{ 0 = 0 } | SORT 0\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\n0\r\n-\r\n0\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nSort-Object: Cannot convert System.Int32 to one of the following types {System.String, System.Management.Automation.ScriptBlock}.\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.3\r\nPSEdition                      Core\r\nGitCommitId                    7.0.3\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Certainly misleading, though I think the right solution is not to report an error at all and actually perform to-string conversion (the implied `-Property` parameter is `[object[]]`-typed).\r\n\r\n",
+      "created_at": "2020-08-05T20:48:00Z",
+      "updated_at": "2020-08-05T20:48:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Why misleading? The message says clearly that PowerShell expects either a string or a scriptblock but not int. Since PowerShell expects _strongly_ one from two types it does not know what would be right conversion. It is a generic code and we can not force to string conversion because there is a high risk to break something in Engine or in custom scripts/codes.\r\n\r\nSee how works `internal List<MshParameter> ProcessParameters(object[] p, TerminatingErrorContext invocationContext)`.\r\n",
+      "created_at": "2020-08-07T11:33:02Z",
+      "updated_at": "2020-08-07T11:33:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "* It is misleading, because you obviously _can_ convert a `System.32` instance to a `System.String` instance.\r\n\r\n* It shouldn't be an error to begin with, because the only sensible interpretation of something that isn't already a string or a hashtable / script block (with a calculated-property definition)  is to _convert it to a string_.\r\n\r\nWhile it's debatable whether to-string conversion should be applied to just _any_ data type, something that _looks like a number_, such as `0`, in _argument mode_ - in the absence of quoting - is inherently ambiguous: is it the number `0` or string `'0'`?\r\nHere, the only sensible interpretation is as a string.\r\n\r\nIf in the end there _is_ a technical reason that this cannot be implemented, the error message should be revised to say something like: \"if this is a property name that looks like a number, enclose it in quotes\".\r\n\r\n",
+      "created_at": "2020-08-07T12:23:29Z",
+      "updated_at": "2020-08-07T13:16:43Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "There's no technical reason I can think of that this couldn't be implemented. Seems like it's most likely just a simple case of doing a type check where it probably should have been a type conversion, i.e., we're probably doing something like:\r\n```pseudo\r\nif Property.BaseObject is IDictionary\r\n  # handle as calculated property\r\nelse if Property.BaseObject is ScriptBlock\r\n  # handle as unnamed calculated property expression\r\nelse if Property.BaseObject is string\r\n  # treat as property name to sort on\r\n```\r\nthat last branch should not have a type check at all, and instead simply opt for `LanguagePrimitives.ConvertTo<string>(Property)` (which will correctly handle the string conversion for parameters parsed as numbers as well).",
+      "created_at": "2020-08-07T12:35:46Z",
+      "updated_at": "2020-08-07T12:36:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @vexx32, that should indeed suffice.\r\n\r\nI got myself confused earlier: there isn't a need to change the `-Property` parameter type, given that the engine implicitly wraps in `PSObject` those arguments that were parsed as numbers _whose default string representation differs from the one given_, with the `PSObject` instance containing the _original (string) representation_, which, as you state, `LanguagePrimitives.ConvertTo<string>()` does utilize.\r\n\r\nThis ensures that passing a bareword such as `1e2`, which becomes a `[double]` that by default stringifies as `100`, is still represented as `'1e2` when converted back to a string.\r\n\r\n\r\n ",
+      "created_at": "2020-08-07T13:03:55Z",
+      "updated_at": "2020-08-07T13:03:55Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Why misleading? The message says clearly that PowerShell expects either a string or a scriptblock but not int.\r\n\r\nThe message clearly states that whatever comes over must be convertible to *both* a string and a script block because it is a problem when the value is not convertible to *one* of them.  A script block is convertible to a string but it is debatable whether a string is convertible to a script block, so for the clarity of exposition I shall assume that it is not.  I also do not know of any other type that is convertible to `ScriptBlock`.  That means the winner is\u2026 `ScriptBlock` \ud83c\udfba\ud83c\udfba and anything that is not one cannot be given as a parameter.  Nice?",
+      "created_at": "2020-08-07T13:13:42Z",
+      "updated_at": "2020-08-07T13:13:42Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> that last branch should not have a type check at all, and instead simply opt for LanguagePrimitives.ConvertTo<string>(Property) (which will correctly handle the string conversion for parameters parsed as numbers as well).\r\n\r\nIt would be a huge breaking change - current code explicitly throws on unexpected type. The code is generic. There can be any allowed types, ex., byte,int,long - why would you convert another type to string in the case?\r\n\r\nAlso for generic code an error message can be only generic too.",
+      "created_at": "2020-08-07T15:46:57Z",
+      "updated_at": "2020-08-07T15:49:28Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "> current code explicitly throws on unexpected type. The code is generic. \r\n\r\nCode that throws on an unexpected type is definitely *not* generic.",
+      "created_at": "2020-08-07T16:24:30Z",
+      "updated_at": "2020-08-07T16:24:30Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\n> why would you convert another type to string in the case?\r\n\r\nIt isn't another type, conceptually. In the example in the OP, the intent is clearly to pass a _string_, `0`.\r\n\r\nYes, you can force interpretation as a string with explicit quoting (`'0'`), _but you shouldn't have to_, given that in _argument-parsing mode_ quoting strings is _optional_ - just like you're free to use `Get-Date -UFormat 0` (to use a contrived example) without having to quote the `0`, or just like `Write-Host 1e2` and `Write-Host '1e2'` produce the same output.)\r\n\r\nWhat we're seeing is the confluence of two behaviors:\r\n\r\n* The parameter binder parses a bareword that _looks like_ a number literal as a number rather than a string, but, if it then binds to an effectively _untyped_ parameter (`object` or `PSObject`)  wraps it in a `PSObject` that caches the original string representation as specified on the command line, leaving the door open to treat this argument as a string later.\r\n\r\n  * However, as an optimization, this wrapping happens _only_  if the original string representation differs from the resulting number's default string representation.\r\n\r\n  * Incidentally, this is currently broken for number literals with the `d` (`[decimal]`) and `n` (`[bigint]`) suffixes, specifically - see #13380\r\n\r\n* `Sort-Object` doesn't have distinct parameters for the distinct types it accepts as sort criteria and uses `object` instead. (I guess it has to, given that the parameter is array-valued and must be able to accept a mix of strings and script blocks / hashtables.)\r\n\r\nNote that a `[string]`-typed parameter would indeed accept _any_ type, given that PowerShell happily converts anything to a string.\r\n\r\nIf you're really concerned that existing code _relies_ on `Sort-Object` throwing an error for non-string property arguments, we can limit what non-string types are accepted to the primitive number types plus `[decimal]` and `[bigint]`.\r\n\r\n(However, due to the optimization that results in a `PSObject` wrapper only when truly needed, we can't reliably tell if a given value started out as a _bareword_, so an unambiguously-passed-as-a-number argument would succeed too; e.g. \r\n `Sort-Object (0)`).\r\n\r\n---\r\n\r\nIncidentally: the code in question appears to be shared among cmdlets; for instance, `Select-Object` has the same problem:\r\n\r\n```powershell\r\nPS> [pscustomobject] @{ 0 = 'zero' } | Select-Object 0\r\nSelect-Object: Cannot convert System.Int32 to one of the following types {System.String, System.Management.Automation.ScriptBlock}.\r\n```\r\n\r\n",
+      "created_at": "2020-08-07T18:02:09Z",
+      "updated_at": "2020-08-07T18:09:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Incidentally: the code in question appears to be shared among cmdlets; for instance,\r\n\r\nYes, it is a generic code. There may be an unpredictable number of cmdlets where this is not the problem but the desired behavior.\r\n",
+      "created_at": "2020-08-07T18:14:12Z",
+      "updated_at": "2020-08-07T18:14:12Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "As far as I'm aware, this code is used exclusively for property expressions (which would all benefit from fixing the issue). Are there other use cases?",
+      "created_at": "2020-08-07T18:32:29Z",
+      "updated_at": "2020-08-07T18:32:29Z"
+    },
+    {
+      "author": "yecril71pl",
+      "author_association": "CONTRIBUTOR",
+      "body": "> > Incidentally: the code in question appears to be shared among cmdlets; for instance,\r\n> \r\n> Yes, it is a generic code. There may be an unpredictable number of cmdlets where this is not the problem but the desired behavior.\r\n\r\nNo, it is *shared* code.  I think we would all appreciate an example where converting a number to a string leads to a zombie apocalypse.  Also, `HELP ABOUT_PARSING`: *In argument mode, each value is treated as an expandable string unless    it begins with one of the following special characters*.\r\n",
+      "created_at": "2020-08-07T21:39:13Z",
+      "updated_at": "2020-08-08T10:51:40Z"
+    }
+  ],
+  "created_at": "2020-08-05T20:34:37Z",
+  "number": 13357,
+  "state": "open",
+  "title": "SORT-OBJECT offers a misleading error message",
+  "updated_at": "2021-01-17T15:00:34Z"
+}

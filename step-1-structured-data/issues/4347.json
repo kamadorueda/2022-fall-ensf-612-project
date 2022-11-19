@@ -1,0 +1,181 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4347",
+  "author": "mklement0",
+  "body": "From what I can tell, this discrepancy has always existed, so there may be a good reason for it, but it deserves an explanation / documentation.\r\n\r\nSpecifically, where do the extra properties come from? They appear not to be part of the ETS type data as returned by `Get-TypeData System.IO.DirectoryInfo` (and there's also none for the parent type, `Get-TypeData System.IO.FileSystemInfo`).\r\n\r\nThe absence of the `.PSPath` property from the directly constructed `[System.IO.DirectoryInfo]` and `[System.IO.FileInfo]` instances  is especially problematic, because pipeline-binding to `-LiteralPath` parameters is based on it.\r\n\r\nThe types used are just an example; the same discrepancy exists for other types, such as `[datetime]::now` vs. `Get-Date`.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n# Construct  seemingly identical [System.IO.DirectoryInfo] instances\r\n([System.IO.DirectoryInfo] '/').psextended | Format-List\r\n'---'\r\n(Get-Item '/').psextended | Format-List\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nPSPath        : Microsoft.PowerShell.Core\\FileSystem::/\r\nPSParentPath  : \r\nPSChildName   : \r\nPSDrive       : /\r\nPSProvider    : Microsoft.PowerShell.Core\\FileSystem\r\nPSIsContainer : True\r\nMode          : d-r---\r\nBaseName      : /\r\nTarget        : \r\nLinkType      : \r\n\r\n---\r\n\r\nPSPath        : Microsoft.PowerShell.Core\\FileSystem::/\r\nPSParentPath  : \r\nPSChildName   : \r\nPSDrive       : /\r\nPSProvider    : Microsoft.PowerShell.Core\\FileSystem\r\nPSIsContainer : True\r\nMode          : d-r---\r\nBaseName      : /\r\nTarget        : \r\nLinkType      : \r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nMode     : d-r---\r\nBaseName : /\r\nTarget   : \r\nLinkType : \r\n\r\n---\r\n\r\nPSPath        : Microsoft.PowerShell.Core\\FileSystem::/\r\nPSParentPath  : \r\nPSChildName   : \r\nPSDrive       : /\r\nPSProvider    : Microsoft.PowerShell.Core\\FileSystem\r\nPSIsContainer : True\r\nMode          : d-r---\r\nBaseName      : /\r\nTarget        : \r\nLinkType      : \r\n```\r\n\r\nAs you can see, the `PS`-prefixed properties only exist on the instance output by `Get-Item`.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.4 on macOS 10.12.5\r\nPowerShell Core v6.0.0-beta.4 on Ubuntu 16.04.2 LTS\r\nPowerShell Core v6.0.0-beta.4 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\nWindows PowerShell v5.1.15063.413 on Microsoft Windows 10 Pro (64-bit; v10.0.15063)\r\n```\r\n",
+  "closed_at": "2019-09-30T00:00:49Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "All provider cmdlets add these properties when writing objects to the pipeline, you can see the code [here](https://github.com/PowerShell/PowerShell/blob/1c42ed253ab2aadb5be0c548a34cc0c669b127a3/src/System.Management.Automation/namespaces/ProviderBase.cs#L2457).\r\n\r\nIt would be better for performance if we used ETS, but there are likely cases where we would need to add these properties to override the ETS value, e.g. if a PSDrive was used in the path.",
+      "created_at": "2017-07-26T15:56:03Z",
+      "updated_at": "2017-07-26T15:56:03Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @lzybkr, good to know.\r\n\r\nHypothetically, is it technically feasible to combine the two approaches? (ETS properties that are selectively overridden by the provider cmdlets, if needed?)\r\n\r\nAlso, `Get-Date` is not a provider cmdlet.  \r\nDoes that mean that _individual_ cmdlets also add additional properties (such as `.DisplayHint` in the case of `Get-Date`)?\r\nIs that common, and is there an easy way to discover it across all cmdlets?\r\n\r\n",
+      "created_at": "2017-07-26T16:35:01Z",
+      "updated_at": "2017-07-26T16:35:01Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We add `DisplayHint` [here](https://github.com/PowerShell/PowerShell/blob/02b5f357a20e6dee9f8e60e3adb9025be3c94490/src/Microsoft.PowerShell.Commands.Utility/commands/utility/GetDateCommand.cs#L317) (In Set-Date too.)\r\nAlthough [output type](https://github.com/PowerShell/PowerShell/blob/02b5f357a20e6dee9f8e60e3adb9025be3c94490/src/Microsoft.PowerShell.Commands.Utility/commands/utility/GetDateCommand.cs#L20) is defined as `Datetime` we modify it.",
+      "created_at": "2017-07-26T16:47:49Z",
+      "updated_at": "2017-07-26T16:47:49Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov - good to know.\r\n\r\nMy overall concern is that bypassing the ETS can lead to both subtle and confusing bugs.\r\n\r\nIt is counter-intuitive for two `[System.DateTime]` instances to behave differently, solely based on how they were obtained.\r\n\r\nIf bypassing cannot be avoided for technical reasons (as it sounds is the case with provider cmdlets), the additional properties should at least be documented.\r\n",
+      "created_at": "2017-07-26T16:58:55Z",
+      "updated_at": "2017-07-26T16:58:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "The trick is that it's not C# type - it is really a PSObject with same name.",
+      "created_at": "2017-07-26T17:06:09Z",
+      "updated_at": "2017-07-26T17:06:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nUnderstood, but that fact is normally _hidden_ from users.\r\n\r\nEven the ETS properties are a departure from the underlying raw .NET type, but the point is that it can be confusing that something that presents as a given type _in PowerShell_ can have different properties in different contexts.\r\n",
+      "created_at": "2017-07-26T17:34:12Z",
+      "updated_at": "2017-07-26T17:34:12Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@mklement0 - I'm sure this is documented somewhere, but there are 3 kinds of members - instance (added via an api or Add-Member), type (added via types.ps1xml or Update-TypeData) - and native - .Net or AD or CIM or whatever the underlying object provides.\r\n\r\nInstance members hide type members, and type members hide native members, so combining is definitely doable.\r\n\r\nThere isn't a super easy way to find all the places where members are added, but searching for `new NoteProperty` will find many of the locations - there are other types of members you can add of course, so you'd want to search for those too, but NoteProperty is the most common.",
+      "created_at": "2017-07-26T17:46:12Z",
+      "updated_at": "2017-07-26T17:46:12Z"
+    },
+    {
+      "author": "zjalexander",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr we are planning to review about_types soon, if this fits in there would you mind giving us some additional details during review?\r\nthanks! ",
+      "created_at": "2017-10-11T20:41:31Z",
+      "updated_at": "2017-10-11T20:41:31Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@zjalexander - sure, ask away when you have specific questions or something for me to review.",
+      "created_at": "2017-10-11T21:12:29Z",
+      "updated_at": "2017-10-11T21:12:29Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "> From what I can tell, this discrepancy has always existed, so there may be a good reason for it, but it deserves an explanation / documentation.\r\n\r\nInstance members are added imperatively by cmdlets, etc, including directly with `Add-Member` or through the API:\r\n```\r\nPS[1] (103) >  $x = 2\r\nPS[1] (104) >  $x.PSObject.Members.Add([System.Management.Automation.PSNoteProperty]::new(\"hi\", \"there\"))\r\nPS[1] (105) >  $x.Hi\r\nthere\r\n```\r\nBasically there is know way of knowing what properties are being added where so there's no way that\r\n```\r\n[io.file]::new(\"c:\\temp\\mypath.txt\")\r\n```\r\ncan add the properties that the provider would have added. Conversely, `[io.file]::new()` knows nothing about the current provider drive or path so you can't pass relative paths to these APIs.  \r\n\r\nMore generally, we explicitly decided not to try wrapping .NET APIs because it was too fragile. There are just to many APIs to wrap. The result would be patchy and inconsistent. Currently it is at least self-consistent. \r\n",
+      "created_at": "2018-05-03T01:00:49Z",
+      "updated_at": "2018-05-03T01:00:49Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "No time no to go through this whole thread, so two questions:\r\n* do folks feel like this has been adequately answered at this point\r\n* if so, do folks have an idea of where it should be doc'd? ",
+      "created_at": "2018-10-30T00:09:47Z",
+      "updated_at": "2018-10-30T00:09:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> do folks feel like this has been adequately answered at this point\r\n\r\nSpeaking as a `[folks]` instance: personally, yes.\r\n\r\n> if so, do folks have an idea of where it should be doc'd?\r\n\r\n`about_Types.ps1xml` has been mentioned, but the problem discussed here is not ETS-related.\r\nI therefore suggest [`about_Object_Creation`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_object_creation?view=powershell-6).\r\n\r\nIncidentally, the latter lacks documentation of the PSv5 static `::new()` method for calling constructors - see https://github.com/PowerShell/PowerShell-Docs/issues/3209 - and deserves a bit of an overhaul in general - see https://github.com/PowerShell/PowerShell-Docs/issues/3210\r\n",
+      "created_at": "2018-10-30T18:19:58Z",
+      "updated_at": "2018-10-30T18:19:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "On second thought:\r\n\r\nI think a note should be added to `about_Types.ps1xm` as well, [based on @lzybkr's comment above](https://github.com/PowerShell/PowerShell/issues/4347#issuecomment-318129852).\r\n\r\nThe relationship between ETS and instance properties added via `Add-Member`  is [already mentioned there](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_types.ps1xml?view=powershell-3.0#typesps1xml-and-add-member), but there's nothing about instances properties being _automatically_ added by _providers_ or (other) _cmdlets_.\r\n\r\nA note in `about_Object_Creation` should then say that directly constructed instances (via `::new()` / `New-Object`) may lack properties that instances of the same type obtained via _cmdlets_ may have.",
+      "created_at": "2018-10-30T18:31:54Z",
+      "updated_at": "2018-10-30T18:31:54Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "It strikes me as somewhat _odd_ that out of all the cmdlets, `New-Object` doesn't add the additional properties. \ud83d\ude15 ",
+      "created_at": "2018-10-30T18:36:29Z",
+      "updated_at": "2018-10-30T18:36:40Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 think of it this way.  You could have two cmdlets `CmdletA` and `CmdletB` that extend `[System.Diagnostics.Process]` in different ways.  One adds a `PropA` and the other adds `PropB` (I would also expect both cmdlets to add to `.pstypenames` so one might be `System.Diagnostics.Process#PropA` and the other `System.Diagnostics.Process#PropB` (useful for formatting, for example).  `New-Object` doesn't know anything about `CmdletA` nor `CmdletB` and thus doesn't know about the additional properties.  Same reason `::new()` wouldn't either.",
+      "created_at": "2018-10-31T02:43:44Z",
+      "updated_at": "2018-10-31T02:43:44Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I guess I'm just not really... clear... on why some objects are done this way, whereas others simply have new types implemented that inherit from the original. \ud83d\ude04 ",
+      "created_at": "2018-10-31T02:47:15Z",
+      "updated_at": "2018-10-31T02:47:15Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 I agree from a user perspective, it can be confusing why a `[Process]` is not the same as another `[Process]`.  But I think the pros having this support in PowerShell outweighs the cons.",
+      "created_at": "2018-10-31T03:59:35Z",
+      "updated_at": "2018-10-31T03:59:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think there's anything inherently *wrong* with the approach... but I do think @mklement0 has a point in asking whether we ought to roll them into some kind of more standard member -- perhaps we should have a different binding point for these properties for consistency... Though I'm sure that's no small ask. \ud83d\ude04 ",
+      "created_at": "2018-10-31T04:11:36Z",
+      "updated_at": "2018-10-31T04:12:44Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@SteveL-MSFT describes a current pattern, but it doesn't make it a good pattern.\r\n\r\nTo use the `Get-Process` example, I think `Get-Process -IncludeUserName` is a bit gross. `UserName` seems important enough that it should always be available on a `Process` object, and ETS was designed for just that scenario.\r\n\r\nIf I want the user name in the output, then I'd rather see `Get-Process | Format-Table -View ProcessWithUserName` or something like that.\r\n\r\nTo expand a bit on how we abuse ETS unnecessarily in the name of formatting, I'll point out an idea first introduced by @KirkMunro in [FormatPx](https://www.powershellgallery.com/packages/FormatPx/1.1.3.15).\r\n\r\nThe basic idea is that formatting directives are attached to an object without relying on the typename. This has the benefit of binding your formats in a script, e.g.:\r\n\r\n```powershell\r\nfunction Get-Process\r\n{\r\n    # Use a very basic default format\r\n    [System.Diagnostics.Process]::GetProcesses() | Format-Table Id,ProcessName\r\n}\r\n```\r\n\r\nAnd use the function like this:\r\n\r\n```\r\nPS> $x = Get-Process\r\nPS> $x[0].ProcessName\r\ncmd\r\nPS> $x\r\n\r\nId  ProcessName\r\n==  ===========\r\n11  cmd\r\n22  powershell\r\n\r\nPS> $x | Format-Table Id,SI,ProcessName\r\n\r\nId  SI  ProcessName\r\n==  ==  ===========\r\n11   1  cmd\r\n22   2  powershell\r\n```\r\n\r\nSo in this example, my function `Get-Process` fully specifies the default formatting while writing instances of `System.Diagnostics.Process` that can be used normally and later have a different format applied.\r\n\r\nFormatPx works like this using the existing format system, and I've implemented this idea in PSMore which is just barely functional as a prototype.\r\n\r\nIn summary, I'd like to see PowerShell move away from adding members to each instance and use type members as much as possible. I think this would be a win from a performance and usability point of view.",
+      "created_at": "2018-10-31T04:56:56Z",
+      "updated_at": "2018-10-31T04:56:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I would *love* to see the Format cmdlets work like that -- still return usable objects, just with the formatting directives altered -- wow!\r\n\r\nThat would save a *significant* amount of confusion for newbies, give us a way to simply and easily specify default formats programatically, the whole deal. Love it!",
+      "created_at": "2018-10-31T05:04:29Z",
+      "updated_at": "2018-10-31T05:04:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "#7857 for tracking PSMore.",
+      "created_at": "2018-10-31T05:16:07Z",
+      "updated_at": "2018-10-31T05:16:07Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I want close this issue. If you see something should be documented please open issue in Docs repo.",
+      "created_at": "2019-09-28T17:32:48Z",
+      "updated_at": "2019-09-28T17:32:48Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2019-09-30T00:00:48Z",
+      "updated_at": "2019-09-30T00:00:48Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Related to the PSMore/FormatPx discussion: https://github.com/PowerShell/PowerShell/issues/10463.",
+      "created_at": "2019-09-30T14:17:17Z",
+      "updated_at": "2019-09-30T14:17:17Z"
+    }
+  ],
+  "created_at": "2017-07-26T15:08:39Z",
+  "number": 4347,
+  "state": "closed",
+  "title": "Directly constructed .NET type instances lack properties that ones output by cmdlets have",
+  "updated_at": "2019-09-30T14:17:17Z"
+}

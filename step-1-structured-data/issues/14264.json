@@ -1,0 +1,55 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14264",
+  "author": "iRon7",
+  "body": "This is actually a copy of the StackOverflow issue with the same name from [@Mark](https://stackoverflow.com/users/80002/mark):\r\n[Powershell Core deserializes numbers in JSON as Int64 vs Windows Powershell which does it as Int32](https://stackoverflow.com/q/64930079/1701026)\r\n\r\n## Steps to reproduce\r\n\r\n```PowerShell\r\n$a = \"1\" | ConvertFrom-Json\r\n(@{ $a = 2 }).1\r\n```\r\n\r\n## Expected behavior\r\n\r\nReturn `2` (just like Windows PowerShell 5)\r\n\r\n## Actual behavior\r\n\r\nReturns nothing (because the actual key is of type `[Int64]` and the key \".`1`\" of type `[Int32]`)\r\n\r\nI am not sure whether this can be called a bug or  is \"by design\" but my expectation (from a dynamically typed language as  PowerShell Core) is that a Json number (less then `[int]::MaxValue`) should default to an `[Int32]` type, just like:\r\n\r\n```PowerShell\r\n$a = 1\r\n$a.GetType().Name\r\nInt32\r\n```\r\n\r\n## Workarround\r\n\r\nRecast the number:\r\n\r\n```PowerShell\r\n$a = \"1\" | ConvertFrom-Json\r\n$a = 0 + \"$a\"\r\n(@{ $a = 2 }).1\r\n2\r\n```\r\n\r\n**related:** \r\n\r\n- [#9207 convertto-json bigint is not properly serialized](https://github.com/PowerShell/PowerShell/issues/9207)\r\n- [Make Newtonsoft JsonConvert Default to Int32 Rather Than Int64](https://stackoverflow.com/a/44010307/1701026)\r\n\r\n\r\n## Environment data\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.19042\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Certainly a pitfall; perhaps to be revisited in the context of moving to the new `System.Text.JSON` APIs - see #11198.\r\n\r\nSimpler workarounds: `@{ $a = 2 }.1l` or `@{ $a = 2 }[1l]` or `@{ $a = 2 }[[long] 1]`\r\n\r\nOn a side note: Ideally, _non-string_ key access should only ever work in _explicit expression contexts_, which the index-based forms above are, but for the property-syntax (dot-notation) syntax that would mean that `@{ $a = 2 }.(1l)` must be used (required `(...)`) - see https://github.com/PowerShell/PowerShell/issues/14036#issuecomment-734397716",
+      "created_at": "2020-11-26T16:14:43Z",
+      "updated_at": "2020-11-26T16:44:09Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "@mklement0 , using those suggested simpler *static* type workarounds will cause another pitfall as that will mean that the same script (that works in PowerShell 7) will break in the older PowerShell versions.\r\nIn other words:\r\n```PowerShell\r\n$a = \"1\" | ConvertFrom-Json\r\n(@{ $a = 2 }).1l\r\n```\r\nWorks in PowerShell Core but not in Windows PowerShell\r\n",
+      "created_at": "2020-11-26T17:53:41Z",
+      "updated_at": "2020-11-26T17:53:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iRon7, yes, though at least in your example `$a = [long] 1; @{ [int] $a = 2 }.1` should do as a _cross-edition_ workaround.",
+      "created_at": "2020-11-26T18:18:13Z",
+      "updated_at": "2020-11-26T18:20:51Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Certainly a pitfall; perhaps to be revisited in the context of moving to the new `System.Text.JSON` APIs - see #11198.\r\n> \r\n> Simpler workarounds: `@{ $a = 2 }.1l` or `@{ $a = 2 }[1l]` or `@{ $a = 2 }[[long] 1]`\r\n\r\n\r\n\r\nI think a lot of people have been caught by the issue of \"This key in the hash table is a value type, but not the same value type as ...\".  So 2 might be a floating point number, or a variety of integer and IIRC  even a char \"a\" and a string \"a\" \r\n\r\n```\r\n$x = [char]65\r\n$hash = @{$x = \"aaa\"}\r\n>$x -eq \"A \r\ntrue \r\n\r\n> $hash[\"A\"]\r\n\r\n>\r\n```\r\nThat's because of the way a hash table is **not** doing `for each k in Keys` and it would be useless if it did.  \r\n\r\n\r\n> @iRon7, yes, though at least in your example `$a = [long] 1; @{ [int] $a = 2 }.1` should do as a _cross-edition_ workaround.\r\n\r\nI have had to use this in a couple of places both putting the key/value in and getting things back. And it was painful to learn. \r\n\r\nThat's subtly different from   \r\n \"This conversion from to / from  text serialization format changes type X to type Y\". I think if you had an int64 or int32 in PS5 and sent them to json and got them back they became int32 and a  `1` is an int32 by default and \"a\" is a string by default. \r\n\r\nNow they come back as int64 - I suspect to avoid a test to say \"Does this need to be an int64 ?\"   This may be something inherited from .net but _anything_ which assumes `1` read from a json file being the same kind of `1` as the `1` in `$x = 1`  - which tbh is a pretty easy assumption to make - is going to hit trouble. \r\nBy the same logic we don't want a json converter seeing \"y\" and converting it to a char instead of a string,.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-11-27T08:58:07Z",
+      "updated_at": "2020-11-27T08:58:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> \"This conversion from to / from text serialization format changes type X to type Y\"\r\n\r\nThe problem is that JSON is an invariably \"lossy\" serialization format with .NET types as the input.\r\nYou lose the specific number types, as any number in JSON becomes that abstraction: a JSON primitive of kind `Number`.\r\nSimilarly, JSON has no `[char]` type, only `String`.\r\n\r\nTherefore, no one should expect a round trip to work.\r\n\r\nHowever, it _is_ reasonable to expect from-JSON conversion to expect _PowerShell-typical_ behavior, which to me means performing the automatic type-widening _as needed_, the same way that (non-type-letter-suffixed) _number literals_ in PowerShell source code employ, which means: `[int]` as the smallest type -> `[long]` -> `[decimal]` -> `[double]`.\r\n\r\n(On a related note: going from `[decimal]` to  `[bigint]`  before going to `[double]` in number-literal parsing would make sense, to avoid quiet loss of accuracy - see #13212; by contrast, `ConvertFrom-Json` in PS Core currently skips the `[decimal]` step and goes straight from `[long]` to `[bigint]` - see https://github.com/PowerShell/PowerShell/issues/9207#issuecomment-573992565) - whereas Windows PowerShell tops out at `[double]` beyond `[decimal]`, and never uses `[bigint]`.\r\n\r\n>  I suspect to avoid a test to say \"Does this need to be an int64 ?\r\n\r\nYes, as implied by a quote of the author of the Json.NET library underlying the current `ConvertFrom-Json` from the [SO answer that @iRon7 links to in the OP](https://stackoverflow.com/a/44010307/45375):\r\n\r\n> Json.NET by default reads integer values as Int64 because there is no way to know whether the value should be Int32 or Int64, and Int64 is less likely to overflow. For a typed property the deserializer knows to convert the Int64 to a Int32 but because your property is untyped you are getting an Int64.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2020-11-27T16:10:46Z",
+      "updated_at": "2020-11-27T18:49:13Z"
+    },
+    {
+      "author": "LaurentDardenne",
+      "author_association": "NONE",
+      "body": "The use of\r\n```powershell\r\n   ...|Convert-From | Group-Object -Property XYZ -AsHashTable\r\n```\r\nmay in some cases require an adaptation of the code depending on the version of powershell.\r\n\r\nExample :\r\n```powershell\r\n$Runs=( gh api -H \"Accept: application/vnd.github+json\" /repos/OWNER/REPO/actions/runs|ConvertFrom-Json).workflow_runs|\r\n     Group-Object workflow_id -AsHashTable\r\n\r\n$List=$runs.GetEnumerator()|% {$_}\r\n$List[0].Key.GetType()\r\n```\r\nIf I have to search for a key, from a cast of a string, the code differs.\r\n```powershell\r\n$id='1234'\r\n\r\n#v5.1\r\n$runs.ContainsKey($id -as [int32])\r\n\r\n#Core\r\n$runs.ContainsKey($id -as [int64])\r\n```\r\nShouldn't this post be marked as 'Breaking change' ?",
+      "created_at": "2022-08-15T10:39:27Z",
+      "updated_at": "2022-08-15T10:39:27Z"
+    }
+  ],
+  "created_at": "2020-11-25T14:39:46Z",
+  "number": 14264,
+  "state": "open",
+  "title": "Powershell Core deserializes numbers in JSON as Int64 vs Windows Powershell which does it as Int32",
+  "updated_at": "2022-08-15T10:39:27Z"
+}

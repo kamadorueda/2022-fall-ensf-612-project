@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10863",
+  "author": "mklement0",
+  "body": "When you create a proxy command, the `begin` block contains the following snippet:\r\n\r\n```\r\n       $outBuffer = $null\r\n        if ($PSBoundParameters.TryGetValue('OutBuffer', [ref]$outBuffer))\r\n        {\r\n            $PSBoundParameters['OutBuffer'] = 1\r\n        }\r\n```\r\n\r\nThat is, if a `-OutBuffer` value is passed, it is quietly reset to `1`, which raises two questions:\r\n\r\n* Why does the `-OutBuffer` value need to be reset at all for the steppable pipeline created by the proxy (wrapper) command?\r\n\r\n* Assuming the intent is to reset the value so as to perform NO buffering, why is the value set to `1`, which implies _paired_ output (it is `-OutBuffer 0` that specifies no buffering)?\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.4\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "I don't know _why_ but I remember this when I first used this to create proxy functions. I have one which adds \"-recurse\" to select string, which was last modified in 2015, and has this code in it\r\n```\r\n           # For proxy functions using stepable pipeline Buffer should always be 1\r\n           $outBuffer = $null\r\n           if ($PSBoundParameters.TryGetValue('OutBuffer', [ref]$outBuffer)) {\r\n                $PSBoundParameters['OutBuffer'] = 1\r\n           }\r\n```\r\nSo whatever the logic, it isn't new :-) ",
+      "created_at": "2019-10-23T15:14:15Z",
+      "updated_at": "2019-10-23T15:14:15Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience do you happen to know anything about this little oddity? \ud83d\ude0a ",
+      "created_at": "2019-10-23T15:17:09Z",
+      "updated_at": "2019-10-23T15:17:09Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "No idea.  I always wondered why:\r\n\r\n1. It doesn't use `ContainsKey` if it isn't even going to use `$outBuffer` (maybe that API didn't exist at the time?)\r\n1. Why do it at all\r\n1. Why set it to 1\r\n\r\nHonestly I generally just remove it.  I don't think I've ever actually used `OutBuffer` for anything though, so ymmv.",
+      "created_at": "2019-10-23T15:40:00Z",
+      "updated_at": "2019-10-23T15:40:00Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @jhoneill - indeed it isn't a new issue, but I was surprised to see the comment in your code snippet - was that auto-generated? If you use `[System.Management.Automation.ProxyCommand]::Create()` now, this comment is _not_ there anymore.\r\n\r\n@SeeminglyScience: \r\n\r\nAs for `.ContainsKey()`: the proxy-command class dates back to PSv2, but even then `$PSBoundParameters` implemented the generic `IDicationary<T,T>` interface, so I believe that the method _was_ available.\r\n\r\nGood point about removing the code - it does seem to work OK without it, even when you do use `-OutBuffer`, that rare beast.\r\n\r\nHere's my _guess_ as to what happened: The generated code is based on:\r\n\r\n* ~a _general_ misconception~ [see [comment below](https://github.com/PowerShell/PowerShell/issues/10863#issuecomment-545611793)]: since `-OutBuffer` only applies to the _output_ side and the _receiving_ cmdlet needn't be aware of whether the one providing the input used buffering or not - it still receives the objects _one by one_, there is no need to modify `-OutBuffer` at all; and - correct me if I'm wrong - on the _output_ side the buffering is handled automatically by the plumbing.\r\n\r\n* a _specific_ misconception: `-OutBuffer 1` sends _2_ objects at a time through the pipeline (which is an understandable misconception and an unfortunate original design decision for `-OutBuffer` - too late...)\r\n\r\n@SteveL-MSFT:\r\n\r\n* Do you know anyone who can speak to the original design intent? \r\n\r\n* Do we feel comfortable removing this part of the generated code? While it is typically benign, it actually thwarts the intentional use of `-OutBuffer`.",
+      "created_at": "2019-10-23T16:12:31Z",
+      "updated_at": "2019-10-23T21:43:25Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Thanks, @jhoneill - indeed it isn't a new issue, but I was surprised to see the comment in your code snippet - was that auto-generated? If you use `[System.Management.Automation.ProxyCommand]::Create()` now, this comment is _not_ there anymore.\r\n\r\nI don't think any comments are (or were) auto-generated, so it must have been my comment . \r\n\r\n\r\n\r\nI don't understand why it has / always had \r\n```\r\n    try {\r\n        $steppablePipeline.Process($_)\r\n    } catch {\r\n        throw\r\n    }\r\n```\r\n\r\nPutting throw <<nothing else>> in a catch block doesn't seem very useful to me ",
+      "created_at": "2019-10-23T16:30:45Z",
+      "updated_at": "2019-10-23T16:30:45Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I don't understand why it has / always had\r\n\r\nYeah.  I always replace `throw` with `$PSCmdlet.ThrowTerminatingError($PSItem)` personally.\r\n\r\nAlso inconsistent brace, inconsistent white space, and almost always unnecessary variable name escaping. (I think you fixed some of that recently though right @vexx32?)",
+      "created_at": "2019-10-23T16:38:57Z",
+      "updated_at": "2019-10-23T16:38:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point, @jhoneill; to add to @SeeminglyScience's comment:\r\n\r\nWhile argument-less `throw` does preserve the original error record (exception details), it converts a _statement_-terminating error into a _script_-terminating (runspace-terminating) error - so the wrapper (proxy) function will in fact behave differently than the wrapped cmdlet: it will not just terminate _itself_, but the entire runspace (unless caught).\r\n\r\n`$PSCmdlet.ThrowTerminatingError($_)` avoids that problem.\r\n\r\nTo summarize: \r\n\r\n* You _do_ need `try` / `catch` - to prevent the proxy function from continuing when a a statement-terminating error occurs in the proxied function, ...\r\n\r\n* ... but the `catch` block should call `$PSCmdlet.ThrowTerminatingError($_)`, not `throw`.",
+      "created_at": "2019-10-23T16:43:29Z",
+      "updated_at": "2019-10-23T16:47:27Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah I tweak it a bit in #9900 I think, since I'm in there adding the dispose block to the template. Not merged yet, though.",
+      "created_at": "2019-10-23T16:47:28Z",
+      "updated_at": "2019-10-23T16:47:28Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @JamesWTruher ",
+      "created_at": "2019-10-23T16:48:04Z",
+      "updated_at": "2019-10-23T16:48:04Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "The `OutBuffer` code is to help avoid a DOS attack. Proxies are typically generated on servers for RBAC and we didn't want an attacker to easily create large buffers by specifying a large OutBuffer. I wish I could say I remembered this (I added the code), but I had to check my email archives.\r\n\r\nIIRC, the try/catch/rethrow was added so errors with a proxy looked as much as possible like they did without the proxy. Any other benefit/downside was unintentional - at least on my part (that was also a change of mine.)\r\n\r\n",
+      "created_at": "2019-10-23T20:00:52Z",
+      "updated_at": "2019-10-23T20:00:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @lzybkr, but given that DOS isn't around anymore ... (just kidding).\r\n\r\nSo it sounds like the following changes are worth making:\r\n\r\n* Streamline the `OutBuffer` code and precede it with a comment; e.g.:\r\n\r\n```powershell\r\n# Ignore -OutBuffer to prevent DoS attacks. \r\n# If that is not a concern and you want -OutBuffer support, remove this `if` statement.\r\nif ($PSBoundParameters.ContainsKey('OutBuffer')) { $PSBoundParameters.Remove('OutBuffer') }\r\n```\r\n\r\nNote that the code now _removes_ the `OutBuffer`  value (tantamount to setting it to `0`, i.e. _no_ buffering), which I presume was the original intent.\r\n\r\n* In the spirit of _so errors with a proxy looked as much as possible like they did without the proxy_, replace the `throw` statements in all `catch` blocks with `$PSCmdlet.ThrowTerminatingError($_)` as suggested by @SeeminglyScience ",
+      "created_at": "2019-10-23T20:27:37Z",
+      "updated_at": "2020-11-01T13:50:48Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "A comment was not included largely for performance reasons - the generated code is mostly not meant for humans and Exchange generates many proxies.",
+      "created_at": "2019-10-23T21:09:41Z",
+      "updated_at": "2019-10-23T21:09:41Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I see. Leaving the comments issue aside (see below), do you agree with the proposed changes?\r\n\r\n---\r\n\r\nThe reason I asked for comments is that I had a different use case  in mind - and I know that this will eventually have to be a separate discussion, but just to get the ball rolling:\r\n\r\nEnd users too can benefit from proxy functions - they're a powerful way to customize existing cmdlets.\r\n\r\nFor instance, I have a `hd` function in my profile  (similar to the Unix `head` utility) that wraps `Select-Object -First <n>`.\r\n\r\nIn this scenario, comments are important, because the generated code does require tweaking by humans.\r\n\r\n@jpsnover  originally introduced the concept in [this blog post from 2009](https://devblogs.microsoft.com/powershell/extending-andor-modifing-commands-with-proxies/) and even published a [PSGallery module](https://www.powershellgallery.com/packages/MetaProgramming) with a `New-ProxyCommand` function - thought it didn't gain much traction, possibly in part because it is rough around the edges.\r\n\r\nI think better support for this use case is well worth considering, possibly even with an official cmdlet.\r\n\r\n",
+      "created_at": "2019-10-23T21:28:05Z",
+      "updated_at": "2019-10-23T21:28:05Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "The code changes sound reasonable.\r\n\r\nI think it's possible to generate a comment without hurting Exchange like scenarios. If the process is interactive (there are some existing checks already), it seems safe to assume PowerShell isn't being used in a server scenario where performance is more important.",
+      "created_at": "2019-10-23T21:34:43Z",
+      "updated_at": "2019-10-23T21:34:43Z"
+    }
+  ],
+  "created_at": "2019-10-22T01:58:55Z",
+  "number": 10863,
+  "state": "open",
+  "title": "SDK: Proxy functions generated with  [System.Management.Automation.ProxyCommand]::Create() incorrectly modify the -OutBuffer common parameter on invocation, mistakenly use Throw",
+  "updated_at": "2020-11-01T13:50:48Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/4069",
+  "author": "mklement0",
+  "body": "Typically, the logic of `[switch]` parameter is _implicit_: merely _using_ the switch parameter (e.g., `-Foo`) implies a value `$True`, whereas _omitting it_ implies `$False`.\r\n\r\nHowever, `[switch]` parameters also allow passing an _explicit value_, such as `-Foo:$True` and  \r\n`-Foo:$False`.\r\n\r\n_Conceptually_, switches are _Boolean_ values, so it's a reasonable expectation that `-Foo:1` and `-Foo:0` would work too, but that currently isn't true:\r\n\r\n```powershell\r\n> function Foo { param( [Parameter(Mandatory)] [switch] $Bar) $Bar }; Foo -Bar:0\r\nFoo : Cannot process argument transformation on parameter 'Bar'.\r\nCannot convert the \"0\" value of type \"System.Int32\" to type \"System.Management.Automation.SwitchParameter\".\r\n```\r\n\r\nBy contrast, a `[bool]` parameter _does_ support numerical values:\r\n```powershell\r\n> function Foo { param( [Parameter(Mandatory)] [bool] $Bar) $Bar }; Foo -Bar 0\r\nFalse  # OK - 0 was coerced to $False\r\n```\r\nIt would be handy to support numerical values too, especially in the context of _external_ invocations on Unix platforms, where avoiding `$`-prefixed tokens such as `$False` is desirable, so as to prevent accidental up-front expansion of such tokens by POSIX-like shells.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nPowerShell Core v6.0.0-beta.2\r\n```\r\n",
+  "closed_at": "2017-06-28T18:41:56Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It looks like implicit converting 0 and 1 to bool but it seems lead to big confusion in PowerShell language.",
+      "created_at": "2017-06-22T03:52:59Z",
+      "updated_at": "2017-06-22T03:52:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: Can you say more? What difference do you see between allowing `0` and `1` to be converted to `[bool]` vs. to `[switch]`?",
+      "created_at": "2017-06-22T07:54:20Z",
+      "updated_at": "2017-06-22T07:54:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I have a question too :-)  Do you want to fix?\r\n```powershell\r\nPS >[System.Management.Automation.SwitchParameter]0\r\nCannot convert the \"0\" value of type \"System.Int32\" to type \"System.Management.Automation.SwitchParameter\".\r\nAt line:1 char:1\r\n+ [System.Management.Automation.SwitchParameter]0\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [], RuntimeException\r\n    + FullyQualifiedErrorId : ConvertToFinalInvalidCastException\r\n```",
+      "created_at": "2017-06-22T08:46:52Z",
+      "updated_at": "2017-06-22T08:46:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That something like `[switch] 0` doesn't work was the starting point, so I'm unsure what you're trying to say. \r\n\r\nThat you _personally_ don't want to take the time to implement it? \r\n\r\nEarlier it sounded like you thought that it _shouldn't be implemented_ (\"big confusion\"), and I still don't know why.",
+      "created_at": "2017-06-22T09:10:43Z",
+      "updated_at": "2017-06-22T09:10:57Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "My first glance was too general: int -> bool.\r\n\r\nAnd if the Issue is only to fix \">[System.Management.Automation.SwitchParameter]0\" - I agree.",
+      "created_at": "2017-06-22T10:08:01Z",
+      "updated_at": "2017-06-22T10:08:01Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "The current behavior is very much by design. The only intended scenario for providing literal values to switch parameters is commands calling commands. Only allowing boolean values is intended to discourage other uses. Switch parameters and boolean parameters should not be conflated.",
+      "created_at": "2017-06-28T18:41:56Z",
+      "updated_at": "2017-06-28T18:41:56Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I get that it's the right decision to be restrictive when it comes to binding Booleans that should be specified as such (as opposed to, say, `[bool] 'foo'`).\r\n\r\nHowever, the difference between a `[bool]` parameter and `[switch]` parameters is _in syntax only_.\r\nWhat is a `[switch]` other than a Boolean value with implicit syntax?\r\n\r\nIn fact, [_the code already treats them the same in the context of parameter binding_](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/ArgumentTypeConverterAttribute.cs#L114), and it is _only the lack of methods for converting from _numbers_  _on  the `[switch]` class itself_ that results in different behavior_.\r\n\r\nThat this is more of an _accident_ is also reflected in the fact that, unlike with `[bool]`-typed parameters, there is no specific error message for `[switch]` when you use _numeric_ arguments:\r\n\r\n```powershell\r\n# With [bool]: specific, helpful error message:\r\n> & { param([bool] $b) $b } 'foo'\r\nCannot process argument transformation on parameter 'b'. Cannot convert value \"System.String\" to type \"System.Boolean\". Boolean parameters accept only \r\nBoolean values and numbers, such as $True, $False, 1 or 0.\r\n\r\n# With [switch] and a *NON-numeric* value: same helpful message\r\n> & { param([switch] $sw) $sw } -sw:foo\r\nCannot process argument transformation on parameter 'sw'. Cannot convert value \"System.String\" to type \"System.Management.Automation.SwitchParameter\". \r\nBoolean parameters accept only Boolean values and numbers, such as $True, $False, 1 or 0.\r\n\r\n# With [switch] and a *numeric* value:\r\n# *Generic error message* that results from the initial inability to coerce a number\r\n> & { param([switch] $sw) $sw } -sw:1\r\nCannot process argument transformation on parameter 'sw'. Cannot convert the \"1\" value of type \"System.Int32\" to type\r\n\r\n```\r\n\r\nFrom that vantage point I see no reason why the permissible values should differ, especially given that `[bool]`-typed parameters seem to strike the right balance between restrictiveness that signals intent on the one hand, and allowing sensible variations on the other: `$true`, `$false`, `0`, `1`.\r\n\r\nAs an aside: Arguably, the fact that `[bool]`-typed parameters more generally accept _any number_ of _any numeric type_ is too lax, however.\r\n\r\nAs stated, aside from _consistency_, the _upside_ of also allowing `-switch:0` and `-switch:1`  is to facilitate calls from POSIX-like shells.",
+      "created_at": "2017-06-28T20:13:39Z",
+      "updated_at": "2017-06-28T20:48:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @PowerShell/area-language ",
+      "created_at": "2017-06-28T20:43:40Z",
+      "updated_at": "2017-06-28T20:43:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> As an aside: Arguably, the fact that  [bool] -typed parameters more generally accept any number of any numeric type is too lax, however.\r\n\r\nIt seems we can accept this (accept any number) because it works such in other places.",
+      "created_at": "2017-06-29T05:02:29Z",
+      "updated_at": "2017-06-29T05:02:29Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov: \r\n\r\nIn case you're referring to `[bool]` _casts_  (e.g., `[bool] 'anything goes'`) / _coercion_ (e.g., `if (Get-Date) ... `): these cases are intentionally treated very differently: by design, _anything_ can be converted to a Boolean there.",
+      "created_at": "2017-06-29T13:00:47Z",
+      "updated_at": "2017-06-29T13:00:47Z"
+    }
+  ],
+  "created_at": "2017-06-21T20:49:34Z",
+  "number": 4069,
+  "state": "closed",
+  "title": "Suggestion: allow specifying switch parameter values numerically too (0 or 1) ",
+  "updated_at": "2017-06-29T13:00:47Z"
+}

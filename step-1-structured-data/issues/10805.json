@@ -1,0 +1,244 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10805",
+  "author": "mklement0",
+  "body": "Note: This is a generalization of #4439. @SteveL-MSFT, if you agree, please close the latter.\r\n\r\nPrefixing full, normalized, native filesystem paths with `\\\\?\\` allows targeting filesystem items whose path is longer than the legacy limit of 259 characters.\r\n\r\n**Update**: \r\n * Prefix `\\\\?\\` isn't _needed_ in PS Core (in .NET Core altogether), so long paths just work as-is, even if not enabled system-wide. \r\n * However, old code may still use it, and even new code may have to, when creating cross-edition scripts.\r\n * Additionally, and separately, `\\\\?\\`  is useful for targeting files or directories with _irregular names_, such as ones with _trailing spaces_, so you can remove them with `Remove-Item`, for instance.\r\n\r\nAs an aside: In Windows 10 you can now opt in system-wide to support long paths, but individual applications must _also_ opt in (PowerShell indirectly does) - see https://blogs.msdn.microsoft.com/jeremykuhne/2016/07/30/net-4-6-2-and-long-paths-on-windows-10/\r\n\r\nAs of PowerShell Core 7.3.0-preview.2, the **inconsistent support for `\\\\?\\` is as follows**:\r\n\r\n* With the **`-Path`** parameter, **`\\\\?\\` isn't supported _at all_** , so wildcard expressions cannot be used. \r\n  * `Get-Item` and `Get-ChildItem` output nothing, and `Remove-Item` is a quiet no-op (silent failure) too. \r\n\r\n* With the **`-LiteralPath`** parameter in combination with `\\\\?\\`:\r\n  *  Only _file paths_ can be targeted.\r\n  * _Directory_ paths exhibit the following behavior:\r\n     * `Get-Item` and `Remove-Item` complain about not finding the path. \r\n        * Adding `-Force` makes `Get-Item` output a broken `DirectoryInfo` instance.  \r\n        * Using `Remove-Item` without `-Recurse` on a nonempty directory presents the usual confirmation prompt (implying the ability to recognize the path as existent), but then fails on confirmation.\r\n     * `Get-ChildItem` reports the _root_ directory's content instead(!)\r\n\r\nAdditionally, `\\\\?\\` paths do _not_ work in the following cases:\r\n\r\n*  With  `>` / `>>`, which implicitly behave like `Out-File -Path` - see #4726\r\n\r\n* <del>In the same vein, _invocation of an executable_ - whether with or without `&` - is broken (possibly related to #4726 as well).</del> (no longer a problem as of PowerShell Core 7.3.0-preview.2)\r\n\r\n* <del>`Start-Process`</del> (no longer a problem as of PowerShell Core 7.3.0-preview.2)\r\n\r\n* `Set-Location` (not even with `-LiteralPath`)\r\n\r\nNote: \r\n\r\n* Some of these problems are regressions from Windows PowerShell, where only the invocation / `Start-Process` tests fail and `>` only with a _new_ file.\r\n\r\n* I haven't looked into whether invoking an _executable_ with an overly long path is supported in principle by the underlying APIs.\r\n\r\n# Steps to reproduce\r\n\r\nRun the following from a Pester test script (`*.Tests.ps1`) on Windows:\r\n\r\n```powershell\r\nDescribe \"Support for long paths, via \\\\?\\\" {\r\n  BeforeAll {\r\n    Push-Location (Convert-Path TestDrive:\\)\r\n    $dirPath = $PWD.ProviderPath\r\n    $PrefixedDir = \"\\\\?\\$dirPath\"\r\n    $fileName = ('a' * 248 + '.cmd')\r\n    $fileNameAlt = ('b' * 248)\r\n    $PrefixedFullName = \"$PrefixedDir\\$fileName\"\r\n    $PrefixedFullNameAlt = \"$PrefixedDir\\$fileNameAlt\"\r\n    # Create the file with the overly long path using .NET,\r\n    # to avoid issues with New-Item\r\n    [IO.File]::WriteAllText($PrefixedFullName, '')\r\n  }\r\n  It \"Get-ChildItem -LiteralPath\" {\r\n    Get-ChildItem -LiteralPath $PrefixedFullName | % FullName | Should -Be $PrefixedFullName\r\n  }\r\n  It \"Get-ChildItem -Path\" {\r\n    Get-ChildItem -Path $PrefixedFullName | % FullName | Should -Be $PrefixedFullName\r\n  }\r\n  It \"Remove-Item -LiteralPath\" {\r\n    { Remove-Item -LiteralPath $PrefixedFullName } | Should -Not -Throw\r\n    # Recreate the file.\r\n    [IO.File]::WriteAllText($PrefixedFullName, '')\r\n  }\r\n  It \"Remove-Item -Path\" {\r\n    { Remove-Item -Path $PrefixedFullName } | Should -Not -Throw\r\n    # Recreate the file, if necessary\r\n    [IO.File]::WriteAllText($PrefixedFullName, '')\r\n  }\r\n  It \"> with new file\" {\r\n    { '' >  $PrefixedFullNameAlt } | Should -Not -Throw\r\n  }\r\n  It \"> / >> with existing file.\" {\r\n    { '@echo Hi.' >  $PrefixedFullName } | Should -Not -Throw\r\n    { 'REM ' >> $PrefixedFullName } | Should -Not -Throw\r\n  }\r\n  It \"Invocation / &\" {\r\n    & $PrefixedFullName | Should -Be 'Hi.'\r\n  }\r\n  It \"Start-Process\" {\r\n    Start-Process -FilePath $PrefixedFullName\r\n  }\r\n  It \"New-Item\" {\r\n    { New-Item -Force -Type File $PrefixedFullName } | Should -Not -Throw\r\n  }\r\n  It \"Set-Location -LiteralPath\" {\r\n    { Set-Location -EA Stop -LiteralPath $PrefixedDir } | Should -Not -Throw\r\n  }\r\n  It \"Set-Location -Path\" {\r\n    { Set-Location -EA Stop -Path $PrefixedDir } | Should -Not -Throw\r\n  }\r\n  AfterAll {\r\n    # Use .NET to remove the overly long path, so that Pester itself doesn't \r\n    # fail on trying to remove the dir. underlying TestDrive:\r\n    [IO.File]::Delete($PrefixedFullName)\r\n    [IO.File]::Delete($PrefixedFullNameAlt)\r\n    Pop-Location\r\n  }\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\nAll tests should pass.\r\n\r\n# Actual behavior\r\n\r\nAll tests but the first one fail, with various error messages.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.4\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "LocalGlobbing code is very sensitive and it seems it is not covered by tests explicitly - I think it is main stopper of a progress here.",
+      "created_at": "2019-10-16T18:12:27Z",
+      "updated_at": "2019-10-16T18:12:27Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As of PowerShell Core 7.0.0-rc.2 `Get-Item -LiteralPath \\\\?\\C:\\Windows` is now broken too (complains about not finding the path; `Get-ChildItem -LiteralPath \\\\?\\C:\\Windows` still works).\r\n\r\nI've noticed that the `\\\\?\\` prefix is never _needed_ in PS Core. Still, people may use it in cross-edition scripts.\r\n",
+      "created_at": "2020-01-24T15:37:11Z",
+      "updated_at": "2020-01-24T15:37:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> I've noticed that the \\\\?\\ prefix is never needed in PS Core.\r\n\r\nLong paths is Windows feature, not PS Core.  It seems we have a test for long path support.",
+      "created_at": "2020-01-24T16:46:17Z",
+      "updated_at": "2020-01-24T16:46:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, it only applies _on Windows_, as hopefully clearly implied by the issue title. PS Core should support the long-path prefix there too, and support has degraded from Windows PowerShell, and even further since v7.0.0-preview.4\r\n\r\nWhat I was trying to say: In PowerShell Core _on Windows_, you can seemingly access paths longer than 259 chars. even _without_ the `\\\\?\\` prefix, irrespective of whether long-path support is turned on system-wide.",
+      "created_at": "2020-01-24T16:52:12Z",
+      "updated_at": "2020-01-24T16:57:14Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> It seems we have a test for long path support.\r\n\r\nYou can run the tests from the initial post; for me, 7 out of the 11 tests fail as of v7.0.0-rc.2",
+      "created_at": "2020-01-24T16:54:21Z",
+      "updated_at": "2020-01-24T16:54:44Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> What I was trying to say: In PowerShell Core on Windows, you can seemingly access paths longer than 259 chars. even without the \\\\?\\ prefix, irrespective of whether long-path support is turned on system-wide.\r\n\r\nI don't understand how PowerShell Core can work with long paths if the feature is not enabled on Windows 10.",
+      "created_at": "2020-01-24T17:00:31Z",
+      "updated_at": "2020-01-24T17:00:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That is a fair question, @iSazonov - I haven't looked into the why and how, but you can try it yourself:\r\n\r\nFirst, open an _elevated_ session and run the following, to turn system-wide support for long paths off:\r\n\r\n```powershell\r\nSet-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem LongPathsEnabled 0\r\n```\r\n\r\nThen, open a regular session and run the following:\r\n\r\n```powershell\r\nSet-Location; 'hi' > ('x'*(259 - \"$pwd\".length)); (Get-Item x*).FullName.Length; Remove-Item x*\r\n```\r\n\r\nYou'll get no error message and `260` as the output, which is the longer-than-259-chars. path of the temporarily created file.\r\n\r\nRunning the same code in _Windows PowerShell_ fails.\r\n\r\nPerhaps `\\\\?\\` is being applied behind the scenes?",
+      "created_at": "2020-01-24T17:15:34Z",
+      "updated_at": "2020-01-24T17:16:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Please share your Windows 10 version. I guess latest versions can have the feature enabled by default.",
+      "created_at": "2020-01-24T17:17:59Z",
+      "updated_at": "2020-01-24T17:17:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It's `Microsoft Windows 10 Pro (64-bit; Version 1909, OS Build: 18363.592)`, but I don't think that is the issue, because the very same code also works on Windows _7_ (where system-wide support for long paths didn't even exist).",
+      "created_at": "2020-01-24T17:21:47Z",
+      "updated_at": "2020-01-24T17:21:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 If you replace 259 in your test with more large value (what about 400?) you get an error. ",
+      "created_at": "2020-01-24T17:24:23Z",
+      "updated_at": "2020-01-24T17:24:23Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That is an unrelated constraint: even in long paths the _individual components_ must not be longer than 255 chars., as far as I know. You'd have to design the test differently to get longer paths.",
+      "created_at": "2020-01-24T17:49:47Z",
+      "updated_at": "2020-01-24T17:49:47Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Ah :-) my bad.\r\nGet-Item really doesn't process long paths - it split path and works with leaf (the individual component < 256) but returns FileInfo object with FullName which is > 255 (266 chars). Perhaps just the fact confuses us.\r\nThen I tried to Set-Location and create subdirectory but get error on Set-Location. So long paths do not works.",
+      "created_at": "2020-01-24T18:49:25Z",
+      "updated_at": "2020-01-24T18:49:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I don't see the behavior you're seeing; try the following code, which creates a directory path that is itself longer than 259 chars., then a file in it, targets the directory with both `Get-Item` and `Get-ChildItem` and the file with `Get-Item`, changes to the directory with the overly long path with `Set-Location`, removes the file with the overly long path, then cleans up - it all seems to work fine, both on Windows 7 and Windows 10.\r\n\r\n```powershell\r\nPush-Location ($dir = mkdir -force ($env:TEMP + \"\\$pid\\\" + 'x' * 250)); $file = \"$pwd\\test.txt\"; 'hi' > $file; \"dir path length: $($dir.FullName.Length)`nfile path length: $($file.length)\"; Get-Item $dir; '###'; Get-ChildItem $dir; '###'; Get-Item $file; '###'; Set-Location $dir -passthru; Pop-Location; Remove-Item $file; Remove-Item (Split-Path $dir) -Recurse\r\n```\r\n\r\nOutput on my Windows 10 machine:\r\n\r\n```none\r\ndir path length: 288\r\nfile path length: 297\r\n\r\n\r\n    Directory: C:\\Users\\jdoe\\AppData\\Local\\Temp\\5816\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\nd----           1/24/2020  4:59 PM                xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n                                                  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n###\r\n\r\n    Directory: C:\\Users\\jdoe\\AppData\\Local\\Temp\\5816\\xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\r\nMode                 LastWriteTime         Length Name\r\n----                 -------------         ------ ----\r\n-a---           1/24/2020  4:59 PM              4 test.txt\r\n###\r\n-a---           1/24/2020  4:59 PM              4 test.txt\r\n###\r\n\r\nDrive        : C\r\nProvider     : Microsoft.PowerShell.Core\\FileSystem\r\nProviderPath : C:\\Users\\jdoe\\AppData\\Local\\Temp\\5816\\xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n               xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\nPath         : C:\\Users\\jdoe\\AppData\\Local\\Temp\\5816\\xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n               xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n```",
+      "created_at": "2020-01-24T22:05:40Z",
+      "updated_at": "2020-01-24T22:05:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I found why I don't understand you :-)\r\nhttps://github.com/PowerShell/PowerShell/pull/3960/files#diff-52b1a915619c71b288b3f92f944924c4R1156-R1162\n\n<blockquote><img src=\"https://avatars2.githubusercontent.com/u/6708868?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicon.ico\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShell/pull/3960\">Allow use of long paths by jeffbi \u00b7 Pull Request #3960 \u00b7 PowerShell/PowerShell</a></strong></div><div>Fixes  #3891\nWhen calling Windows native API to determine if an item exists, ensure the path is prepended with \\\\?\\ to allow for paths > 260 characters.</div></blockquote>",
+      "created_at": "2020-01-25T08:44:17Z",
+      "updated_at": "2020-01-25T08:44:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "\ud83d\ude01 - thanks for digging deeper.",
+      "created_at": "2020-01-25T20:07:52Z",
+      "updated_at": "2020-01-25T20:07:52Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": ".NET Core itself supports long file paths implicitly, while .NET Framework requires app opt-in.  I get that users may want to use the `\\\\?\\` legacy syntax, but it's not clear to me how impactful that is to motivate spending the time to fix this.",
+      "created_at": "2020-01-28T23:12:25Z",
+      "updated_at": "2020-01-28T23:12:25Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good to know that .NET Core supports long paths by default - seemingly even without the system-wide  opt-in.\r\n\r\nThe code that @iSazonov linked to seems to no longer be part of the repo (except for the tests, which don't use the `\\\\?\\` prefix).\r\n\r\n>  I get that users may want to use the \\\\?\\ legacy syntax\r\n\r\n* They _may have done so in the past_, which means that old code with `\\\\?\\` prefixes that would otherwise be compatible breaks.\r\n\r\n* They may _have to going forward_, if they want to write cross-edition code.\r\n\r\nGiven that the current behavior is clearly a regression from Windows PowerShell, I suggest either:\r\n\r\n* fixing the behavior (which you seem disinclined to do)\r\n\r\n* documenting the _breaking change_.\r\n\r\n\r\n\r\n",
+      "created_at": "2020-01-29T03:16:21Z",
+      "updated_at": "2020-01-29T03:17:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I am not sure we can fix this now. I think it _must_ necessarily be in FileSystem provider V2.",
+      "created_at": "2020-01-29T06:20:21Z",
+      "updated_at": "2020-01-29T06:20:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Understood, @iSazonov. \r\n\r\nWith the intent to fix this _eventually_, the categorization shifts from _breaking change_ to _(known) bug_, so please label this issue accordingly.\r\n",
+      "created_at": "2020-01-29T12:37:24Z",
+      "updated_at": "2020-01-29T12:37:24Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Meta bug label :-)",
+      "created_at": "2020-01-29T13:12:18Z",
+      "updated_at": "2020-01-29T13:12:18Z"
+    },
+    {
+      "author": "pjaclark",
+      "author_association": "NONE",
+      "body": "This should be listed as a Known Issue causing breaking changes until resolved.",
+      "created_at": "2020-07-14T06:13:53Z",
+      "updated_at": "2020-07-14T06:13:53Z"
+    },
+    {
+      "author": "musm",
+      "author_association": "NONE",
+      "body": "Is this related to why I can't create very long paths?\r\n```\r\n> mkdir ('x' * 290)\r\nNew-Item: The filename, directory name, or volume label syntax is incorrect ....\r\n```\r\n",
+      "created_at": "2020-09-25T15:37:52Z",
+      "updated_at": "2020-09-25T15:37:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@musm, no, you're seeing a fundamental NTFS limitation that applies even when long-path support is enabled: _individual file/directory names_ must not be longer than `255` chars (as opposed to the length of a _path_ as a whole).\r\n\r\nWhile you could argue that the error message _technically_ applies, it is certainly vague.",
+      "created_at": "2020-09-25T16:24:09Z",
+      "updated_at": "2020-09-25T16:25:29Z"
+    },
+    {
+      "author": "Liturgist",
+      "author_association": "NONE",
+      "body": "What is the state of this issue? I see that no one is assigned. Will this be a will-not-fix?",
+      "created_at": "2021-08-16T21:43:35Z",
+      "updated_at": "2021-08-16T21:43:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> What is the state of this issue?\r\n\r\nNice to have :-)",
+      "created_at": "2021-08-17T05:04:24Z",
+      "updated_at": "2021-08-17T05:04:24Z"
+    },
+    {
+      "author": "beermattuk",
+      "author_association": "NONE",
+      "body": "> \r\n> \r\n> > What is the state of this issue?\r\n> \r\n> Nice to have :-)\r\n\r\nHow can this just be a nice to have?  For file server administration it's very common for users to save things in ridiculously long paths, then when you come to doing maintenance and migrations you're not able to use powershell to work with them.  I know there are workarounds for an individual file, but when you've got a server with millions of files on them and thousands of long paths, how are you supposed to automate anything?",
+      "created_at": "2021-11-05T16:49:49Z",
+      "updated_at": "2021-11-05T16:49:49Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> but when you've got a server with millions of files on them and thousands of long paths, how are you supposed to automate anything?\r\n\r\nIt is my headache :-( If supporting `\\\\?\\` is not so critical now since Windows 10 API now can support long paths OOB, PowerShell can not be used for processing large file volumes because of very bad performance and now it's even worse than before. See #14469 - the MSFT team does not acknowledge this and I have no explanation for it - only bewilderment. \r\n",
+      "created_at": "2021-11-05T17:23:19Z",
+      "updated_at": "2021-11-05T17:23:19Z"
+    },
+    {
+      "author": "ghost",
+      "author_association": "NONE",
+      "body": "**TL;DR :** \r\nRegression has happened because **Windows PowerShell embedded the manifest file whereas PowerShell does not.** Please embed the manifest in `pwsh.exe\r\n`\r\n\r\nJust because .NET Core / .NET 5 / .NET 6 / .NET 7 those runtimes themselves support `longPathAware` , doesn't mean all .NET applications which are built on top of those runtimes will support it automagically.  \r\n\r\nBe it .NET or Completely Native, each and every `.exe` executables has to separately embed the manifest file.\r\n\r\n![Screenshot 2022-02-22 063152](https://user-images.githubusercontent.com/100173066/155044462-da18d3c6-d3dd-4a34-82f5-1cdabec9e6b0.png)\r\n\r\n![Screenshot 2022-02-22 063247](https://user-images.githubusercontent.com/100173066/155044470-4a0756c0-faca-4c82-8326-bf007c1f0480.png)\r\n\r\n---\r\n---\r\n**Long Path works on windows 10 v1607 and upwards with _\\*per executables opt-in.\\*_**\r\nBenefit : No need for `\\\\? or UNC Path Handling Complexities` Nonsense.\r\n\r\n---\r\nbuild the `pwsh.exe` with following embedded manifest file.\r\n\r\n**Special Note :** This manifest file has to be embedded into each executables.\r\nThat means, If your App contains `SomeApp1.exe` and `SomeApp2.exe` , the manifest file has to be embedded into each executables.\r\n\r\nFile name must be `app.manifest`\r\n\r\n```xml\r\n<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<assembly manifestVersion=\"1.0\" xmlns=\"urn:schemas-microsoft-com:asm.v1\">\r\n<application xmlns=\"urn:schemas-microsoft-com:asm.v3\">\r\n    <windowsSettings xmlns:ws2=\"http://schemas.microsoft.com/SMI/2016/WindowsSettings\">\r\n        <ws2:longPathAware>true</ws2:longPathAware>\r\n    </windowsSettings>\r\n</application>\r\n</assembly>\r\n```\r\n---\r\nUsers who wish to use long path must Set Long Path Aware On system wide through Registry : `Computer\\HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\FileSystem` there make a DWORD key `LongPathsEnabled` and set the value to 1\r\n\r\n**_Why System Wide Long Path is not on by default (?) according to a MS engineer_** : https://github.com/microsoft/WindowsAppSDK/issues/875#issuecomment-850551419\r\n\r\n\r\n---\r\n\r\n**Following APIs change behaviors after opt-in :**\r\n\r\nCopyFileW, CopyFile2, CopyFileExW, CreateFileW, CreateFile2, CreateDirectoryW, CreateDirectoryExW GetCurrentDirectoryW, RemoveDirectoryW, SetCurrentDirectoryW, CreateHardLinkW, CreateSymbolicLinkW, DeleteFileW, FindFirstFileW, FindFirstFileExW, FindNextFileW, GetFileAttributesW, GetFileAttributesExW, SetFileAttributesW, GetFullPathNameW, GetLongPathNameW, MoveFileW, MoveFileExW, MoveFileWithProgressW, ReplaceFileW, SearchPathW, FindFirstFileNameW, FindNextFileNameW, FindFirstStreamW, FindNextStreamW, GetCompressedFileSizeW, GetFinalPathNameByHandleW.\r\n\r\n\r\n---\r\n\r\nRef:\r\n\r\n\r\n1. https://docs.microsoft.com/en-us/archive/blogs/jeremykuhne/net-4-6-2-and-long-paths-on-windows-10#enabling-win32-long-path-support\r\n\r\n2. https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=cmd\n\n<blockquote><div><strong><a href=\"https://docs.microsoft.com/en-us/archive/blogs/jeremykuhne/net-4-6-2-and-long-paths-on-windows-10\">.NET 4.6.2 and long paths on Windows 10</a></strong></div></blockquote>\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation\">Maximum Path Length Limitation - Win32 apps</a></strong></div><div>Maximum path length limitation.</div></blockquote>",
+      "created_at": "2022-02-22T01:05:06Z",
+      "updated_at": "2022-02-22T01:05:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@ghost The issue is about consistent support of `\\\\?\\`, not long paths in whole. As for manifest, it force to turn on the feature _per application_. Now users can turn on the feature on OS level. I am not sure we want to force to turn on the feature since we don't cover code by tests and community doesn't vote for this actively. You could ask about adding the manifest in new issue.",
+      "created_at": "2022-02-22T03:32:32Z",
+      "updated_at": "2022-02-22T03:32:32Z"
+    },
+    {
+      "author": "mkht",
+      "author_association": "NONE",
+      "body": "I have a simple script that deletes all files in a particular folder. I have added the `\\\\?\\` prefix to the path so that it will work correctly even if the full path of the file is longer than 260 characters. This script worked fine in Windows PowerShell 5.1.\r\n\r\n```PowerShell\r\n$TargetFolder = '\\\\?\\C:\\MyTemp\\'\r\nGet-ChildItem -LiteralPath $TargetFolder -Force | Remove-Item -Force -Recurse\r\n```\r\nAs a result of running this script in PowerShell 7.2.1, PowerShell attempted to delete all files in the C drive and the system was destroyed.\r\n\r\nDespite the fact that PowerShell 7 is advertised as being highly compatible with Windows PoweShell 5.1, this kind of behavior is ridiculous.\r\nI don't know how hard it is, but hopefully it will be fixed to work consistently with Windows PowerShell 5.1.\r\n",
+      "created_at": "2022-03-01T10:57:46Z",
+      "updated_at": "2022-03-01T10:57:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mkht Really PowerShell FileSystem Provider was never designed to support `\\\\?\\` prefix. I hope we will support this but not as particular case, but as generic PowerShell Direct path.",
+      "created_at": "2022-03-02T17:09:36Z",
+      "updated_at": "2022-03-02T17:09:36Z"
+    },
+    {
+      "author": "JazBInKC",
+      "author_association": "NONE",
+      "body": "I just submitted a bug report for Set-ACL.  I'm using paths like:\r\n![image](https://user-images.githubusercontent.com/96395010/166866507-fd47d52e-8135-45fb-80de-b185223586c7.png) in the creation of  new folders and the subsequent change of owner using Set-ACL.\r\nI'm having to wait 3 minutes for Set-ACL to timeout with each new  folder.  No error message.\r\nThinking the lack of support for `\\\\?\\` might be the issue.\r\n",
+      "created_at": "2022-05-05T05:14:42Z",
+      "updated_at": "2022-05-05T05:14:42Z"
+    },
+    {
+      "author": "mkht",
+      "author_association": "NONE",
+      "body": "PR #15873 that has been merged into `v7.3.0-preview.7` seems to have partially resolved this issue.\r\n\r\nIn the case of the `Get-ChidItem` command, we can use the long-path prefix with the `-LiteralPath` parameter, but cannot be used with the `-Path` parameter.\r\n",
+      "created_at": "2022-08-16T04:56:28Z",
+      "updated_at": "2022-08-16T04:56:28Z"
+    }
+  ],
+  "created_at": "2019-10-16T16:51:10Z",
+  "number": 10805,
+  "state": "open",
+  "title": "Windows (NTFS): Inconsistent support for the long-path prefix (\\\\?\\) in filesystem paths",
+  "updated_at": "2022-08-16T04:56:28Z"
+}

@@ -1,0 +1,83 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/2205",
+  "author": "lilyfang",
+  "body": "<!--\n\nIf it is a bug report:\n- make sure you are able to repro it on the latest released version. \nYou can install the latest version from https://github.com/PowerShell/PowerShell/releases\n- Search the existing issues.\n- Refer to the [FAQ](../docs/FAQ.md).\n- Refer to the [known issues](../docs/KNOWNISSUES.md).\n- Fill out the following repro template\n\nIf it's not a bug, please remove the template and elaborate the issue in your own words.\n-->\n## Steps to reproduce\n\nIn CentOS7, Setup and run PSRP remote scenario by following instructions at https://github.com/powershell/psl-omi-provider. \n## Expected behavior\n\nNo exception is thrown. If needed, return a proper error.   \n## Actual behavior\n\nHit exception as below when trying to login remotely from a windows client, \n PS C:\\windows\\system32> Enter-PSSession -ComputerName li-cent7 -Credential $cred -Authentication neg\notiate -SessionOption $o\nEnter-PSSession : The type initializer for 'System.Management.Automation.ConfigPropertyAccessor'\nthrew an exception.\nAt line:1 char:1\n- Enter-PSSession -ComputerName li-cent7 -Credential $cred -Authenticat ...\n- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n  - CategoryInfo          : NotSpecified: (:) [Enter-PSSession], TypeInitializationException\n  - FullyQualifiedErrorId : RemoteRunspaceStateInfoReason\n## Environment data\n\n<!-- provide the output of $PSVersionTable -->\n\n``` powershell\n> $PSVersionTable\nName                           Value\n----                           -----\nPSVersion                      6.0.0-alpha\nPSEdition                      Core\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\nBuildVersion                   3.0.0.0\nGitCommitId                    v6.0.0-alpha.9\nCLRVersion\nWSManStackVersion              3.0\nPSRemotingProtocolVersion      2.3\nSerializationVersion           1.1.0.1\n```\n\nAfter debugging, the exception is thrown in PropertyAccessor.cs, line 138.  When PSRP tries to CreatDirectory /root/.config/powershell under root at GetCurrentUserConfigDirectory(). It is inconsistent that the logic catches the exception at JsonConfigFileAccessor(), but not GetCurrentUserConfigDirectory(). \n\n```\n    internal JsonConfigFileAccessor()\n    {\n        //\n        // Sets the system-wide configuration directory\n        //\n        Assembly assembly = typeof(PSObject).GetTypeInfo().Assembly;\n        psHomeConfigDirectory = Path.GetDirectoryName(assembly.Location);\n\n        //\n        // Sets the per-user configuration directory\n        //\n        appDataConfigDirectory = Utils.GetUserConfigurationDirectory();\n        if (!Directory.Exists(appDataConfigDirectory))\n        {\n            try\n            {\n                Directory.CreateDirectory(appDataConfigDirectory);\n            }\n            catch (UnauthorizedAccessException)\n            {\n                // Do nothing now. This failure shouldn't block initialization\n                appDataConfigDirectory = null;\n            }\n        }\n    }\n\n    /// <summary>\n    /// Enables delayed creation of the user settings directory so it does \n    /// not interfere with PowerShell initialization\n    /// </summary>\n    /// <returns>Returns the directory if present or creatable. Throws otherwise.</returns>\n    private string GetCurrentUserConfigDirectory()\n    {\n        if (null == appDataConfigDirectory)\n        {\n            string tempAppDataConfigDir = Utils.GetUserConfigurationDirectory();\n            if (!Directory.Exists(tempAppDataConfigDir))\n            {\n                Directory.CreateDirectory(tempAppDataConfigDir);\n                // Only assign it if creation succeeds. It will throw if it fails.\n                appDataConfigDirectory = tempAppDataConfigDir;\n            }\n            // Do not catch exceptions here. Let them flow up.\n        }\n        return appDataConfigDirectory;\n    }\n```\n\ntempAppDataConfigDir is /root/.config/powershell at the failure case.\n",
+  "closed_at": "2016-10-08T04:46:38Z",
+  "comments": [
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "While this can be reproduced during remoting due to the higher likelihood of HOME not being set (or being set to a non-writable folder), this is not itself a remoting bug.\n\nThe `ConfigPropertyAccessor` logic that is meant to read PowerShell configuration values from JSON files _must not_ require that user config directory can be created. If it cannot be written, PowerShell should not fail like this.\n\nThe XDG Base Directory Specification (which this `UserConfigDirectory` is for) states:\n\n> If, when attempting to write a file, the destination directory is non-existant an attempt should be made to create it with permission 0700. If the destination directory exists already the permissions should not be changed. The application should be prepared to handle the case where the file could not be written, either because the directory was non-existant and could not be created, or for any other reason. In such case it may chose to present an error message to the user.\n\nAn error message is acceptable; crashing is not.\n",
+      "created_at": "2016-09-19T17:40:44Z",
+      "updated_at": "2016-09-19T17:40:44Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "I'm assigning to @mirichmo for follow-up.\n",
+      "created_at": "2016-09-19T17:41:11Z",
+      "updated_at": "2016-09-19T17:41:11Z"
+    },
+    {
+      "author": "damon-atkins",
+      "author_association": "NONE",
+      "body": "It would be nice if it check HOME was set, before trying to use it and if not set, display an error message saying please set environment variable home.  I was lucky to notice this was a difference between myself running it as a user and a service running it.\n",
+      "created_at": "2016-09-19T17:58:44Z",
+      "updated_at": "2016-09-19T17:58:44Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "Ah but PowerShell should be able to run even without `HOME` being set, as there are applicable scenarios where this is the correct environment (say, running as a daemon, or started by cron under a user with a non-existent home directory). So instead of erroring, I think it should just run without a problem (and error gracefully when it needs to write something but can't).\n",
+      "created_at": "2016-09-19T18:42:04Z",
+      "updated_at": "2016-09-19T18:42:04Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "closed via #2387\n",
+      "created_at": "2016-10-08T04:46:38Z",
+      "updated_at": "2016-10-08T04:46:38Z"
+    },
+    {
+      "author": "vinodc",
+      "author_association": "NONE",
+      "body": "@andschwa @mirichmo I'm continuing to encounter this error with the latest alpha release on Ubuntu 14.04 when HOME is unset. I expected running it with -NoProfile would prevent Powershell from attempting to load settings, but I could be mistaken on what that flag controls. Is this error still expected on Ubuntu 14.04 even though #2387 is merged in?\r\n\r\n    $ unset HOME\r\n    $ powershell\r\n    PowerShell\r\n    Copyright (C) 2016 Microsoft Corporation. All rights reserved.\r\n\r\n    The shell cannot be started. A failure occurred during initialization:\r\n    The type initializer for 'System.Management.Automation.ConfigPropertyAccessor' threw an exception.\r\n\r\nEnvironment info:\r\n\r\n```\r\nPS /home/kloudless> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.0.0-alpha\r\nPSEdition                      Core\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   3.0.0.0\r\nGitCommitId                    v6.0.0-alpha.14\r\nCLRVersion\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```",
+      "created_at": "2017-01-11T06:37:27Z",
+      "updated_at": "2017-01-11T06:37:27Z"
+    },
+    {
+      "author": "mirichmo",
+      "author_association": "MEMBER",
+      "body": "@vinodc Can you please attach the stack trace from the exception?\r\n\r\nBased on code inspection, I suspect that this is the [offending line](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/CoreCLR/CorePsPlatform.cs#L237). My guess is that it is an ArgumentNullException stating that the argument to Path.Combine is null since \"HOME\" is not defined.",
+      "created_at": "2017-01-11T23:41:00Z",
+      "updated_at": "2017-01-11T23:41:00Z"
+    },
+    {
+      "author": "andschwa",
+      "author_association": "MEMBER",
+      "body": "I believe that's #1794.",
+      "created_at": "2017-01-12T00:35:22Z",
+      "updated_at": "2017-01-12T00:35:22Z"
+    },
+    {
+      "author": "vinodc",
+      "author_association": "NONE",
+      "body": "@mirichmo That's all the output that was provided. Was there a way to obtain the stack-trace from the alpha release? I'm not sure if it was compiled with debugging symbols. Would I need to compile it from source to generate a Debug build instead?",
+      "created_at": "2017-01-12T00:46:40Z",
+      "updated_at": "2017-01-12T00:46:40Z"
+    },
+    {
+      "author": "mirichmo",
+      "author_association": "MEMBER",
+      "body": "Hmmmm... if PowerShell had started, you could use `$Error[0] | fl * -Force`. Debugging it in VS Code and stopping at the exception throw point would provide the answer.\r\n\r\nWith that said, I'm pretty certain that this is a simpler reproduction of #1794 and no additional information is needed.",
+      "created_at": "2017-01-12T00:58:09Z",
+      "updated_at": "2017-01-12T00:58:09Z"
+    }
+  ],
+  "created_at": "2016-09-07T23:29:21Z",
+  "number": 2205,
+  "state": "closed",
+  "title": "Unexpected exception is thrown in PropertyAccessor.cs, line 138. ",
+  "updated_at": "2017-01-12T00:58:09Z"
+}

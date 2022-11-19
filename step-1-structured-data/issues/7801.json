@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7801",
+  "author": "CJHarmath",
+  "body": "Description\r\n------------------\r\nWhen using Powershell Core 6.1 from a domain joined Windows 10 to call a REST API on a trusted MIT Kerberos realm host running on RHEL 7, the authentication fails with NTLMSSP.\r\nThe Linux server responds with Negotiate and NTLM, but only NTLM is being used which fails.\r\nThe expectation is to do Negotiate/SPNego just as PowerShell 5.1 would do.\r\nLooking at the existing issues or known limitations I did not see thing being called out as not supported.\r\n\r\nPrerequisites\r\n----------------------\r\n* AD domain with a client machine\r\n* MIT Kerberos realm with Linux\r\n* Trust setup between the 2 realms ( AD and MIT Kerberos ) [RedHat Windows integration docs - Part 2](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/pdf/windows_integration_guide/Red_Hat_Enterprise_Linux-7-Windows_Integration_Guide-en-US.pdf)\r\n* Setup a web server with kerberos [Example with Apache](https://access.redhat.com/documentation/en-us/red_hat_jboss_web_server/3/html/http_connectors_and_load_balancing_guide/sect-mod_auth_kerb_example)\r\n* Test spnego from PowerShell 5 then from PowerShell 6.1 Core and compare the results\r\n\r\nSteps to reproduce\r\n------------------\r\n```powershell\r\nInvoke-RestMethod -UseDefaultCredentials https://mykerberosSite.domain.com\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nThe expected behaviour is to perform Negotiate / SPNego / Kerberos first which would succeed in properly configured Kerberos environment.\r\n\r\n![spnego_pws5](https://user-images.githubusercontent.com/1450460/45632745-1bc61200-ba6c-11e8-8563-f2442246b28a.PNG)\r\n\r\n\r\nActual behavior\r\n---------------\r\n\r\n```powershell\r\nInvoke-RestMethod -UseDefaultCredentials https://mykerberosSite.domain.com\r\nInvoke-RestMethod : Response status code does not indicate success: 401 (Unauthorized).\r\nAt line:1 char:1\r\n+ Invoke-RestMethod -UseDefaultCredentials https..\r\n```\r\n\r\nMore details\r\n--------------\r\n\r\nPacket capture from wireshark \r\nGET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.15063; en-US) PowerShell/6.1.0\r\nHost: mykerberosSite.domain.com\r\n\r\nHTTP/1.1 401 Unauthorized\r\nDate: Mon, 17 Sep 2018 15:05:49 GMT\r\nServer: Apache-Coyote/1.1\r\nWWW-Authenticate: Negotiate\r\nWWW-Authenticate: NTLM\r\nContent-Length: 0\r\n\r\nGET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.15063; en-US) PowerShell/6.1.0\r\nAuthorization: Negotiate ****************==\r\nHost: mykerberosSite.domain.com\r\n\r\nHTTP/1.1 401 Unauthorized\r\nDate: Mon, 17 Sep 2018 15:05:49 GMT\r\nServer: Apache-Coyote/1.1\r\nWWW-Authenticate: NTLM\r\nContent-Length: 0\r\n\r\n\r\n![spnego_pws61](https://user-images.githubusercontent.com/1450460/45632730-110b7d00-ba6c-11e8-976d-b03609d46309.PNG)\r\n\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\n> $PSVersionTable\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0\r\nOS                             Microsoft Windows 10.0.15063 \r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\nWorkaround\r\n-----\r\nSet the envvar to not use the sockets http handler\r\n```powershell\r\n$env:DOTNET_SYSTEM_NET_HTTP_USESOCKETSHTTPHANDLER=0\r\n```",
+  "closed_at": "2019-05-31T22:00:47Z",
+  "comments": [
+    {
+      "author": "CJHarmath",
+      "author_association": "NONE",
+      "body": "Just learned about the [SocketsHttpHandler](https://docs.microsoft.com/en-us/dotnet/core/whats-new/dotnet-core-2-1#sockets-improvements) and that we can turn that off.\r\nHaven't yet read and understood the whole thing, but wanted to quickly post and update in case others reading this.\r\n\r\nSo basically we can disable this new sockets http handler via an env var and things will work the old way\r\n```powershell\r\n$env:DOTNET_SYSTEM_NET_HTTP_USESOCKETSHTTPHANDLER=0\r\n```\r\n\r\ni.e.: spnego will be used.\r\n\r\nThis is the same behavior with .NET Core 2.1 with HttpClient.\r\n\r\ndoes not work by default\r\n----\r\n```csharp\r\nvar handler = new HttpClientHandler\r\n            {\r\n                UseDefaultCredentials = true,\r\n                AllowAutoRedirect = true,\r\n            };\r\nusing (var client = new HttpClient(handler))\r\n            {\r\n                var res = client.SendAsync(new HttpRequestMessage(HttpMethod.Get, uri)).GetAwaiter().GetResult();\r\n                System.Console.WriteLine(res);\r\n            }\r\n```\r\n\r\nworks\r\n----\r\n```csharp\r\nAppContext.SetSwitch(\"System.Net.Http.UseSocketsHttpHandler\", false);\r\nvar handler = new HttpClientHandler\r\n            {\r\n                UseDefaultCredentials = true,\r\n                AllowAutoRedirect = true,\r\n            };\r\nusing (var client = new HttpClient(handler))\r\n            {\r\n                var res = client.SendAsync(new HttpRequestMessage(HttpMethod.Get, uri)).GetAwaiter().GetResult();\r\n                System.Console.WriteLine(res);\r\n            }\r\n```\r\n\r\nCreds goes to this [SO post](https://stackoverflow.com/questions/52266659/net-core-spnego-auth-with-httpclient/52267046)",
+      "created_at": "2018-09-17T16:21:18Z",
+      "updated_at": "2018-09-17T16:21:18Z"
+    },
+    {
+      "author": "markekraus",
+      "author_association": "CONTRIBUTOR",
+      "body": "If I'm reading dotnet/corefx#32328 this will be fixed when we move to CoreFX 3.0+",
+      "created_at": "2019-01-24T01:00:18Z",
+      "updated_at": "2019-01-24T01:00:18Z"
+    },
+    {
+      "author": "CJHarmath",
+      "author_association": "NONE",
+      "body": "yes, that's correct.\r\nin the meantime, either don't use CName or disable SocketsHttpHandler as shown above.",
+      "created_at": "2019-01-24T02:40:45Z",
+      "updated_at": "2019-01-24T02:40:45Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as external and has not had any activity for **1 day**. It has been be closed for housekeeping purposes.",
+      "created_at": "2019-05-31T22:00:26Z",
+      "updated_at": "2019-05-31T22:00:26Z"
+    },
+    {
+      "author": "CJHarmath",
+      "author_association": "NONE",
+      "body": "Just confirmed with PowerShell Core 7 preview 3 that Kerberos is now working properly on both Windows and Linux with CNames. Sweet! \r\nThanks!",
+      "created_at": "2019-08-21T14:38:40Z",
+      "updated_at": "2019-08-21T14:38:40Z"
+    }
+  ],
+  "created_at": "2018-09-17T15:39:16Z",
+  "number": 7801,
+  "state": "closed",
+  "title": "Negotiate/SPNego auth is not working from PowerShell Core",
+  "updated_at": "2019-08-21T14:38:40Z"
+}

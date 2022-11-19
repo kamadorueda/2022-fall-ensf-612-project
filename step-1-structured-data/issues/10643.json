@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10643",
+  "author": "kilasuit",
+  "body": "PowerShell Functions and Cmdlets can be decorated with the `[CmdletBinding()]` attribute with additional properties being able to be defined including `SupportsShouldProcess`, `ConfirmImpact`, `DefaultParameterSetName`,`HelpURI`, `SupportsPaging`, `PositionalBinding`\r\n\r\nCurrently we do not output details on this other than it being True if set and we don't return it as false if it is not set and we should return it as either a simple `False` if not set at all or should return an object with the above properties as defined in the command\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nGet-Command Disable-PNPDevice | Select -ExpandProperty CmdletBinding\r\n```\r\n\r\n# Expected behavior\r\n![image](https://user-images.githubusercontent.com/6355225/65814950-c543f580-e1e0-11e9-9531-73a17f649487.png)\r\n![image](https://user-images.githubusercontent.com/6355225/65814952-cd9c3080-e1e0-11e9-830d-34359e409f9b.png)\r\n\r\n# Actual behavior\r\n\r\n![image](https://user-images.githubusercontent.com/6355225/65815001-68950a80-e1e1-11e9-8cab-1e839471fbe7.png)\r\n![image](https://user-images.githubusercontent.com/6355225/65815007-78145380-e1e1-11e9-9ee3-744201d62db0.png)\r\n\r\n# Environment data\r\nWhilst the screenshot's are from ps v5.1 this also affects v7.0.0.preview.4\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "ArmaanMcleod",
+      "author_association": "CONTRIBUTOR",
+      "body": "Looks like `System.Management.Automation.Functioninfo.CmdletBinding` is returning `bool`: https://github.com/PowerShell/PowerShell/blob/6a21bcc96766a32888bfc8a1aa24e30e21877b8f/src/System.Management.Automation/engine/FunctionInfo.cs#L270-L276\r\n\r\nThinking we can instead return `Dictionary<string, object>` and populate with above CmdletBinding properties. \r\n\r\nHowever this sounds like it would be a breaking change, given some people could be using this `bool` property, but I would agree that it would be very useful to add those CmdletBinding properties instead of just returning `True`. Perhaps these properties could be added to another new member?\r\n\r\nWhat do you think @iSazonov, @kilasuit? I can help PR this if needed.",
+      "created_at": "2021-07-25T04:04:39Z",
+      "updated_at": "2021-07-25T10:09:34Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Thinking we can instead return Dictionary<string, object> and populate with above CmdletBinding properties.\r\n\r\nIt is public API and we can not change it. Also the API wrap internal API so it is not easy to get a new overload.\r\nI think we need another approach to resolve the issue.",
+      "created_at": "2021-07-26T05:38:32Z",
+      "updated_at": "2021-07-26T05:38:32Z"
+    },
+    {
+      "author": "ArmaanMcleod",
+      "author_association": "CONTRIBUTOR",
+      "body": "> > Thinking we can instead return Dictionary<string, object> and populate with above CmdletBinding properties.\r\n> \r\n> It is public API and we can not change it. Also the API wrap internal API so it is not easy to get a new overload.\r\n> I think we need another approach to resolve the issue.\r\n\r\nWhat about adding a new member to the `FunctionInfo` type? This sounds like an acceptable change in [Bucket 1](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#acceptable-changes):\r\n\r\n> Adding new types, **new type members** and new cmdlets\r\n\r\nCorrect me if I'm misinterpreting something here \ud83d\ude42 ",
+      "created_at": "2021-07-26T11:02:03Z",
+      "updated_at": "2021-07-26T11:04:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, we could add new API.\r\n\r\nPerhaps you could look PseudoBindingInfo class for start..",
+      "created_at": "2021-07-26T11:36:42Z",
+      "updated_at": "2021-07-26T11:36:42Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Easiest would be something like this pseudo code:\r\n\r\n```csharp\r\npublic partial class FunctionInfo\r\n{\r\n    public CmdletBindingAttribute? GetCmdletBinding()\r\n    {\r\n        ReadOnlyCollection<AttributeAst> attributes = ScriptBlock.Ast.Attributes?.Count > 0\r\n            ? ScriptBlock.Ast.Attributes\r\n            : ScriptBlock.Ast.ParamBlock?.Attributes;\r\n\r\n        AttributeAst cmdletBindingAst = attributes\r\n            .Where(a => a.GetReflectionAttributeType() == typeof(CmdletBindingAttribute))\r\n            .FirstOrDefault();\r\n\r\n        if (cmdletBindingAst is null)\r\n        {\r\n            return null;\r\n        }\r\n\r\n        return Compiler.GetAttribute(cmdletBindingAst);\r\n    }\r\n}\r\n```\r\n\r\nIt's pretty heavy for a property.  It could be cached of course, and there is plenty of precedent for heavy properties in `FunctionInfo`, but it's worth considering making this a method.",
+      "created_at": "2021-07-26T12:15:00Z",
+      "updated_at": "2021-07-26T12:17:44Z"
+    },
+    {
+      "author": "kilasuit",
+      "author_association": "COLLABORATOR",
+      "body": "I should have been clearer in the issue as this only affects outputs for cmdlets, not functions, which means this only affects the `CmdletInfo` class & not `FunctionInfo`\r\n\r\nI'd expect that whilst implied as it is a cmdlet, that this should also return details similarly to the second expected screenshot",
+      "created_at": "2021-07-26T23:53:53Z",
+      "updated_at": "2021-07-26T23:53:53Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Note that for binary cmdlets it would be `CmdletAttribute` rather than `CmdletBindingAttribute`.  I agree that both should provide this information more readily though.\r\n\r\nFor binary cmdlets, there is at least a quick workaround with public API's:\r\n\r\n```powershell\r\n(gcm Get-Command).ImplementingType.GetCustomAttributes([Management.Automation.CmdletAttribute])\r\n```",
+      "created_at": "2021-07-27T01:40:56Z",
+      "updated_at": "2021-07-27T01:40:56Z"
+    },
+    {
+      "author": "ArmaanMcleod",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks @SeeminglyScience. It seems like the `CmdletBindingAttribute` is attached to the scriptblock:\r\n\r\n```csharp\r\npublic CmdletBindingAttribute GetCmdletBinding\r\n{\r\n    get => this.CmdletBinding ? this.ScriptBlock.CmdletBindingAttribute : null;\r\n}\r\n```\r\n\r\nWhich gives:\r\n\r\n```pwsh\r\nPS C:\\> (Get-Command Update-Disk).GetCmdletBinding\r\n\r\nPositionalBinding       : False\r\nDefaultParameterSetName : ByNumber\r\nSupportsShouldProcess   : False\r\nSupportsPaging          : False\r\nSupportsTransactions    : False\r\nConfirmImpact           : None\r\nHelpUri                 :\r\nRemotingCapability      : PowerShell\r\nTypeId                  : System.Management.Automation.CmdletBindingAttribute\r\n\r\n```",
+      "created_at": "2021-07-27T13:52:39Z",
+      "updated_at": "2021-07-27T14:32:00Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "You can get that one today as well, although it's rather buried. Would be nice to get at it a bit more easily, but this does work for functions:\r\n\r\n```powershell\r\n(Get-Command $functionName).ScriptBlock.Attributes.Where{$_ -is [CmdletBinding]}\r\n```",
+      "created_at": "2021-07-27T15:04:39Z",
+      "updated_at": "2021-07-27T15:04:39Z"
+    }
+  ],
+  "created_at": "2019-09-28T10:18:58Z",
+  "number": 10643,
+  "state": "open",
+  "title": "Get-Command should return full cmdletbinding details",
+  "updated_at": "2021-07-27T15:04:39Z"
+}

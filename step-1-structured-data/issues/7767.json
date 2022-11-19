@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7767",
+  "author": "mklement0",
+  "body": "<sup>Related: #7744</sup>\r\n\r\n[Virtual Terminal escape sequences](https://docs.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences) allow, among other things, formatting of console (terminal) output, notably to produce _colored_ output.\r\n\r\nAn escape sequence that changes the output color - e.g., `` \"`e[32m\" `` to switch to green - stays in effect until the color is reset - e.g., with `` \"`e[m\" ``\r\n\r\nExample:\r\n\r\n```powershell\r\n\"before `e[32mgreen`e[m after\"  # prints only the word \"green\" in green.\r\n```\r\n\r\nTherefore, if PowerShell _truncates_ strings for output formatting, a string may get cut off so that the reset sequence is _not_ output, which means that the color unexpectedly stays in effect.\r\n\r\n#7744 shows the problem in the context of using an [OSC escape sequence](https://en.wikipedia.org/wiki/ANSI_escape_code#Escape_sequences) to construct a hyperlink (which only some terminals support; others render just the link label).\r\n\r\nThis is a nontrivial problem to solve, because PowerShell would have to be aware of all potential escape sequences and _know how to reset their effects_ so that the appropriate escape sequence can be appended to the truncated string.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n[pscustomobject] @{ test1=\"before `e[32mgreen`e[m after\"; test2='next col' } | Format-Table @{ e='test1'; width=17 }, test2\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\ntest1              test2\r\n-----              -----\r\nbefore gr...       next col\r\n```\r\n\r\n`gr...` should render green, but `next col` should render with the default color.\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\ntest1             test2\r\n-----             -----\r\nbefore gr...  next col\r\n```\r\n\r\nThat is, `next col` too is printed in green, and green output stays in effect (the prompt rendered after the command will be green too).\r\n\r\nAdditionally, note that the column alignment is off.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.1.0-rc.1 on macOS 10.13.6\r\nPowerShell Core v6.1.0-rc.1 on Ubuntu 16.04.4 LTS\r\nPowerShell Core v6.1.0-rc.1 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.165)\r\n```\r\n",
+  "closed_at": "2018-12-11T21:56:47Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I would like to know that there is a better practice for working with VT.",
+      "created_at": "2018-09-12T15:44:31Z",
+      "updated_at": "2018-09-12T15:44:31Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "What do you mean by that, @iSazonov?",
+      "created_at": "2018-09-12T15:47:23Z",
+      "updated_at": "2018-09-12T15:47:23Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It seems we could go with a simple approach and always reset the console color anytime after we truncate.",
+      "created_at": "2018-09-12T16:36:04Z",
+      "updated_at": "2018-09-12T16:36:04Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's promising, @SteveL-MSFT; it will definitely work with _colors_, but is there an equivalent generic reset mechanism for _other types of escape sequences_, such as the OSC sequences mentioned in #7744? (There may be, I haven't checked).\r\n\r\n`` \"`e[m\" ``, which works for colors, does _not_ work for OSCs.",
+      "created_at": "2018-09-12T16:58:51Z",
+      "updated_at": "2018-09-21T14:13:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We don't want to see escapes in trace log. So we need a rendering subsystem.",
+      "created_at": "2018-09-12T18:28:11Z",
+      "updated_at": "2018-09-12T18:28:11Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "~Worth noting that ``` `e[m``` won't reset underline (at least on Windows), so ``` `e[24m``` may be needed as well.~",
+      "created_at": "2018-09-13T12:55:20Z",
+      "updated_at": "2018-09-13T14:14:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That smells like a bug, @SeeminglyScience, and I actually can't reproduce it on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.285)\r\n\r\nDoes the following really not work for you?\r\n\r\n```powershell\r\n\"before `e[4munderlined`e[m after\"\r\n```\r\n\r\n",
+      "created_at": "2018-09-13T13:03:22Z",
+      "updated_at": "2018-09-13T13:03:22Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 huh, it does now.  I wonder if a Windows update fixed that or if I'm just thinking of something else...\r\n\r\nEither way nevermind :)",
+      "created_at": "2018-09-13T14:13:59Z",
+      "updated_at": "2018-09-13T14:13:59Z"
+    },
+    {
+      "author": "jazzdelightsme",
+      "author_association": "CONTRIBUTOR",
+      "body": "I made the same comment on #7744, but: [DbgShell](https://github.com/Microsoft/DbgShell)'s approach is not to try to reset/undo escape sequences; rather just leave them all in. In other words, when truncating, it only truncates *content*, but preserves all escape sequences (code [here](https://github.com/Microsoft/DbgShell/blob/52f5edda36b435f4f18703b9b2ae816fb47dc901/DbgProvider/internal/CaStringUtil.cs#L267)).\r\n\r\nThat said, resetting does seem like a good idea in general for a formatting engine. I came searching for Issues after running `Get-Variable` where I had a bunch of variables like `${RED}`, `${YELLOW}`, `${BLACK}`, etc. defined, which totally horked my console. Fortunately I also had a `Reset-Colors` command.",
+      "created_at": "2018-11-20T17:19:56Z",
+      "updated_at": "2018-11-20T17:19:56Z"
+    }
+  ],
+  "created_at": "2018-09-12T13:38:28Z",
+  "number": 7767,
+  "state": "closed",
+  "title": "Strings with Virtual Terminal (VT) / ANSI escape sequences that are truncated for display make effects linger",
+  "updated_at": "2018-12-11T21:56:47Z"
+}

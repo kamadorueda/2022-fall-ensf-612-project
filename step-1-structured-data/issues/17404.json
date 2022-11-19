@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/17404",
+  "author": "SteveL-MSFT",
+  "body": "### Summary of the new feature / enhancement\n\nCurrently, when using `ConvertFrom-Json -AsHashtable`, you get an unordered hashtable where the properties don't match the order defined in the JSON.\r\n\r\n```powershell\r\n'{ \"a\": 0, \"b\": 1, \"c\": 2 }' | ConvertFrom-Json -AsHashtable\r\n```\r\n\r\nExpected:\r\n\r\n```output\r\nName                           Value\r\n----                           -----\r\na                              0\r\nb                              1\r\nc                              2\r\n```\r\n\r\nActual:\r\n\r\n```output\r\nName                           Value\r\n----                           -----\r\nc                              2\r\nb                              1\r\na                              0\r\n```\n\n### Proposed technical implementation details (optional)\n\nProposal is to make `-AsHashtable` actually return an OrderedDictionary.  I believe from PS script usage, there should not be any impact even if the type changes.  Alternative would be to add a `-Ordered` switch used with `-AsHashtable` or a `-AsOrderedDictionary` in a different parameterset from `-AsHashtable` but this seems unnecessary and most of the time, I would expect users converting from JSON would want to preserve order making it more readable.",
+  "closed_at": "2022-07-13T04:23:04Z",
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Wouldn't this be a breaking change?",
+      "created_at": "2022-05-21T18:57:03Z",
+      "updated_at": "2022-05-21T18:57:03Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "That's the question for the WG.  I believe it's a bucket 3 breaking change in that the type changes but users won't notice other than it works how they probably expect.",
+      "created_at": "2022-05-21T19:17:28Z",
+      "updated_at": "2022-05-21T19:17:28Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> Wouldn't this be a breaking change?\r\n\r\nI'm wondering what code expects a hash table and would fail if it gets an orderedDictionary instead? When I saw this earlier was on the point of saying \"that change won't break _anything_\"  But something in the back of my mind was saying 'I'm sure changing @{} to ordered by default was discussed, and not done, so would it break stuff?'  \r\n  Because an unordered hash table is - to most intents - random, changing the sequence won't break anything and will help a few things to work.  \r\n\r\n\r\n\r\n",
+      "created_at": "2022-05-21T22:43:08Z",
+      "updated_at": "2022-05-21T22:43:08Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "In general changing the underlying type of an output object is considered a breaking change. Certainly there's a matter of greater or lesser degress (for example, both Hashtable and OrderedDictionary support similar basic IDictionary interfaces and so forth), but if anything happens to be relying on the specific type (e.g., using reflection APIs to do something with the hashtable, or just simply checking the output type for one reason or another) will break.\r\n\r\nConsider a relatively straightforward script that walks the resulting object from ConvertFrom-Json -AsHashtable which checks what to do with each node based on its type -- array, hashtable, something else. In that case, if the check is `if ($node -is [hashtable])` then such a script would break, despite OrderedDictionary being largely similar to a hashtable:\r\n\r\n```powershell\r\n$root = $json | ConvertFrom-Json -AsHashtable\r\n\r\nforeach ($node in $root.GetEnumerator()) {\r\n    $name = $node.Name\r\n    $value = $node.Value\r\n    if ($value -is [array]) {\r\n        foreach ($item in $value) {\r\n            # do stuff with array items, probably recurse?\r\n        }\r\n        \r\n        continue\r\n    }\r\n\r\n    if ($value -is [hashtable]) {\r\n         # recurse and evaluate all the hashtable entries\r\n         continue\r\n    }\r\n    \r\n    # do stuff with the remaining non-array and non-dictionary/hashtable items\r\n}\r\n```\r\n\r\nI'm not against the change at all, but it's worth mentioning it is breaking and tagging it as such, because regardless of whether a large number of users are likely to be impacted, it needs to be documented as such so users know what to expect.\r\n\r\nConsider also whether it's worth confusing users over the actual type of the object. The switch is _named_ `-AsHashtable`, not `-AsOrderedDictionary`. Maybe a new switch is a better option here to avoid confusion and give users a choice?\r\n\r\nThere are, after all, additional performance impacts when using OrderedDictionary compared to using Hashtable.",
+      "created_at": "2022-05-21T23:44:44Z",
+      "updated_at": "2022-05-21T23:51:25Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Any code that checks if it's explicitly a [hashtable] will break so that by itself is sufficient to, unfortunately, consider one of the alternate options.  My preference then is probably `-AsOrderedDictionary` which makes it very clear.  I also found out that Hashtable has a clone() method, but OrderedDictionary does not.",
+      "created_at": "2022-05-22T01:19:58Z",
+      "updated_at": "2022-05-22T01:19:58Z"
+    },
+    {
+      "author": "237dmitry",
+      "author_association": "NONE",
+      "body": "> Actual:\r\n\r\n![ArcoLinux_2022-05-22_11-35-54](https://user-images.githubusercontent.com/78153320/169686102-b6797405-9bac-4be1-a687-9679069a5d2d.png)\r\n",
+      "created_at": "2022-05-22T08:37:17Z",
+      "updated_at": "2022-05-22T08:38:28Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "> In general changing the underlying type of an output object is considered a breaking change. Certainly there's a matter of greater or lesser degress \r\n\r\nI'd say this is lesser... but not zero\r\n\r\n> simply checking the output type for one reason or another) will break.\r\n\r\n_Sound of palm hitting forehead._ Yeah that would break. Anything written since `[ordered] `was added in V3 _should_ test for both, but I did a search through all the code on my laptop and found one thing I wrote in the last year and various modules which don't. One popular module had this  \r\n```\r\nif ($x -is [HashTable] -or $x.ToString() -eq 'System.Collections.Hashtable' ) {... \r\n```  \r\nNot sure about the benefit of the second part :-) \r\n \r\nBut that's also an argument for things to stick to outputting hash tables and _never_ to output ordered dictionary - if I publish something which outputs _ordered_ and someone uses it with a module with a test for `[hashtable]`. they will hit an error. \r\n\r\nThe problem with changing the default behaviour to ordered isn't (IMHO) code which says \r\n```\r\n$stuff =  Get-content $file | convertFrom-Json -asHashTable\r\nif ($stuff -is [hashtable]) \r\n``` \r\nBecause we don't generally do that,  it's someone calling \r\n``` \r\n$s = Get-Stuff  # which now converts to ordered\r\nInvoke-Something -options $s\r\n ```\r\nWhere `Invoke-Something` is 10 years old, not  being updated with an untyped options parameter and code which checks to see if $options is a hash table.  Changing the existing switch (or if the existing switch had been ordered from the start) would mean that everything using ConvertFrom-Json would break  But if there is a new switch for ordered output and I use it in `Get-Stuff` there's still a problem with my code working with `Invoke-Something`.  It narrows the scope, so it's probably the way to go, but it needs to come with a warning - only use this where the order matters because a few things out there will break.\r\n\r\n",
+      "created_at": "2022-05-22T11:26:17Z",
+      "updated_at": "2022-05-22T11:26:17Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "As you know I have been doing some research on migrating to new .Net JSON API. There are a number of inevitable incompatible changes. Migrating to this new API is inevitable at some time. Maybe now would be a good time to do it as an experimental feature instead of complicating things with a series of incompatible changes spread out over several years?",
+      "created_at": "2022-05-22T16:01:37Z",
+      "updated_at": "2022-05-22T16:01:37Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@iSazonov as an ExperimentalFeature makes sense as I agree it makes sense to move all of PS7 JSON usage to the .NET JSON API",
+      "created_at": "2022-05-22T16:52:05Z",
+      "updated_at": "2022-05-22T16:52:05Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT Good news! Have you a roadmap for the work?",
+      "created_at": "2022-05-22T16:56:33Z",
+      "updated_at": "2022-05-22T16:56:33Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "It's not something we're planning for 7.3, there's a bunch of partner work we are working on as more internal usage of PS7 grows\r\n",
+      "created_at": "2022-05-22T16:56:57Z",
+      "updated_at": "2022-05-22T16:57:29Z"
+    },
+    {
+      "author": "iRon7",
+      "author_association": "NONE",
+      "body": "Related discussion: [`13852` Encourage using IDictionary interface](https://github.com/PowerShell/PowerShell/issues/13852)",
+      "created_at": "2022-05-29T11:04:01Z",
+      "updated_at": "2022-05-29T11:04:01Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I would love this and have had to code around it many times.",
+      "created_at": "2022-07-09T00:00:11Z",
+      "updated_at": "2022-07-09T00:00:11Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #17405, which has now been successfully released as `v7.3.0-preview.6`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.3.0-preview.6)\n",
+      "created_at": "2022-07-18T21:43:19Z",
+      "updated_at": "2022-07-18T21:43:19Z"
+    }
+  ],
+  "created_at": "2022-05-21T18:03:08Z",
+  "number": 17404,
+  "state": "closed",
+  "title": "ConvertFrom-Json should have a -AsOrderedDictionary",
+  "updated_at": "2022-07-18T21:43:19Z"
+}

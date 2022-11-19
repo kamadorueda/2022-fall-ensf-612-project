@@ -1,0 +1,111 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14511",
+  "author": "fredliex",
+  "body": "I have two server, server1 and server2.\r\nI invoke command on server1 and want to get machine environment on server2 by remoting. \r\nex: `[Environment]::GetEnvironmentVariable(\"path\", \"machine\")`\r\nbut return the environment variable on server1.\r\n\r\nI changed `GetEnvironmentVariable` to `MachineName` and had the same problem.\r\n\r\n## Steps to reproduce\r\n\r\n```powershell\r\nPS C:\\Users\\abc>Enter-PSSession server2\r\n[server2]: PS C:\\Users\\abc\\Documents> [Environment]::MachineName\r\n[server2]: PS C:\\Users\\abc\\Documents> Write-Output ([Environment]::MachineName)\r\n[server2]: PS C:\\Users\\abc\\Documents> $env:COMPUTERNAME\r\n[server2]: PS C:\\Users\\abc\\Documents> Write-Output ($env:COMPUTERNAME)\r\n[server2]: PS C:\\Users\\abc\\Documents> Write-Output ([Environment]::MachineName + \",\" + $env:COMPUTERNAME)\r\n```\r\n\r\n## Expected behavior\r\n\r\n```powershell\r\nserver2\r\nserver2\r\nserver2\r\nserver2\r\nserver2,server2\r\n```\r\n\r\n## Actual behavior\r\n\r\n```powershell\r\nserver2\r\nserver1      # <-- diff here, Write-Host ([Environment]::MachineName)\r\nserver2\r\nserver2\r\nserver2,server2\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.18363\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "It's not the environment _variable_ doing it, it's  write-* with [environment]\r\n\r\n```\r\n>  $s = New-PSSession -ComputerName localhost -EnableNetworkAccess -ConfigurationName microsoft.powershell32\r\n>  Enter-PSSession -Session $s\r\n\r\n> ([environment]::Is64BitProcess)\r\nFalse\r\n> write-verbose -Verbose ([environment]::Is64BitProcess)\r\nVERBOSE: True\r\n\r\n> [environment]::Version\r\n\r\nMajor  Minor  Build  Revision\r\n-----  -----  -----  --------\r\n4      0      30319  42000\r\n\r\n> write-output ([environment]::Version)\r\n\r\nMajor  Minor  Build  Revision\r\n-----  -----  -----  --------\r\n5      0      0      -1\r\n```\r\n",
+      "created_at": "2021-01-07T16:29:46Z",
+      "updated_at": "2021-01-07T16:29:46Z"
+    },
+    {
+      "author": "fredliex",
+      "author_association": "NONE",
+      "body": "I am confused as to whether write-* brings different results.\r\nAnd the result of `Write-Output ([Environment]::MachineName + \",\" + $env:COMPUTERNAME)` is as expected.\r\nIs this by design or is it a bug?\r\nIf it is designed, are there any documents or information to read?\r\n\r\nthanks\r\n",
+      "created_at": "2021-01-10T03:12:12Z",
+      "updated_at": "2021-01-10T03:15:12Z"
+    },
+    {
+      "author": "jhoneill",
+      "author_association": "NONE",
+      "body": "IT seems some sort of short-circuit evaluation happens for  `Write-` commands in remote sessions. **could someone with deeper knowledge of the internals comment whether this is by design.**  \r\n\r\n```\r\n>  $s = New-PSSession -ComputerName localhost -EnableNetworkAccess -ConfigurationName microsoft.powershell32\r\n>  Enter-PSSession -Session $s\r\n> ([environment]::Is64BitProcess)\r\nFalse\r\n> write-output ([environment]::Is64BitProcess)\r\nTrue\r\n> write-output ([environment]::Is64BitProcess) > deleteme\r\n> type deleteme\r\nFalse\r\n```\r\nIf it needs to write to a file, the value comes from the remote session, \r\n\r\n```\r\n> write-output (\"$PID \" + [environment]::Is64BitProcess )\r\n20576 False\r\n> write-output (\" \" + [environment]::Is64BitProcess )\r\n True\r\n```\r\nIf it adds a _variable_ the expression is evaluated remotely session, but if it adds a string _constant_ the value comes from the parent session.  \r\n\r\nTo work around this you can put the value in a variable before outputting it. \r\n\r\n```\r\n> $x = [environment]::Is64BitProcess\r\n> write-output $x\r\nFalse\r\n```",
+      "created_at": "2021-01-11T09:13:16Z",
+      "updated_at": "2021-01-11T09:13:16Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "cc @PaulHigin ",
+      "created_at": "2021-01-11T13:11:41Z",
+      "updated_at": "2021-01-11T13:11:41Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is actually by design for `Enter-PSSession`.  The argument for `Write-Output ([Environment]::MachineName)` is evaluated on the client. The evaluated argument (\"server1\") is then packaged with `Write-Output` and sent to the remote session to execute there.\r\n\r\n`$x = [Environment]::MachineName; Write-Output $x` evaluates `[Environment]::MachineName` on the remote session and stores it in a variable in that session, so it provides the expected result.\r\n\r\nAdmittedly this is strange behavior on the interactive command line, but unfortunately is just the way that PowerShell parses and executes remote commands.\r\n\r\nSome workarounds are:\r\n```powershell\r\n[server2]: PS > [System.Environment]::MachineName\r\n[server2]: PS > [System.Environment]::MachineName | Write-Output\r\n[server2]: PS > \"$(Write-Output ([System.Environment]::MachineName))\"\r\n```",
+      "created_at": "2021-01-11T18:15:11Z",
+      "updated_at": "2021-01-11T18:15:11Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin Out of curiosity, would you happen to know off the top of your head where to look for the code behind this behavior?",
+      "created_at": "2021-01-11T18:36:44Z",
+      "updated_at": "2021-01-11T18:36:44Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Also, I think Patrick was looking at it earlier and the behaviour seems to persist for Invoke-Command which is... problematic at _best_, surely?",
+      "created_at": "2021-01-11T18:38:01Z",
+      "updated_at": "2021-01-11T18:38:01Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Also, I think Patrick was looking at it earlier and the behaviour seems to persist for Invoke-Command\r\n\r\nYeah seems to work the same way.\r\n\r\n> which is... problematic at _best_, surely?\r\n\r\nI'd be interested to hear the reasons behind the design in general.  I'm inclined to say it might be worth a breaking change to modify the behavior unless there are some particularly strong use cases.\r\n\r\nI'm pretty sure this is the source of some distrust in various .NET API's.  Like for example I knew at one point early on that `Environment.Is64BitProcess` and `OperatingSystem` gave inconsistent results but I didn't understand why until now.",
+      "created_at": "2021-01-11T18:50:25Z",
+      "updated_at": "2021-01-11T18:50:25Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "The argument is evaluated in the ScriptBlockToPowerShellConverter, while packaging the command to be sent over to the remote session.\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/runtime/ScriptBlockToPowerShell.cs#L678\r\n\r\nI think it would be a pretty big breaking change, but I'll mark this for committee review.\n\n<blockquote><img src=\"https://repository-images.githubusercontent.com/49609581/aad0ad80-cdec-11ea-8248-a37bc0571bfd\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/PowerShell/PowerShell\">PowerShell/PowerShell</a></strong></div><div>PowerShell for every system! Contribute to PowerShell/PowerShell development by creating an account on GitHub.</div></blockquote>",
+      "created_at": "2021-01-11T19:12:41Z",
+      "updated_at": "2021-01-11T19:12:43Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> The argument is evaluated in the ScriptBlockToPowerShellConverter, while packaging the command to be sent over to the remote session.\r\n\r\nOHHHHHH okay that all makes sense now.  To clarify, when you say it's by design do you mean that the behavior itself was considered desirable at the time or was it more of a technical limitation/implementation detail?\r\n\r\n---\r\n\r\nSome more examples that will force invocation on the remote machine:\r\n\r\n```powershell\r\n$s = New-PSSession -ComputerName localhost -ConfigurationName microsoft.powershell32\r\n\r\n# Invokes property getter locally (returns True).\r\nicm -Session $s { echo ([Environment]::Is64BitProcess) }\r\n\r\n# These force invocation in remote session (returns False).\r\nicm -Session $s { ''; echo ([Environment]::Is64BitProcess) }\r\nicm -Session $s { (echo ([Environment]::Is64BitProcess)) }\r\nicm -Session $s { echo ([Environment]::Is64BitProcess) | % { $_ } }\r\n```\r\n\r\nBasically anything that forces a change from `AddCommand` to `AddScript`.\r\n\r\n> I think it would be a pretty big breaking change, but I'll mark this for committee review.\r\n\r\n\u2764\ufe0f ",
+      "created_at": "2021-01-11T19:35:33Z",
+      "updated_at": "2021-01-11T19:35:33Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Yes, this client side evaluation was implemented on purpose.  But I wasn't part of the decision at the time and can only speculate as to why this was done.  So I think it makes sense to let the committee review and confirm this is the behavior we want.",
+      "created_at": "2021-01-11T19:44:56Z",
+      "updated_at": "2021-01-11T19:44:56Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Looks like a dupe of https://github.com/PowerShell/PowerShell/issues/13108",
+      "created_at": "2021-01-13T23:30:52Z",
+      "updated_at": "2021-01-13T23:30:52Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee has reviewed this, in general we stand by our original decision to change the behavior so that expressions are evaluated on the remote side as users would expect.  However, we are concerned about JEA scenarios with no language mode which will no longer work.  We'll be reaching out to some internal partners that rely on JEA to get more data.",
+      "created_at": "2021-01-13T23:41:56Z",
+      "updated_at": "2021-01-13T23:41:56Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee discussed this further and agree that expressions should be evaluated on the remote side with the exception where the remote side is using no language mode then to support those scenarios, like JEA, we need to continue to evaluate those on the client.  This needs to be clearly documented.",
+      "created_at": "2021-03-03T23:47:00Z",
+      "updated_at": "2021-03-03T23:47:00Z"
+    }
+  ],
+  "created_at": "2020-12-30T03:21:03Z",
+  "number": 14511,
+  "state": "open",
+  "title": "PSSession return local environment variable, not remote variable",
+  "updated_at": "2021-03-03T23:47:18Z"
+}

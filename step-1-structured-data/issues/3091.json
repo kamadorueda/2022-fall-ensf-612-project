@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/3091",
+  "author": "Jaykul",
+  "body": "In order to support cross-platform modules, we need to support dependent assembly packages properly, the way that `dotnet build` does -- we need to be able to either:\r\n\r\n1. make requiredAssemblies like package.json: a list of nuget packages you can load from the .nuget folder (the new compile-time GAC)\r\n2. ship .nupkg files, and refer to the assemblies in requiredAssemblies\r\n3. include the lib/ folder from the nupkg files, and have you PowerShell pick the right one based on platform.\r\n\r\nTo me, it's perfectly obvious that a single machine-wide .nuget folder -- which PowerShell could un-pack from on demand -- would be the ideal solution, requiring the least amount of disk space and work on the part of developers.  It would require the NuGet package provider for PowerShell PackageManagement be updated, and significant changes to the core to do the work of unpacking and loading the right assemblies...\r\n\r\nShort of that, a .nuget folder (or \"assemblies\" or whatever) in my PowerShell folder would be a good fall-back option. Same basic story.\r\n\r\nFailing that, the fallback option would be to allow module authors to include the actual nupkg files in their modules. It requires almost all of the same development, and you end up with a lot more copies of the assemblies, but since it doesn't require a working PackageManagement provider (at least, not at runtime), it's somewhat simpler, and self-contained.\r\n\r\nAs a final, worst-case scenario, we could require module authors to actually _unpack_ the nupkg files.  That is, we could require each module author to `Install-Package Dependency -Destination MyModuleFolder` and put the `lib` folder from the nuget packages directly within their module.  This way PowerShell is only responsible to load the right assembly based on the platform, but we still get cross-platform modules.\r\n\r\n### Backwards compatibility\r\n\r\nNote that for the sake of making modules compatible with PowerShell 5.x and lower, all of these methods require cutting off support at PowerShell 3 (.Net 4) and shipping the .Net 4 assemblies _loose_ in the _root folder of the module_.  As long as the manifest just says:  RequiredAssemblies = \"Whatever.dll\", legacy `Windows PowerShell` only looks in the GAC or in the module folder.",
+  "closed_at": "2020-03-14T18:07:59Z",
+  "comments": [
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "That sounds pretty complicated - why shouldn't a module author just target `netstandard1.3` and only depend on assemblies that also target an appropriate version of `netstandard`?\r\n\r\nTake a look at how msbuild is thinking about this issue - it's really a similar thing: https://github.com/Microsoft/msbuild/issues/1542\r\n\r\nI think we'll need to do the same for PowerShell - ship the facade assemblies alongside powershell.exe in `$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0` and, if applicable, `$env:SystemRoot\\SysWow64\\WindowsPowerShell\\v1.0` - we would need to do that for V3 and V5.1 at a minimum, maybe V4 and V5 as well.",
+      "created_at": "2017-02-03T18:59:56Z",
+      "updated_at": "2017-02-03T18:59:56Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "First of all, .netstandard1.3? why 1.3? I thought we were on 1.6?\r\n\r\nNow, I'm going to go ahead and (pretend to?) accept as a given that you can find some way of shipping all \"the\" facades into the old versions of PowerShell on all OSes (for no reason but forward compatibility?)... \r\n\r\n#### That sounds like a great plan! \r\n\r\nI actually thought the whole \"facades\" thing wasn't going to work until .netstandard2, but if it's an option now, that sounds great. Does that mean you're going to ship **everything** in PowerShell core, too -- even if you're not using it yourselves?\r\n\r\nI mean, otherwise, you're only covering the basics, and you have barely dented the problem. However, regardless:\r\n\r\n1. PowerShell modules are still going to have half a metric gigabyte of dependencies, ,which they only need for Core. We can make a list of what you've shipped to reduce what gets packaged, right, but still ...\r\n\r\n2. What do I do with \"native\" libraries? I mean, even `System` and `System.Net.Http` are compiled to _native_, but have you seen `System.Security.Cryptography`?\r\n\r\nThe other day I tried [AngleSharp](https://www.nuget.org/packages/AngleSharp). It has no dependencies on .Net 4.5, but when I ran...\r\n\r\n```posh\r\nInstall-Package AngleSharp -Source https://www.nuget.org/api/v2/ -Provider NuGet -Destination .\r\n```\r\n\r\nSince package manager's motto is \"be prepared,\" I managed to get back 318,011,877 bytes worth of stuff.\r\n\r\nIncluding these:\r\n```\r\nruntime.debian.8-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0      \r\nruntime.fedora.23-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0     \r\nruntime.fedora.24-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0     \r\nruntime.native.System.Security.Cryptography.Apple.4.3.0                             \r\nruntime.native.System.Security.Cryptography.OpenSsl.4.3.0                           \r\nruntime.opensuse.13.2-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0 \r\nruntime.opensuse.42.1-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0 \r\nruntime.osx.10.10-x64.runtime.native.System.Security.Cryptography.Apple.4.3.0       \r\nruntime.osx.10.10-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0     \r\nruntime.rhel.7-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0        \r\nruntime.ubuntu.14.04-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0  \r\nruntime.ubuntu.16.04-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0  \r\nruntime.ubuntu.16.10-x64.runtime.native.System.Security.Cryptography.OpenSsl.4.3.0  \r\n```\r\n\r\nNow, for Cryptography, you guys might choose to ship it in PowerShell Core, but my question is, in general -- how do I load the right library, when it's **just not** cross-platform?",
+      "created_at": "2017-02-04T01:54:52Z",
+      "updated_at": "2017-02-04T01:54:52Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "@lzybkr We (third parties) *must* be able to produce modules like this one: \r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.LocalAccounts/LocalAccounts/PInvokeDllNames.cs\r\n\r\nWe either need a way to ship \"Core\" _and_ \"Full\" modules to the gallery (and automatically install the right one), or we need a solution for loading the right one from a module package containing both.\r\n\r\n\r\nNot to mention that if you build a **binary module** you have to take a dependency on [System.Management.Automation](https://powershell.myget.org/feed/powershell-core/package/nuget/System.Management.Automation), which is *cross compiled* -- forcing the binary module to cross-compile. \r\n\r\nIt's therefore *impossible*, as things stand, to ship a cross-platform binary module the way you describe. We have to package both modules as submodules into one module package, and use a script module _facade_ to do OS detection and load the right one.\r\n\r\nBy the time .Net 2 ships, and a _better way_ gets sorted out, we're going to be knee deep in hacks for this.",
+      "created_at": "2017-03-28T20:00:53Z",
+      "updated_at": "2017-03-28T20:22:13Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul Jason did some early work with portable modules successfully compiling PSReadline to be cross platform and supporting PSv3 https://github.com/PowerShell/PowerShell/pull/3095",
+      "created_at": "2017-03-28T21:18:31Z",
+      "updated_at": "2017-03-28T21:18:31Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks @SteveL-MSFT, it's good to see that effort -- although somewhat discouraging.\r\n\r\nMore questions arise from that:\r\n\r\n* Since that document is from 3 weeks ago, has any decision been reached about whose problem this is?\r\n* I assume that even if the problem is passed to the PowerShellGallery team, the PowerShell core team still owns producing _new_ reference assemblies -- should I open a new issue to track that?\r\n* If the problem is passed to the PowerShellGallery team, will the solution be dictated to them, or will they be free to choose to solve this in packaging (as in, sxs folders in the package, and only the appropriate one is extracted)?\r\n* Does the story for shipping an updated PowerShellGet module require that every module author who needs cross-platform binary modules will have to specify the minimum PowerShellGet version to successfully install the module on Windows?\r\n\r\nI'm picturing something like this in every github repo:\r\n\r\n#### To install `<MyXplatModule>` on Windows, you must first update to the latest PowerShellGet\r\n```posh\r\n    Update-Module PowerShellGet\r\n    Install-Module MyXplatModule\r\n```",
+      "created_at": "2017-03-28T22:00:32Z",
+      "updated_at": "2017-03-28T22:00:32Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul what may not be immediately obvious (and we covered this briefly on the last Community Call) is that we're working through pruning the set of api's we would publish as `PowerShell Standard 1.0` (name to be decided later) and this work isn't done yet (as part of the PR I ref'd above).  \r\n\r\nExpectation is that once this is complete, we'd have a new ref assembly you would use for cross platform (and cross PS version) compatible PowerShell modules (we're calling Portable Modules for now).\r\n\r\nIntent is that module authors only build one assembly that works where they need it to work.  Assume for now, that `PowerShell Standard 1.0` is targeting PSv3, `2.0` is PSv5+.  There should be no changes needed for PSGet although we will probably need some changes to PSGallery for new tags yet to be defined.\r\n",
+      "created_at": "2017-03-28T22:40:41Z",
+      "updated_at": "2017-03-28T22:40:41Z"
+    },
+    {
+      "author": "atanasa",
+      "author_association": "NONE",
+      "body": "@Jaykul are you referring to native assemblies as well?\r\n@SteveL-MSFT How is defining a PS standard going to help? This would solve the problem for the reference to System.Management.Automation.dll but the references to the .net standard shims are still a problem.",
+      "created_at": "2017-04-10T13:23:46Z",
+      "updated_at": "2017-04-10T13:23:46Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@atanasa - you're right, as I mention in https://github.com/lzybkr/PowerShell/blob/34ed215a6671f5cc234f58cfed04504890f91159/docs/portable-modules/portable-modules.md (part of #3095) - there are 2 parts of the story - a baseline (standard) System.Management.Automation.dll (and probably a few other dlls) and the .net facade assemblies.",
+      "created_at": "2017-04-10T17:20:58Z",
+      "updated_at": "2017-04-10T17:20:58Z"
+    },
+    {
+      "author": "atanasa",
+      "author_association": "NONE",
+      "body": "@lzybkr have you considered packing the shims in a set of modules in the Gallery maintained by Microsoft while portable modules specify the dependency in their manifest as a required module rather than custom tags? To me this looks like the classic problem of sharing a dynamic library and a good solution is a package manager. MSBuild does not have a package manager (yet) but PowerShell does.",
+      "created_at": "2017-04-11T12:27:50Z",
+      "updated_at": "2017-04-11T12:27:50Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "Can our package manager express the dependency correctly? It's only a dependency with desktop CLR - you wouldn't want them installed on non-Windows machines or on Nano Server, and you can't have them loaded in Core PowerShell, they should only be loaded in Windows PowerShell.",
+      "created_at": "2017-04-11T18:19:09Z",
+      "updated_at": "2017-04-11T18:19:09Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "We won't be able to address this in 6.0 as it's not a small item and potentially too risky",
+      "created_at": "2017-12-06T19:22:51Z",
+      "updated_at": "2017-12-06T19:22:51Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "The compile-time-only PowerShellStandard.Library goes a long way to helping with this -- although the docs need to show the right way for people to avoid _shipping_ the library:\r\n\r\n```xml\r\n    <PackageReference Include=\"PowerShellStandard.Library\" Version=\"5.1.0-RC1\">\r\n      <IncludeAssets>Compile</IncludeAssets>\r\n      <ExcludeAssets>Runtime</ExcludeAssets>\r\n    </PackageReference>\r\n```\r\n\r\nHowever, even in straightforward Windows-only projects we still have very uncomfortable problems using things like ... [System.Drawing.Common](https://www.nuget.org/packages/System.Drawing.Common/)\r\n\r\nNote that's **not** a \"native\" binary, and the problems occur just going from Windows PowerShell to PowerShell Core on Windows -- Microsoft is shipping _completely_ different assemblies for .Net 4x and .Net Standard, so when I take a reference on it, I *have* to cross-compile and ship separate sets of assemblies. The .NET Standard one works fine in PowerShell Core, but if I load it in Windows PowerShell, I get `System.Drawing is not supported on this platform` errors. \r\n\r\nI know (now) that I can put conditional logic in a manifest to reference the right assemblies, but that's something I have to **hand write** and get it right.",
+      "created_at": "2018-10-28T18:11:02Z",
+      "updated_at": "2018-10-28T18:11:02Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul what version of .NET Framework are you using?  Prior to 4.7.2, you had to include the netstandard.dll facade assembly as it wasn't part of .NET Framework.  Also, if using Windows Compatibility Pack for .NET, you have to also include those facade assemblies for .NET Framework.\r\n\r\nThe SDK docs should provide guidance on not accidentally shipping the ref assembly.  cc @adityapatwardhan , @JamesWTruher ",
+      "created_at": "2018-10-28T18:53:37Z",
+      "updated_at": "2018-10-28T18:53:37Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's a complicated question, @SteveL-MSFT \ud83d\ude01 \r\n\r\nRight this minute (where I'm trying to reference System.Drawing.Common), I have ended up targeting .NetStandard 2.0 _and_ .Net 4.7.2 in my [WindowsConsoleFonts](https://github.com/Jaykul/WindowsConsoleFonts) project.  I'm conditionally loading the RootModule in the manifest, and it works in both Windows PowerShell (with the 4.x binary) and PowerShell Core (on Windows) with the .Net Standard binary.\r\n\r\nNote that I could target 4.6.2 (as System.Drawing.Common does), but it would make no difference to this problem -- and the build ends up with something like _96 extra binary assemblies_, and since I don't understand what portion of my users might be helped by that, I'm just going to target the latest for now and wait for people to complain, because I'm already having to ship my binaries _twice_, and I'd rather not ship 30x the binaries.\r\n",
+      "created_at": "2018-10-30T04:25:04Z",
+      "updated_at": "2018-10-30T04:25:04Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@Jaykul Another option is to do what PSReadLine does which is to build for `net472` only and test on PSCore6, and ship just that assembly (and dependent assemblies).  In this case, you wouldn't separately build for `netstandard2.0`.\r\n\r\nMSIL is compatible between .Net Framework and .Net Core.  .Net Standard really only provides some assurance that the APIs you're using are compatible in multiple CLRs.  If you test in both Windows PowerShell and PowerShell Core, you could get away with just building for `net472`.  There are exceptions, of course, if you start using assemblies that we don't include with PSCore6.\r\n\r\nI tested a build of your module against `net472` (modifying the psd1) on both 5.1 and 6.2-preview.1 and works in both (well, only tried Get and Set)",
+      "created_at": "2018-10-31T00:01:59Z",
+      "updated_at": "2018-10-31T00:03:07Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's interesting. You're totally right, that works when all I need is Windows. ",
+      "created_at": "2018-10-31T02:16:44Z",
+      "updated_at": "2019-10-08T02:38:10Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "So is this being addressed in 7, or are we just going to keep ignoring the problem?",
+      "created_at": "2019-10-06T23:02:14Z",
+      "updated_at": "2019-10-06T23:02:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83d\ude4f I know it's not an easy problem, but it would make working with xplat native APIs _significantly_ easier if we can get this resolved. GraphicalTools has probably run into this problem at least a handful of times, I'd wager, and the workarounds aren't particularly pretty.",
+      "created_at": "2019-10-06T23:05:08Z",
+      "updated_at": "2019-10-06T23:05:08Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Perhaps #11032 resolves the issue.",
+      "created_at": "2019-11-18T12:07:21Z",
+      "updated_at": "2019-11-18T12:07:21Z"
+    }
+  ],
+  "created_at": "2017-02-03T14:55:04Z",
+  "number": 3091,
+  "state": "closed",
+  "title": "XPLAT: RequiredAssemblies must automatically consider lib\\framework",
+  "updated_at": "2020-03-14T18:07:59Z"
+}

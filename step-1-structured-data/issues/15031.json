@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15031",
+  "author": "csurf",
+  "body": "Include an option/directive for the 'Start-Process' cmdlet that allows the user to specify that stream output should be *appended to an existing output file when redirecting the stdout/stderr streams to file.\r\n\r\nCurrently, when using either the '-RedirectStandardOutput' or '-RedirectStandardError' parameters to specify output file paths for redirection of the standard streams to file, the behavior of 'Start-Process' is to create/overwrite if a specified file exists. There is no means to have the output appended to an existing file. This forces the user to come up with additional and, IMHO, seemingly unnecessary work-arounds in order to implement the append logic. This seems like something that could be relatively easily implemented at a lower level, and, quite frankly, seems like basic functionality that the cmdlet should already support.\r\n\r\nThis could be as simple as adding some kind of append specifier to each parameter:\r\n```\r\n# stdout files gets overwritten (default behavior), stderr file gets appended to ('>>' specifier)\r\nStart-Process -RedirectStandardOutput='logfile.txt' -RedirectStandardError='>>errlog.txt'\r\n```\r\nOf course, this could be setup in a variety of ways and/or as the powershell devs see fit.\r\n\r\nJustification:\r\nThere are a variety of cases where it would be useful to be able to have a complete output history of a child process' output, even when the same child process is created multiple times, or across multiple executions of the parent script/command. Having the ability to append output files directly from 'Start-Process' would increase its usefulness in this respect.\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "PowerShell utilizes Process class which has not such feature. You could discuss this in .Net runtime repository to enhance the class.",
+      "created_at": "2021-03-16T05:52:21Z",
+      "updated_at": "2021-03-16T17:52:35Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "This is definitely something that is implemented in PowerShell. .NET gives you the ability to redirect stdout/stderr and exposes that redirection through a [StreamReader](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.process.standardoutput?view=net-5.0#System_Diagnostics_Process_StandardOutput). To achieve this functionality we would have to change how the FileStream is opened here https://github.com/PowerShell/PowerShell/blob/4c40ab11401ff2ca19ee1206b7654ed299f373e6/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs#L2263.\r\n\r\nAll that needs to be done to implement this functionality is to either change the mode to `FileMode.Append` or set to `FileMode.Open` and seek the FileStream to the end.",
+      "created_at": "2021-03-16T12:21:00Z",
+      "updated_at": "2021-03-16T12:21:00Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Sorry, it seems I understood this scenario.",
+      "created_at": "2021-03-16T12:51:59Z",
+      "updated_at": "2021-03-16T14:18:19Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "It looks like as if, to the _caller_ of the .NET APIs, [`System.Diagnostics.Process.StandardOutput`](https://docs.microsoft.com/en-US/dotnet/api/System.Diagnostics.Process.StandardOutput) and `StandardError` are simply _read-only_ properties through which automatically created `StreamReader` instances reflect the redirected output  (that on Unix these stream readers are apparently backed by a _file_ looks like an implementation detail that isn't visible to the caller); alternatively, the output can be read via events.\r\n\r\nTo put it differently: sending that captured output to a user-chosen _file_  must already be functionality _provided by PowerShell_, so offering an opt-in way to _append_ to such a file should be possible.\r\n\r\n---\r\n\r\nAs for how pressing the need for this feature is (I'm not saying it wouldn't be useful):\r\n\r\nNote that there's generally little reason to combine [`Start-Process`](https://docs.microsoft.com/powershell/module/microsoft.powershell.management/start-process) with _console_ applications (terminal applications that use stdout and stderr).\r\n\r\n* For synchronous invocation, invoke such applications directly, in which case  you can use `>>`\r\n\r\n```powershell\r\nsomeutil >> out.log 2>> err.log\r\n```\r\n\r\n* For asynchronous invocation, you can use a background job, which also allows you to use `>>` - \r\n\r\n```powershell\r\n$job = someutil >> out.log 2>> err.log & \r\n```\r\n\r\nAs an aside: Unfortunately, the job-info object currently doesn't reflect `$LASTEXITCODE` after termination - see  #5422\r\n\r\n\r\nUnnecessary - and often limiting - use of `Start-Process` is a common problem; I've asked for guidance to be added to the documentation at https://github.com/MicrosoftDocs/PowerShell-Docs/issues/6239, which has further details.\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-16T13:16:40Z",
+      "updated_at": "2021-03-16T16:01:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I don't like an cryptic things in PowerShell language - it is hard for users to discover them. It is more preferable to have an additional switch or two with self described name(s) like -AppendToOutput/-AppendToError.",
+      "created_at": "2021-03-16T17:57:37Z",
+      "updated_at": "2021-03-16T17:57:59Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Or maybe even a mode like `-RedirectOutputMode Create/Append` (same for Error). This could have the benefit of adding `Store/Var` support where `-RedirectStandardOutput` is the name of a variable to redirect the value to.",
+      "created_at": "2021-03-16T19:10:53Z",
+      "updated_at": "2021-03-16T19:10:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Targeting variables could be achieved via paths that use namespace variable notation, such as `-RedirectStandardOutput variable:out`, which has been suggested before in #5184; the same idea had come up in the context of `2>`: #4332, which would make for a nice generalization.\r\n\r\nThat leaves the aspect of how to ask for _appending_, and in the case at hand `-Append` would then be enough.\r\n\r\nNote that you may also want to append to _variables_ (add to an existing collection stored there), which we already support in the context of common parameters such as `-OutVariable` - and there we _do_ already have the kind of non-obvious \"mini-DSL\" that @iSazonov  is trying to avoid: prefixing the variable name with `+` requests append functionality:\r\n\r\n```powershell\r\n$null = Get-Date -ov out\r\n$null = Get-Date 1970-01-01 -ov +out  # appends to existing $out variable\r\n$out # outputs both dates\r\n```\r\n\r\nIn the context of something like `2>variable:errs`, where adding parameters isn't an option, we'd have no other choice than to use a similar approach: `2>+variable:errs`\r\n\r\n",
+      "created_at": "2021-03-16T19:40:26Z",
+      "updated_at": "2021-03-17T07:32:38Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Or maybe even a mode like `-RedirectOutputMode Create/Append` (same for Error). This could have the benefit of adding `Store/Var` support where `-RedirectStandardOutput` is the name of a variable to redirect the value to.\r\n\r\nThe mode would be useful if we knew there would be more modes. \r\n\r\nAs for output to variables, since we already have this with OutVariable parameter in some cmdlets we should follow this here too for consistency.",
+      "created_at": "2021-03-17T07:24:11Z",
+      "updated_at": "2021-03-17T07:24:11Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  we already have this with `OutVariable` parameter in some cmdlets\r\n\r\nThe [common `-OutVariable` parameter](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_CommonParameters#outvariable) as well as `-ErrorVariable`, as a common parameters, are present on _all_ cmdlets and designed to display uniform behavior across all cmdlets.\r\n\r\nThey are implemented in the engine itself, and we cannot overlay that with cmdlet-specific functionality.\r\n\r\nAs in all cmdlets, these parameters capture what the cmdlet _itself_ outputs to _PowerShell_'s success / error streams, which in the case of `Start-Process` does not apply to  the _native_ output streams (stdout, stderr) of the external process being launched, because - of necessity, given the asynchronous-by-default `Start-Process` behavior - these native streams aren't mapped onto their PowerShell equivalents, unlike in _direct_ invocation. This lack of stream integration is the primary reason not to use `Start-Process` with console applications.\r\n\r\nThese two common parameters therefore aren't terribly useful with `Start-Process`, but they do work as advertised:\r\n\r\n* `-OutVariable out` captures whatever `Start-Process` itself emits to the pipeline in variable `$foo`, which only applies when `-PassThru` is also specified in order to pass out the process-info object describing the newly launched process.\r\n\r\n* `-ErrorVariable err` captures the errors that `Start-Process` itself emits in variable `$err`, which is in effect limited to the inability to even _create_ the process (e.g., `Start-Process nosuch -ErrorVariable err`) - though I've just realized that appears to be broken on Unix-like platforms - see #15054.\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-17T15:38:59Z",
+      "updated_at": "2021-03-17T17:05:47Z"
+    }
+  ],
+  "created_at": "2021-03-15T18:26:05Z",
+  "number": 15031,
+  "state": "open",
+  "title": "Start-Process: Provide the ability to append when redirecting stdout/stderr streams to file",
+  "updated_at": "2021-03-17T17:05:47Z"
+}

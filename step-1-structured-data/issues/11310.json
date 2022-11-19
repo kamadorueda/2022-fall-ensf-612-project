@@ -1,0 +1,69 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11310",
+  "author": "JamesWTruher",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nOne of the things that I miss in PowerShell from my years of using *nix shells, is the ability to combine multiple parameters into a single one.\r\nThe easiest way to see this behavior is with `/bin/rm` where `/bin/rm -r -f *` is equivalent to `/bin/rm -rf *`.\r\nWhile PowerShell has a way to create parameter aliases, it's a _developer_ activity, rather than a user activity,\r\nwhich puts the responsibility on the developer to create a custom experience for the user.\r\nWe've done a pretty good job with parameter aliases, but I feel we still fall short.\r\nI think this can be enhanced and improve the experience by providing what I like to call _Composed Parameters_.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nHere's what happens today:\r\n\r\n```powershell\r\nPS> remove-item -rf *\r\nRemove-Item: A parameter cannot be found that matches parameter name 'rf'.\r\n```\r\n\r\nI think this new behavior can be added to `Set-Alias` to include not just command aliases, but parameter aliases as well.\r\nA new parameter set could be created for `Set-Alias` which provides the following behavior:\r\n\r\n```powershell\r\nPS> Set-Alias -parameter rf -command remove-item -value @{ Force = $true; Recurse = $true }\r\nPS> remove-item -rf *\r\n```\r\n\r\nThe aliased parameter would be _preferred_, so the parameter binder would check the aliases _first_ and replace the aliased parameter with the provided values.\r\nThis implies that you could create a parameter alias as:\r\n\r\n```powershell\r\nPS> Set-Alias -parameter f -command * -value { Force = $true }\r\n```\r\n\r\nwhich would prefer `-force` over `-filter` for commands like `get-childitem`, which might improve the experience further.\r\n\r\nNote that this does _not_ address issues of ordering (`rm -rf` vs `rm -fr`), but much of these behaviors are muscular rather than cognitive; Fingers typing the same thing over and over, year after year, rather than thinking about it.\r\n\r\nNote that this implies that not only the `alias` cmdlets would need change, but also we would need a way to store this information in the alias provider, but I don't believe this to be overly complicated.\r\n\r\nA couple of further thoughts:\r\n\r\n* What about multiple instances of parameters?\r\n  * I think that we do simple replacements, which means that we would get a runtime error if we saw:\r\n\r\n```powershell\r\nPS> Set-Alias -parameter rf -command remove-item -value @{ Force = $true; Recurse = $true }\r\nPS> Remove-Item -rf -force *\r\nRemove-Item: Cannot bind parameter because parameter 'force' is specified more than once. To provide multiple values to parameters that can accept multiple values, use the array syntax. For example, \"-parameter value1,value2,value3\".\r\n```\r\n\r\n* ScriptAnalyzer rules should be created to warn when this is done\r\n  * I see this as an interactive behavior which should probably not be in scripts\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "Would it make sense to also include a similar behaviour with native commands and an argument array/vector?",
+      "created_at": "2019-12-10T19:06:50Z",
+      "updated_at": "2019-12-10T19:06:50Z"
+    },
+    {
+      "author": "oising",
+      "author_association": "CONTRIBUTOR",
+      "body": "This could be a bit dangerous or at least ambiguously breaking -- this works in gnu land because single hyphen parameters are guaranteed to be one letter in length: Double hyphens are used for longer parameters. In powershell, we don't have that safety and partial parameter names (e.g. `-fo` for `-force`) may be shadowed by an alias that leads to destructive actions.\r\n\r\nTL;DR Having global parameter aliases like above could have unpredictable effects with other cmdlets/functions imported later into the session.\r\n\r\n",
+      "created_at": "2019-12-10T20:26:25Z",
+      "updated_at": "2019-12-10T20:26:25Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, I don't think this really makes sense for PS.\r\n\r\nIf you want something in this vein, we have splatting which works:\r\n```ps\r\n$rf = @{ Recurse = $true; Force = $true }\r\n\r\nRemove-Item -Path $folder @rf\r\n```",
+      "created_at": "2019-12-10T21:44:53Z",
+      "updated_at": "2019-12-10T21:44:53Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> this works in gnu land because single hyphen parameters are guaranteed to be one letter in length\r\n\r\nI'm not sure such things are more than just conventional between commands (the convention existing because of a shared dependency on `getopt`) and I can think of a few counter examples:\r\n\r\n- `ls -al`\r\n- `rm -rf`\r\n- `tar -xvf`\r\n- `xclip -selection c`\r\n- `find -printf`\r\n\r\n> In powershell, we don't have that safety\r\n\r\nI would contend that PowerShell's cmdlets have their parameter syntax much more rigorously enforced.\r\n\r\nBut to the point of shadowing parameters and unpredictability, I've seen that raised in other scenarios but my feeling is that PowerShell, as a shell and scripting language, embraces dynamism. There are plenty of things you can do today that are state driven and could be classed as unpredictable. Certainly a huge number of core PowerShell behaviours are things that can't be promised before runtime (working on PowerShell Editor Services and PSScriptAnalyzer has bourne this out for me). If it's possible to override a command (`function Remove-Item { param($Path) Write-Host \"Didn't remove $Path\" }`), then I think we need better reasons why it shouldn't be possible for parameters.\r\n\r\nThe heart of this proposal is I think to find a PowerShell way to express a `sh` alias like `alias ll='ls -l'` or a way to condense common parameter combinations for muscle memory purposes, and splatting doesn't accomplish that because it's not pithy enough and relies on local state.\r\n",
+      "created_at": "2019-12-10T22:08:27Z",
+      "updated_at": "2019-12-10T22:08:27Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "In my mind, this scenario is primarily around interactive, muscle-memory usage. I don't see it as any less PS-y than, say, using `rm` instead of `Remove-Item` from the command line. We've always agreed that pithy usage is beneficial, just not in well-maintained automation artifacts.\r\n\r\nTo be clear, I'm *not* in favor of shipping any of these by default today. This would be something the user would want to define. But I've always thought it would be cool to have some sort of \"I'm used to Bash\" module that serves as a collection of aliases and behaviors like this (akin to #5870).\r\n\r\nBut bias on the table: this is something I've wanted for a very long time almost solely so I can type `rm -rf` on Windows without removing the alias and overriding `rm` with a function. ",
+      "created_at": "2019-12-10T22:28:23Z",
+      "updated_at": "2019-12-10T22:28:23Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> To be clear, I'm not in favor of shipping any of these by default today\r\n\r\n100% agreed there",
+      "created_at": "2019-12-10T23:10:35Z",
+      "updated_at": "2019-12-10T23:10:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> To be clear, I'm not in favor of shipping any of these by default today. This would be something the user would want to define. But I've always thought it would be cool to have some sort of \"I'm used to Bash\" module that serves as a collection of aliases and behaviors like this (akin to #5870).\r\n\r\nhttps://github.com/PowerShell/PowerShell-RFC/pull/129\r\n",
+      "created_at": "2019-12-11T08:17:01Z",
+      "updated_at": "2019-12-11T08:17:01Z"
+    },
+    {
+      "author": "Bishwas-py",
+      "author_association": "NONE",
+      "body": "You can do this with [powershell alias function with parameters](https://webmatrices.com/d/530-powershell-alias-function-with-parameters), this given help is helpful.",
+      "created_at": "2021-07-02T05:16:19Z",
+      "updated_at": "2021-07-02T05:16:19Z"
+    }
+  ],
+  "created_at": "2019-12-10T19:03:40Z",
+  "number": 11310,
+  "state": "open",
+  "title": "PowerShell should support dynamic aliasing of parameters",
+  "updated_at": "2021-12-15T17:40:14Z"
+}

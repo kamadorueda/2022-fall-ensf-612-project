@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7758",
+  "author": "vexx32",
+  "body": "@PowerShell/powershell-committee\r\n@rjmholt (I can't tag them, apparently, heh!~)\r\n\r\nPer discourse in #7736, opening this for hashtable key > property precedence and dynamic binding issues.\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n$Hash = @{\r\n    Keys = \"No keys for you!\"\r\n}\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\nWhen accessing .Keys property, the keys of the hashtable should be listed. Properties (statically-bound, part of the parent object) should have *higher* precedence than keys in the hashtable, which are d\r\n\r\n```none\r\nPS> $Hash.Keys\r\nKeys\r\n```\r\n\r\nHashtable keys *should be* lower precedence, because the native key access syntax `$Hash['Keys']` is already an alternative and should be preferred in most cases regardless. The key->dot-property mapping is syntactic sugar and should not override actual object properties.\r\n\r\nActual behavior\r\n---------------\r\nThe key named 'keys' is accessed instead, preventing listing of the hashtable keys without some trickery in amongst `.PSObject.Properties`\r\n```none\r\nPS> $Hash.Keys\r\nNo keys for you!\r\n```\r\nThis behaviour is reflected the same way for all hashtable object properties -- specifying a key in the table that has the same name as a property will mask the property and make it inaccessible, with the *sole exception* of the hidden `.psobject` property.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      6.1.0-rc.1\r\nPSEdition                      Core\r\nGitCommitId                    6.1.0-rc.1\r\nOS                             Microsoft Windows 10.0.17134\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2018-10-10T02:42:47Z",
+  "comments": [
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Interestingly, the logic is _reversed_ in the context of _member enumeration_ (collection-level properties shadow element properties), which prompted #7445 (see https://github.com/PowerShell/PowerShell/issues/7445#issuecomment-411206651 in particular).\r\n\r\nTo spell out the - obscure - workarounds:\r\n\r\n\r\n```powershell\r\n# Update: Via .psbase - as suggested by @SteveL-MSFT in #3176\r\n#  and as now also documented in about_hash-tables\r\nPS> @{ Keys = \"No keys for you!\"; Foo = 'bar' }.psbase.Keys\r\nKeys\r\nFoo\r\n\r\n# Also: .get_Keys()\r\nPS> @{ Keys = \"No keys for you!\"; Foo = 'bar' }.get_Keys()\r\nKeys\r\nFoo\r\n\r\n# Via .psobject.properties\r\nPS> @{ Keys = \"No keys for you!\"; Foo = 'bar' }.psobject.properties['Keys'].Value\r\nKeys\r\nFoo\r\n```\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-09-11T17:42:37Z",
+      "updated_at": "2018-10-10T02:11:58Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "The current behaviour is by design and has been this way since V1. And while the behaviour is problematic in some cases (e.g. accessing the `Keys`, `Values` and `Count` properties), changing it would be a significant breaking change. Also, the workarounds, while obscure, are not difficult: `.get_Count()`, `.get_Keys()`, `.get_Values()`.\r\n\r\n@mklement0 \r\n> Interestingly, the logic is reversed in the context of member enumeration (collection-level properties shadow element properties), \r\n\r\nThese are two entirely unrelated things. The hashtable behaviour predates member enumeration by about a decade. \r\n\r\nHistorical note:  this behaviour dates from the earliest iterations of the language, modeled on Perl's hashtable/object behaviour. In these very early versions, hashtables were written as\r\n```powershell\r\n@{\r\n    one => 1\r\n    two => 2\r\n    method => { ... }\r\n}\r\n```\r\nAt this point, the fact that there was a .NET class underlying hashtables was not really relevant (hence the hiding of the .NET properties). Hashtables were pseudo-objects which included \"methods\": assigning a scriptblock to a key allowed you to invoke that key as `$table.method(...)`.  Later on, where we introduced the ability to add instance members with `Add-Member` the \"method\" mechanism was removed. Around this time, the separator was also changed from `=>` to `=` but the property hiding was never cleaned up.  ",
+      "created_at": "2018-09-12T00:29:32Z",
+      "updated_at": "2018-09-12T00:29:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks for giving us the history, @BrucePay.\r\n\r\n> These are two entirely unrelated things. The hashtable behaviour predates member enumeration by about a decade.\r\n\r\nUnfortunately, that still makes it an inconsistency that can trip people up, because _conceptually_ these things _are_ similar.\r\n\r\nWith a commitment to backward compatibility, there is no good solution. Yes, the workaround is simple, but it being obscure is bad enough in itself.\r\n\r\nFor member enumeration, the proposed `@.` offers a clean solution, but, due to the reversed logic, that is not an option for hashtables.\r\n",
+      "created_at": "2018-09-12T03:44:20Z",
+      "updated_at": "2018-09-12T03:44:20Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@BrucePay it would be a 'significant breaking change' to reverse the logic in the case of a small handful of properties that are attached to hashtables?\n\nThat doesn't strike me as particularly significant. I'm not suggesting removing the property->key mapping, I'm suggesting querying the object's actual properties first, in the way that is likely to be expected by anyone who knows the barest basics of hashtables.\n\nI'm suggesting that because we have the native key access syntax, we can just ensure properties are queried first when using the syntax that is *designed to access properties*, so if there is an overlap like this (property with the same name as a key), said property is not hidden. Accessing the key itself would simply be done by using the standard collection accessor `$hash['keys']`\n\nUnless you make extensive use of the present state of things, where you deliberately hide the hashtable properties with keys, it would break... Absolutely nothing, no? Using it for non-colliding key names would still work just fine, and if you (foolishly, perhaps) had some code where you took user input to insert keys to a hashtable, the possibility of them *breaking your code* if you don't know about the broken behaviour is quietly removed, letting you enumerate keys as per normal.",
+      "created_at": "2018-09-12T10:40:55Z",
+      "updated_at": "2018-09-12T10:45:05Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good point about index notation being an unambiguous way to target _entries_, @vexx32.\r\n\r\nWhile I too wish we could change the current logic, I think the backward-compatibility problem is more serious than you think:\r\n\r\n>  in the way that is likely to be expected by anyone who knows the barest basics of hashtables.\r\n\r\nIn the context of _PowerShell_, you may never need to access any of a hashtable's _properties_ from your code, which means existing code may live happily - without symptoms - with hashtables such as the following:\r\n\r\n```powershell\r\n$ht = @{ Values = 'values'; Keys = 'keys'; Count = 'chocula'  }\r\n```\r\n\r\nOnly if the code uses dot notation _and expects it to give precedence to the hashtable's own properties_ do you have a problem, and that code would _currently_ be broken. \r\nAnd you can definitely use hashtables without ever touching the type's instance properties directly.\r\n\r\nConversely, someone using `$ht.Values` in their code to target the _entry_ will see their code break, if we reverse the logic.\r\n\r\nSomeone who knows that dot notation targets _entries_ first would probably not construct such a hashtable (though may still be _given_ one), but given that we're discussing this only now, the behavior is probably not widely known - and one of the nice things about PowerShell is that you don't _have_ to be intimately familiar with the underlying .NET types.\r\n\r\nUltimately, only a dedicated entry-accessor syntax form solves the problem - which we do have in `[...]` for hashtables, and which is proposed as `@.` for list-like collections (member enumeration) - but taking away dot notation for entry access now can definitely break things.\r\n\r\nYou could argue that dot notation should never have been implemented for hashtable-entry access and member enumeration, but those ships have clearly sailed, and the flip sides are convenience and familiarity.\r\n\r\nThe member-enumeration case is less problematic, because it does give precedence to the list's own properties (and you can use enumeration to ensure that you're targeting _entries_), but it sounds like we'll have to live the `.get_<propName>()` workaround for hashtables, unless someone conducts thorough analysis to demonstrate that little code, if any, is likely to break.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-09-12T13:04:36Z",
+      "updated_at": "2018-09-12T13:04:36Z"
+    },
+    {
+      "author": "adamedx",
+      "author_association": "NONE",
+      "body": "What a surprise in a bad way -- I can't believe the language would do something like this. I filed a doc bug to make this more visible, we probably need to add any property accessors like `keys` to the linter for PowerShell in tools like vscode if they don't already catch that (I have not seen that they do).\r\n\r\nLanguages should not have non-deterministic behavior, especially if it's not documented. At this point I understand the arguments about not just \"fixing\" it due to the fix itself breaking code, but if we can't invent a mode called \"don't alter the behavior of .net types at runtime\", then at the very least let's identify a syntax for accessing collections without strange workarounds. If I add `get_Keys()` to my code everywhere, someone else is likely to come along and change it back to `Keys` because they have no idea about this unexpected (and frankly crazy) behavior.",
+      "created_at": "2022-07-17T05:44:55Z",
+      "updated_at": "2022-07-17T05:44:55Z"
+    },
+    {
+      "author": "rkeithhill",
+      "author_association": "COLLABORATOR",
+      "body": "Another option is to create a `PSScriptAnalyzer` rule that flags hashtable property names that correspond to underlying .NET properties like `Keys` and `Values`.",
+      "created_at": "2022-07-23T20:10:21Z",
+      "updated_at": "2022-07-23T20:10:21Z"
+    }
+  ],
+  "created_at": "2018-09-11T15:45:08Z",
+  "number": 7758,
+  "state": "closed",
+  "title": "Dot-Property Access for Hashtable/Dictionary keys HIDES property values",
+  "updated_at": "2022-07-23T20:10:21Z"
+}

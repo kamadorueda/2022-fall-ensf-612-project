@@ -1,0 +1,125 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10452",
+  "author": "replicaJunction",
+  "body": "# Summary of the new feature/enhancement\r\n\r\nAs a C# developer, when writing a PowerShell frontend to my .NET Standard or Core libraries, I would like to expose my library's existing logging to PowerShell's output streams - Verbose, Debug, Progress, etc. This is already easy to do with synchronous methods, but any `async` method causes threading problems that PowerShell cannot handle.\r\n\r\nCurrently, when Cmdlet.Write* is called from a background thread, an error message is thrown:\r\n\r\n```\r\nThe WriteObject and WriteError methods cannot be called from outside the overrides of the BeginProcessing, ProcessRecord, and EndProcessing methods, and they can only be called from within the same thread. Validate that the cmdlet makes these calls correctly, or contact Microsoft Customer Support Services.\r\n```\r\n\r\nI would like the Cmdlet.Write* methods to allow writing on background threads, and handle marshalling data back to the primary thread as necessary.\r\n\r\n# Proposed technical implementation details (optional)\r\n\r\nHere is a simple reproduction:\r\n\r\n```csharp\r\npublic interface ILogger\r\n    {\r\n        void Debug(string message);\r\n        void Info(string message);\r\n        // ...etc\r\n    }\r\n\r\n    public class PwshLogger : ILogger\r\n    {\r\n        public Cmdlet Cmdlet { get; }\r\n\r\n        public PwshLogger(Cmdlet cmdlet) { this.Cmdlet = cmdlet; }\r\n\r\n        // ILogger implementation\r\n        public void Debug(string message) => this.Cmdlet.WriteDebug(message);\r\n        public void Info(string message) => this.Cmdlet.WriteVerbose(message);\r\n    }\r\n\r\n    public class Widget\r\n    {\r\n        public ILogger Logger { get; set; }\r\n\r\n        public int PerformTest()\r\n        {\r\n            Logger?.Info(\"Beginning test\");\r\n            Thread.Sleep(3000);\r\n            Logger?.Info(\"Completing test\");\r\n            return 0;\r\n        }\r\n\r\n        public async Task<int> PerformTestAsync()\r\n        {\r\n            // Contrived example - normally, this would have some awaits in it\r\n            var task = Task.Run(() => {\r\n                Logger?.Info(\"Beginning async test\");\r\n                Thread.Sleep(3000);\r\n                Logger?.Info(\"Completing async test\");\r\n            });\r\n            task.GetAwaiter().GetResult();\r\n\r\n            return 0;\r\n        }\r\n    }\r\n\r\n    [Cmdlet(VerbsDiagnostic.Test, \"Widget\")]\r\n    public class TestWidget : PSCmdlet\r\n    {\r\n        private PwshLogger _logger;\r\n        private Widget _widget;\r\n\r\n        protected override void BeginProcessing()\r\n        {\r\n            base.BeginProcessing();\r\n            _logger = new PwshLogger(this);\r\n            _widget = new Widget { Logger = _logger };\r\n        }\r\n\r\n        protected override void ProcessRecord()\r\n        {\r\n            base.ProcessRecord();\r\n\r\n            // Works - run this cmdlet with -Verbose to see output\r\n            _widget.PerformTest();\r\n\r\n            // Does not work - throws the error detailed above\r\n            Task.Run(() => _widget.PerformTestAsync()).GetAwaiter().GetResult();\r\n        }\r\n    }\r\n```\r\n\r\nRunning the command provides this output:\r\n\r\n```\r\nPS> ipmo C:\\Users\\myUser\\source\\repos\\PowerShellTest\\PowerShellTest\\bin\\Debug\\PowerShellTest.dll\r\n\r\nPS> Test-Widget -Verbose\r\nVERBOSE: Beginning test\r\nVERBOSE: Completing test\r\nTest-Widget : The WriteObject and WriteError methods cannot be called from outside the overrides of the BeginProcessing, ProcessRecord, and EndProcessing methods, and they can only be called from within the same thread. Validate that the cmdlet makes these calls correctly, or contact Microsoft Customer Support Services.\r\nAt line:1 char:1\r\n+ Test-Widget -Verbose\r\n+ ~~~~~~~~~~~~~~~~~~~~\r\n+ CategoryInfo          : InvalidOperation: (:) [Test-Widget], PSInvalidOperationException\r\n+ FullyQualifiedErrorId : InvalidOperation,PowerShellTest.TestWidget\r\n```\r\n\r\nI have confirmed this behavior on Windows PowerShell 5.1, PowerShell 6.2.2, and PowerShell 7.0.0 preview 3.\r\n\r\nI've seen a few [questions](https://stackoverflow.com/questions/38405770/reporting-powershell-progress-from-event-handler) [about](https://stackoverflow.com/questions/12852494/best-way-to-update-cmdlet-progress-from-a-separate-thread) [this](https://stackoverflow.com/questions/40537019/cmdlet-verbose-stream), with various proposed solutions, but they all require the entire structure of the cmdlet class to be built around their solutions.\r\n\r\nOne could argue that a PowerShell frontend shouldn't be exposing the internal logging from the module, but I'd argue that PowerShell's native output streams are perfect for that sort of thing. The user can see no logging info if they want, or they can pass `-Verbose` and/or `-Debug` if they want detailed logging data displayed.\r\n\r\nWith the popularity of asynchronous programming, I believe it would be appropriate for PowerShell to handle this case gracefully in order to better integrate with the rest of .NET.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "In this scenario, what is currently running in the pipeline thread?  The engine cannot take control back from something that is not either script based, or is a method from the engine itself that is specifically checking for requests from another thread.\r\n\r\nSomething that makes that prospect a lot more complicated is that writing an object as output is directly tied to the invocation of the next command's process block/`ProcessRecord` method.  Even streams other than output like error and verbose can be redirected as output.  So whatever process is running to record messages from other threads would need to know when to output these messages in a way that preserves execution order.",
+      "created_at": "2019-08-28T12:11:13Z",
+      "updated_at": "2019-08-28T12:11:13Z"
+    },
+    {
+      "author": "replicaJunction",
+      "author_association": "CONTRIBUTOR",
+      "body": "> In this scenario, what is currently running in the pipeline thread?\r\n\r\nThe pipeline thread is blocked and waiting for the async item to complete. In my example above, it's the `.GetAwaiter().GetResult()` line at the very end. As far as the end user is concerned, this is still a synchronous process - it's just leveraging an async method under the hood. The method is async in the first place to allow for compatibility with other ecosystems (in my specific use case, the same library is also used for a WPF application).\r\n\r\nThe trouble is that the async item is still handled on a separate thread, even though the PowerShell engine is blocking and waiting for its completion. This causes the error message I detailed above, since it's not actually executing on the pipeline thread.",
+      "created_at": "2019-08-28T14:08:56Z",
+      "updated_at": "2019-08-28T14:08:56Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "The issue is that instead of `GetAwaiter().GetResult()`, you could be running some other code that accesses the thread static resources this exception is meant to protect.  PowerShell has no visibility into what your code is doing, even if it's just waiting on code from another thread.\r\n\r\nWhat you could do instead of blocking on the result, is set up a blocking collection that allows you to marshal calls back to the context of your cmdlet.  Something like:\r\n\r\n```csharp\r\npublic class AsyncExample : PSCmdlet, IDisposable\r\n{\r\n    private readonly BlockingCollection<Action> _asyncRequests = new BlockingCollection<Action>();\r\n\r\n    private readonly CancellationTokenSource _stopProcessing = new CancellationTokenSource();\r\n\r\n    public void Dispose()\r\n    {\r\n        _asyncRequests.Dispose();\r\n        _stopProcessing.Dispose();\r\n    }\r\n\r\n    protected override void StopProcessing() => _stopProcessing.Cancel();\r\n\r\n    protected override void EndProcessing()\r\n    {\r\n        var task = Task.Run(() => _asyncRequests.Add(() => WriteObject(\"something\")));\r\n        try\r\n        {\r\n            while (_asyncRequests.TryTake(out Action asyncRequest, -1, _stopProcessing.Token))\r\n            {\r\n                asyncRequest();\r\n            }\r\n        }\r\n        catch (OperationCanceledException)\r\n        {\r\n        }\r\n    }\r\n}\r\n```\r\n\r\nYou need a way to gracefully \"complete\" and probably a few other things but that gives the general idea.",
+      "created_at": "2019-08-28T14:27:32Z",
+      "updated_at": "2019-08-28T14:48:50Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience that needs to be in some official guidance for working with async in PS cmdlets!",
+      "created_at": "2019-08-28T14:30:22Z",
+      "updated_at": "2019-08-28T14:30:22Z"
+    },
+    {
+      "author": "replicaJunction",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SeeminglyScience - Understood on the thread safety. I like your example, but in a large project, this will become boilerplate code very quickly, especially if I need to implement this in more than one process block (both ProcessRecord and EndProcessing, for example). The intent of my feature request is that PowerShell implements and abstracts this code so a developer doesn't need to copy/paste it around in every cmdlet they write.\r\n\r\nPerhaps there could be a new subclass of `Cmdlet` - something like `PSAsyncCmdlet` - that overrides BeginProcessing, ProcessRecord, and EndProcessing with something similar to your code?",
+      "created_at": "2019-08-28T15:06:07Z",
+      "updated_at": "2019-08-28T15:06:07Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "There actually _is_ an `AsyncCmdlet` class if I'm not mistaken?\r\n\r\nI don't know how reliable it is or the limitations of using it, though.",
+      "created_at": "2019-08-28T15:09:40Z",
+      "updated_at": "2019-08-28T15:09:40Z"
+    },
+    {
+      "author": "replicaJunction",
+      "author_association": "CONTRIBUTOR",
+      "body": "I don't think there's a current, official `AsyncCmdlet` class from Microsoft - or if there is, it's prohibitively difficult to find.\r\n\r\nI found [this one from the old OneGet documentation](https://docs.microsoft.com/en-us/previous-versions/dn910357(v%3Dvs.85)), but I can't find that information on anything current.\r\n\r\nI also found a bare-bones unofficial one at [OctopusDeploy](https://github.com/DimensionDataCBUSydney/OctopusDeploy.Powershell/blob/master/OctopusDeploy.Powershell/AsyncCmdlet.cs), but that doesn't cover this use case.\r\n\r\nFinally, [here's another community version](https://github.com/fearthecowboy/Toolkit/blob/master/AsyncCmdlet/AsyncCmdlet.cs) that's much more elaborate. I just found this as I was typing this comment and haven't gone through it in depth yet, so I'm not sure whether it meets this use case or not.\r\n",
+      "created_at": "2019-08-28T15:27:47Z",
+      "updated_at": "2019-08-28T15:27:47Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@replicaJunction I'm not sure I understand the motivation here. It sounds like you want to allow random threads to start writing error/verbose/information messages mixed in with what the user is actually doing. That sound's like a very confusing experience to me. On the other hand, if the goal is to support in-band user notification of asynchronous events, that is more interesting but might lead to a different approach.",
+      "created_at": "2019-08-29T05:12:54Z",
+      "updated_at": "2019-08-29T05:12:54Z"
+    },
+    {
+      "author": "replicaJunction",
+      "author_association": "CONTRIBUTOR",
+      "body": "> On the other hand, if the goal is to support in-band user notification of asynchronous events, that is more interesting but might lead to a different approach.\r\n\r\nThis is what I'm going for. Basically, I'd like an asynchronous, background thread to be able to call Cmdlet.WriteVerbose() and have the Cmdlet object handle any thread safety concerns transparently.\r\n\r\nIn my particular use case, I only need one callback at a time, and I block until that background worker is complete anyway. (This is the use case for which I provided a code example in the first post.) These are just implementation details, though.\r\n\r\nI understand there would be no guaranteed order if there are multiple callbacks happening on multiple background threads - I see that as a \"let the buyer beware\" kind of situation. If a user wanted to have multiple background threads going at once, I don't see an issue with the warning that \"these are not in a guaranteed order, and they could be confusing.\"",
+      "created_at": "2019-09-03T14:51:38Z",
+      "updated_at": "2019-09-03T14:51:38Z"
+    },
+    {
+      "author": "vpopescu",
+      "author_association": "NONE",
+      "body": "The problem with @SeeminglyScience 's solution (if I understand it correctly) is that the events are all queued up until EndProcessing() is called. That is not very useful for something like  a progress bar, no?\r\n\r\nAny updates since 2019?\r\n",
+      "created_at": "2022-08-23T22:41:13Z",
+      "updated_at": "2022-08-23T22:41:13Z"
+    },
+    {
+      "author": "vpopescu",
+      "author_association": "NONE",
+      "body": "FWIW, Cmdlet.CommandRuntime.Host.UI.WriteProgress() (and related) are not subject to this cross-thread restriction. I am not sure in which case they would  be counter-indicated.\r\n\r\nHowever these sets of cmdlets don't properly respect switches and preferences (e.g. if you call CommandRuntime.Host.UI.WriteVerboseLine() it will write verbose output even if -Verbose is not specified, and doesn't honor $VerbosePreference.) So no free lunch here either, unless we manually parse the command line switches and env vars for the entire family of functions ourselves.\r\n\r\n\r\nMy use case is that I'd like to register a method to get updates from the library for a long running process, e.g.:\r\n\r\n_mydependency.ProgressUpdates +=     ...   {     ...WriteProgress(...) };\r\n_mydependency.DebugMessages +=     ...   {     ...WriteVerbose(...) };\r\n  \r\n\r\n",
+      "created_at": "2022-08-24T17:26:51Z",
+      "updated_at": "2022-08-24T17:26:51Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> The problem with @SeeminglyScience 's solution (if I understand it correctly) is that the events are all queued up until EndProcessing() is called.\r\n\r\nThat's just where I happened to put it, it's not dependent on being there though.\r\n\r\nThat said, `EndProcessing` is just what is called after all pipeline input is received. It's the same as a `end` block in powershell (the default block). You can definitely use it for progress either way.",
+      "created_at": "2022-08-29T18:11:40Z",
+      "updated_at": "2022-08-29T18:13:14Z"
+    },
+    {
+      "author": "vpopescu",
+      "author_association": "NONE",
+      "body": "In my case I need to advance the progress before EndProcessing is called, so I guess I'd need to do it in ProcessRecord, which makes for hard to read boiler plate alongside the cmdlet business logic.\r\n\r\n\r\nTBH I haven't seen any issues calling CommandRuntime.Host.UI.WriteXXX() directly for my use case, so I could also just call those with proper testing and keeping in mind thread safety. But I don't want to manually add all the command line and env var processing myself.\r\n\r\nI am currently trying to derive from Cmdlet and implement your pattern above in a generic way. Will see how clean i can do it. \r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2022-08-29T19:16:10Z",
+      "updated_at": "2022-08-29T19:16:10Z"
+    },
+    {
+      "author": "vpopescu",
+      "author_association": "NONE",
+      "body": "Does this look like a good start for a somewhat generic solution?\r\n\r\n```cs\r\n      public class MyCmdlet : Cmdlet, IDisposable\r\n    {\r\n        private readonly BlockingCollection<Action> _asyncRequests = new();\r\n        private bool disposedValue;\r\n\r\n        protected override void BeginProcessing()\r\n        {\r\n            BeginProcessing(null);\r\n        }\r\n\r\n        protected virtual void BeginProcessing(CancellationToken? Token)\r\n        {\r\n            base.BeginProcessing();\r\n            var t = Task.Run(() => Process(Token));\r\n            try\r\n            {\r\n                while (_asyncRequests.TryTake(out Action asyncRequest, -1, Token ?? CancellationToken.None))\r\n                    asyncRequest();\r\n            }\r\n            catch (OperationCanceledException)\r\n            {\r\n            }\r\n        }\r\n\r\n        protected virtual void Process(CancellationToken? Token)\r\n        {\r\n            _asyncRequests.CompleteAdding();\r\n        }\r\n\r\n        protected override void EndProcessing()\r\n        {\r\n            base.EndProcessing();\r\n        }\r\n      \r\n        public void SendDebug(string text) { _asyncRequests.Add(() => WriteDebug(text)); }\r\n        public void SendVerbose(string text) { _asyncRequests.Add(() => WriteVerbose(text)); }\r\n        public void SendProgress(ProgressRecord record) { _asyncRequests.Add(() => WriteProgress(record)); }\r\n        public void SendError(ErrorRecord record) { _asyncRequests.Add(() => WriteError(record));  }\r\n        public void SendInformation(InformationRecord record)  { _asyncRequests.Add(() => WriteInformation(record)); }\r\n        public void SendInformation(Object messageData, string[] strings) { _asyncRequests.Add(() => WriteInformation(messageData, strings));   }\r\n        public void SendWarning(string text) { _asyncRequests.Add(() => WriteWarning(text));  }\r\n        public void SendObject(Object obj) { _asyncRequests.Add(() => WriteObject(obj));  }\r\n        public void SendObject(Object obj, bool single) { _asyncRequests.Add(() => WriteObject(obj, single)); }\r\n\r\n        protected virtual void Dispose(bool disposing)\r\n        {\r\n            if (!disposedValue)\r\n            {\r\n                if (disposing)\r\n                {\r\n                   _asyncRequests.Dispose();\r\n                }\r\n                disposedValue = true;\r\n            }\r\n        }\r\n\r\n        public void Dispose()\r\n        {\r\n            Dispose(disposing: true);\r\n            GC.SuppressFinalize(this);\r\n        }\r\n    }\r\n\r\n ```\r\n\r\nUsage:\r\n```cs\r\npublic class MyCmdltImpl  :  MyCmdlet, ...\r\n{\r\n         protected override void Process(CancellationToken? Token)\r\n        {\r\n            // long running task here...\r\n\r\n            base.Process(Token);\r\n         }     \r\n}\r\n  \r\n```\r\nAny additional suggestions? I haven't really tested it thoroughly yet.\r\n\r\n",
+      "created_at": "2022-08-29T20:13:35Z",
+      "updated_at": "2022-08-29T20:19:15Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "At a glance it looks fine for what is there as far as I can tell.\r\n\r\nPart of the problem with trying to tie async into PowerShell generically is that it's a \"pit of failure\". Meaning that there's a lot of random engine specific knowledge you have to know in order to do it safely. PowerShell is designed from the ground up to store all of it's state in a thread static way. The exception that gets thrown when trying to write from a different thread is actually the *kind* way this manifests.\r\n\r\nEven something as simple as calling `this.MyInvocation.MyCommand.Parameters` from a different thread can cause dead locks and/or state corruption. The `AsyncCmdlet` used internally by the `PackageManagement` module [had this issue](https://github.com/PowerShell/PowerShellEditorServices/issues/762) for example.\r\n\r\nWhile a lot of things may end up working fine, a seemingly small change can have huge consequences due to this architecture. Basically, if you're on a different thread, you should just straight up never touch the `PSCmdlet` instance at all unless you have a deep understanding of how the engine works internally.\r\n\r\nPersonally, I'd like to see a utility class that makes this sort of thread communication easier but I fear tying it into a subclass of `PSCmdlet` may set the wrong expectation. Even if it was it's own standalone class I'd be very hesitant to suggest it be added to SMA.",
+      "created_at": "2022-08-31T16:21:55Z",
+      "updated_at": "2022-08-31T16:21:55Z"
+    },
+    {
+      "author": "vpopescu",
+      "author_association": "NONE",
+      "body": "I understand your concern, but I think the current behavior is really not flexible enough for certain use cases, and the issue is obscure enough that people will end up shooting themselves in the foot trying to work around it anyway. \r\n\r\nMy goal was simple when I started, write a serilog sink that will capture logs from my dependencies and output them to powershell's respective output stream -- since the dependencies were already instrumented with serilog.  Didn't turn out that simple.\r\n\r\nAnyway, thanks for your help and insight, hopefully it will be considered for the future.\r\n",
+      "created_at": "2022-08-31T17:15:46Z",
+      "updated_at": "2022-08-31T17:15:46Z"
+    }
+  ],
+  "created_at": "2019-08-27T15:24:22Z",
+  "number": 10452,
+  "state": "open",
+  "title": "Feature Request: Allow writing to output streams from other threads",
+  "updated_at": "2022-08-31T17:15:46Z"
+}

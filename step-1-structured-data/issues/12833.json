@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12833",
+  "author": "ZonderP",
+  "body": "I do not know what is exactly happening, when one uses either 'Input' or 'Host' as parameter name for advanced functions/cmdlets.\r\nBut from time to time I forget that it is dangerous to use those as parameter names and this then produces hours of debugging, because really weird things might happen (they do not necessarily happen all the time).\r\nIt would be good, if Powershell wouldn't allow those names as parameter names at an early stage, like e.g. when importing a module which contains advanced functions/cmdlets it could fail with an error message, that those names must not be uses as parameter name for a cmdlet.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I recently ran into this issue myself. I had to go really deep troubleshooting it to identify exactly what was happening. Once I was sure that I knew exactly the way was broken (Value getting into the parameter but empty in the default end block), only then did I remember `$input` is a magic variable. It is so rare for me to think about that one that it completely slipped my mind when I was fighting the problems it caused. I know I have had similar issues with `$host` in the past.\r\n\r\nThe variable names `$input` and `$host` are very generic and could commonly be used for parameters. The problems presented are different if the parameter is or is not mandatory adding to the confusion.\r\n\r\n```\r\nfunction test-input{\r\n    param(\r\n        [Parameter(Mandatory)]\r\n        [ValidateNotNullOrEmpty()]\r\n        $Input\r\n    )\r\n    if(-not $Input) {\r\n        throw \"This should never happen\"\r\n    }\r\n    \"No issues here [$Input]\"\r\n}\r\nTest-Input -Input \"Test Value\" # exception\r\n\"also fails\" | Test-Input -input \"other\" # also exception\r\n```\r\n\r\nIf we remove the mandatory attribute, we get these results that are a more expected if you realize that `$Input` is a special variable:\r\n\r\n```\r\nPS> Test-Input -Input \"Definitely not null or empty\"\r\nNo issues here []\r\n\r\nPS> \"CrazyTown\" | Test-Input -Input \"Definitely not null or empty\"\r\nNo issues here [CrazyTown]\r\n```\r\n\r\nWe also need a Script Analyzer rule in the short term for this one.\r\n\r\nEdit: There already are Script Analyzer rules for these. Not sure how I missed it in my case.",
+      "created_at": "2020-05-29T18:52:21Z",
+      "updated_at": "2020-05-29T20:34:32Z"
+    },
+    {
+      "author": "ZonderP",
+      "author_association": "NONE",
+      "body": "This time it was 'Host' which caused troubles for me.\r\nThing is:\r\nA cmdlet named 'Invoke-SQLQuery' with this parameter name ($Host) is in a self written module and was used successfully some months by automated tests under Windows Powershell  5.1.\r\nIt also did not run into problems on a machine where we use Powershell Core 7.0.x for evaluating purposes (we want to switch to Core generally).\r\nThen the test which uses this cmdlet was changed slightly (an command line utility now gets called some lines BEFORE the call to 'Invoke-SQLQuery' and from that time on it started to crash the test on the machine where Core is used, but still not on the other machines.\r\nThe test writers looked into the issue and at the end came to me, because they couldn't find out what was going on in this case.\r\nMy first thought was: Must be the newly added 2 lines of code where the command line utility gets called and its output processed.\r\nI commented those lines out and voil\u00e1 - everything worked again!!! (As said, those 2 lines are BEFORE the code where ''Invoke-SQLQuery' gets called!)\r\nSo for sure I wanted to check which of those two newly added lines caused the trouble.\r\nI then re-enabled the line which would process the output (already initialized with a short string).\r\nStill no crash - as expected, because this just did a replace in the string and I anyway thought it would be the call of the external command line tool.\r\nThus I did it the other way around:\r\nI re-enabled the line with the call to the command-line tool and out-commented the string processing line and expected to get into troubles again.\r\nBut all went well!\r\nThen enabled both lines again and the crash was back - it happened at some point where the module containing 'Invoke-SQLQuery' is in got loaded, but I was not really able to exactly determine the place/line where it occurred - but it was NOT at the beginning of 'Invoke-SQLQuery'.\r\nThe error message said something about 'reference to object' and each time I reached that point I had to close 'Visual Code', because stopping the debugger didn't work...\r\nHours later 'Host' as a parameter name to 'Invoke-SQLQuery' got my attention - I renamed it to 'HostName' and from that point everything was back to normal...",
+      "created_at": "2020-05-29T19:24:43Z",
+      "updated_at": "2020-05-29T19:30:06Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I am not able to recreate your issue with `$host` as a parameter. It would be helpful if you could provide a way to reproduce it.\r\n\r\nIn my local testing on both 7.0.1 and 5.1, I get this error when trying to `$host` as a parameter and passing in a value: \r\n\r\n    WriteError: Cannot overwrite variable Host because it is read-only or constant.\r\n\r\nI can't even assign a value to it as a normal variable. PSScriptAnalyzer is also warning me not to use it.",
+      "created_at": "2020-05-29T20:30:36Z",
+      "updated_at": "2020-05-29T20:30:36Z"
+    },
+    {
+      "author": "ZonderP",
+      "author_association": "NONE",
+      "body": "I would be super lucky, if I could create such an example where it actually crashes, because - as I said - it didn't crash on 5.1 even with the 2 new lines added to the test script and it also doesn't crash on 7.1 when I out-comment those 2 added lines...\r\nI will create an example though, which at least will give a rough picture of the call sequence, which is like:\r\nStart-Test invoked on the command line will invoke that function from a module named 'Testing'.\r\nThis function then calls a test script from some drive location (in our case a network drive).\r\nAnd that test script calls 'Invoke-SQLQuery' which is located in a module named 'SQL'.\r\n\r\nI never saw this error so far - but this is maybe because of the - although unlikely - fact that I never called 'Invoke-SQLQuery' with parameter 'Host', as that parameter has a default value which is the one which we use during our testing.\r\n\r\nAlso, I usually still work with 5.1 ISE on Windows, because I do not yet have the best experience with debugging modules in Visual Code. And on 7.1 ISE I once had PSScriptAnalyzer in use, but somehow it got lost...\r\n\r\nThe example will take a little, since it is already quite late here and we have a long weekend (including Monday) and this issue is work related.\r\n\r\nBut I will immediately try out if I manage to get this WriteError in a very quick test...",
+      "created_at": "2020-05-29T20:56:14Z",
+      "updated_at": "2020-05-29T20:56:14Z"
+    },
+    {
+      "author": "ZonderP",
+      "author_association": "NONE",
+      "body": "Okay, that WriteError always appears for me, if I just write a regular function or cmdlet with a parameter called 'Host' in a script file - in each case, even if I call the function without this parameter (which is not mandatory) - That's good!\r\nSeems like the behavior is different, if the cmdlet is defined in a module...\r\nYes, it is! As soon as the absolutely same function is a cmdlet in a module, then this error doesn't appear and the function performs, regardless if called with the 'bad' parameter name or without it.\r\nBut no crash - that would be too simple...\r\n(Tested from within 5.1 ISE and 7.0.1 console.)",
+      "created_at": "2020-05-29T21:20:47Z",
+      "updated_at": "2020-05-29T21:23:06Z"
+    },
+    {
+      "author": "ZonderP",
+      "author_association": "NONE",
+      "body": "With 'bad' parameter 'Input' there is no error message at all, also not, if function is just only in a script file. But at least one might quickly detect an issue (although not easily to understand why it happens) when using the argument to 'Input' in the called function, because it will not be the value one would expect...\r\n",
+      "created_at": "2020-05-29T21:41:14Z",
+      "updated_at": "2020-05-29T21:41:32Z"
+    },
+    {
+      "author": "ZonderP",
+      "author_association": "NONE",
+      "body": "Here we go:\r\n[Example.zip](https://github.com/PowerShell/PowerShell/files/4704731/Example.zip)\r\n\r\nThis is a rough schema regarding the call sequence, where we had the issue.\r\nUnfortunately it didn't crash for me - as expected...\r\nJust unzip to some PoSh module directory and call 'Invoke-Test' without parameters.\r\nThis will call 'test'-script 'Main.ps1' under folder 'HopeForCrash' under the module path for module called 'Testing'. The script itself will call 'Invoke-SQLQuery' which is defined in module 'SQL'.",
+      "created_at": "2020-05-29T23:18:20Z",
+      "updated_at": "2020-05-29T23:18:20Z"
+    }
+  ],
+  "created_at": "2020-05-29T08:05:23Z",
+  "number": 12833,
+  "state": "open",
+  "title": "Do not allow cmdlet parameter names 'Input' and 'Host' (and possibly others named like automatic variables)",
+  "updated_at": "2020-06-01T17:04:54Z"
+}

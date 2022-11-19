@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/14604",
+  "author": "MaxAnderson95",
+  "body": "For those of you who frequently work with the ActiveDirectory module, you'll know using `Get-ADUser` or `Get-ADComputer` will only return a few of the many properties of the object from the database (10 and 9 respectively). If you wish to retrieve additional properties of an AD object, you must specify the `-Properties` parameter and provide one or more property names.\r\n\r\nWhen passing an ADObject that contains one or more non-default properties to a runspace as an argument, the property values are not accessible. They can not be accessed with dot-notation, nor used in a Where-Object filter (among other things).\r\n\r\nInterestingly enough, if you just pass the object through the runspace script and output it again in the current context, it will now have the missing properties again, as if they were never lost.\r\n\r\nI can reproduce the exact same behavior with `Start-ThreadJob`, `ForEach-Object -Parallel` (which of which uses runspaces) as well as the popular 3rd party module `PoshRSJob`. When using either of these method, it makes no difference to which method I use to pass the object into the job. The problem occurs if I use the `-ArgumentList` or the `$using:` syntax.\r\n\r\nThis problem however does **NOT** occur with the standard `Start-Job` which spawns an entire new process rather than a new thread/runspace. The downside to using standard background jobs is that the objects are serialized upon passing to the job.\r\n\r\n## Steps to reproduce\r\nIn the example below the `Name` property of an ADUser object is \"default\", but the `City` property must be requested specifically. I output the two properties three times each. Once before, once from within the runspace, and once using the object that was passed through the runspace and back into the current context.\r\n```powershell\r\n$ADUser = Get-ADUser -identity mander -Properties City\r\n\r\nWrite-Output \"Before Runspace - The value of name is: $($ADUser.Name)\"\r\nWrite-Output \"Before Runspace - The value of city is: $($ADUser.City)\"\r\n\r\n$Runspace = [runspacefactory]::CreateRunspace()\r\n$PowerShell = [powershell]::Create()\r\n$PowerShell.runspace = $Runspace\r\n$Runspace.Open()\r\n\r\n[void]$PowerShell.AddScript({\r\n    Param ($ADUser)\r\n    $a = \"Inside Runspace - The value of name is: $($ADUser.Name)\"\r\n    $b = \"Inside Runspace - The value of city is: $($ADUser.City)\"\r\n    $c = $ADUser\r\n\r\n    return @($a,$b,$c)\r\n})\r\n[void]$PowerShell.AddArgument($ADUser)\r\n\r\n$a, $b, $c = $PowerShell.Invoke()\r\n\r\n$a\r\n$b\r\n\r\nWrite-Output \"After Runspace  - The value of name is: $($c.Name)\"\r\nWrite-Output \"After Runspace  - The value of city is: $($c.City)\"\r\n```\r\n\r\n## Expected behavior\r\n\r\n```none\r\nBefore Runspace - The value of name is: Max Anderson\r\nBefore Runspace - The value of city is: Atlanta\r\nInside Runspace - The value of name is: Max Anderson\r\nInside Runspace - The value of city is: Atlanta\r\nAfter Runspace  - The value of name is: Max Anderson\r\nAfter Runspace  - The value of city is: Atlanta\r\n```\r\n\r\n## Actual behavior\r\n\r\n```none\r\nBefore Runspace - The value of name is: Max Anderson\r\nBefore Runspace - The value of city is: Atlanta\r\nInside Runspace - The value of name is: Max Anderson\r\nInside Runspace - The value of city is:\r\nAfter Runspace  - The value of name is: Max Anderson\r\nAfter Runspace  - The value of city is: Atlanta\r\n```\r\n\r\n## Environment data\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```none\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.1.0\r\nPSEdition                      Core\r\nGitCommitId                    7.1.0\r\nOS                             Microsoft Windows 10.0.19041\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "MaxAnderson95",
+      "author_association": "NONE",
+      "body": "I also would like to note that this issue is not only occuring in PowerShell core. I've also observed the same behavior in Windows PowerShell 5.1. This would tell me that it's not an issue with any abstraction layer (such as [WindowsCompatibility](https://github.com/PowerShell/WindowsCompatibility) making the ActiveDirectory module work within PowerShell Core.\r\n\r\n```\r\nName                           Value\r\n----                           -----\r\nPSVersion                      5.1.19041.546\r\nPSEdition                      Desktop\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0...}\r\nBuildVersion                   10.0.19041.546\r\nCLRVersion                     4.0.30319.42000\r\nWSManStackVersion              3.0\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\n```",
+      "created_at": "2021-01-13T03:37:27Z",
+      "updated_at": "2021-01-13T03:37:27Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Since AD module is not source open only MSFT team can investigate the issue. I guess the problem can be related with how PowerShell clones variables. If so we could try to fix this in the repo. Otherwise the issue should be reported by Windows support channels, UserVoice site and MSFT forums.\r\n\r\n/cc @PaulHigin Could you please make an conclusion?",
+      "created_at": "2021-01-13T07:02:51Z",
+      "updated_at": "2021-01-13T07:02:51Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "This is definitely a weird one. When testing against a remote Runspace I can see the CLIXML returned contains the property and accessing `$obj.City` works just fine\r\n\r\n```xml\r\n<Obj RefId=\"0\">\r\n  <TN RefId=\"0\">\r\n    <T>Microsoft.ActiveDirectory.Management.ADUser</T>\r\n    <T>Microsoft.ActiveDirectory.Management.ADAccount</T>\r\n    <T>Microsoft.ActiveDirectory.Management.ADPrincipal</T>\r\n    <T>Microsoft.ActiveDirectory.Management.ADObject</T>\r\n    <T>Microsoft.ActiveDirectory.Management.ADEntity</T>\r\n    <T>Microsoft.ActiveDirectory.Management.ADPropertyCollection</T>\r\n    <T>System.Object</T>\r\n  </TN>\r\n  <ToString>CN=vagrant-domain,CN=Users,DC=domain,DC=test</ToString>\r\n  <Props>\r\n    <S N=\"City\">My City</S>\r\n    <S N=\"DistinguishedName\">CN=vagrant-domain,CN=Users,DC=domain,DC=test</S>\r\n    <B N=\"Enabled\">true</B>\r\n    <Nil N=\"GivenName\" />\r\n    <S N=\"Name\">vagrant-domain</S>\r\n    <S N=\"ObjectClass\">user</S>\r\n    <G N=\"ObjectGUID\">bdfa699e-dfb9-41ba-864d-6a2f162f579d</G>\r\n    <S N=\"SamAccountName\">vagrant-domain</S>\r\n    <S N=\"SID\">S-1-5-21-3849754078-2265128455-4044759769-1104</S>\r\n    <Nil N=\"Surname\" />\r\n    <S N=\"UserPrincipalName\">vagrant-domain@domain.test</S>\r\n  </Props>\r\n</Obj>\r\n```\r\n\r\nWhen using a PowerShell pipeline that is targeted against the current runspace (no serialization occurs) I can replicate this problem. What's even more interesting is that the property itself still exists when checking `$obj.PSObject.Properties` and it has the value\r\n\r\n```powershell\r\n$ps = [PowerShell]::Create()\r\n\r\n$null = $ps.AddScript(@'\r\nGet-ADUser -Identity vagrant-domain -Property City\r\n'@)\r\n\r\n$user = $ps.Invoke()\r\n\r\n\"Direct: '$($user[0].City)'\"\r\n\"By Prop: '$(($user[0].PSObject.Properties | Where-Object Name -eq City).Value)'\"\r\n```\r\n\r\n```\r\nDirect: ''\r\nBy Prop: 'My City'\r\n```\r\n\r\nThe same thing applies when running it other ways like through `Invoke-Command` but interestingly not `ForEach-Object -Parallel` even though no serialization occurs through that method. I believe remote runspaces are fine because when the ADUser object is serialized the type isn't preserved so the object that is returned is just a generic property bag.\r\n\r\nI'm honestly not sure why this is happening so interested to hear what others may have to say.",
+      "created_at": "2021-01-13T07:20:46Z",
+      "updated_at": "2021-01-13T07:20:46Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Does this only occur for an AD object?  I cannot run the repro, and it would be interesting to know if there is a general type of object/property that causes this problem.  For example a script property on an object may not run correctly when passed to a different runspace, due to script block runspace affinity.",
+      "created_at": "2021-01-13T18:21:08Z",
+      "updated_at": "2021-01-13T18:21:08Z"
+    },
+    {
+      "author": "MaxAnderson95",
+      "author_association": "NONE",
+      "body": "@PaulHigin I have not run into another type of object that this issue occurs on. I've tested your theory using a file object and it does NOT occur. \r\n\r\n```powershell\r\n$File = Get-Item C:\\windows\\system32\\drivers\\etc\\hosts | Select-Object Mode, LastWriteTime, Length, Name, @{N=\"LengthInKB\";E={$_.Length/1KB}}\r\n\r\nWrite-Output \"Before Runspace - The value of name is: $($File.Name)\"\r\nWrite-Output \"Before Runspace - The value of lengthInKB is: $($File.LengthInKB)\"\r\n\r\n$Runspace = [runspacefactory]::CreateRunspace()\r\n$PowerShell = [powershell]::Create()\r\n$PowerShell.runspace = $Runspace\r\n$Runspace.Open()\r\n\r\n[void]$PowerShell.AddScript({\r\n    Param ($File)\r\n    $a = \"Inside Runspace - The value of name is: $($File.Name)\"\r\n    $b = \"Inside Runspace - The value of lengthInKB is: $($File.LengthInKB)\"\r\n    $c = $File\r\n\r\n    return @($a,$b,$c)\r\n})\r\n[void]$PowerShell.AddArgument($File)\r\n\r\n$a, $b, $c = $PowerShell.Invoke()\r\n\r\n$a\r\n$b\r\n\r\nWrite-Output \"After Runspace  - The value of name is: $($c.Name)\"\r\nWrite-Output \"After Runspace  - The value of lengthInKB is: $($c.LengthInKB)\"\r\n```",
+      "created_at": "2021-01-13T19:31:03Z",
+      "updated_at": "2021-01-13T19:31:03Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I can't speak for @MaxAnderson95 but I've only just tested this with `Get-ADUser` and the `ADUser` type. Here are the details:\r\n\r\n```powershell\r\n> $user.PSObject.Properties | Where-Object Name -eq City\r\n\r\n\r\nBaseObject      : CN=vagrant-domain,CN=Users,DC=domain,DC=test\r\nTag             :\r\nMemberType      : Property\r\nValue           : My City\r\nIsSettable      : True\r\nIsGettable      : True\r\nTypeNameOfValue : System.String\r\nName            : City\r\nIsInstance      : True\r\n\r\n\r\n> $user.GetType()\r\n\r\n\r\nIsPublic IsSerial Name                                     BaseType\r\n-------- -------- ----                                     --------\r\nTrue     False    ADUser                                   Microsoft.ActiveDirectory.Management.ADAccount\r\n```\r\n\r\nI haven't really checked other types but in this case it's definitely the ADUser type. What's interesting is that the `City` property is an actual Property and not a `NoteProperty` or any other PowerShell ETS one AFAIK. Maybe PowerShell sees the type as [ADUser](https://docs.microsoft.com/en-us/dotnet/api/microsoft.activedirectory.management.aduser?view=activedirectory-management-10.0) and only accesses the properties on the type itself which `City` is not usually present?\r\n\r\n```powershell\r\n> [Microsoft.ActiveDirectory.Management.ADUser].GetProperties().Name\r\n\r\nGivenName\r\nSurname\r\nUserPrincipalName\r\nEnabled\r\nSamAccountName\r\nSID\r\nDistinguishedName\r\nName\r\nObjectClass\r\nObjectGuid\r\nPropertyNames\r\nAddedProperties\r\nRemovedProperties\r\nModifiedProperties\r\nPropertyCount\r\nItem\r\n```\r\n\r\nIt's hard to replicate this as `Add-Member` only allows you to add a `NoteProperty` which works just fine and trying to add a [PSAdaptedProperty](https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.psadaptedproperty?view=powershellsdk-7.0.0) manually through `$user.PSObject.Properties.Add($adaptedProp)` fails.",
+      "created_at": "2021-01-13T19:43:05Z",
+      "updated_at": "2021-01-13T19:43:05Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Just as an FYI you can workaround this issue by adding `| Select-Object *` to your cmdlet calls as that will convert the AD object to a PSObject with NoteProperties instead.",
+      "created_at": "2021-01-13T20:58:00Z",
+      "updated_at": "2021-01-13T20:58:00Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "A script property was just an example of something that **may** not run on different runspaces.  Simple scripts may run but others may not because of affinity issues (such as accessing a variable only defined in the original runspace).\r\n\r\nThere may be other reasons why an object property might not evaluate correctly in a different runspace.\r\n\r\nOr, it may have nothing to do with the property at all.  But the fact that it seems to only repro on AD objects makes it suspect.",
+      "created_at": "2021-01-13T21:00:06Z",
+      "updated_at": "2021-01-13T21:00:06Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Definitely something up with the AD cmdlets, I cannot seem to replicate it when adding a custom adapted property to an object\r\n\r\n```powershell\r\n$ps = [PowerShell]::Create()\r\n\r\n$null = $ps.AddScript(@'\r\n$obj = Get-Service -Name WinRM\r\n$obj.PSObject.Properties.Add(($pwd.PSObject.Properties | Where Name -eq Path), $true)\r\n\r\n$obj\r\n'@)\r\n\r\n$obj = $ps.Invoke()[0]\r\n\r\n\"Direct: '$($obj.Path)'\"\r\n\"By Prop: '$(($obj.PSObject.Properties | Where-Object Name -eq Path).Value)'\"\r\n\r\n# Direct: 'C:\\temp'\r\n# By Prop: 'C:\\temp'\r\n```\r\n\r\nI tried building my own adapted property but to get/set a value I need to supply an adapter which is hidden behind internal classes so I didn't bother to go any deeper.\r\n\r\nOne thing to note is the adapter used in AD is a ThirdPartyAdapter compared to my test which is a DotNetAdapter, might be another thing to look into.\r\n\r\n```powershell\r\n$adProp = (Get-ADUser -Identity user -Property City).PSObject.Properties | Where Name -eq City\r\n$pwdProp = $pwd.PSObject.Properties | Where Name -eq Path\r\n\r\n$adProp.GetType().GetField('adapter', 60).GetValue($adProp)\r\n$adProp.GetType().GetField('adapter', 60).GetValue($pwdProp)\r\n\r\n# System.Management.Automation.ThirdPartyAdapter\r\n# System.Management.Automation.DotNetAdapter\r\n```\r\n",
+      "created_at": "2021-01-13T21:19:40Z",
+      "updated_at": "2021-01-13T21:24:49Z"
+    },
+    {
+      "author": "RipTornMist",
+      "author_association": "NONE",
+      "body": "Ronald Leslie Ritchie\u00a0 75 jasper ave smiths falls Ontario Canada k7a 4c8 613 206 7320\n-------- Original message --------From: Jordan Borean <notifications@github.com> Date: 2021-01-13  2:44 p.m.  (GMT-05:00) To: PowerShell/PowerShell <PowerShell@noreply.github.com> Cc: Subscribed <subscribed@noreply.github.com> Subject: Re: [PowerShell/PowerShell] Passing Active Directory Objects into a\n  Runspace Stripts All Non-Default Properties (#14604) \nI can't speak for @MaxAnderson95 but I've only just tested this with Get-ADUser and the ADUser type. Here are the details:\n> $user.PSObject.Properties | Where-Object Name -eq City\n\n\nBaseObject      : CN=vagrant-domain,CN=Users,DC=domain,DC=test\nTag             :\nMemberType      : Property\nValue           : My City\nIsSettable      : True\nIsGettable      : True\nTypeNameOfValue : System.String\nName            : City\nIsInstance      : True\n\n\n> $user.GetType()\n\n\nIsPublic IsSerial Name                                     BaseType\n-------- -------- ----                                     --------\nTrue     False    ADUser                                   Microsoft.ActiveDirectory.Management.ADAccount\nI haven't really checked other types but in this case it's definitely the ADUser type. What's interesting is that the City property is an actual Property and not a NoteProperty or any other PowerShell ETS one AFAIK. Maybe PowerShell sees the type as ADUser and only accesses the properties on the type itself which City is not usually present?\n> [Microsoft.ActiveDirectory.Management.ADUser].GetProperties().Name\n\nGivenName\nSurname\nUserPrincipalName\nEnabled\nSamAccountName\nSID\nDistinguishedName\nName\nObjectClass\nObjectGuid\nPropertyNames\nAddedProperties\nRemovedProperties\nModifiedProperties\nPropertyCount\nItem\nIt's hard to replicate this as Add-Member only allows you to add a NoteProperty which works just fine and trying to add a PSAdaptedProperty manually through $user.PSObject.Properties.Add($adaptedProp) fails.\n\n\u2014You are receiving this because you are subscribed to this thread.Reply to this email directly, view it on GitHub, or unsubscribe.\n",
+      "created_at": "2021-01-14T00:06:16Z",
+      "updated_at": "2021-01-14T00:06:16Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Is Microsoft.ActiveDirectory.Management.ADAccount an COM object? I see:\r\n```\r\nItem                   ParameterizedProperty Microsoft.ActiveDirectory.Management.ADPropertyValueCollection Item(str...\r\n```\r\nMaybe it is COM interaction issue? /cc @SeeminglyScience \r\n\r\nIs an object cloned when passed to runspace? Maybe the issue related the cloning (in Engine or in the object)?",
+      "created_at": "2021-01-14T04:10:07Z",
+      "updated_at": "2021-01-14T04:10:07Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Is Microsoft.ActiveDirectory.Management.ADAccount an COM object? I see:\r\n> \r\n> ```\r\n> Item                   ParameterizedProperty Microsoft.ActiveDirectory.Management.ADPropertyValueCollection Item(str...\r\n> ```\r\n> \r\n> Maybe it is COM interaction issue? /cc @SeeminglyScience\r\n> \r\n> Is an object cloned when passed to runspace? Maybe the issue related the cloning (in Engine or in the object)?\r\n\r\nThe AD module uses a custom adapter that just isn't registered in the new runspace.  Issue is fixed if you add `Import-Module ActiveDirectory` in the `AddScript` block.",
+      "created_at": "2021-01-28T17:48:51Z",
+      "updated_at": "2021-01-28T17:48:51Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> One thing to note is the adapter used in AD is a ThirdPartyAdapter compared to my test which is a DotNetAdapter, might be another thing to look into.\r\n\r\n@jborean93 FYI `ThirdPartyAdapter` is sort of a bridge to the public `PSPropertyAdapter` class.  You can pass the `Type` of an implementation of that class to `Update-TypeData`'s `TypeAdapter` property.",
+      "created_at": "2021-01-28T20:31:13Z",
+      "updated_at": "2021-01-28T20:31:13Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience thanks for the explanation, it still seems weird that the property is present through `$obj.PSObject.Properties` yet you can't access it through the dot notation.",
+      "created_at": "2021-01-28T20:34:35Z",
+      "updated_at": "2021-01-28T20:34:35Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> @SeeminglyScience thanks for the explanation, it still seems weird that the property is present through `$obj.PSObject.Properties` yet you can't access it through the dot notation.\r\n\r\nIt's just sorta how it's stored. The binder looks in `PSObject._instanceMembers` which only contains explicitly added members.  You can see the adapted property in `_members` if it's already been retrieved due to caching, but that's just not where the binder is looking.",
+      "created_at": "2021-01-29T17:46:42Z",
+      "updated_at": "2021-01-29T17:46:42Z"
+    }
+  ],
+  "created_at": "2021-01-13T03:34:11Z",
+  "number": 14604,
+  "state": "open",
+  "title": "Passing Active Directory Objects into a Runspace Stripts All Non-Default Properties",
+  "updated_at": "2021-01-29T17:46:42Z"
+}

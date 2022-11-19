@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/13588",
+  "author": "bobbytreed",
+  "body": "So, I know you are working on improving ForEach-Object -Parallel, but I wanted to offer what I have seen so far.\r\n\r\nWithin a ForEach-Object -Parallel, I load a script containing functions and class declarations. At some point within the processing, the pipeline breaks down first\r\n\r\nsomething as simple as @() | Where-Object hangs indefinitely, while @().Where({}) executes fine. Further into the processing, even calling a static function of a defined PS class hangs indefinitely.  \r\n\r\nSo far I've been working through the script trying to remove all Write-Progress calls (they intermittently causes hangs as well), Any Pipeline Where or ForEach calls, etc. But its odd now that even though breakpointing the script shows that the PS Class I created does exist, calling a static function hangs. \r\n\r\nI know it would be impossible to provide enough context to help identify the issue, but I'm very confident that its not a breakdown in my code. \r\n\r\nIn addition to any insight you have, is there any way to see more about whats going on? \r\n\r\nThank you\r\n\r\nI'm using the latest version of PS 7.",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> something as simple as @() | Where-Object hangs indefinitely, while @().Where({}) executes fine.\r\n\r\nCan you post the exact snippet you're using? I can't reproduce it.\r\n\r\n> Further into the processing, even calling a static function of a defined PS class hangs indefinitely.\r\n\r\nYeah classes aren't thread safe and are likely to cause deadlocks or state corruption.  See #12801\r\n",
+      "created_at": "2020-09-06T22:38:03Z",
+      "updated_at": "2020-09-06T22:38:03Z"
+    },
+    {
+      "author": "bobbytreed",
+      "author_association": "NONE",
+      "body": "I'll try to post something in the next day or so that replicates my logic. \r\n\r\nClasses not being thread safe should not matter. \r\n\r\nEach parallel execution dot sources the script containing the class definition. The code is written such that every parallel execution should not interact with another.",
+      "created_at": "2020-09-07T12:33:19Z",
+      "updated_at": "2020-09-07T12:33:19Z"
+    },
+    {
+      "author": "bobbytreed",
+      "author_association": "NONE",
+      "body": "Place in class.ps1\r\n\r\n```\r\n    class InnerClass {\r\n        [string]$Value;\r\n    }\r\n\r\n    class OuterClass\r\n    {\r\n        [InnerClass[]]$Values;\r\n\r\n        [void] TestWhere ([string]$filter) {\r\n            Write-Host \"TestWhere\"\r\n            $this.Values | Where-Object {\r\n                Write-Host \"`tTestWhere: {`$_.Value -match $filter}: $($_ -match $filter)\"\r\n                $_.Value -match $filter\r\n            }\r\n        }\r\n\r\n        [void] TestForEach ([string]$filter) {\r\n            Write-Host \"TestForEach\"\r\n            $this.Values | ForEach-Object {\r\n                Write-Host \"`tTestForEach: $($_.Value)\"\r\n            }\r\n        }\r\n\r\n        [void] TestForEachMethod ([string]$filter) {\r\n            Write-Host \"TestForEachMethod\"\r\n            $this.Values.ForEach({\r\n                Write-Host \"`tTestForEachMethod: $($_.Value)\"\r\n            })\r\n        }\r\n\r\n        [string] TestStaticMethod([string]$filter) {\r\n            Write-Host \"TestStaticMethod\"\r\n            return [OuterClass]::ReturnString($filter)\r\n        }\r\n\r\n        static [string] ReturnString([string]$string) {\r\n            Write-Host \"`tTestStaticMethod: $string\"\r\n            return $string + \" append\"\r\n        }\r\n    }\r\n\r\n    Function Test-Loop {\r\n        [CmdletBinding()]\r\n        param (\r\n            [Parameter()]\r\n            [OuterClass]\r\n            $OuterClass,\r\n\r\n            [Parameter()]\r\n            [int]$Value,\r\n\r\n            [Parameter(Mandatory)]\r\n            [ValidateSet(\"Where\", \"ForEach\", \"Static\")]\r\n            [string]$Type\r\n        )\r\n\r\n        process {\r\n            $OuterClass.TestForEachMethod($Value)\r\n            switch ($type) {\r\n                \"Static\" {\r\n                    $output = $OuterClass.TestStaticMethod($value)\r\n                }\r\n\r\n                \"Where\" {\r\n                    $OuterClass.TestWhere($Value)\r\n                }\r\n\r\n                \"ForEach\" {\r\n                    $OuterClass.TestForEach($Value)\r\n                }\r\n            }\r\n        }\r\n    }\r\n```\r\n\r\nPlace in testscript.ps1\r\n\r\n```\r\nparam(\r\n    [Parameter(Mandatory)]\r\n    [ValidateSet(\"Where\", \"ForEach\", \"Static\")]\r\n    [string]$Type,\r\n\r\n    [Parameter()]\r\n    [string]$ClassScriptLocation = \"C:\\users\\robreed\\documents\\powershell\\temp\\class.ps1\"\r\n)\r\n\r\n. $ClassScriptLocation\r\n$passScriptLocation = $ClassScriptLocation\r\n$passType = $Type\r\n\r\n$Class = [OuterClass]::new()\r\n\r\n$class.Values = 1..5 | Foreach-object {\r\n    $tmp = [InnerClass]::new()\r\n    $tmp.Value = $_\r\n    $tmp\r\n}\r\n\r\n1..2 | Foreach-object -Parallel {\r\n    . $using:passScriptLocation\r\n    Test-Loop -OuterClass $using:class -Value $_ -Type $using:passType\r\n}\r\n```\r\n\r\nCall Testscript.ps1 -Type ForEach\r\n\r\nOutput: \r\n\r\n```\r\nTestForEachMethod\r\n        TestForEachMethod: 1\r\n        TestForEachMethod: 2\r\n        TestForEachMethod: 3\r\n        TestForEachMethod: 4\r\n        TestForEachMethod: 5\r\nTestForEachMethod\r\n        TestForEachMethod: 1\r\n        TestForEachMethod: 2\r\n        TestForEachMethod: 3\r\n        TestForEachMethod: 4\r\n        TestForEachMethod: 5\r\nTestForEach\r\n\r\n```\r\n\r\nCall Testscript.ps1 -Type Static\r\n\r\nOutput: \r\n\r\n```\r\nTestForEachMethod\r\n        TestForEachMethod: 1\r\n        TestForEachMethod: 2\r\n        TestForEachMethod: 3\r\n        TestForEachMethod: 4\r\n        TestForEachMethod: 5\r\nTestForEachMethod\r\n        TestForEachMethod: 1\r\n        TestForEachMethod: 2\r\n        TestForEachMethod: 3\r\n        TestForEachMethod: 4\r\n        TestForEachMethod: 5\r\nTestStatic\r\n\r\n```\r\n\r\nCall Testscript.ps1 -Type Where\r\n\r\nOutput: \r\n\r\n```\r\nTestForEachMethod\r\n        TestForEachMethod: 1\r\n        TestForEachMethod: 2\r\n        TestForEachMethod: 3\r\n        TestForEachMethod: 4\r\n        TestForEachMethod: 5\r\nTestForEachMethod\r\n        TestForEachMethod: 1\r\n        TestForEachMethod: 2\r\n        TestForEachMethod: 3\r\n        TestForEachMethod: 4\r\n        TestForEachMethod: 5\r\nTestWhere\r\n\r\n```\r\n\r\nStatic, Where, and ForEach alll fail and foreachmethod works. \r\n",
+      "created_at": "2020-09-07T13:08:00Z",
+      "updated_at": "2020-09-07T13:08:00Z"
+    },
+    {
+      "author": "bobbytreed",
+      "author_association": "NONE",
+      "body": "And by \"fail\" I mean they sit there forever without doing anything, no error or indication of error",
+      "created_at": "2020-09-07T13:08:59Z",
+      "updated_at": "2020-09-07T13:08:59Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Classes not being thread safe should not matter.\r\n> \r\n> Each parallel execution dot sources the script containing the class definition. The code is written such that every parallel execution should not interact with another.\r\n\r\nYeah, it's still the same generated type though.  It's cached based on the AST which will be the same in all runspaces.  You can see it by running this:\r\n\r\n```powershell\r\n$classFile = 'temp:\\myClassFile.ps1'\r\ntry {\r\n    $null = New-Item -ItemType File -Path $classFile -Value 'class Testing { }'\r\n    $hashCodes = 0..100 | ForEach-Object -Parallel {\r\n        . $using:classFile\r\n        [Testing].GetHashCode()\r\n    }\r\n\r\n    $hashCodes | Group-Object\r\n} finally {\r\n    Remove-Item $classFile -ErrorAction Ignore\r\n}\r\n```\r\n\r\nYou should get something like this:\r\n\r\n```raw\r\nCount Name                      Group\r\n----- ----                      -----\r\n  101 56517414                  {56517414, 56517414, 56517414, 56517414\u2026}\r\n```\r\n\r\nThough you might get a couple different on the first run if you hit a race condition, it should be mostly the same generated type.",
+      "created_at": "2020-09-08T12:24:37Z",
+      "updated_at": "2020-09-08T12:25:01Z"
+    }
+  ],
+  "created_at": "2020-09-06T15:04:09Z",
+  "number": 13588,
+  "state": "open",
+  "title": "ForEach-Object -Parallel Pipeline and other breakdowns",
+  "updated_at": "2020-09-08T12:25:01Z"
+}

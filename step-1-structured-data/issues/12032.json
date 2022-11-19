@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/12032",
+  "author": "mklement0",
+  "body": "If you're trying to set a _persistent_ execution policy (`-Scope LocalMachine` or `-Scope CurrentUser`)  while a _process-level_ policy happens to be in effect (`-Scope Process` or, more likely, `-ExecutionPolicy` via the CLI), updating the persistent policy succeeds, but for the current process the previous process-level policy remains in effect.\r\n\r\n`Set-ExecutionPolicy` commendably tries to alert the user to that fact, but instead of issuing  a _warning_, it emits a _statement-terminating error_.\r\n\r\nYou can tell from the wording of the message alone that this shouldn't be an _error_ (emphasis added):\r\n\r\n> Set-ExecutionPolicy: **PowerShell updated your execution policy successfully**, but the setting is overridden by a policy defined at a more specific scope.  Due to the override, your shell will retain its current effective execution policy of Restricted. Type \"Get-ExecutionPolicy -List\" to view your execution policy settings. For more information please see \"Get-Help Set-ExecutionPolicy\".\r\n\r\nThis behavior gets in the way of a common idiom:\r\n\r\n```powershell\r\n# Triggers error\r\npwsh -ExecutionPolicy Bypass -c 'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force; ...'\r\n```\r\n\r\n# Steps to reproduce\r\n\r\nOn _Windows_:\r\n\r\n```powershell\r\n# This is is the same as calling the CLI with -ExecutionPolicy Bypass\r\nSet-ExecutionPolicy -Scope Process Bypass -Force\r\n\r\ntry {\r\n  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force\r\n} catch {\r\n  \"Error unexpectedly thrown: $_\"\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\nThe code should run without an error, and a _warning_ should be shown.\r\n\r\n# Actual behavior\r\n\r\nA statement-terminating error occurs in the 2nd `Set-ExecutionPolicy` call, which triggers the `catch` block:\r\n\r\n```none\r\nError unexpectedly thrown: PowerShell updated your execution policy successfully, but the setting is overridden by a policy defined at a more specific scope.  Due to the override, your shell will retain its current effective execution policy of AllSigned. Type \"Get-ExecutionPolicy -List\" to view your execution policy settings. For more information please see \"Get-Help Set-ExecutionPolicy\".\r\n```\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0\r\n```\r\n",
+  "closed_at": "2020-03-24T12:00:15Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "/cc @TravisEz13 @PaulHigin Please make a conclusion.",
+      "created_at": "2020-03-05T16:17:57Z",
+      "updated_at": "2020-03-05T16:17:57Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Well, it is pretty clear from the code that whoever implemented this felt this should be a terminating error.  My guess is that this was done to support scripts where changing the execution policy setting is critical for the script to succeed.  So even if the 'policy' is successfully changed at a specific scope, but the actual state doesn't change because some other scope overrides it, then it is an error.  \r\n\r\nIt seems like it would have been better to have separate cmdlets that had clear responsibility for affecting policy and for affecting current state.  But changing this now would be a breaking change (unless we propose new cmdlets and deprecate the old).  \r\n\r\nFeel free to add the 'Review-Committee' tag if you feel this should be considered.",
+      "created_at": "2020-03-05T18:24:06Z",
+      "updated_at": "2020-03-05T18:24:06Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin sure, but there's a reason `-WarningAction` exists.\r\n\r\nI dont think a situation where \"_maybe_ it could be critical\" calls for a terminating error all the time. \ud83e\udd37\u200d\u2642 ",
+      "created_at": "2020-03-05T18:28:22Z",
+      "updated_at": "2020-03-05T18:28:22Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "If a cmdlet's primary action fails then that should be a terminating error.  The problem is that this cmdlet does two primary things.",
+      "created_at": "2020-03-05T18:35:35Z",
+      "updated_at": "2020-03-05T18:35:35Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think that's really the case. It does _one_ thing, at multiple possible scopes. If the action taken on the scope targeted succeeds... then it's done its job. The fact that there may be an overriding scope that nullifies the _result_ of that action is, in essence, metadata. A warning sounds the best choice in my opinion.",
+      "created_at": "2020-03-05T18:51:16Z",
+      "updated_at": "2020-03-05T18:51:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Well put, @vexx32.\r\n\r\nI think that without backward-compatibility considerations, that is the way to go.\r\nTo _also, implicitly_ update the `Process` scope  is definitely not the _primary_ purpose when you target `-Scope CurrentUser` or `-Scope LocalMachine`.\r\n(This secondary action generally makes sense, but isn't even documented as such.)\r\n\r\nAs for it being a breaking change:\r\n\r\nHypothetically, someone who relied on a `try` / `catch` _with a `throw` in the `catch` block_ would be affected, as that is the only way to _abort_ the script - given that _statement_-terminating errors do not abort the script _as a whole_.\r\n\r\nMuch more likely, `try` / `catch` has been used _without_ `throw`, simply to silence the unexpected error, because the typical use case I've seen is the following:\r\n\r\n ```powershell\r\npwsh -ExecutionPolicy Bypass -c 'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force; ...'\r\n```\r\n\r\nThis is a perfectly reasonable command, yet it triggers the statement-terminating error and requires a `try` / `catch` simply to silence it.\r\n(Note that, unlike what I've originally said in the OP (since fixed), the error occurs irrespective of whether the persistent policy being set is more or less restrictive than the effective process-level one.)\r\n\r\nIn short: I would consider this a [Bucket 3: Unlikely Grey Area](https://github.com/PowerShell/PowerShell/blob/master/docs/dev-process/breaking-change-contract.md#bucket-3-unlikely-grey-area) change.\r\n\r\n\r\n",
+      "created_at": "2020-03-05T20:52:36Z",
+      "updated_at": "2020-03-12T08:04:28Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, can you please tag this for committee review?",
+      "created_at": "2020-03-05T21:14:47Z",
+      "updated_at": "2020-03-05T21:43:41Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Tagging for committee review for @vexx32  and @mklement0 's reasoning to be reviewed",
+      "created_at": "2020-03-05T21:43:06Z",
+      "updated_at": "2020-03-05T21:43:06Z"
+    },
+    {
+      "author": "joeyaiello",
+      "author_association": "CONTRIBUTOR",
+      "body": "@PowerShell/powershell-committee discussed this and we we're worried about potential breaking changes in an area that's so widely depended upon by the entire ecosystem. It's likely that this try/catch has been deployed very widely, and even if the fix to work around that break is simple, it could be in unmaintained areas of automation. \r\n\r\nThe issue that's really being discussed is whether or not folks depend on (and/or expect) the behavior of Set-ExecutionPolicy to set both the scope specified *and* the process scope. @BrucePay and @JamesWTruher both raised the fact that the cmdlets were designed and communicated like this early on, as @PaulHigin intuited from the source code.\r\n\r\nWe do agree that the documentation and/or error message could be improved to be clear about the intended behavior of the cmdlet and why the error is being thrown (specifically that the Process level execution policy could not be changed). \r\n\r\nWe discussed and ultimately rejected the idea of a Switch parameter (something like a `-PolicyOnly`) as it would simply add complexity to the cmdlet with no real benefit (this is why we have GP). \r\n\r\nWe also raised that it would be useful to have some cmdlets that help set configuration values in the `powershell.config.json` so that you could easily do something like `Set-PowerShellConfigurationValue -ExecutionPolicy Bypass` and have it only be reflected in the config. ",
+      "created_at": "2020-03-11T22:27:56Z",
+      "updated_at": "2020-03-11T22:27:56Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "> @PowerShell/powershell-committee discussed this and we we're worried about potential breaking changes in an area that's so widely depended upon by the entire ecosystem. It's likely that this try/catch has been deployed very widely, and even if the fix to work around that break is simple, it could be in unmaintained areas of automation.\r\n\r\n\ud83e\udd14 in most cases where automation is concerned, this cmdlet is not often used from what I've seen. Most tools that are running powershell use the `-ExecutionPolicy Bypass` mode on the executable itself.\r\n\r\nEven if we assume that a decent portion of folks are running the cmdlet itself where the issue occurs, for the proposed change to break something, the _environment_ itself would have to change. (Unless something is relying on _not_ being able to change the execution policy, which... seems like a contrived scenario even at the most optimistic assessment I can muster.) That being the case would be a problem regardless of whether or not this change is taken, so the only time this impacts an automation scenario is it starting to fail... which _would happen anyway_, only more severely and slightly more obviously without the proposed change.\r\n\r\nAnd that, inherently, means the code _is_ being maintained, or at least the server / other system it's on is being updated, and something is bound to break or require a bit of fixing from time to time regardless.\r\n\r\nI'm really not seeing any particular value in leaving things the way they are here, and nor do I see a lot of potential value in further complicating the executionpolicy settings. \ud83e\udd37\u200d\u2642 ",
+      "created_at": "2020-03-11T22:43:38Z",
+      "updated_at": "2020-03-11T22:43:38Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee continued discussing this and agree that we don't believe the proposed value justifies the breaking change",
+      "created_at": "2020-03-18T22:40:37Z",
+      "updated_at": "2020-03-18T22:40:37Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> \ud83e\udd14 in most cases where automation is concerned, this cmdlet is not often used from what I've seen. Most tools that are running powershell use the `-ExecutionPolicy Bypass` mode on the executable itself.\r\n\r\nYou'd be surprised unfortunately.  I've seen scenarios where the entirety of a product's generated code starts with `Set-ExecutionPolicy` in a `try`/`catch` with a different code path for failures.  Maybe because `-ExecutionPolicy Bypass` is a no-op (or at least silently(?) fails) when `MachinePolicy` or `UserPolicy` is defined.",
+      "created_at": "2020-03-19T14:22:41Z",
+      "updated_at": "2020-03-19T14:22:41Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as answered and has not had any activity for **1 day**. It has been closed for housekeeping purposes.",
+      "created_at": "2020-03-24T12:00:14Z",
+      "updated_at": "2020-03-24T12:00:14Z"
+    }
+  ],
+  "created_at": "2020-03-05T16:07:02Z",
+  "number": 12032,
+  "state": "closed",
+  "title": "Set-ExecutionPolicy reports statement-terminating error instead of warning",
+  "updated_at": "2020-03-24T12:00:15Z"
+}

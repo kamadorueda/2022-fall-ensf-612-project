@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10454",
+  "author": "daxian-dbw",
+  "body": "<!-- Anything that looks like this is a comment and can't be seen after the Pull Request is created. -->\r\n\r\n# PR Summary\r\n\r\n**NOTE:** mark the PR as WIP because the rewriting causes some issues to stepping during debugging. Looking into that.\r\n\r\nA follow-up PR for #10047\r\nMake `ForEach-Object` faster for its commonly used scenarios by rewriting the command into a filter-like script block execution in the pipeline.\r\nFor the follow `ForEach-Object` usages, they will be rewritten to `... | . { process { ... } } | ...` when constructing the pipeline.\r\n\r\n```powershell\r\n... | % { ... } | ...\r\n... | % -process { ... } | ...\r\n... | % -process:{ ... } | ...\r\n```\r\n\r\nBy doing this rewriting, we are able to eliminate all unnecessary overheads from:\r\n1. parameter binding\r\n2. invoking a script block with `ScriptBlock.InvokeUsingCmdlet` for every incoming object, which has to do the setting-up/tearing-down every time executing the script block.\r\n\r\nThis PR targets to improve the performance of `ForEach-Object` for the most common usages. It's not a goal to cover all possible scenarios, such as `% -pro:{...}` or `% { ... } { ... } { ... }`\r\n\r\n| Script | Before | After |\r\n|-|-|-|\r\n| `1..100kb \\| % { }` | 290ms | 37ms |\r\n|`1..100kb \\| . { process {} }`| 37ms | 37ms |\r\n| `foreach ($i in 1..100kb) { }` | 28ms | 28ms |\r\n\r\nThis optimization will be turned off automatically in the following cases:\r\n1. when debugger is enabled, namely when any breakpoint is set in the session. This is to make the debugger works as expected in case a breakpoint is set on `ForEach-Object`, e.g `Set-PSBreakpoint -Command ForEach-Object`.\r\n2. when 'ConstrainedLanguageMode' has been used for the current Runspace. The language mode transition is tricky. It's better to stick with the same old code path for safety.\r\n\r\n## PR Context\r\n\r\nhttps://github.com/PowerShell/PowerShell/issues/9731#issuecomment-496721086\r\nDraft PR: #10153 \r\n\r\n## PR Checklist\r\n\r\n- [x] [PR has a meaningful title](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n    - Use the present tense and imperative mood when describing your changes\r\n- [x] [Summarized changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] [Make sure all `.h`, `.cpp`, `.cs`, `.ps1` and `.psm1` files have the correct copyright header](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n- [x] This PR is ready to merge and is not [Work in Progress](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---work-in-progress).\r\n    - If the PR is work in progress, please add the prefix `WIP:` or `[ WIP ]` to the beginning of the title (the `WIP` bot will keep its status check at `Pending` while the prefix is present) and remove the prefix when the PR is ready.\r\n- **[Breaking changes](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#making-breaking-changes)**\r\n    - [x] None\r\n    - **OR**\r\n    - [ ] [Experimental feature(s) needed](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/6/Microsoft.PowerShell.Core/About/about_Experimental_Features.md)\r\n        - [ ] Experimental feature name(s): <!-- Experimental feature name(s) here -->\r\n- **User-facing changes**\r\n    - [x] Not Applicable\r\n    - **OR**\r\n    - [ ] [Documentation needed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#pull-request---submission)\r\n        - [ ] Issue filed: <!-- Number/link of that issue here -->\r\n- **Testing - New and feature**\r\n    - [x] N/A or can only be tested interactively\r\n    - **OR**\r\n    - [ ] [Make sure you've added a new test if existing tests do not effectively test the code changed](https://github.com/PowerShell/PowerShell/blob/master/.github/CONTRIBUTING.md#before-submitting)\r\n- **Tooling**\r\n    - [x] I have considered the user experience from a tooling perspective and don't believe tooling will be impacted.\r\n    - **OR**\r\n    - [x] I have considered the user experience from a tooling perspective and enumerated concerns in the summary. This may include:\r\n        - Impact on [PowerShell Editor Services](https://github.com/PowerShell/PowerShellEditorServices) which is used in the [PowerShell extension](https://github.com/PowerShell/vscode-powershell) for VSCode (which runs in a different PS Host).\r\n        - Impact on Completions (both in the console and in editors) - one of PowerShell's most powerful features.\r\n        - Impact on [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) (which provides linting & formatting in the editor extensions).\r\n        - Impact on [EditorSyntax](https://github.com/PowerShell/EditorSyntax) (which provides syntax highlighting with in VSCode, GitHub, and many other editors).\r\n",
+  "closed_at": "2019-08-30T19:09:20Z",
+  "comments": [
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "I always assumed optimizations like this would be handled in an `AstVisitor` implementation, hoping such optimizations could be performed while retaining the extent in the original scripts so that neither the script author nor the debugger is aware of them while code just runs faster. This PR seems to indicate that my assumption is incorrect.\r\n\r\nMy naive questions about this: Is it simply not possible to perform optimizations such as this one transparently to the user and the debugger by doing the work in the AST itself? Or is it possible, but an approach like that is considered undesirable for other reasons?",
+      "created_at": "2019-08-29T15:40:50Z",
+      "updated_at": "2019-08-29T15:40:50Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "> Is it simply not possible to perform optimizations such as this one transparently to the user and the debugger by doing the work in the AST itself?\r\n\r\nThe original AST should be preserved exactly as is because it should reflect exactly what the user typed on the console or wrote in the file.\r\nIf your thought is to generate another AST via a visitor before compiling, and use that one for compilation, then there is no guarantee the extent will be exactly the same or it will be transparent to the debugger.\r\nTake this change as an example, once `foreach-object { ... }` is replaced by `. { process { ... } }` in the generated AST, you will have problem on the extent of the `process {` part, because that's new elements added the generated AST. Also, there won't be a `CommandProcessor` representing the `ForEach-Object` in the pipeline, and thus the debugger will break at the open curly instead of `ForEach-Object` for `Set-PSBreakpoint -Command Foreach-Object`.\r\n\r\nFor this specific change, I think there is something we can try if we really want to make it work with debugger: when rewriting the pipeline, instead of creating a command processor with the script block, we can construct a `FunctionInfo` with the name `ForEach-Object` and make its extent the same as the `ForEach-Object` extent. That might work, but of course might cause new issues that are unknown yet.",
+      "created_at": "2019-08-29T18:32:47Z",
+      "updated_at": "2019-08-29T18:53:29Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "@KirkMunro \r\n\r\n> Is it simply not possible to perform optimizations such as this one transparently to the user and the debugger by doing the work in the AST itself? Or is it possible, but an approach like that is considered undesirable for other reasons\r\n\r\nIt's definitely possible. There's a good example in `DynamicKeywordStatementAst`:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/704ee90d5cd2909ebc98a8d624359eed5d1b1cbc/src/System.Management.Automation/engine/parser/ast.cs#L6817-L7027\r\n\r\nBut to my mind, the questions are those of layering:\r\n\r\n- How faithfully should the AST represent the program as it was given to the parser?\r\n- How much should the AST know about what consumes it?\r\n- To what extent (heh) should I be able to reconstruct a program from its AST?\r\n- If we add syntactic sugar, does the parser own it, the AST or the compiler?\r\n\r\nThese problems (/restatements of the same problem) are inconsistently addressed in PowerShell:\r\n\r\n- [The parser doesn't record where traps occur in a block at all, so the AST is created with some arguably important information missing](https://github.com/PowerShell/PowerShell/blob/704ee90d5cd2909ebc98a8d624359eed5d1b1cbc/src/System.Management.Automation/engine/parser/Parser.cs#L1858-L1908)\r\n- [ScriptBlockAsts for scriptblocks without an explicit end block still have the `End` property populated because the AST type favours the consumer of the AST over structural fidelity](https://github.com/PowerShell/PowerShell/blob/704ee90d5cd2909ebc98a8d624359eed5d1b1cbc/src/System.Management.Automation/engine/parser/ast.cs#L1031-L1041)\r\n- [Dynamic keyword invocations get their own AST, but they do their own AST transformation to be compiled](https://github.com/PowerShell/PowerShell/blob/704ee90d5cd2909ebc98a8d624359eed5d1b1cbc/src/System.Management.Automation/engine/parser/Compiler.cs#L2978-L2986)\r\n- The compiler's `*Ops` libraries have some syntactic sugar transformations in them, like [for job control operators (`Get-Command &`)](https://github.com/PowerShell/PowerShell/blob/704ee90d5cd2909ebc98a8d624359eed5d1b1cbc/src/System.Management.Automation/engine/parser/Compiler.cs#L3092-L3098) and here with the `ForEach-Object` now\r\n\r\nIf we were writing it all over today, we might have a syntactic sugar phase/layer between the parser and the compiler implemented as an AstVisitor that takes in one AST and spits out the transformed one, although the immutability of the AST (which I still think is a very good thing) makes that a bit more expensive. That's certainly the way other statically compiled. languages have gone.\r\n\r\nBut I do feel ambivalent about syntactic sugar (in the strict sense of a language-level AST-to-AST transformation, where one syntax is a macro for another) in an interpreted language. I'm not sure about Python, Ruby and friends, but both C# and Java seem to have a policy against it as far as I can tell; they go direct to bytecode and leave the optimisations to the runtime.\r\n\r\nFor PowerShell though, I think (1) we want to encourage good practice with syntax, (2) it's good to try and find performance wherever we can while still finding time for other work.\r\n\r\nSo basically, I don't think we have a good, consistent answer for how something like this should be implemented, but this implementation is one of the better ones in terms of both how it's done and where it sits.",
+      "created_at": "2019-08-29T18:49:42Z",
+      "updated_at": "2019-08-29T20:33:58Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "Those answers are very, very helpful. Thank you @daxian-dbw and @rjmholt for taking the time to provide that information.",
+      "created_at": "2019-08-29T21:42:46Z",
+      "updated_at": "2019-08-29T21:42:46Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I like the optimization because it works well for _all_ scenarios.\r\nAlthough it\u2019s obvious that there could be optimizations that can work well in a particular situation. That's why the question of Ast optimizations arises.\r\n\r\nFor example, for a simple management script in a task scheduler, an optimization is not to do any optimization at all since the interpreter will be the fastest.\r\nFor data manning script (parse and analyze large log file(s)), we could say in advance `pwsh -Optimization Full` to apply all optimizations _before_ run. In the scenario generating optimized Ast tree could bring significant acceleration. Currently single optimization we do for such scenarios - switch from interpreter to compiler for long running script blocks.\r\n\r\n> they go direct to bytecode and leave the optimizations to the runtime.\r\n\r\nSince we have new modern runtime we could review if we can generate code so that it can optimize by the runtime better.",
+      "created_at": "2019-08-30T05:35:49Z",
+      "updated_at": "2019-08-30T05:35:49Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "@daxian-dbw This PR introduces a breaking change. :boom:\r\n\r\nStep 1: Create a file with the following contents:\r\n\r\n```PowerShell\r\n1..2 | ForEach-Object{\r\n\r\n    Write-Host('MyInvocation in ForEach-Object: ' + $MyInvocation.MyCommand.Name)\r\n\r\n}\r\n```\r\n\r\nStep 2: Dot-source or invoke that file with the call operator.\r\n\r\nBefore this change (using preview 3):\r\n`$MyInvocation.MyCommand.Name` results in the name of the file.\r\n\r\nAfter this change (using a custom build with the latest bits, pulled just now):\r\n`$MyInvocation.MyCommand.Name` is `$null`.\r\n\r\nRelated: #10477.",
+      "created_at": "2019-09-03T16:06:36Z",
+      "updated_at": "2019-09-03T16:09:10Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "Interesting, I knew there might be cases that I didn't catch :) I will be working on a fix.\r\n\r\nI guess we also need an answer to this question:\r\n> why does the behaviour differ between Where-Object and ForEach-Object? They are both cmdlets, and I don't think it's unreasonable for users to expect a consistent experience between these two commands in terms of how their scriptblock implementations behave.\r\n",
+      "created_at": "2019-09-03T21:52:20Z",
+      "updated_at": "2019-09-03T21:52:20Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "#10485 was submitted to revert this PR given that it introduced a breaking change to the value of `$MyInvocation` within the script block argument.",
+      "created_at": "2019-09-05T00:35:42Z",
+      "updated_at": "2019-09-05T00:35:42Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:`v7.0.0-preview.4` has been released which incorporates this pull request.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-preview.4)\n",
+      "created_at": "2019-09-19T17:52:15Z",
+      "updated_at": "2019-09-19T17:52:15Z"
+    }
+  ],
+  "created_at": "2019-08-27T17:59:13Z",
+  "number": 10454,
+  "state": "closed",
+  "title": "Make `ForEach-Object` faster for its commonly used scenarios",
+  "updated_at": "2019-09-19T17:52:15Z"
+}

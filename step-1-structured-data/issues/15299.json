@@ -1,0 +1,62 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15299",
+  "author": "alexei-matveev",
+  "body": "## Steps to reproduce\r\n\r\nSee comments in https://github.com/dotnet/runtime/issues/46462\r\n\r\nHm, it seems it is difficult to reproduce from an interactive Shell.\r\nThe automated Script is started from a daemon process, several times a minute ... \r\n\r\n```\r\n...\r\nls -lrtd /tmp/????????-????-????-????-????????????\r\n```\r\n\r\n[Edited by @daxian-dbw] Remove the `Home` env variable, and then start PowerShell multiple times. You will see multiple temporary folder with GUID id names got created in `/tmp`.\r\n\r\n## Expected behavior\r\n\r\nEmpty output\r\n\r\n## Actual behavior\r\n\r\nGarbage as this ist left:\r\n\r\n            $ find 88a84cf3-05b5-40c3-a29e-52d611e919e7\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.cache\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.cache/powershell\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.cache/powershell/StartupProfileData-NonInteractive\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.cache/powershell/telemetry.uuid\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.local\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.local/share\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.local/share/powershell\r\n            88a84cf3-05b5-40c3-a29e-52d611e919e7/.local/share/powershell/Modules\r\n\r\n\r\n## Environment data\r\n\r\nSame with the LTS 7.0.6 and non-LTS 7.1. CentOS 7 with MS Repo attached:\r\n\r\n```\r\n> $PSVersionTable\r\n\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.0.6\r\nPSEdition                      Core\r\nGitCommitId                    7.0.6\r\nOS                             Linux 3.10.0-1127.19.1.el7.x86_64 #1 SMP Tue Aug 25 17:23:54 UTC 2020\r\nPlatform                       Unix\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n",
+  "closed_at": "2021-11-22T18:44:58Z",
+  "comments": [
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I believe this is related to https://github.com/PowerShell/PowerShell/pull/13239. PowerShell creates a temporary folder when the environment variable `Home` doesn't exist. Can you try setting the env variable `Home` and see if the issue is gone?",
+      "created_at": "2021-05-03T22:51:39Z",
+      "updated_at": "2021-05-03T22:51:39Z"
+    },
+    {
+      "author": "alexei-matveev",
+      "author_association": "NONE",
+      "body": "Yep, looks like that. This works as expected:\r\n\r\n```\r\nmkdir xxx\r\nTMPDIR=./xxx pwsh\r\n```\r\nThis is the content wheil pwsh was running. They dissappear:\r\n\r\n```\r\nprwx------ 1 alexei alexei 0 May  6 22:52 clr-debug-pipe-4432-226815218-in\r\nprwx------ 1 alexei alexei 0 May  6 22:52 clr-debug-pipe-4432-226815218-out\r\nsrwxrwxr-x 1 alexei alexei 0 May  6 22:52 CoreFxPipe_PSHost.D742B9AE.4432.None.pwsh\r\nsrw------- 1 alexei alexei 0 May  6 22:52 dotnet-diagnostic-4432-226815218-socket\r\n```\r\n\r\nIf I run it like this:\r\n\r\n    TMPDIR=./xxx HOME=/nowhere pwsh\r\n\r\nGarbage remains in ./xxx:\r\n\r\n```\r\n$ find .\r\n.\r\n./b1409506-7aae-4211-b3c0-0d24ddbfbdf5\r\n./b1409506-7aae-4211-b3c0-0d24ddbfbdf5/telemetry.uuid\r\n./b1409506-7aae-4211-b3c0-0d24ddbfbdf5/StartupProfileData-Interactive\r\n./b1409506-7aae-4211-b3c0-0d24ddbfbdf5/7.1.3\r\n./b1409506-7aae-4211-b3c0-0d24ddbfbdf5/7.1.3/sentinel1-2021-5-6.done\r\n```",
+      "created_at": "2021-05-06T20:59:57Z",
+      "updated_at": "2021-05-06T20:59:57Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "@JamesWTruher @rjmholt Any ideas on how to address this in code? Or, do we just document this behavior?\r\nIt's not uncommon for containers to not have `Home` defined.",
+      "created_at": "2021-05-08T18:33:43Z",
+      "updated_at": "2021-05-08T18:33:43Z"
+    },
+    {
+      "author": "JamesWTruher",
+      "author_association": "MEMBER",
+      "body": "there's a few things going on here: we create a fair number of files (command cache, for one, which we want to remain after the process is gone). It's possible to disable telemetry, but that's only one file. Some of these things are artifacts of the way we enable debugging. Usually, these files aren't really a problem, but in some edge cases they may be. I would suggest that the appropriate way to proceed is to launch something like\r\n`mkdir /tmp/t; HOME=/tmp/t TMPDIR=/tmp/t pwsh; rm -rf /tmp/t`\r\n\r\nI thought this was instructive:\r\n```\r\n# TMPDIR=/dev/null pwsh\r\nFailed to create CoreCLR, HRESULT: 0x80004005\r\n\r\n# HOME=/dev/null pwsh\r\nProcess terminated. The type initializer for 'System.Management.Automation.Runspaces.InitialSessionState' threw an exception.\r\n   at System.Environment.FailFast(System.String, System.Exception)\r\n   at Microsoft.PowerShell.UnmanagedPSEntry.Start(System.String, System.String[], Int32)\r\n   at Microsoft.PowerShell.ManagedPSEntry.Main(System.String[])\r\nSystem.TypeInitializationException: The type initializer for 'System.Management.Automation.Runspaces.InitialSessionState' threw an exception.\r\n ---> System.TypeInitializationException: The type initializer for 'System.Management.Automation.Platform' threw an exception.\r\n ---> System.IO.IOException: The file '/dev/null' already exists.\r\n   at System.IO.FileSystem.CreateDirectory(String fullPath)\r\n   at System.IO.Directory.CreateDirectory(String path)\r\n   at System.Management.Automation.Platform.SelectProductNameForDirectory(XDG_Type dirpath)\r\n   at System.Management.Automation.Platform..cctor()\r\n   --- End of inner exception stack trace ---\r\n   at System.Management.Automation.Runspaces.InitialSessionState..cctor()\r\n   --- End of inner exception stack trace ---\r\n   at System.Management.Automation.Runspaces.InitialSessionState.CreateDefault2()\r\n   at Microsoft.PowerShell.ConsoleShell.Start(String bannerText, String helpText, String[] args)\r\n   at Microsoft.PowerShell.UnmanagedPSEntry.Start(String consoleFilePath, String[] args, Int32 argc)Aborted\r\n```\r\n\r\nLet's address the second case first. Here we can see that the CLR is up and clearly running our code. The engine attempts to create a directory for config data in the users home (CorePsPlatform.cs lines 321, 346, and elsewhere) which will obviously fail in my case. We _could_ possibly be a bit more robust in this case. However, because we use the home location for things like command cache, _not_ having it is going to result in some problematic performance (just a gut response). However, I'm going to assert that setting `TMPDIR=/dev/null` produces a much _more_ dramatic result - it looks like the CLR fiddles about and if it can't do what it needs, it just falls over. I don't think we get as far as executing any of our code.\r\n\r\nFWIW, I think this is probably an issue best addressed by documentation.",
+      "created_at": "2021-05-10T21:45:43Z",
+      "updated_at": "2021-05-10T21:45:43Z"
+    },
+    {
+      "author": "daxian-dbw",
+      "author_association": "MEMBER",
+      "body": "I thought about this issue more, and believe we should fix it in our code to make PowerShell work better in a container environment without the env variable `Home` defined. After all, it's not uncommon for a container to not have `Home` env var. I think it can be fixed by adding a well-known prefix to the temporary folder name, and next time PS session starts, it can just look for an folder under `tmp` with that well-know prefix and use that as the pseudo `Home` directory.",
+      "created_at": "2021-05-13T18:11:10Z",
+      "updated_at": "2021-05-13T18:11:10Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@daxian-dbw See https://github.com/dotnet/runtime/issues/2048. I did a proposal there and draft implementation. We could ask .Net team to include the API in .Net Runtime 7.",
+      "created_at": "2021-10-15T03:36:04Z",
+      "updated_at": "2021-10-15T03:36:04Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #16263, which has now been successfully released as `v7.3.0-preview.1`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.3.0-preview.1)\n",
+      "created_at": "2021-12-16T20:01:33Z",
+      "updated_at": "2021-12-16T20:01:33Z"
+    }
+  ],
+  "created_at": "2021-04-23T15:03:32Z",
+  "number": 15299,
+  "state": "closed",
+  "title": "Garbage in TMPDIR resulting in Failed to create CoreCLR, HRESULT: 0x80004005",
+  "updated_at": "2021-12-16T20:01:33Z"
+}

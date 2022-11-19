@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/11122",
+  "author": "mklement0",
+  "body": "The handy new `Get-Error` cmdlet implements its pretty-printing by replacing the `System.Management.Automation.ErrorRecord` type name in the   ETS type-name array with `PSExtendedError`.\r\n\r\nUnfortunately, it does this on the _originals_ in the `$Error` collection, resulting in inadvertent modification that makes these instances print differently with implicit output (e.g., `$Error[0]`) afterwards.\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\n# Provoke a an error.\r\ntry { 1 / 0 } catch {}\r\n\r\n$Error[0].pstypenames | Should -Be System.Management.Automation.ErrorRecord, System.Object\r\n\r\n# Run Get-Error, which accidentally modifies .pstypenames of the most recent error.\r\n$null = Get-Error \r\n\r\n# Repeating the test shows the modified .pstypenames\r\n$Error[0].pstypenames | Should -Be System.Management.Automation.ErrorRecord, System.Object\r\n```\r\n\r\n# Expected behavior\r\n\r\nBoth tests should succeed.\r\n\r\n# Actual behavior\r\n\r\nThe 2nd test fails:\r\n\r\n```none\r\n Expected @('System.Management.Automation.ErrorRecord', 'System.Object'), but got @('PSExtendedError', 'System.Object').\r\n```\r\n\r\nThat is, `$Error[0]`'s `.pstypename` property was accidentally modified.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.5\r\n```\r\n",
+  "closed_at": "2019-11-21T10:14:33Z",
+  "comments": [
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "This is an unfortunate workaround to how `OutOfBand` formatting works.  Exceptions and ErrorRecords are `OutOfBand` and take precedence for formatting.  This is why you have to use `-force` with `format-list` to see the entire contents, but it's also how exceptions/errorrecords can show up in the  middle of pipeline output formatting (well, for non-terminating ones).  Not sure how to fix this without this side effect since there isn't a generic way to copy a .NET object.",
+      "created_at": "2019-11-19T19:38:39Z",
+      "updated_at": "2019-11-19T19:38:39Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT since this modification to PSTypeNames only needs to go as deep as the ETS, I think you can just call `PSObject.Copy()` to clone the wrapper and modify that instead of the original PSObject stored in $error.",
+      "created_at": "2019-11-19T19:57:02Z",
+      "updated_at": "2019-11-19T19:57:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 tried that, didn't work.  PSObject.Copy() relies on the base object to implement ICloneable.  Note that I was aware of this side effect which is why the formatter puts back the original types.  However, if you assign the output to $null, the formatter doesn't even get exercised.",
+      "created_at": "2019-11-19T20:13:09Z",
+      "updated_at": "2019-11-19T20:14:07Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "\ud83e\udd14 Can you then do `var newWrapper = PSObject.AsPSObject(errorRecordPSObject.BaseObject);` perhaps? Bit of a run-around I'm sure but hey \ud83d\ude01 ",
+      "created_at": "2019-11-19T20:19:03Z",
+      "updated_at": "2019-11-19T20:19:03Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 not sure how that buys us anything?  It'll still be a ref to the original",
+      "created_at": "2019-11-19T20:29:24Z",
+      "updated_at": "2019-11-19T20:29:24Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@SteveL-MSFT, note that problem also occurs if you don't assign the output to `$null`:\r\n\r\n```powershell\r\ntry { 1/0 } catch {}; $e = $Error[0]; Get-Error; '----'; $e.pstypenames\r\n```\r\n\r\n",
+      "created_at": "2019-11-19T20:32:35Z",
+      "updated_at": "2019-11-19T20:32:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "An additional problem is that `PSExtendedError` is apparently invariably inserted _every time_ `Get-Error` processes a given record:\r\n\r\n```\r\ntry { 1/0 } catch {}; $e = $Error[0]; Get-Error; Get-Error; '----'; $e.pstypenames\r\n```\r\n\r\nNote how the output at the end now has _two_ `PSExtendedError` lines.",
+      "created_at": "2019-11-19T20:35:09Z",
+      "updated_at": "2019-11-19T20:35:09Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@mklement0 duplicate typenames should already be fixed in master (coming in Preview.6).  I don't think we can solve the other problem unless we rewrite out OutOfBand formatting works",
+      "created_at": "2019-11-19T20:36:42Z",
+      "updated_at": "2019-11-19T20:39:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "There is a solution, @SteveL-MSFT, by harnessing obscure behavior in `Select-Object -ExpandProperty`:\r\n\r\nHere's a PoC in PowerShell:\r\n\r\n```powershell\r\ntry { 1/0 } catch {}; $e = $Error[0]; $eClone = [pscustomobject] @{ e = $e } | select -ExpandProperty e; $null = Get-Error; $eClone.pstypenames\r\n```\r\n\r\nNote how `$eClone` retained its separate `.pstypenames` value.\r\n\r\n",
+      "created_at": "2019-11-19T21:07:02Z",
+      "updated_at": "2019-11-19T21:07:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "You were on the right track, @vexx32, all that was missing was `true`:\r\n\r\n```\r\n                PSObject obj = PSObject.AsPSObject(errorRecord, true);\r\n```\r\n\r\nThis uses [this `internal` `PSObject.ASPSObject()` overload](https://github.com/PowerShell/PowerShell/blob/2c8955eaebfa147e6973e24ef8495afc6d6ef104/src/System.Management.Automation/engine/MshObject.cs#L1050), which gives the resulting `PSObject` instance a wrapper-local ETS type-name list not tied to the original object.\r\n\r\n`Select-Object -ExpandProperty` apparently uses the same overload - obscurely.\r\n",
+      "created_at": "2019-11-19T22:02:26Z",
+      "updated_at": "2019-11-19T22:02:26Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Missed it by _that_ much. Nicely done @mklement0 \ud83d\ude01 ",
+      "created_at": "2019-11-19T22:03:55Z",
+      "updated_at": "2019-11-19T22:03:55Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Excellent, I'll try this out.",
+      "created_at": "2019-11-19T22:07:38Z",
+      "updated_at": "2019-11-19T22:07:38Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #11125, which has now been successfully released as `v7.0.0-rc.2`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-rc.2)\n",
+      "created_at": "2020-01-16T23:37:13Z",
+      "updated_at": "2020-01-16T23:37:13Z"
+    }
+  ],
+  "created_at": "2019-11-19T18:45:55Z",
+  "number": 11122,
+  "state": "closed",
+  "title": "Get-Error unexpectedly modifies the ETS type names of the ErrorRecord instances it processes in place",
+  "updated_at": "2020-01-17T03:58:36Z"
+}

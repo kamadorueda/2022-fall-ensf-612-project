@@ -1,0 +1,104 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15905",
+  "author": "SeeminglyScience",
+  "body": "### Steps to reproduce\r\n\r\n```powershell\r\n$script = '(Invoke-WebRequest google.com).'\r\n(TabExpansion2 -inputScript $script -cursorColumn $script.Length).CompletionMatches\r\n```\r\n\r\n### Expected behavior\r\n\r\n```console\r\nCompletionText    ListItemText      ResultType ToolTip\r\n--------------    ------------      ---------- -------\r\nBaseResponse      BaseResponse        Property System.Net.Http.HttpResponseMessage BaseResponse { get; set; }\r\nContent           Content             Property byte[] Content { get; }\r\nHeaders           Headers             Property System.Collections.Generic.Dictionary[string,System.Collections.Generic.IEnumerable[string]] Headers { get; }\r\nRawContent        RawContent          Property string RawContent { get; }\r\nRawContentLength  RawContentLength    Property long RawContentLength { get; }\r\nRawContentStream  RawContentStream    Property System.IO.MemoryStream RawContentStream { get; }\r\nRelationLink      RelationLink        Property System.Collections.Generic.Dictionary[string,string] RelationLink { get; }\r\nStatusCode        StatusCode          Property int StatusCode { get; }\r\nStatusDescription StatusDescription   Property string StatusDescription { get; }\r\nEquals(           Equals                Method bool Equals(System.Object obj)\r\nGetHashCode(      GetHashCode           Method int GetHashCode()\r\nGetType(          GetType               Method type GetType()\r\nToString(         ToString              Method string ToString()\r\n```\r\n\r\n\r\n### Actual behavior\r\n\r\n```console\r\n# Nothing\r\n```\r\n\r\n\r\n### Error details\r\n\r\nN/A\r\n\r\n### Environment data\r\n\r\n```powershell\r\nName                           Value\r\n----                           -----\r\nPSVersion                      7.2.0-preview.7\r\nPSEdition                      Core\r\nGitCommitId                    7.2.0-preview.7\r\nOS                             Microsoft Windows 10.0.18362\r\nPlatform                       Win32NT\r\nPSCompatibleVersions           {1.0, 2.0, 3.0, 4.0\u2026}\r\nPSRemotingProtocolVersion      2.3\r\nSerializationVersion           1.1.0.1\r\nWSManStackVersion              3.0\r\n```\r\n\r\n\r\n---\r\n\r\nNeeds `OutputTypeAttribute` decoration:\r\n\r\n```diff\r\na/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/CoreCLR/InvokeWebRequestCommand.CoreClr.cs\r\n+++ b/src/Microsoft.PowerShell.Commands.Utility/commands/utility/WebCmdlet/CoreCLR/InvokeWebRequestCommand.CoreClr.cs\r\n@@ -13,6 +13,7 @@ namespace Microsoft.PowerShell.Commands\r\n     /// This command makes an HTTP or HTTPS request to a web server and returns the results.\r\n     /// </summary>\r\n     [Cmdlet(VerbsLifecycle.Invoke, \"WebRequest\", HelpUri = \"https://go.microsoft.com/fwlink/?LinkID=2097126\", DefaultParameterSetName = \"StandardMethod\")]\r\n+    [OutputType(typeof(WebResponseObject))]\r\n     public class InvokeWebRequestCommand : WebRequestPSCmdlet\r\n     {\r\n         #region Virtual Method Overrides\r\n```\r\n\r\n",
+  "closed_at": "2022-03-24T22:54:09Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Are there other cmdlets we should fix too?",
+      "created_at": "2021-08-11T05:09:51Z",
+      "updated_at": "2021-08-11T05:09:51Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "So I ran a test.  This checks for binary cmdlets that are not decorated with `OutputTypeAttribute` but have a reference to `WriteObject` somewhere in their disassembled source.  This is not a perfect test and will have false negatives and positives.\r\n\r\n```powershell\r\n$typesWithNoOutputType = ClassExplorer\\Find-Type -InheritsType System.Management.Automation.Cmdlet {\r\n    $_.IsDefined([Management.Automation.CmdletAttribute], $true) -and\r\n    -not $_.IsDefined([OutputType], $true)\r\n}\r\n\r\n$needsOutputType = foreach ($type in $typesWithNoOutputType) {\r\n    $disassem = dnSpy.Console.exe --md $type.MetadataToken $type.Assembly.Location |\r\n        Out-String -Width 10000\r\n    if ($disassem.Contains('WriteObject', [StringComparison]::Ordinal)) {\r\n        # yield\r\n        $type\r\n    }\r\n}\r\n\r\n$needsOutputType | % { $ExecutionContext.InvokeCommand.GetCmdletByTypeName($PSItem) }\r\n```\r\n\r\n\r\nThat gives the list below.  Note that some of these may have their type inference hard coded into the engine, or they may not be able to meaningfully describe their output via a static type name.  These should probably still be annotated for tools like PSSA that may use `OutputType` to determine *if* a command outputs rather than *what* a command outputs. Also some of these may only output when a flag is passed like `PassThru`, which may also be difficult to annotate currently.\r\n\r\nSome however definitely just need an annotation (looking at you `Get-TimeZone`).\r\n\r\n<details>\r\n\r\n<summary>Command List (click to expand)</summary>\r\n\r\n```powershell\r\nInvoke-History\r\nForEach-Object\r\nWhere-Object\r\nInvoke-Command\r\nReceive-Job\r\nReceive-PSSession\r\nOut-Default\r\nGet-Help\r\nGet-Acl\r\nRename-Computer\r\nGet-ItemPropertyValue\r\nPush-Location\r\nPop-Location\r\nResolve-Path\r\nRemove-Service\r\nGet-TimeZone\r\nSet-TimeZone\r\nAdd-Member\r\nCompare-Object\r\nConvertTo-Html\r\nExport-Csv\r\nConvertFrom-Csv\r\nOut-GridView\r\nGet-Unique\r\nImport-LocalizedData\r\nImport-PowerShellDataFile\r\nNew-Object\r\nSelect-Object\r\nShow-Command\r\nSort-Object\r\nTee-Object\r\nTest-Json\r\nTrace-Command\r\nUpdate-List\r\nNew-Variable\r\nInvoke-RestMethod\r\nConvertFrom-Json\r\nConvertTo-Json\r\nInvoke-WebRequest\r\nWrite-Output\r\nEnable-WSManCredSSP\r\nGet-WSManCredSSP\r\nInvoke-WSManAction\r\nNew-WSManSessionOption\r\nTest-WSMan\r\nSet-WSManQuickConfig\r\nGet-WSManInstance\r\nSet-WSManInstance\r\nNew-WSManInstance\r\n```\r\n\r\n</details>",
+      "created_at": "2021-08-11T13:34:51Z",
+      "updated_at": "2021-08-11T13:34:51Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "It is nice to have but I'd prefer to implement OutputType per ParameterSet first.",
+      "created_at": "2021-08-11T17:54:50Z",
+      "updated_at": "2021-08-11T17:54:50Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "You can already annotate per `ParameterSet` (`[OutputType(typeof(Something), ParameterSetName = \"PassThru\")]`), though type inference doesn't actually try to verify it.  It just treats it the same as if you did not specify a parameter set name.\r\n\r\nNot all of the ones on that list need anything other than a normal `OutputType` decoration though.",
+      "created_at": "2021-08-11T18:30:09Z",
+      "updated_at": "2021-08-11T18:30:09Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@SeeminglyScience Could you please add more info? It seems we haven't ParameterSet attribute. Or you say about ParameterAttribute? ",
+      "created_at": "2021-08-12T03:19:10Z",
+      "updated_at": "2021-08-12T03:19:10Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The Output type attribute already has a field to specify which parameter set name it applies to. For multiple parameter sets, you just add multiple OutputType attributes, each specifying a different parameter set.",
+      "created_at": "2021-08-12T03:24:02Z",
+      "updated_at": "2021-08-12T03:24:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Ah, thanks! It's even easier than I thought. We have to add this analysis first and then fix the cmdlets.",
+      "created_at": "2021-08-12T03:35:55Z",
+      "updated_at": "2021-08-12T03:36:05Z"
+    },
+    {
+      "author": "jdhitsolutions",
+      "author_association": "COLLABORATOR",
+      "body": "Is this being considered a bug or a cmdlet enhancement?",
+      "created_at": "2021-08-18T13:39:16Z",
+      "updated_at": "2021-08-18T13:39:16Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Is this being considered a bug or a cmdlet enhancement?\r\n\r\nCould be either.  It's technically probably closest to an enhancement but you could also argue that any obviously missing output type decorations is a mistake.",
+      "created_at": "2021-08-18T13:51:41Z",
+      "updated_at": "2021-08-18T13:51:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "We forget about _Providers_ - they are annotated with OutputTypeAttribute too.\r\n",
+      "created_at": "2021-08-19T02:48:57Z",
+      "updated_at": "2021-08-19T02:48:57Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> We forget about _Providers_ - they are annotated with OutputTypeAttribute too.\r\n\r\nYeah that's correct, the list wasn't manually vetted and likely has other false negatives and positives.",
+      "created_at": "2021-08-19T03:46:55Z",
+      "updated_at": "2021-08-19T03:46:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "I have started to prepare the fix but it turned out to be a little complicated because the attribute allows many-to-many mappings. :-)",
+      "created_at": "2021-08-19T04:19:12Z",
+      "updated_at": "2021-08-19T04:19:12Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": ":tada:This issue was addressed in #16962, which has now been successfully released as `v7.3.0-preview.4`.:tada:\n\nHandy links:\n* [Release Notes](https://github.com/PowerShell/PowerShell/releases/tag/v7.3.0-preview.4)\n",
+      "created_at": "2022-05-23T16:20:53Z",
+      "updated_at": "2022-05-23T16:20:53Z"
+    }
+  ],
+  "created_at": "2021-08-10T17:17:50Z",
+  "number": 15905,
+  "state": "closed",
+  "title": "`Invoke-WebRequest` is not annotated with `OutputTypeAttribute`",
+  "updated_at": "2022-05-23T16:20:53Z"
+}

@@ -1,0 +1,440 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/15128",
+  "author": "mklement0",
+  "body": "Note: It is debatable what console encoding should apply when remoting into a Window machine - the caller's or the target machine's - but (effectively) using _ANSI_ encoding  - rather than the OEM code page, as is still the default on Windows - seems like the wrong choice.\r\n\r\nCuriously, Windows PowerShell behaves this way too.\r\n\r\n\r\n## Steps to reproduce\r\n\r\nRun on (PS Core) on Windows:\r\n\r\n* from an _elevated_ session, to enable \"loopback\" remoting\r\n* make sure that the calling version is enabled for remoting \r\n\r\n```powershell\r\n& {\r\n  # Target the local machine.\r\n  $htParams = @{ ('HostName', 'ComputerName')[$env:OS -eq 'Windows_NT'] = '.' }\r\n  # On Windows, determine what edition / version to target remotely: use the caller's.\r\n  if ($env:OS -eq 'Windows_NT') {\r\n    $htParams['ConfigurationName'] = (('PowerShell.' + $PSVersionTable.PSVersion), 'microsoft.powershell')[$PSVersionTable.PSEdition -ne 'Core']\r\n  }  \r\n  Invoke-Command @htParams { if ($env:OS -eq 'Windows_NT') { chcp } else { $env:LANG }; [Console]::InputEncoding.WebName; [Console]::OutputEncoding.WebName, $OutputEncoding.WebName }\r\n}\r\n```\r\n\r\n## Expected behavior\r\n\r\n```powershell\r\nActive code page: 437\r\nibm437   # [Console]::InputEncoding.WebName\r\nibm437   # [Console]::OutputEncoding.WebName\r\nutf-8       # $OutputEncoding\r\n```\r\n\r\n## Actual behavior\r\n\r\n```powershell\r\nActive code page: 437\r\nwindows-1252   # !! *ANSI* code page\r\nCodepage - 0   # !! *0* - but in effect seems to behave like ANSI\r\nutf-8\r\n```\r\n\r\n## Environment data\r\n\r\n```none\r\nPowerShell Core 7.2.0-preview.4\r\n```\r\n",
+  "closed_at": "2021-05-17T22:29:47Z",
+  "comments": [
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "While the behaviour definitely isn't helpful the reason why this is the case is because your PSSession does not have a console/conhost.exe allocated to the process. When .NET goes to get the codepage [GetConsoleCP](https://docs.microsoft.com/en-us/windows/console/getconsolecp) (Input) and [GetConsoleOutputCP](https://docs.microsoft.com/en-us/windows/console/getconsoleoutputcp) (Output) both return 0 meaning an error occurred.\r\n\r\nThis value isn't checked at all and is just passed straight into `[Text.Encoding]::GetEncoding` where the docs state https://docs.microsoft.com/en-us/dotnet/api/system.text.encoding.getencoding?view=net-5.0#System_Text_Encoding_GetEncoding_System_Int32_\r\n\r\n> 0 (zero), to use the default encoding.\r\n\r\nThe reason why running `chcp.com` returns the correct codepage is because the act of starting a spawning a new console process without an existing conhost will result in one being spawned automatically and it now has the correct value.\r\n\r\nTry it out\r\n\r\n```powershell\r\nInvoke-Command -ComputerName localhost -ScriptBlock {\r\n\r\n    $getConsoleCP = {\r\n        Add-Type -Namespace Kernel32 -Name NativeMethods -MemberDefinition @'\r\n[DllImport(\"Kernel32.dll\")]\r\npublic static extern uint GetConsoleCP();\r\n\r\n[DllImport(\"Kernel32.dll\")]\r\npublic static extern uint GetConsoleOutputCP();\r\n'@\r\n\r\n        [PSCustomObject]@{\r\n            ConsoleCP = [Kernel32.NativeMethods]::GetConsoleCP()\r\n            InputEncoding = [Console]::InputEncoding.WebName\r\n\r\n            ConsoleOutputCP = [Kernel32.NativeMethods]::GetConsoleOutputCP()\r\n            OutputEncoding = [Console]::OutputEncoding.WebName\r\n        }\r\n    }\r\n    \r\n    Write-Host \"In PSSession\"\r\n    &$getConsoleCP | Format-Table\r\n\r\n    Write-Host \"In sub process\"\r\n    $encCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($getConsoleCP.ToString()))\r\n    powershell.exe -EncodedCommand $encCommand\r\n}\r\n```\r\n\r\nOutputs\r\n\r\n```\r\nIn PSSession\r\n\r\nConsoleCP InputEncoding ConsoleOutputCP OutputEncoding\r\n--------- ------------- --------------- --------------\r\n        0 Windows-1252                0 Windows-1252\r\n\r\n\r\nIn sub process\r\n\r\nConsoleCP InputEncoding ConsoleOutputCP OutputEncoding\r\n--------- ------------- --------------- --------------\r\n      437 IBM437                    437 IBM437\r\n```\r\n\n\n<blockquote><img src=\"https://docs.microsoft.com/en-us/media/logos/logo-ms-social.png\" width=\"48\" align=\"right\"><div><strong><a href=\"https://docs.microsoft.com/en-us/dotnet/api/system.text.encoding.getencoding\">Encoding.GetEncoding Method (System.Text)</a></strong></div><div>Returns an encoding for the specified code page. </div></blockquote>",
+      "created_at": "2021-03-31T03:26:02Z",
+      "updated_at": "2021-03-31T03:26:04Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Now the question is what should be the correct behaviour, some of the options I can think off right now\r\n\r\n* .NET fixes their logic to fallback to the registry setting if the Win32 APIs return 0\r\n* PowerShell first checks if a console is present\r\n  * If present then it acts like it does today\r\n  * If not it could fallback to the registry\r\n* PowerShell could automatically allocate a new conhost whenever a native process is started and set the cp to 65001 (or fallback to the registry default)\r\n  * If PowerShell spawns a console then any child processes it creates should use that same console/cp settings\r\n\r\nFor the latter it will have the same restrictions that exist today for a normal process session but it at least solves this problem.",
+      "created_at": "2021-03-31T03:30:09Z",
+      "updated_at": "2021-03-31T03:30:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @jborean93, that's helpful background information.\r\n\r\nI explicitly included the `chcp` call in order to force allocation of a console first, followed by querying `[Console]::InputEncoding` and `[Console]::OutputEncoding`.\r\n\r\nThe curious thing that the `chcp` calls assigns a value to `[Console]::InputEncoding`, but not to `[Console]::OutputEncoding`\r\n\r\nBy contrast, in _Windows PowerShell_ _both_ values are set to the ANSI encoding, and even _without_ running a console application first - does it always, automatically allocate a console? Or does it simply take an extra step to translate `0` into the default == ANSI code page?\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-03-31T03:36:26Z",
+      "updated_at": "2021-03-31T03:43:48Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for what the correct behavior should be:\r\n\r\n* .NET should definitely fix their fallback behavior to fall back to the _OEM_ code page, not the ANSI code page.\r\n\r\n* Separately, we should decide what makes more sense for PowerShell remoting: inherit the _caller_'s code page, or defer to the targeted machine's code page? \r\n  * If the latter case, `65001` (UTF-8) would certainly be convenient, but only appropriate if we officially we decide to make PowerShell Core sessions on Windows UTF-8 _by default_, as proposed in https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-800503184; otherwise, the target machine's OEM code page should be used.\r\n",
+      "created_at": "2021-03-31T03:48:29Z",
+      "updated_at": "2021-03-31T03:48:29Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> I explicitly included the chcp call in order to force allocation of a console first, followed by querying [Console]::InputEncoding and [Console]::OutputEncoding.\r\n\r\nThe conhost is created and tied to the lifetime of the `chcp` process. It won't persist beyond that life of that process and tie itself to your PSSession so that codepage will still be 0. So regardless of the order the fact that you called `chcp` won't affect (or at least I don't see how) the .NET Console encoding values of your PSSession itself. The same thing applies to any other console subprocess you spawn. For example I've got a blank PSSession open I can see it's running as `wsmprovhost.exe` with no `conhost.exe` attached.\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/113087403-e0a11e00-9226-11eb-8796-fdbf11f849c9.png)\r\n\r\nI spawn `powershell.exe` with a lifetime time to keep it running and I can see it now has a console associated with it\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/113087476-04fcfa80-9227-11eb-85d7-fbc7fb7b6984.png)\r\n\r\nWhen that ends I'm now back with just `wsmprovhost.exe` with the `conhost.exe` no longer there\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/113087591-53aa9480-9227-11eb-8cb5-799742c4b23f.png)\r\n\r\n> The curious thing that the chcp calls assigns a value to [Console]::InputEncoding, but not to [Console]::OutputEncoding\r\n\r\nThis is what doesn't make sense to me, both `InputEncoding` and `OutputEncoding` depend on the Win32 APIs to get the values. They both should be returning `0` and thus set the encoding to the default encoding on the host. Even when I test that assumption I cannot replicate what you see (even when targeting PowerShell v7).\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/113087718-94a2a900-9227-11eb-9495-e736a07d1ff2.png)\r\n\r\n> By contrast, in Windows PowerShell both values are set to the ANSI encoding, and even without running a console application first - does it always, automatically allocate a console? Or does it simply take an extra step to translate 0 into the default == ANSI code page?\r\n\r\nI'm not 100% sure what you mean with Windows PowerShell here, the encoding values come from .NET and it's the behaviour of `[Text.Encoding]::GetEncoding(0)` to return the default encoding (whatever that actually is) which in this case is the \"ANSI\" encoding.",
+      "created_at": "2021-03-31T03:51:21Z",
+      "updated_at": "2021-03-31T03:51:21Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The conhost is created and tied to the lifetime of the chcp process. It won't persist beyond that life of that process and tie itself to your PSSession so that codepage will still be 0. So regardless of the order the fact that you called chcp won't affect (or at least I don't see how) the .NET Console encoding values of your PSSession itself. \r\n\r\nGood to know, thanks. Yes, it is curious thing that (only) `[Console]::InputEncoding` is set after running `chcp`, but the fact that the reported encoding _differs_ from what `chcp` reports confirms your larger point that `chcp`'s console is no longer active.\r\n\r\n> I'm not 100% sure what you mean with Windows PowerShell here\r\n\r\nRun the same command from Windows PowerShell, which targets itself (configuration `microsoft.powershell`) as the endpoint, and you'll see the difference.\r\nIt may come down to the difference between .NET Framework (Windows PowerShell) and .NET (Core) 5+ (PowerShell Core).\r\n\r\nThe above applies to the `Invoke-Command` invocation scenario; when entering an _interactive_ session with `Enter-PSSession`, I do consistently see both `[Console]::InputEncoding`  and `[Console]::OutputEncoding`  set to the ANSI encoding.\r\n\r\nTo simplify the `Invoke-Command` calls and show the difference (it doesn't make a difference what edition you call _from_):\r\n\r\n```powershell\r\n# Target the current PS Core preview (I get the same behavior with 7.0.3)\r\nPS> icm -cn . -config PowerShell.7.2.0-preview.4 { [console]::InputEncoding.CodePage; [console]::OutputEncoding.CodePage }\r\n0\r\n0\r\n```\r\n\r\n```powershell\r\n# Target WinPS\r\nPS> icm -cn . -config microsoft.powershell { [console]::InputEncoding.CodePage; [console]::OutputEncoding.CodePage }\r\n1252\r\n1252\r\n```",
+      "created_at": "2021-03-31T04:12:44Z",
+      "updated_at": "2021-03-31T04:13:17Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> The above applies to the Invoke-Command invocation scenario; when entering an interactive session with Enter-PSSession, I do consistently see both [Console]::InputEncoding and [Console]::OutputEncoding set to the ANSI encoding.\r\n\r\nAh ok, I'm running with just `Enter-PSSession`, weird that there is a difference though, I wouldn't have thought it would matter.",
+      "created_at": "2021-03-31T04:18:35Z",
+      "updated_at": "2021-03-31T04:18:35Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I'm currently looking into how `[Text.Encoding]::GetEncoding(0)` returns windows-1252. The definition of this function for .NET Core is at https://github.com/dotnet/runtime/blob/99d6215ef2336b8fa51fe19b2e8e782df62959df/src/libraries/System.Private.CoreLib/src/System/Text/Encoding.cs#L215. Briefly browsing the logic is somewhat similar to .NET Framework but not exactly the same\r\n\r\nIt first checks if the encoding is in the registered provider (more on that later on) and then falls back to a hardcoded switch statement. In that statement `0` is set to be `[Text.Encoding]::Default` which in .NET Core is set to [UTF-8 without a BOM](https://github.com/dotnet/runtime/blob/99d6215ef2336b8fa51fe19b2e8e782df62959df/src/libraries/System.Private.CoreLib/src/System/Text/Encoding.cs#L80-L83). On .NET Framework [the `Default` encoding](https://referencesource.microsoft.com/#mscorlib/system/text/encoding.cs,da50c22465aa9274,references) it is dependent on [GetACP](https://docs.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-getacp).\r\n\r\nSo this explains why `[Text.Encoding]::GetEncoding(0)` returns `windows-1252` on Windows PowerShell but not PowerShell (I would expect that to be `utf-8`). In .NET Core there has to be a registered encoding provider that supports `0` overriding the default behaviour of `0` being `[Text.Encoding]::Default`.\r\n\r\nWe can use reflection to test this out on PowerShell:\r\n\r\n```powershell\r\n$encProvType = [AppDomain]::CurrentDomain.GetAssemblies().DefinedTypes | Where-Object {\r\n    $_.FullName -eq 'System.Text.EncodingProvider'\r\n} | Select -First 1\r\n\r\n$getMeth = $encProvType.GetMethod('GetEncodingFromProvider', [Reflection.BindingFlags]'NonPublic, Static', $null, [Type[]]@([int]), $null)\r\n$getMeth.Invoke($null, @(0))\r\n```\r\n\r\n_Outputs_\r\n\r\n```\r\nIsSingleByte      : True\r\nEncodingName      : Western European (Windows)\r\nWebName           : windows-1252\r\nHeaderName        : windows-1252\r\nBodyName          : iso-8859-1\r\nPreamble          :\r\nWindowsCodePage   :\r\nIsBrowserDisplay  :\r\nIsBrowserSave     :\r\nIsMailNewsDisplay :\r\nIsMailNewsSave    :\r\nEncoderFallback   : System.Text.InternalEncoderBestFitFallback\r\nDecoderFallback   : System.Text.InternalDecoderBestFitFallback\r\nIsReadOnly        : True\r\nCodePage          : 1252\r\n```\r\n\r\nSo this explains why `GetEncoding(0)` returns `windows-1252`. When looking at the [GetEncodingFromProvider method](https://github.com/dotnet/runtime/blob/99d6215ef2336b8fa51fe19b2e8e782df62959df/src/libraries/System.Private.CoreLib/src/System/Text/EncodingProvider.cs#L83) the logic is pretty simple; it looks through the registered providers (`s_providers`) and returns the first match it finds for the codepage.\r\n\r\nWe can also use reflection to get these registered providers\r\n\r\n```powershell\r\n$encProvType = [AppDomain]::CurrentDomain.GetAssemblies().DefinedTypes | Where-Object {\r\n    $_.FullName -eq 'System.Text.EncodingProvider'\r\n} | Select -First 1\r\n\r\n$sProvidersField = $encProvType.GetField('s_providers', [Reflection.BindingFlags]'NonPublic, Static')\r\n$providers = [Text.EncodingProvider[]]$sProvidersField.GetValue($null)\r\n\r\n$providers | % GetType\r\n```\r\n\r\n_Outputs_\r\n\r\n```\r\nIsPublic IsSerial Name                                     BaseType\r\n-------- -------- ----                                     --------\r\nTrue     False    CodePagesEncodingProvider                System.Text.EncodingProvider\r\n```\r\n\r\nThe docs for the [CodePagesEncodingProvider](https://docs.microsoft.com/en-us/dotnet/api/system.text.codepagesencodingprovider?view=net-5.0) state it\r\n\r\n> Provides access to an encoding provider for code pages that otherwise are available only in the desktop .NET Framework.\r\n\r\nLooking at the PowerShell codebase it looks like it is being registered there https://github.com/PowerShell/PowerShell/blob/3ba61069b8e8d027dbbe11f69a85c871359291f9/src/System.Management.Automation/utils/ClrFacade.cs#L143-L149. I just don't have much of an idea of what the purpose of this particular code is for. It looks like some sort of shim to implement some .NET Framework behaviour that is missing in .NET Core. This could even be a red herring and not at all related to the problem but I thought it interesting enough to share.\n\n<blockquote><img src=\"https://avatars.githubusercontent.com/u/9141961?s=400&v=4\" width=\"48\" align=\"right\"><div><img src=\"https://github.githubassets.com/favicons/favicon.svg\" height=\"14\"> GitHub</div><div><strong><a href=\"https://github.com/dotnet/runtime\">dotnet/runtime</a></strong></div><div>.NET is a cross-platform runtime for cloud, mobile, desktop, and IoT apps. - dotnet/runtime</div></blockquote>",
+      "created_at": "2021-03-31T05:03:34Z",
+      "updated_at": "2021-03-31T05:03:36Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Alas I have no idea why `Invoke-Command` differs from `Enter-PSSession` here, they both don't have a console associated with the remote process so the raw Win32 values make sense but I don't know why PowerShell returns 0 (I'm seeing it on OutputEncoding on my host)\r\n```powershell\r\n$getConsoleCP = {\r\n    param ([string]$Scenario, [bool]$RunChcp)\r\n    \r\n    if ($RunChcp) {\r\n        chcp.com\r\n    }\r\n\r\n    Add-Type -Namespace Kernel32 -Name NativeMethods -MemberDefinition @'\r\n[DllImport(\"Kernel32.dll\")]\r\npublic static extern uint GetConsoleCP();\r\n\r\n[DllImport(\"Kernel32.dll\")]\r\npublic static extern uint GetConsoleOutputCP();\r\n'@\r\n\r\n    $inputEncoding = [Console]::InputEncoding\r\n    $outputEncoding = [Console]::OutputEncoding\r\n\r\n    [PSCustomObject]@{\r\n        Scenario = $Scenario\r\n        ConsoleCP = [Kernel32.NativeMethods]::GetConsoleCP()\r\n        InputEncodingCP = $inputEncoding.CodePage\r\n        InputEncoding = $inputEncoding.WebName\r\n        \r\n        \r\n        ConsoleOutputCP = [Kernel32.NativeMethods]::GetConsoleOutputCP()\r\n        OutputEncodingCP = $outputEncoding.CodePage\r\n        OutputEncoding = $outputEncoding.WebName\r\n    }\r\n}\r\n\r\nInvoke-Command localhost -ScriptBlock $getConsoleCP -ArgumentList 'WinPS', $false\r\n\r\nInvoke-Command localhost -ScriptBlock $getConsoleCP -ArgumentList 'WinPS + proc', $true\r\n\r\nInvoke-Command localhost -ConfigurationName PowerShell.7 -ScriptBlock $getConsoleCP -ArgumentList 'PS', $false\r\n\r\nInvoke-Command localhost -ConfigurationName PowerShell.7 -ScriptBlock $getConsoleCP -ArgumentList 'PS + proc', $true\r\n```\r\n\r\n```\r\nScenario         : WinPS\r\nConsoleCP        : 0\r\nInputEncodingCP  : 1252\r\nInputEncoding    : Windows-1252\r\nConsoleOutputCP  : 0\r\nOutputEncodingCP : 1252\r\nOutputEncoding   : Windows-1252\r\n\r\n\r\nScenario         : WinPS + proc\r\nConsoleCP        : 0\r\nInputEncodingCP  : 1252\r\nInputEncoding    : Windows-1252\r\nConsoleOutputCP  : 0\r\nOutputEncodingCP : 1252\r\nOutputEncoding   : Windows-1252\r\n\r\n\r\nScenario         : PS\r\nConsoleCP        : 0\r\nInputEncodingCP  : 1252\r\nInputEncoding    : windows-1252\r\nConsoleOutputCP  : 0\r\nOutputEncodingCP : 1252\r\nOutputEncoding   : windows-1252\r\n\r\n\r\nScenario         : PS + proc\r\nConsoleCP        : 0\r\nInputEncodingCP  : 1252\r\nInputEncoding    : windows-1252\r\nConsoleOutputCP  : 0\r\nOutputEncodingCP : 0\r\nOutputEncoding   : Codepage - 0\r\n```\r\n\r\nWinPS is consistent and makes sense because it's really just using `[Text.Encoding]::Default` when the cp returned by the Win32 API is `0`. Pwsh is interesting as it uses the registered `CodePagesEncodingProvider` to get the \"ANSI\" codepage but when a console process had run that provider seems to be a bit screwed up and only for `[Console]::OutputEncoding`.\r\n\r\nMaybe PSReadLine or some other mechanism is setting `[Console]::OutputEncoding = $someBackupValue` after the native process had exited and `$someBackupValue` was derived in some other way from `0`.",
+      "created_at": "2021-03-31T05:14:31Z",
+      "updated_at": "2021-03-31T05:14:31Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> As for what the correct behavior should be:\r\n> \r\n> * .NET should definitely fix their fallback behavior to fall back to the _OEM_ code page, not the ANSI code page.\r\n\r\nIs there an issue for reference?\r\n\r\n> * Separately, we should decide what makes more sense for PowerShell remoting: inherit the _caller_'s code page, or defer to the targeted machine's code page?\r\n>   \r\n>   * If the latter case, `65001` (UTF-8) would certainly be convenient, but only appropriate if we officially we decide to make PowerShell Core sessions on Windows UTF-8 _by default_, as proposed in [#14945 (comment)](https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-800503184); otherwise, the target machine's OEM code page should be used.\r\n\r\nOf course, I would like to avoid a situation when we receive a message from a remote host in a different language and in wrong double re-encoding.\r\n\r\nIf we connect to WinPS we should follow old behavior. \r\nIf we connect to new PowerShell Core it is best to be Utf8 (maybe excluding old Windows) as it will cause fewer side effects and reflects the modern trend, and it would nice to have a parameter to set explicitly encoding to address specific scenarios.\r\n\r\n",
+      "created_at": "2021-03-31T08:17:58Z",
+      "updated_at": "2021-03-31T08:17:58Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> Of course, I would like to avoid a situation when we receive a message from a remote host in a different language and in wrong double re-encoding.\r\n\r\nThis is all happening on the remote side, anything exchanged across PSSessions are in a utf-8 encoded CLIXML payload so there's no chance of an encoding mismatch between the client and the server. We just need to make sure that the remote PowerShell session captures the `stdout` from the process properly before it is serialised as a string to the CLIXML.\r\n\r\nWhen PowerShell runs a native executable it needs to capture the `stdout` and `stderr` and it uses the `[Console]::OutputEncoding` value to encode those bytes from `stdout` and `stderr` to a .NET string. When there is a mismatch between `[Console]::OutputEncoding` on the calling PowerShell process and the output encoding used by the child process we can get the wrong characters being interpreted.\r\n\r\nNormally this isn't as much of a problem because `[Console]::OutputEncoding` defaults to the console output codepage. In most cases when a native process writes to `stdout` they encode their string using the output codepage so PowerShell is able to correctly decode them. There are definitely cases where this isn't the case but there's little PowerShell can do about that.\r\n\r\nFor a remote PSSession there is no console process associated with the PowerShell process which results in `[Console]::OutputEncoding` using the default \"ANSI\" codepage of Windows and **NOT** the default console codepage that a native application is meant to use. This essentially means the native app will write to `stdout` using the console codepage and PowerShell will read `stdout` using the \"ANSI\" codepage which is not aligned.\r\n\r\nIf the native application outputs `caf\u00e8` here is the string that PowerShell will set for that output based on the defaults of an en-US Windows host:\r\n\r\n```powershell\r\n$ibm = [Text.Encoding]::GetEncoding(437)\r\n$windows = [Text.Encoding]::GetEncoding('windows-1252')\r\n\r\n$windows.GetString($ibm.GetBytes('caf\u00e8'))\r\n\r\n# caf\u0160\r\n```\r\n\r\nYou can see the string get mangled when different encoding mechanisms are used and this is essentially what will happen over a PSRemoting session.\r\n\r\nThere are a 2 things I can see PowerShell  do here:\r\n\r\n* Create a console if none is present; either on startup or when it spawns a new process\r\n  * [GetConsoleWindow](https://docs.microsoft.com/en-us/windows/console/getconsolewindow) can be used to detect if a console is present\r\n  * [AllocConsole](https://docs.microsoft.com/en-us/windows/console/allocconsole) can be used to create a new console and attach to the current process\r\n  * Any new console processes spawned by PowerShell will inherit this console and its settings\r\n  * As long as `[Console]::OutputEncoding` isn't called before the console was spawned then it will continue to work as per usual\r\n* If no console is detected (either through `GetConsoleWindow` above or `GetConsoleOutputCP() == 0`)\r\n  * Don't use `[Console]::OutputEncoding`, rather lookup the codepage from the registry\r\n  * `Get-ItemPropertyValue -Path HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage -Name OEMCP`\r\n  * This is further complicated because the code page can be set under console settings for the user, specific exe, `.lnk` that was invoked\r\n  * Due to the above the `OEMCP` might be 437 but saw `pwsh.exe` has a `CodePage` value of `65001` in `HKCU:\\Console\\pwsh_path.exe` then the wrong codepage is being used again\r\n\r\nThe trouble with the 2nd point and identifying the codepage that the subprocess will use is a reason why I think PowerShell itself should just spawn it's own console when it starts (or when the first process is spawned). The first option also has the added benefit of allowing PowerShell to set the codepage to UTF-8 in the future in case that's something to be desired.",
+      "created_at": "2021-03-31T09:47:03Z",
+      "updated_at": "2021-03-31T09:47:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> This is all happening on the remote side,\r\n\r\nI say about another - if our local session has English  locale and remote one - Russian, then we see follow:\r\n```powershell\r\n Invoke-Command -ComputerName testhost -ScriptBlock { ping localhost }\r\n\r\n\u040b\u040e\u00ac\u0490\u00ad \u0407\u00a0\u0404\u0490\u0432\u00a0\u00ac\u0401 \u0431 testhost [::1] \u0431 32 \u040e\u00a0\u00a9\u0432\u00a0\u00ac\u0401 \u00a4\u00a0\u00ad\u00ad\u043b\u0435:\r\n\u040b\u0432\u045e\u0490\u0432 \u00ae\u0432 ::1: \u045e\u0430\u0490\u00ac\u043f<1\u00ac\u0431\r\n\u040b\u0432\u045e\u0490\u0432 \u00ae\u0432 ::1: \u045e\u0430\u0490\u00ac\u043f<1\u00ac\u0431\r\n\u040b\u0432\u045e\u0490\u0432 \u00ae\u0432 ::1: \u045e\u0430\u0490\u00ac\u043f<1\u00ac\u0431\r\n\u040b\u0432\u045e\u0490\u0432 \u00ae\u0432 ::1: \u045e\u0430\u0490\u00ac\u043f<1\u00ac\u0431\r\n\r\n\u2018\u0432\u00a0\u0432\u0401\u0431\u0432\u0401\u0404\u00a0 Ping \u00a4\u00ab\u043f ::1:\r\n    \u040f\u00a0\u0404\u0490\u0432\u00ae\u045e: \u00ae\u0432\u0407\u0430\u00a0\u045e\u00ab\u0490\u00ad\u00ae = 4, \u0407\u00ae\u00ab\u0433\u0437\u0490\u00ad\u00ae = 4, \u0407\u00ae\u0432\u0490\u0430\u043f\u00ad\u00ae = 0\r\n    (0% \u0407\u00ae\u0432\u0490\u0430\u043c)\r\n\u040f\u0430\u0401\u040e\u00ab\u0401\u00a7\u0401\u0432\u0490\u00ab\u043c\u00ad\u00ae\u0490 \u045e\u0430\u0490\u00ac\u043f \u0407\u0430\u0401\u0490\u00ac\u00a0-\u0407\u0490\u0430\u0490\u00a4\u00a0\u0437\u0401 \u045e \u00ac\u0431:\r\n    \u040a\u0401\u00ad\u0401\u00ac\u00a0\u00ab\u043c\u00ad\u00ae\u0490 = 0\u00ac\u0431\u0490\u0404, \u040a\u00a0\u0404\u0431\u0401\u00ac\u00a0\u00ab\u043c\u00ad\u00ae\u0490 = 0 \u00ac\u0431\u0490\u0404, \u2018\u0430\u0490\u00a4\u00ad\u0490\u0490 = 0 \u00ac\u0431\u0490\u0404\r\n```\r\nExpected:\r\n```powershell\r\n\u041e\u0431\u043c\u0435\u043d \u043f\u0430\u043a\u0435\u0442\u0430\u043c\u0438 \u0441 testhost [::1] \u0441 32 \u0431\u0430\u0439\u0442\u0430\u043c\u0438 \u0434\u0430\u043d\u043d\u044b\u0445:\r\n\u041e\u0442\u0432\u0435\u0442 \u043e\u0442 ::1: \u0432\u0440\u0435\u043c\u044f<1\u043c\u0441\r\n\u041e\u0442\u0432\u0435\u0442 \u043e\u0442 ::1: \u0432\u0440\u0435\u043c\u044f<1\u043c\u0441\r\n\u041e\u0442\u0432\u0435\u0442 \u043e\u0442 ::1: \u0432\u0440\u0435\u043c\u044f<1\u043c\u0441\r\n\u041e\u0442\u0432\u0435\u0442 \u043e\u0442 ::1: \u0432\u0440\u0435\u043c\u044f<1\u043c\u0441\r\n\r\n\r\n\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 Ping \u0434\u043b\u044f ::1:\r\n    \u041f\u0430\u043a\u0435\u0442\u043e\u0432: \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e = 4, \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u043e = 4, \u043f\u043e\u0442\u0435\u0440\u044f\u043d\u043e = 0\r\n    (0% \u043f\u043e\u0442\u0435\u0440\u044c)\r\n\u041f\u0440\u0438\u0431\u043b\u0438\u0437\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f \u043f\u0440\u0438\u0435\u043c\u0430-\u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438 \u0432 \u043c\u0441:\r\n    \u041c\u0438\u043d\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0435 = 0\u043c\u0441\u0435\u043a, \u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0435 = 0 \u043c\u0441\u0435\u043a, \u0421\u0440\u0435\u0434\u043d\u0435\u0435 = 0 \u043c\u0441\u0435\u043a\r\nping.exe exited on localhost with error code 0.\r\n```\r\n",
+      "created_at": "2021-03-31T12:55:27Z",
+      "updated_at": "2021-04-08T04:07:31Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "That\u2019s most likely due to the same problem but had nothing to do with the PSRemoting serialisation. At that point it\u2019s already a string and damage is already done. It could be that the culture settings that are sent through impact the default encoding used but it\u2019s just more reason why PowerShell needs to be more defensive when there\u2019s no console present.",
+      "created_at": "2021-03-31T20:26:34Z",
+      "updated_at": "2021-03-31T20:26:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Great sleuthing, @jborean93.\r\n\r\n@iSazonov, re:\r\n\r\n> Is there an issue for reference?\r\n\r\nI couldn't find anything (except an ancient issue, which shows that at some point the default _with_ an allocated console was UTF-8(!) - https://github.com/dotnet/runtime/issues/17849).\r\n\r\nWhen accessing  `Console.In/OutputEncoding` _without a console present_:\r\n\r\n* It is only .NET Framework (not .NET Core) that falls back to ANSI (which is definitely not appropriate - but I doubt they'll fix that).\r\n\r\n* .NET Core now returns an encoding object with code page `0`  and web name `Codepage - 0`- I don't know if that's by design or a bug, but it certainly isn't helpful. \r\n  * By contrast, if you call `Encoding.GetEncoding(0)` explicitly, you get UTF-8, which is consistent with `Encoding.Default` in .NET Core - which makes sense, given that this call in isolation isn't console-related.\r\n  * As @jborean93 has found out, with the Windows code-page encoding provider registered, which apparently happens automatically when a console _is_ attached (in a console application), it preempts the default meaning of `0` and returns the system's ANSI code page instead.\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-01T21:05:36Z",
+      "updated_at": "2021-04-01T21:05:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@jborean93, the explanation for the discrepancy between `Invoke-Command` and `Enter-PSSession` is therefore as follows:\r\n\r\n`Invoke-Command` doesn't call `[System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)`, whereas `Enter-PSSession` does:\r\n\r\nIf you register the code-page encoding provider explicitly, you get the same symptom as with `Enter-PSSession`:\r\n\r\n```powershell\r\n# !! Without the `[System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)`\r\n# !! call, the output is (0, 0)\r\nPS>  icm -cn . -config PowerShell.7.2.0-preview.4 { [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance); [console]::InputEncoding.CodePage; [console]::OutputEncoding.CodePage }\r\n1252\r\n1252 \r\n```\r\n\r\nCuriously, running _any_ console application in lieu of registering the code-page provider manages to make `Console.InputEncoding` - only - reflect the system's ANSI code page:\r\n\r\n```powershell\r\nPS>  icm -cn . -config PowerShell.7.2.0-preview.4 { \r\n  cmd /c exit\r\n  [console]::InputEncoding.CodePage; [console]::OutputEncoding.CodePage\r\n}\r\n1252 # Console.InputEncoding\r\n0    # Console.OutputEncoding\r\n```\r\n\r\nWhat it seems to come down to is that calling the underlying WinAPI functions at least once  - even though they themselves keep returning `0`(!) - then makes `Console.In/OutputEncoding` return the system's active ANSI code page:\r\n\r\n```powershell\r\nPS>  icm -cn . -config PowerShell.7.2.0-preview.4 { \r\n  Add-Type -Namespace Util -Name WinApi -MemberDefinition '[DllImport(\"Kernel32.dll\")] public static extern uint GetConsoleCP(); [DllImport(\"Kernel32.dll\")] public static extern uint GetConsoleOutputCP();'; \r\n  [Util.WinAPI]::GetConsoleCP(); [Util.WinAPI]::GetConsoleOutputCP()\r\n  [console]::InputEncoding.CodePage; [console]::OutputEncoding.CodePage\r\n}\r\n0    # GetConsoleCP()\r\n0    # GetConsoleOutputCP()\r\n1252 # Console.InputEncoding\r\n1252 # Console.OutputEncoding\r\n```\r\n\r\n",
+      "created_at": "2021-04-02T01:51:26Z",
+      "updated_at": "2021-04-02T01:52:59Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for what PowerShell should do:\r\n\r\nIt seems like the _caller's_ settings should determine the behavior:\r\n\r\n* In terms of _culture_ (`[cultureinfo]::CurrentCulture` / `$PSCulture`), the _caller's_ settings already apply, irrespective of the target-machine settings.\r\n\r\n* It therefore also makes sense to use the caller's _console encoding_.\r\n\r\nHowever, that is problematic in _cross-platform_ remoting: \r\n\r\n* Windows -> Unix: The Windows code page may not even be available on the target machine.\r\n* Unix -> Windows: This would (most likely) make the console use UTF-8\r\n\r\nGenerally, agreeing on UTF-8 as the \"lingua franca\" would make the most sense - certainly more than the current Windows behavior of using the _ANSI_ code page.\r\n\r\n",
+      "created_at": "2021-04-02T02:01:29Z",
+      "updated_at": "2021-04-02T02:01:29Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@dhowett Have you any thoughts?",
+      "created_at": "2021-04-02T06:04:45Z",
+      "updated_at": "2021-04-02T06:04:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> . I just don't have much of an idea of what the purpose of this particular code is for. It looks like some sort of shim to implement some .NET Framework behaviour that is missing in .NET Core. This could even be a red herring and not at all related to the problem but I thought it interesting enough to share.\r\n\r\nBefore we added the \"Encoding.RegisterProvider(CodePagesEncodingProvider.Instance); \" users could not use OEM and ANSII encoding names in cmdlets (Get-Content -Encoding windows-1251)",
+      "created_at": "2021-04-02T06:19:45Z",
+      "updated_at": "2021-04-02T06:19:45Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> `Invoke-Command` doesn't call `[System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)`, whereas `Enter-PSSession` does:\r\n\r\nIf I understand right  `Invoke-Command` should follow `Enter-PSSession` behavior and both should have correct default that should be rather Utf8 then OEM in modern Windows 10 (I would not worry about old Windows 7). And we need a fix in Console class (no workaround could be in PowerShell itself?). Yes?",
+      "created_at": "2021-04-02T06:37:44Z",
+      "updated_at": "2021-04-02T06:37:44Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": ">  users could not use OEM and ANSII encoding names in cmdlets (Get-Content -Encoding windows-1251)\r\n\r\nIndeed; `[System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)` is the prerequisite for access to all encodings based on _Windows code pages_, notably including the active OEM and ANSI code pages; that is, without registering the provider, something like `Encoding.GetEncoding(437)` (the [OEM code page used in the `en-US` culture](https://en.wikipedia.org/wiki/Code_page_437), for instance) wouldn't work.\r\n\r\n> both should have correct default that should be rather Utf8 then OEM in modern Windows 10 \r\n\r\nAgreed, but to that end we should also commit to making  regular, local console windows default to UTF-8 - which is long overdue - as originally proposed in  #7233 and fleshed out in https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-800503184\r\n\r\nThe only thing that could break is calls to very old CLIs that cannot handle code page `65001` (UTF-8) and its variable-length encoding aspect - but my guess is that such CLIs are pretty rare these days.\r\n\r\n---\r\n\r\n> And we need a fix in Console class (no workaround could be in PowerShell itself?). Yes?\r\n\r\nNo, if the intent is to do \"our own thing\" with unconditional use of UTF-8, I don't think we need a fix in `Console` (as debatable as code page `0` in the _absence_ of the Windows code-page encoding provider is, and as debatable as use of the ANSI code page is in its _presence_, but that's a separate issue).\r\n\r\nInstead, we should do what @jborean93 has mentioned as an option [above](https://github.com/PowerShell/PowerShell/issues/15128#issuecomment-810932594): \r\n\r\n* Allocate a console on entering the remote session and set its encoding to UTF-8, and keep it around for the lifetime of the session for all console applications (if any) to run in.\r\n  * I think doing so on _entering_  rather than _on demand_ is preferable, so that someone executing `[Console]::OutputEncoding`, for instance,  _before_ calling a console application in the session gets the correct information.\r\n\r\n\r\n",
+      "created_at": "2021-04-02T19:41:11Z",
+      "updated_at": "2021-04-02T19:42:23Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> Agreed, but to that end we should also commit to making regular, local console windows default to UTF-8 - which is long overdue - as originally proposed in #7233 and fleshed out in [#14945 (comment)](https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-800503184)\r\n> \r\n> The only thing that could break is calls to very old CLIs that cannot handle code page `65001` (UTF-8) and its variable-length encoding aspect - but my guess is that such CLIs are pretty rare these days.\r\n\r\nYeah, hello Oracle! :-))) I guess there are a lot of old business applications using OEM encoding.\r\nWhen I looked at this earlier I was thinking about the Native cmdlet concept to be able to annotate native applications accurately and personally.",
+      "created_at": "2021-04-03T05:24:47Z",
+      "updated_at": "2021-04-03T05:24:47Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Even if there is an older legacy API the caller can still set `[Console]::OutputEncoding` to something else to change the code page.",
+      "created_at": "2021-04-03T05:51:55Z",
+      "updated_at": "2021-04-03T05:51:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov, note that use of OEM encoding _per se_ isn't the problem, as long as:\r\n\r\n* programs do not use a _fixed_ OEM encoding and instead - as they should - respect the console's encoding (code page), which defaults to _system's_ OEM code page, as determined by the legacy system locale, aka \"Language for non-Unicode programs\"), such as `437` on US systems.\r\n\r\n* _and_ such programs know how to handle  the case when the console code page happens to be `65001`, i.e. UTF-8 (older programs may not be able to deal with the variable-length encoding aspect of UTF-8 (1-4 bytes per character)).\r\n\r\nIn short: If we switch PowerShell consoles from the system's OEM code page to `65001` == UTF-8, _only_ the following cases will amount to a breaking change:\r\n\r\n* Legacy programs that use a _fixed_ OEM code page (other than `65001`).\r\n* Legacy program that respect the console's code page but _cannot handle code page `65001` == UTF-8_ - an example of such a program is `WMIC.exe`, which is _deprecated_, however.\r\n\r\nFor \"rogue\" programs that do their own thing (e.g., Node.js, Python, `sfc.exe` - though note that Python can be configured to use UTF-8), the temporarily-setting-`Console]::OutputEncoding` workaround is _already_ necessary.\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-03T13:28:03Z",
+      "updated_at": "2021-04-07T13:57:11Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "Remoting working group:  The issues was filed with a description of a behavioral difference with no description of why the desired behavior is needed, what the scenario would be.  We understand that ideally this would be something else, but it is not clear from the issue what the behavior should be.  \r\n\r\nRight now, it seems like it seems like the only clear issue is on .NET and you can work around this by setting up the remote console how you want it to be.  Resolving this External.",
+      "created_at": "2021-04-07T21:27:40Z",
+      "updated_at": "2021-04-07T21:29:28Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "It's simply someone opens up a remote PSSession and runs an external command that returns non-ASCII characters. Doing so will mean the string is incorrect when it is read by PowerShell because of the codepage difference. Not sure why you would close the issue as this is behaviour in PowerShell that should be corrected.",
+      "created_at": "2021-04-07T21:29:52Z",
+      "updated_at": "2021-04-07T21:29:52Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "![image](https://user-images.githubusercontent.com/8462645/113937701-e907e300-983c-11eb-9ebb-621d82a6e023.png)\r\n\r\nVery simple reproducer that shows when a native application writes non-ASCII characters the values are screwed up, `\u00e9` becomes `\u201a` due to the encoding mismatch.",
+      "created_at": "2021-04-07T21:36:00Z",
+      "updated_at": "2021-04-07T21:36:00Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "If PowerShell was to run `AllocConsole` when it starts up when there is no console present we can see the correct behaviour returns back to us\r\n\r\n![image](https://user-images.githubusercontent.com/8462645/113938225-a1ce2200-983d-11eb-896f-c59faf1a7221.png)\r\n\r\nYou don't even need to change the codepage to utf-8 by default, although I would recommend doing that as a follow up PR due to other reasons as stated in https://github.com/PowerShell/PowerShell/issues/14945.",
+      "created_at": "2021-04-07T21:41:02Z",
+      "updated_at": "2021-04-07T21:41:02Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13, /cc @SteveL-MSFT:\r\n\r\n> The issues was filed with a description of a behavioral difference with no description of why the desired behavior is needed\r\n\r\nA reasonable expectation to have of a working group is a deep understanding of the issues involved, so that not every detail needs to be spelled out; thankfully, @jborean93 has since done so, leaving no doubt that things are _broken_.\r\n\r\n>   it is not clear from the issue what the behavior should be.\r\n\r\nSee my previous point.\r\n\r\n> seems like the only clear issue is on .NET\r\n\r\nNo, that issue is incidental, as [explained above](https://github.com/PowerShell/PowerShell/issues/15128#issuecomment-812681768).\r\n\r\n> you can work around this by setting up the remote console how you want it to be. \r\n\r\nNo, you can't, and it should have been obvious from the previous comments that you cannot (leaving impractical solutions involving ad-hoc compiled C# code that calls the Windows API to allocate a console aside).\r\n\r\nIn short: The working group's cursory and dismissive response is deeply concerning; it is something I first got a taste of in https://github.com/PowerShell/PowerShell/issues/11698, but Steve [assured me that the experience wasn't representative of what working groups would bring to the table](https://twitter.com/Steve_MSFT/status/1372657543747489792?s=20).\r\nCertainly, this experience leaves me unconvinced.\r\n",
+      "created_at": "2021-04-08T01:37:03Z",
+      "updated_at": "2021-04-08T01:37:03Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> The trouble with the 2nd point and identifying the codepage that the subprocess will use is a reason why I think PowerShell itself should just spawn it's own console when it starts (or when the first process is spawned). The first option also has the added benefit of allowing PowerShell to set the codepage to UTF-8 in the future in case that's something to be desired.\r\n\r\nIs it always permissible to create a console? Are there any unwanted side effects?\r\n\r\nWill this be enough to solve this problem, or is something else absolutely necessary?\r\n\r\n> The working group's cursory and dismissive response is deeply concerning\r\n\r\nYour chagrin is understandable but anyone can really break their heads about this _very long_ discussion. :-) no wonder they only read the title. I suggest to update the OP to demonstrate how bad is the end user experience.",
+      "created_at": "2021-04-08T07:46:38Z",
+      "updated_at": "2021-04-08T08:01:55Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "> A reasonable expectation to have of a working group is a deep understanding of the issues involved, so that not every detail needs to be spelled out; thankfully, @jborean93 has since done so, leaving no doubt that things are broken.\r\n\r\nIt's reasonable to have issue filed with the required information which include what you are trying to accomplish.  Issues without that information, are **NOT** issues at all but merely discussions and not actionable by the working group.  The primary action of the working group is to prioritize an issue.  An issue without a scenario has no priority and in an area as complex as remoting, I don't believe we (Including the community) should fix any issue like that.  ",
+      "created_at": "2021-04-08T17:35:07Z",
+      "updated_at": "2021-04-08T17:35:07Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "In reply to \r\n> The working group's cursory and dismissive response is deeply concerning\r\n\r\nand\r\n\r\n> It's simply someone opens up a remote PSSession and runs an external command that returns non-ASCII characters. Doing so will mean the string is incorrect when it is read by PowerShell because of the codepage difference. Not sure why you would close the issue as this is behaviour in PowerShell that should be corrected.\r\n\r\nThis was not put in the issue description.  This type of information should be included in the issue description to help the working group understand the impact of the issue.  If it is discovered later, please update the initial issue. \r\n",
+      "created_at": "2021-04-08T17:56:47Z",
+      "updated_at": "2021-04-08T17:56:47Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@TravisEz13 \r\n\r\n* While the _full_ picture only emerged in the course of the discussion, _it should be obvious that the behavior is broken_, so the answer to \"what are you trying to accomplish\" is: _fix broken behavior_.\r\n\r\n* Perhaps we need clarity on the duties of working groups; here's what I think they should _not_ do: Close issues:\r\n    * without having taken the time to understand the issue at hand. \r\n    * based on arguments that do not apply (\"you can work around this by setting up the remote console how you want it to be\")\r\n\r\n* If the problem isn't fully understood yet and / or you don't want to spend the time gleaning it from the discussion, _ask for clarification or an update_ (as you now have), or even _ask for a new, focused proposal / bug report to be created_.\r\n\r\n  * I can appreciate the problem of not wanting to wade through a lengthy discussion, but to dismiss it summarily without even having understood the problem at hand is the disconcerting part.\r\n\r\n  * If working groups routinely behave the way they did in this case, we've made no progress: it is reminiscent of similar committee decisions, where - understandably - a stretched-way-too-thin, small group of individuals had to make _all_ the decisions. My hope was that working groups would address that very problem: subject-matter experts that have the time to engage in relevant discussions (which, again,  doesn't preclude asking for a tl;dr first).\r\n\r\nIn other words: \r\n\r\n* Yes, this is an _ongoing_ discussion. \r\n* It even led to a [concrete, focused proposal for how to fix the issue](https://github.com/PowerShell/PowerShell/issues/15128#issuecomment-812681768).\r\n* No one asked for the discussion _to end yet_, if there's no consensus yet or if the issue must be further clarified.\r\n\r\n> This was not put in the issue description.\r\n\r\nIs it really official policy that the only thing working groups are required to read is the _issue description_?\r\nI generally try to keep the initial post updated, but in an ongoing discussion that's not always practical.\r\n\r\nMy understanding - and hope - is that working groups are meant to _work with the community_ rather than handing down 2-minute-deliberation fiat decisions.\r\n\r\nBy contrast, if the intent is indeed to have working groups only come in _once a discussion has settled down and a focused proposal has been made_, we need a different process: currently, issue are tagged for the relevant workgroup _shortly after creation_, so there's no control over the stage of the discussion at which the working group comes in.\r\n\r\n\r\n\r\n",
+      "created_at": "2021-04-08T18:21:27Z",
+      "updated_at": "2021-04-09T03:22:33Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov \r\n\r\n> Is it always permissible to create a console? Are there any unwanted side effects?\r\n\r\nAs far as I know, always creating a console should be fine, and I'm not aware of any side effects, but perhaps @jborean93 has further insights.\r\n\r\n> Will this be enough to solve this problem, or is something else absolutely necessary?\r\n\r\nYes, allocating a console at the start of the session should be enough to solve the problem:\r\n\r\n* Even without switching to UTF-8, it restores expected console behavior - albeit based on the _target_ machine's active OEM code page when targeting a Windows machine.\r\n\r\n  * That said, I fully agree with @jborean93 that defaulting PowerShell consoles to UTF-8 is the right thing to do.\r\n\r\n* Once a console is available, `[Console]::OutputEncoding` can be set (temporarily) as usual in order to handle nonstandard encoding behavior, such as the always-UTF-8 output from Node.js applications.\r\n\r\nHere's an example that emulates the proposed fix, similar to @jborean93's example:\r\n\r\n```powershell\r\n# Target a Windows machine.\r\n# E.g., from that machine itself, from an ELEVATED session:\r\nPSELEV> Invoke-Command -cn . {\r\n  # Allocate a console for the lifetime of this session. THIS IS WHAT POWERSHELL SHOULD DO AUTOMATICALLY.\r\n  $null = (Add-Type -Name Aux -Namespace WinApi -Passthru -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern bool AllocConsole();')::AllocConsole()\r\n  # Now you can set [Console]::OutputEncoding to control how external-program output is decoded:\r\n  # E.g., Node.js always outputs UTF-8\r\n  # !! Without a console, this assignment would FAIL.\r\n  [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\r\n  # Now Node.js output is captured correctly.\r\n  ($output = node -pe \"'e\u00e9'\")\r\n}\r\n\r\ne\u00e9  # OK\r\n```\r\n\r\nNote that in the \"loopback\" remoting scenario the allocated console actually becomes visible, in mangled form - I haven't looked into how to prevent that.\r\n\r\n",
+      "created_at": "2021-04-08T18:53:11Z",
+      "updated_at": "2021-04-09T03:25:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> > Is it always permissible to create a console? Are there any unwanted side effects?\r\n> \r\n> As far as I know, always creating a console should be fine, and I'm not aware of any side effects, but perhaps @jborean93 has further insights.\r\n\r\nI'd want to get confirmation from @TravisEz13 that we do not fall in a security issue here.  (I vaguely remember an old story with shadow window for system account  on Windows)\r\n\r\n\r\nDo we want to fix both scenario - Enter-PSSession and Invoke-Command?",
+      "created_at": "2021-04-09T03:21:05Z",
+      "updated_at": "2021-04-09T03:24:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Do we want to fix both scenario - Enter-PSSession and Invoke-Command?\r\n\r\nAbsolutely - calling console applications should be supported in both scenarios.\r\n",
+      "created_at": "2021-04-09T03:26:40Z",
+      "updated_at": "2021-04-09T03:26:40Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 We have an open PR in RFC repo for WG - please move your feedback to the PR.",
+      "created_at": "2021-04-09T03:28:50Z",
+      "updated_at": "2021-04-09T03:28:50Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 After we get a confirmation for my question https://github.com/PowerShell/PowerShell/issues/15128#issuecomment-816373098 I suggest you to open new issue with clean and short description (with references to posts in that issue) and proposed solution. Thanks you and @jborean93 for great discussion!",
+      "created_at": "2021-04-09T03:33:39Z",
+      "updated_at": "2021-04-09T03:33:39Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @iSazonov.\r\n\r\nAs for the security question: note that consoles already are being created if you call console applications, namely _transient_ ones, on a _per-call_ basis - but with misinterpreted-by-PowerShell output, and with no way to fix that (except via the WinAPi call shown above).",
+      "created_at": "2021-04-09T03:44:55Z",
+      "updated_at": "2021-04-09T03:44:55Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "> note that consoles already are being created if you call console applications\r\n\r\nThe consoles are created by OS for subprocesses. My question is about root WinRM process.",
+      "created_at": "2021-04-09T06:21:27Z",
+      "updated_at": "2021-04-09T06:21:27Z"
+    },
+    {
+      "author": "msftbot[bot]",
+      "author_association": "NONE",
+      "body": "This issue has been marked as external and has not had any activity for **1 day**. It has been be closed for housekeeping purposes.",
+      "created_at": "2021-04-13T22:00:04Z",
+      "updated_at": "2021-04-13T22:00:04Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "This can have a side effect #15229",
+      "created_at": "2021-04-14T12:29:13Z",
+      "updated_at": "2021-04-14T12:29:13Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> This can have a side effect #15229\r\n\r\nIn this cases these 2 issues are unrelated and is no indication that allocating a console for WSMan is going to be a problem. For WSMan the PSRP exchanges occur on the WSMan transport (see SOAP/HTTP exchange) which is totally unrelated to the console stdio pipes. In the case of SSH there is already a console allocated which is fine but the problem is that the existing stdio referenced in PowerShell is now the sharing the same pipe as what PowerShell is using to exchange the PSRP messages. So by writing to `stdout` you are sending a message back to the client which isn't a correct PSRP packet causing a failure. For WSMan by writing to the allocated console nothing happens, it's just written to the conhost buffer that was allocated and not seen anywhere which is exactly what happens today with no console being there.",
+      "created_at": "2021-04-14T19:23:28Z",
+      "updated_at": "2021-04-14T19:23:28Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "wg-remoting\r\n\r\n@mklement0  It looks like this has evolved over time through this discussion, and I am confused as to the final problem.  It is not clear to me if there is an issue in PowerShell Core or PowerShell Windows or both.  Can you please update this issue (at the beginning and including issue title) for clarity and provide a summary of the problem including scenario based repro?\r\n\r\nTo clarify, I realize that remoting session does not set the console encoding, but I am unclear of a scenario where this causes a problem.",
+      "created_at": "2021-05-12T21:33:49Z",
+      "updated_at": "2021-05-12T21:33:49Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "@PaulHigin I can't update the title but essentially it's a problem in both WinPS and PSCore, the end result just might be different even if they are still both wrong.\r\n\r\nEssentially for WSMan based remoting sessions there is no `conhost.exe` assigned to the process so when PowerShell goes to determine the encoding that is used to encode the bytes received from a native app invocation it will most likely use the wrong encoding. The reason why it will most likely be the wrong encoding is because:\r\n\r\n* The native application is spawned with a new console (there's no console on the ps process to inherit from) and the default output encoding is most likely to be the console codepage\r\n  * The only exceptions to this rule are things like `python`, `node` which don't respect the console codepage settings and use their own logic\r\n  * `python`, `node`, and others are still a problem but unrelated to this particular issue\r\n* When PowerShell reads the raw bytes on that native apps `stdout` pipe it essentially uses `[Console]::OutputEncoding`\r\n  * This may in fact be logic in .NET but the logic is still the same\r\n* `[Console]::OutputEncoding` somewhat \"fails\" because the remote PowerShell session does not have an actual console associated with it\r\n  * It doesn't actually throw an exception but fails because there is no console in the ps session to get the output encoding values for\r\n  * The underlying Win32 API will return a codepage of `0` in this case\r\n  * This typically corresponds to the \"ANSI\" codepage which is **not** the same as the console codepage\r\n  * This behaviour might be an issue but it would be up to dotnet to decide if they want to change that behaviour\r\n  * Even if they do I don't see a nice way to solve it as there is some complex logic that decides what the console codepage will be\r\n* Because the output is decoded using the \"ANSI\" codepage but the native app encoded it using the console codepage we get the wrong string value in PowerShell\r\n\r\nTo test this out you can run the following on either WinPS or PSCore.\r\n\r\n```powershell\r\n$cmd = {\r\n    [Console]::Out.WriteLine('caf\u00e9')\r\n}\r\n$encCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd.ToString()))\r\n\r\n# This works because [Console]::OutputEncoding is set for a normal process\r\npowershell.exe -EncodedCommand $encCommand\r\n\r\n# This doesn't work because the remote process started by the WSMan plugin doesn't have a console process\r\n'Microsoft.PowerShell', 'PowerShell.7' | ForEach-Object -Process {\r\n    $session = New-PSSession -ComputerName localhost -ConfigurationName $_\r\n    try {\r\n        Write-Host \"The output with Invoke-Command PSSession $_\"\r\n        Invoke-Command $session -ScriptBlock {\r\n            powershell.exe -EncodedCommand $using:encCommand\r\n        }\r\n\r\n    }\r\n    finally {\r\n        $session | Remove-PSSession\r\n    }\r\n}\r\n```\r\n\r\nFor me this outputs `caf\u201a` because PowerShell will output `caf\u00e9` using the 437 codepage (`0x63 0x61 0x66 0x82`) but PowerShell is reading it using my \"ANSI\" codepage (windows-1252); `0x82` in [windows-1252](https://en.wikipedia.org/wiki/Windows-1252) is `\u201a`. Note the string iterpretation happens on the remote side so this isn't a CLIXML serialization over PSRemoting but how PowerShell itself decodes bytes from a native app if there is no console associated with the PowerShell process.\r\n\r\nMy proposed fix for this in PowerShell is to always ensure that a console is associated with the process so that `[Console]::OutputEncoding` actually has a correct value just like it does for a native app. I'm sure there are some edge cases that need to be tested but as per https://github.com/PowerShell/PowerShell/issues/15128#issuecomment-815282724 it does fix the issue.",
+      "created_at": "2021-05-12T22:18:18Z",
+      "updated_at": "2021-05-12T22:18:18Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thank you, @jborean93, for succinctly summarizing the issue.\r\n\r\nRe:\r\n\r\n> When PowerShell reads the raw bytes on that native apps stdout pipe it essentially uses `[Console]::OutputEncoding`\r\n> * This may in fact be logic in .NET but the logic is still the same\r\n\r\nIt is actually (now) _PowerShell's_ decision (see #10824), albeit a sensible one.\r\n\r\nTwo asides: \r\n\r\n* The behavior deserves documenting, as suggested in the proposed `about_Native_Calls` conceptual help topic - see https://github.com/MicrosoftDocs/PowerShell-Docs/issues/5152\r\n\r\n* Defaulting _all_ console contexts to UTF-8 is called for, as we've discussed: see https://github.com/PowerShell/PowerShell/issues/14945#issuecomment-800503184\r\n\r\n---\r\n\r\n@PaulHigin, if you'll excuse the mixed metaphor, I'm [personally tired of shouting at windmills](https://github.com/PowerShell/PowerShell/pull/10238#issuecomment-830406280), so I'm unsubscribing from this thread.\r\n\r\nI'll leave any follow-up in the capable hands of @jborean93, who - I hope - has the stamina to keep going.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2021-05-12T22:50:57Z",
+      "updated_at": "2021-05-13T00:33:09Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@jborean93  Thanks for the clarification.\r\nI feel the title for this issue should be:\r\n**WinRM remote sessions do not set Console code page to that of client, affecting remote native command execution**\r\n@TravisEz13 I don't have permissions to update the Issue title, can you do it?\r\n\r\nI feel a better repro scenario would be something like:\r\n```powershell\r\n# Create WinRM session from client with non-default codepage\r\n# Run script executing native command in remote session\r\n\r\nExpected Results:\r\n\"text\"\r\n\r\nActual Results:\r\n\"garbled text\"\r\n```\r\n\r\n@jborean93, @mklement0 \r\nThe first thing the working group does is triage the issue, and this means understanding the issue and trying to determine user impact for prioritization.  So it is critical to have this information at the very beginning and be as clear and concise as possible.  Discussion, and proposed solutions are very welcome but only after the issue is clearly defined.   In this case the issue was more like a discussion but without any clear conclusion summary.  This is why guidelines require a specific format ... to help working groups quickly understand impact and triage issues.  In hindsight, I feel this should have started as a discussion, eventually culminating into an Issue once the problem was fully understood.",
+      "created_at": "2021-05-13T16:07:13Z",
+      "updated_at": "2021-05-13T16:07:13Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> I feel the title for this issue should be: WinRM remote sessions do not set Console code page to that of client, affecting remote native command execution\r\n\r\n@PaulHigin that is not the problem here, strings returned from a remote session are serialized in CLIXML using utf-8 and aren't a problem here. The remote session also does not need to match with the console code page of the client, in fact you don't want that as it will exacerbate the problem in case they do mismatch.\r\n\r\nThe issue is the WinRM remote session doesn't have a console associated with it so the `[Console]::OutputEncoding` value isn't correct. This causes the problem where any spawned console processes will use the actual console codepage but PowerShell is using a different encoding when getting the output causing the mismatch values for non-ASCII characters.\r\n\r\n> I feel a better repro scenario would be something like:\r\n\r\nIf you really think so, personally I don't as you can't see what script can actually replicate this problem, at least with mine it showed you the problem exists on both WinPS and PSCore and how to replicate this exact problem.",
+      "created_at": "2021-05-13T19:48:38Z",
+      "updated_at": "2021-05-13T19:48:38Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "@jborean93  Thanks again for the clarification.  What I am looking for is real world impact of a lack of correct console code page in a remote session.  Why would anyone use console write APIs in a remote script?  If you can provide a real world example, that will help us assess impact.  But at this point it seems to be a low impact issue.  Sorry if I am missing something obvious.  ",
+      "created_at": "2021-05-13T20:32:22Z",
+      "updated_at": "2021-05-13T20:34:10Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> What I am looking for is real world impact of a lack of correct console code page in a remote session\r\n\r\nThe impact is whenever a native application outputs a non-ASCII characters (0-127), there's a very high chance that because of the encoding mismatch the string stored in PowerShell is not the same as the one the native application outputted.\r\n\r\n> Why would anyone use console write APIs in a remote script?\r\n\r\nThey wouldn't, or if they do PowerShell won't capture it in any scenario (even locally) because it bypasses the stdout pipe and writes directly to the screen buffer. On the remote side this screen buffer is not the local one so it is lost to the world, locally this bypasses the PowerShell stdout capturing and the console codepage doesn't apply. This is unrelated to the problem and not something that PowerShell can really fix unless it starts delving into the ConPTY stuff that WT uses.\r\n\r\n> If you can provide a real world example, that will help us assess impact.\r\n\r\nIt's hard to as for myself personally I rarely deal with non-ASCII characters, most of my tools is based on en-US and these diacritics isn't very common to encounter in native tools. Essentially any native app that outputs a non-ASCII character will most likely be affected.\r\n\r\nOne other example where this is probably even more problematic is the `tree` command someone might be doing to get a snapshot of what a directory looks like:\r\n\r\n```\r\n# Run on a WSMan remote PSSession\r\n> tree 'C:\\Program Files\\WindowsPowerShell\\Modules'\r\n```\r\n\r\n```\r\nFolder PATH listing for volume Windows 2019\r\nVolume serial number is 08B0-E145\r\nC:\\PROGRAM FILES\\WINDOWSPOWERSHELL\\MODULES\r\n\u00c3\u00c4\u00c4\u00c4ImpliedReflection\r\n\u00b3   \u00c0\u00c4\u00c4\u00c40.2.1\r\n\u00b3       \u00c0\u00c4\u00c4\u00c4en-US\r\n\u00c3\u00c4\u00c4\u00c4Microsoft.PowerShell.Operation.Validation\r\n\u00b3   \u00c0\u00c4\u00c4\u00c41.0.1\r\n\u00b3       \u00c3\u00c4\u00c4\u00c4Diagnostics\r\n\u00b3       \u00b3   \u00c3\u00c4\u00c4\u00c4Comprehensive\r\n\u00b3       \u00b3   \u00c0\u00c4\u00c4\u00c4Simple\r\n\u00b3       \u00c0\u00c4\u00c4\u00c4Test\r\n\u00b3           \u00c0\u00c4\u00c4\u00c4Modules\r\n\u00b3               \u00c3\u00c4\u00c4\u00c4Example1.Diagnostics\r\n\u00b3               \u00b3   \u00c0\u00c4\u00c4\u00c4Diagnostics\r\n\u00b3               \u00b3       \u00c0\u00c4\u00c4\u00c4Simple\r\n\u00b3               \u00c3\u00c4\u00c4\u00c4Example2.Diagnostics\r\n\u00b3               \u00b3   \u00c0\u00c4\u00c4\u00c41.0.1\r\n\u00b3               \u00b3       \u00c0\u00c4\u00c4\u00c4Diagnostics\r\n\u00b3               \u00b3           \u00c0\u00c4\u00c4\u00c4Simple\r\n\u00b3               \u00c0\u00c4\u00c4\u00c4Example3.Diagnostics\r\n\u00b3                   \u00c3\u00c4\u00c4\u00c41.1.1\r\n\u00b3                   \u00b3   \u00c0\u00c4\u00c4\u00c4Diagnostics\r\n\u00b3                   \u00b3       \u00c0\u00c4\u00c4\u00c4Simple\r\n\u00b3                   \u00c0\u00c4\u00c4\u00c42.0.1\r\n\u00b3                       \u00c0\u00c4\u00c4\u00c4Diagnostics\r\n\u00b3                           \u00c0\u00c4\u00c4\u00c4Simple\r\n\u00c3\u00c4\u00c4\u00c4PackageManagement\r\n\u00b3   \u00c0\u00c4\u00c4\u00c41.0.0.1\r\n\u00b3       \u00c3\u00c4\u00c4\u00c4DSCResources\r\n\u00b3       \u00b3   \u00c3\u00c4\u00c4\u00c4en-US\r\n\u00b3       \u00b3   \u00c3\u00c4\u00c4\u00c4MSFT_PackageManagement\r\n\u00b3       \u00b3   \u00b3   \u00c0\u00c4\u00c4\u00c4en-US\r\n\u00b3       \u00b3   \u00c0\u00c4\u00c4\u00c4MSFT_PackageManagementSource\r\n\u00b3       \u00b3       \u00c0\u00c4\u00c4\u00c4en-US\r\n\u00b3       \u00c0\u00c4\u00c4\u00c4en\r\n\u00c3\u00c4\u00c4\u00c4PackerWindoze\r\n\u00c3\u00c4\u00c4\u00c4Pester\r\n\u00b3   \u00c0\u00c4\u00c4\u00c45.1.1\r\n\u00b3       \u00c3\u00c4\u00c4\u00c4bin\r\n\u00b3       \u00b3   \u00c3\u00c4\u00c4\u00c4net452\r\n\u00b3       \u00b3   \u00c0\u00c4\u00c4\u00c4netstandard2.0\r\n\u00b3       \u00c0\u00c4\u00c4\u00c4en-US\r\n\u00c3\u00c4\u00c4\u00c4PInvokeHelper\r\n\u00b3   \u00c0\u00c4\u00c4\u00c40.1.0\r\n\u00c3\u00c4\u00c4\u00c4platyPS\r\n\u00b3   \u00c0\u00c4\u00c4\u00c40.14.1\r\n\u00b3       \u00c3\u00c4\u00c4\u00c4docs\r\n\u00b3       \u00c3\u00c4\u00c4\u00c4en-US\r\n\u00b3       \u00c0\u00c4\u00c4\u00c4templates\r\n\u00c3\u00c4\u00c4\u00c4PowerShellGet\r\n\u00b3   \u00c0\u00c4\u00c4\u00c41.0.0.1\r\n\u00b3       \u00c0\u00c4\u00c4\u00c4en-US\r\n\u00c3\u00c4\u00c4\u00c4psprivilege\r\n\u00b3   \u00c0\u00c4\u00c4\u00c40.1.0\r\n\u00b3       \u00c3\u00c4\u00c4\u00c4Private\r\n\u00b3       \u00c0\u00c4\u00c4\u00c4Public\r\n\u00c0\u00c4\u00c4\u00c4PSReadline\r\n    \u00c0\u00c4\u00c4\u00c42.0.0\r\n        \u00c0\u00c4\u00c4\u00c4en\r\n```\r\n\r\nAs you can see the characters that `tree` uses to denote the structure are all non-ASCII chars and are affected by the wrong encoding.\r\n\r\nHere is some details on those non-ASCII chars used in the output\r\n\r\n|437 Char|437 Decimal|Windows-1252 Char|\r\n|-|-|-|\r\n|`\u2502`|179|`\u00b3`|\r\n|`\u2514`|192|`\u00c0`|\r\n|`\u2500`|196|`\u00c4`|\r\n\r\n> But at this point it seems to be a low impact issue\r\n\r\nThat's understandable, my intention is to just really document the problem so that either;\r\n\r\n1. People can understand what is happened - obviously I've failed at that with the numerous posts\r\n2. A workaround if no fix has been merged into PowerShell - Call `AllocConsole` using PInvoke",
+      "created_at": "2021-05-13T20:58:49Z",
+      "updated_at": "2021-05-13T20:58:49Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "This is exactly what I said before is it not?  A native console command that returns text and runs in a remote session may return garbled text if the console code page is incorrect.  Right?  If so, we can update the Issue title and proceed with triage.",
+      "created_at": "2021-05-13T21:59:31Z",
+      "updated_at": "2021-05-13T21:59:31Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "My apologies I misinterpreted it but after rereading it does sound like we are on the same page. I can open another issue under my name if we want to start without all this history here with a different title if you wish.",
+      "created_at": "2021-05-13T22:22:47Z",
+      "updated_at": "2021-05-13T22:22:47Z"
+    },
+    {
+      "author": "PaulHigin",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks @jborean93 , I think the history is valuable so let's keep it.  I just wanted a clearer understanding of the problem.  We'll update this issue at the next working group meeting.",
+      "created_at": "2021-05-13T22:44:56Z",
+      "updated_at": "2021-05-13T22:44:56Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "First, thanks @mklement0 and @jborean93 for the detailed investigation.  A couple of questions:\r\n\r\n- Is this only a problem with WinRM based remoting or is SSH also equally affected?\r\n- Is the ask to have pwsh.exe call AllocConsole() on startup?  Note that we are not making changes to powershell.exe that aren't security or other compliance issues\r\n",
+      "created_at": "2021-05-13T22:51:19Z",
+      "updated_at": "2021-05-13T22:51:19Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "> Is this only a problem with WinRM based remoting or is SSH also equally affected?\r\n\r\nJust WinRM, the process that is spawned by the WinRM service seems to be done in a way that there's no console associated with it (`wsmprovhost.exe`). SSH calls `pwsh.exe` like a normal process and has a `conhost` associated with it so isn't affected.\r\n\r\n> Is the ask to have pwsh.exe call AllocConsole() on startup?\r\n\r\nOr at least allocate it if there is no console that exists already. This at least solves the issue in testing but I'm unsure if it will start to affect things like the `$host.UI.WriteLine` behaviour or not. I assume it wouldn't but it's hard to tell. I also don't know if this should be done in `pwsh.exe` as a WinRM based remote session doesn't seem to call that executable. It uses `wsmprovhost.exe` and `pwrshplugin.dll` so maybe that's what needs to be touched.\r\n\r\n> Note that we are not making changes to powershell.exe that aren't security or other compliance issues\r\n\r\nThat's understandable, the comparisons with WinPS and PSCore are mostly to show it's an existing problem and not something new added since WinPS.",
+      "created_at": "2021-05-14T00:07:08Z",
+      "updated_at": "2021-05-14T00:07:08Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "Maybe changing `pwsrhplugin.dll` is the way to go.  That code is [here](https://github.com/PowerShell/PowerShell-Native/tree/master/src/powershell-native/nativemsh/pwrshplugin).\r\n\r\n@jborean93 would you be willing to build a private validating that `AllocConsole()` solves the problem?\r\n\r\nIf we agree the change is in that dll, I'll move this issue over to that repo.",
+      "created_at": "2021-05-14T00:13:24Z",
+      "updated_at": "2021-05-14T00:13:24Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "I can try but I can't guarantee I'll be able to look at where it needs to go and build it anytime soon.",
+      "created_at": "2021-05-14T00:29:14Z",
+      "updated_at": "2021-05-14T00:29:14Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@jborean93 take a look at the referenced PR.  Did some manual validation with `tree` and your encoded command example and works correctly.  You can build it after cloning that repo using:\r\n\r\n```powershell\r\nipmo ./build.psm1 -force\r\nStart-PSBootstrap -BuildWindowsNative\r\nStart-BuildNativeWindowsBinaries -Clean\r\n```\r\n\r\nThen copy `src\\powershell-native\\Bin\\RELEASE\\CoreClr\\pwrshplugin.dll` to `$PSHOME` and use `Install-PowerShellRemoting.ps1` from `$PSHOME` to register the dll.  Take notice of which sessionconfiguration is being used.",
+      "created_at": "2021-05-14T14:21:01Z",
+      "updated_at": "2021-05-14T14:23:53Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks for the PR, I've been able to test it and can also confirm it fixes this particular problem. I also couldn't find any side affects and things acted like they did before.",
+      "created_at": "2021-05-17T03:14:07Z",
+      "updated_at": "2021-05-17T03:14:07Z"
+    },
+    {
+      "author": "jborean93",
+      "author_association": "COLLABORATOR",
+      "body": "Thanks all for sticking to this and working on a solution.",
+      "created_at": "2021-05-17T23:00:38Z",
+      "updated_at": "2021-05-17T23:00:38Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@jborean93 your detailed investigation made this easy :)",
+      "created_at": "2021-05-17T23:57:10Z",
+      "updated_at": "2021-05-17T23:57:10Z"
+    },
+    {
+      "author": "TravisEz13",
+      "author_association": "MEMBER",
+      "body": "@jborean93 Thanks for working with @PaulHigin to help the Working group and PowerShell understand the issue.  This is vital part of the process.",
+      "created_at": "2021-05-19T21:13:09Z",
+      "updated_at": "2021-05-19T21:13:09Z"
+    }
+  ],
+  "created_at": "2021-03-31T03:04:44Z",
+  "number": 15128,
+  "state": "closed",
+  "title": "Remote sessions targeting Windows machines unexpectedly use ANSI character encoding for external programs",
+  "updated_at": "2021-05-19T21:13:10Z"
+}

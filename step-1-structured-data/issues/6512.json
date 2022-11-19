@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/6512",
+  "author": "mklement0",
+  "body": "The PSv4+ collection operators `.Where()` and `.ForEach()` differ from normal pipeline-output collecting behavior in two respects:\r\n\r\n* If the result is a _single_ item, it _isn't unwrapped_; that is, a _collection_ is _always_ returned, and\r\n* that collection is always of type `[System.Collections.ObjectModel.Collection[psobject]]` rather than a regular PS array (`[object[]]`)\r\n\r\nIn the spirit of https://github.com/PowerShell/PowerShell-RFC/pull/120, the **behavior should be harmonized with how pipeline output is already collected and how the `-*Variable` common parameters (except `-PipelineVariable`) _should_ collect output, according to the RFC**.\r\n\r\nGiven how contentious the linked `-OutVariable`-related RFC is turning out to be, this proposal may need to become an RFC as well, though perhaps the decision on said RFC will imply how to proceed here.\r\n\r\nTo reiterate what, to me, motivates this desire for harmonization / resolving inconsistencies:\r\n\r\n**The unifying vision is to provide a consistent experience whenever PowerShell collects output for you**, so you never need to worry about different unwrapping  behavior and/or differing collection types.\r\n\r\nNote:\r\n\r\n**This harmonization would currently incur a performance cost**, because the internally used, resizable collection data types must on output be converted to `object[]]`.\r\n\r\nHowever, **the proper way to resolve this is to switch PowerShell's fundamental collection data type from `[object[]]` to an _efficiently resizable_ one that can be used internally _and_ directly output.**\r\n[Discussion in that direction has started](https://github.com/PowerShell/PowerShell/issues/5643#issuecomment-349811857), but it's obviously a massive _internal_ change; _externally_, assuming no bugs have crept in, however, much of existing code may not only continue to work as-is, but may exhibit automatic performance gains.\r\n\r\nTo quote @lzybkr  from the linked issue:\r\n\r\n> I've often wondered if the comma operator could create a list instead of an array. I have a feeling most scripts would never notice a difference because of how freely things are converted to an object array.\r\n\r\nCurrent Behavior\r\n-----------------\r\n\r\n```powershell\r\nPS> (1).ForEach({$_}).GetType().Name; (1, 2).ForEach({$_}).GetType().Name\r\nCollection`1  # single-item result wasn't unwrapped\r\nCollection`1  # output collection type is not [object[]]\r\n```\r\n\r\nDesired Behavior\r\n-----------------\r\n\r\n```powershell\r\nPS> (1).ForEach({$_}).GetType().Name; (1, 2).ForEach({$_}).GetType().Name\r\nInt32      # single-item result was unwrapped\r\nObject[]   # regular PS array\r\n```\r\n",
+  "closed_at": "2018-03-27T18:32:10Z",
+  "comments": [
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 The `Where()` and `Foreach()` methods *always* return `Collection[PSObject]` by design. This is intended to match the signatures of other methods in the PowerShell API, for example:\r\n```\r\nPS[1] (13) > [powershell]::Create().Invoke\r\n\r\nOverloadDefinitions\r\n-------------------\r\nSystem.Collections.ObjectModel.Collection[psobject] Invoke()\r\nSystem.Collections.ObjectModel.Collection[psobject] Invoke(System.Collections.IEnumerable input)\r\nSystem.Collections.ObjectModel.Collection[psobject] Invoke(System.Collections.IEnumerable input,\r\nSystem.Management.Automation.PSInvocationSettings settings)\r\n:\r\n```",
+      "created_at": "2018-03-27T18:31:37Z",
+      "updated_at": "2018-03-27T18:31:37Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@BrucePay:\r\n\r\n`[powershell]::Create().Invoke` is an _API_ method, as you say, whereas `.Where()` and `.ForEach()` are public methods on _any_ object surfaced in regular PowerShell use.\r\n\r\nOr where they never meant to be used as such?\r\n\r\nIf they _are_ meant to be provided as - more performant and flexible - complements to `ForEach-Object` and `Where-Object` (which they are), then consistency with normal PowerShell behavior seems more important to me.\r\n\r\nPerhaps, though, that breaks existing API uses; at any rate, we may have another `Documentation Needed` on our hands - @SteveL-MSFT?\r\n\r\n",
+      "created_at": "2018-03-27T18:40:49Z",
+      "updated_at": "2018-03-27T18:42:38Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 I guess I'm not being clear. The key point is that they are _methods_, not _commands_and should behave like _methods_, not _commands_. Methods don't stream so there is no ambiguity as to whether the result should be a collection or not. The design team explicitly decided that they would have consistent behaviour and always return a collection. They return `Collection<PSObject>` both for performance reasons, and because this matches the return type other methods in the PowerShell API. Again, both explicit decisions on the part of the design team. \r\n",
+      "created_at": "2018-03-27T22:39:52Z",
+      "updated_at": "2018-03-27T22:39:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The key point is that they are methods, not _commands_and should behave like methods, not commands.\r\n\r\nThat is indeed an important clarification.\r\n\r\n> Methods don't stream so there is no ambiguity as to whether the result should be a collection or not.\r\n\r\nOn a side note: That's perhaps the most commendably succinct rationale for pipeline-output behavior I've ever come across.\r\n\r\n> They return Collection<PSObject> both for performance reasons\r\n\r\nUnderstood. I've addressed the performance aspect in my proposal.\r\n\r\n> and because this matches the return type other methods in the PowerShell API. \r\n\r\nSo the awkwardness arises out of these methods doing double duty: (a) being part of the API and (b) being public methods accessible to regular PowerShell users.\r\n\r\nBut perhaps (b) was _incidental_, given that:\r\n\r\n* these methods aren't documented, as far as I'm aware of.\r\n\r\n* [at least internally terming them _operators_](https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/engine/runtime/Operations/MiscOps.cs#L2427) - seems like a misnomer, given the _method_ syntax.\r\n\r\n   * Breaking news: The `.Where()` \"operator\" (though not `.ForEach()`, as far as I can tell) does make a brief - and unexpected - cameo in the documentation:  [\"Where() operator behavior has changed.\"](https://docs.microsoft.com/en-us/powershell/module/Microsoft.PowerShell.Core/Where-Object?view=powershell-6#notes).\r\n\r\nWas (b) incidental?\r\n\r\nEither way, **how about surfacing these API methods as bona fide _operators_**?\r\n\r\nSo, instead of:\r\n\r\n```powershell\r\n(1, 2, 3).Where({ $_ -gt 1 })\r\n```\r\n\r\nimplementing something like:\r\n\r\n```powershell\r\n1, 2, 3 -where { $_ -gt 1 }\r\n```\r\n\r\n(And analogously for `.ForEach()`).\r\n\r\nThat would not only make for more natural, PowerShell-like syntax, but would allow us to discuss the output behavior separately from the strictures of the API.\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-03-28T02:25:13Z",
+      "updated_at": "2018-03-28T02:25:13Z"
+    },
+    {
+      "author": "BrucePay",
+      "author_association": "COLLABORATOR",
+      "body": "`.Where()` and `.Foreach` _are_ documented in the context for which they were designed: processing DSC ConfigurationData. See [Using configuration data in DSC](https://docs.microsoft.com/en-us/powershell/dsc/configdata) and [Separating configuration and environment data](https://docs.microsoft.com/en-us/powershell/dsc/separatingenvdata). The second document in particular shows examples of use.\r\n\r\nNow there doesn't appear to be a standalone help topic for these methods. We should add this but as near as I can tell, we don't document any of the existing type extensions anywhere (e.g. `.Count` on `object[]`).\r\n\r\n> at least internally terming them operators \r\n\r\nThis terminology was picked up from LINQ which referred to query methods like `where()` as \"operators\". \r\n\r\n> the awkwardness arises out of these methods doing double duty: (a) being part of the API and (b) being public methods accessible to regular PowerShell users\r\n\r\nI don't understand this statement. What \"double duty\"?  You seem to be making some artificial distinction here. The PowerShell API **is** part of the regular PowerShell user's experience. Advanced experiences perhaps but not different. \r\n\r\n>Was (b) incidental?\r\n\r\nNo. It was entirely intentional. \r\n\r\n> how about surfacing these API methods as bona fide operators?\r\n\r\nIn query scenarios, methods are simpler and compose more naturally (again see LINQ).\r\n\r\n> That would not only make for more natural, PowerShell-like syntax, but would allow us to discuss the output behavior separately from the strictures of the API.\r\n\r\nOperators aren't commands. Operators have operator semantics, not command semantics. Operators don't stream.\r\n",
+      "created_at": "2018-03-28T23:32:53Z",
+      "updated_at": "2018-03-28T23:32:53Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> documented in the context for which they were designed: processing DSC ConfigurationData\r\n\r\nThat's a fair point: the regular documentation makes no mention of `.Where()` and `.ForEach()`, except for the seemingly random cameo I've mentioned.\r\nI initially discovered them [here](http://www.powershellmagazine.com/2014/10/22/foreach-and-where-magic-methods/) (an article by @KirkMunro), and have been using them ever since.\r\n\r\nSo, given their lack of user documentation and how hard it is to discover them with reflection, perhaps their esoteric nature spares regular PowerShell users puzzlement over:\r\n\r\n* the unfamiliar _collection_ type returned (``System.Collections.ObjectModel.Collection`1``)\r\n* the problematic _element_ type (`[psobject]`) - the usually behind-the-scenes type that causes issues when it surfaces publicly (see #4344, #4343, #5579, #5763, #5797)\r\n\r\nSeemingly exactly as designed for API use, but awkward for in-PowerShell use (more on that below).\r\n\r\nHowever, I do now understand the point you were trying to make with: \r\n\r\n> Operators aren't commands. Operators have operator semantics, not command semantics. Operators don't stream.\r\n\r\nThat's a helpful distinction, thank you - and the kind of basic tenet that I wish were documented somewhere.\r\n\r\n---\r\n\r\n> This terminology was picked up from LINQ which referred to query methods like where() as \"operators\".\r\n> In query scenarios, methods are simpler and compose more naturally (again see LINQ).\r\n\r\nFor in-PowerShell use (not from C#), methods are an awkward fit, due to the different argument syntax, [as I've tried to argue here](https://github.com/PowerShell/PowerShell/issues/5805#issuecomment-366811092):\r\n\r\n> _Property_ access comes naturally in PowerShell, _method_ calls do not.\r\n>\r\n> Ideally, you never need to call methods - that's what _cmdlets_ are for.\r\n> \r\n> The context switching between PowerShell's argument mode and .NET method syntax is a perennial > pain point, even for experienced users.\r\n> [...]\r\n> Instead, PowerShell uses _operators_ to provide convenient abstractions: Much of what requires method calls in, say, C#, is provided via operators such as -join, -split, -replace, ...\r\n> [...]\r\n> As an aside: consider how PowerShell's one foray into method syntax has fared; the (confusingly named) .ForEach() and .Where() collection operators never gained traction.\r\n\r\nOf course, I now have a better understanding of perhaps the main reason for their not gaining traction, as discussed above.\r\n\r\n> You seem to be making some artificial distinction here. The PowerShell API is part of the regular PowerShell user's experience. Advanced experiences perhaps but not different.\r\n\r\nI think the distinction is real, both conceptually and pragmatically:\r\n\r\n* the API is for controlling PowerShell from the outside (even though you can also use PowerShell scripting to do so; the more typical use case is to use C#, however, methinks)\r\n\r\n* as a regular PowerShell user, you can spend your entire PowerShell life blissfully ignorant of even the existence of the API: you typically don't need it to call cmdlets and write scripts, and the regular `Get-Help` based help system makes no mention of it.\r\n\r\nHence my suggestion to surface `.Where()` and `.ForEach()` as _operators_ `-where` and `-foreach`, ideally with `[object[]]` output for consistency - even though that is clearly implies performance hit, which takes us back to the [discussion of fundamentally changing PowerShell's collection data type](https://github.com/PowerShell/PowerShell/issues/5643#issuecomment-378467986).\r\n\r\n\r\n\r\n",
+      "created_at": "2018-04-04T04:09:56Z",
+      "updated_at": "2018-04-04T04:09:56Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "FWIW, >10 years into PowerShell, and I don't believe method syntax to be a pain point for PowerShell users. I certainly haven't heard it broadly identified as a pain point like you describe from the community members I have spoken with over the years. Some, sure. But few, to be honest. Further, I find the idea that cmdlets should always be used in place of methods is preposterous, not to mention a nightmare. In some cases it makes great sense, but in oh so many others it does not.",
+      "created_at": "2018-04-04T18:10:17Z",
+      "updated_at": "2018-04-04T18:10:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@KirkMunro:\r\n\r\nAs a comparatively inexperienced user, I can tell you that switching between argument mode and method syntax still trips me up on occasion.\r\n\r\nIt's not that cmdlets _should_ always be used, it's about _ideally_ having the majority of use cases covered by cmdlets, so that less savvy users have their needs met without having to learn about specific .NET types and switching back and forth between conflicting syntax forms and, not least, so as to benefit from the higher level of abstraction that cmdlets usually provide.\r\n\r\nAs I've said before: that you have the _option_ to call methods from PowerShell is a great blessing and gives PowerShell its virtually unlimited power, but it is an advanced use case.\r\n",
+      "created_at": "2018-04-04T18:25:57Z",
+      "updated_at": "2018-04-04T18:28:35Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I've decided to create a new issue to focus on the operator proposal: #6576",
+      "created_at": "2018-04-05T20:08:39Z",
+      "updated_at": "2018-04-05T20:08:39Z"
+    }
+  ],
+  "created_at": "2018-03-27T18:03:17Z",
+  "number": 6512,
+  "state": "closed",
+  "title": "Collection operators .Where() and .ForEach() do not unwrap single-item results",
+  "updated_at": "2018-10-15T21:44:55Z"
+}

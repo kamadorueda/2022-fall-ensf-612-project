@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9181",
+  "author": "HumanEquivalentUnit",
+  "body": "In normal mode, accessing a property that does not exist returns `$null`. StrictMode disables this and makes it an exception. That is consistent over several commands - except Get-Member which returns $null. This is surprising, and I expected it should also raise an exception. Should it?\r\n\r\nTest cases:\r\n\r\n```powershell\r\nPS C:\\> Set-StrictMode -Version 2\r\nPS C:\\> $x = Get-Item 'C:\\windows'\r\nPS C:\\> $x.pretend\r\nThe property 'pretend' cannot be found on this object. # PropertyNotFoundStrict\r\n\r\nPS C:\\> $x | Select-Object -ExpandProperty pretend\r\nSelect-Object : Property \"pretend\" cannot be found # ExpandPropertyNotFound\r\n\r\nPS C:\\> $x | ForEach-Object -MemberName pretend\r\nForEach-Object : The input name \"pretend\" cannot be resolved to a member. # PropertyOrMethodNotFound\r\n\r\nPS C:\\> $x | Where-Object -Property pretend -eq $null\r\nWhere-Object : The input name \"pretend\" cannot be resolved to a property. # PropertyNotFound\r\n\r\nPS C:\\> $x.foreach('pretend')\r\nThe property 'pretend' cannot be found on this object. # PropertyNotFoundStrict\r\n\r\nPS C:\\> $x | Get-Member -Name pretend    # outputs $null\r\n```\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I'm half-thinking it's best to leave it so that we have _some_ way of figuring out whether a property exists or not without throwing an exception.\r\n\ud83e\udd37\u200d\u2642\ufe0f ",
+      "created_at": "2019-03-21T03:41:06Z",
+      "updated_at": "2019-03-21T03:41:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I see your point, @vexx32. Using an expression you could do `[bool] $x.psobject.properties['pretend']` or `[bool] $x.psobject.methods['pretendMethod']`, however.\r\n\r\n@HumanEquivalentUnit, note that `Select-Object -ExpandProperty pretend` _always_ reports a _non-terminating_ error (per input object that lacks the property), irrespective of the strict-mode setting  (strict-mode violations are _statement-terminating_ errors).",
+      "created_at": "2019-03-21T06:00:42Z",
+      "updated_at": "2019-03-21T06:00:42Z"
+    },
+    {
+      "author": "HumanEquivalentUnit",
+      "author_association": "CONTRIBUTOR",
+      "body": "I doubt it would be possible to change now without breaking existing code; perhaps only document it. But my question is, was that deliberate or accidental?\r\n\r\n@mklement0 you might have seen the related discussion #9086 including testing whether properties exist before using them, in strictmode.  I didn't note that `Select-Object -ExpandProperty` always reports errors for absent properties, that is interesting. I did note that `Select-Object -Property Nme` with a typo, works perfectly fine in strictmode, no errors about absent properties, and does make an object with a property `Nme = $null`, just as it would in normal mode.\r\n\r\nAs per the null-soaking issue, if the intent of StrictMode PropertyNotFound exceptions is to guard against typos, avoid propagating $null, or assert the object is the type you expected it to be, this behaviour of `Get-Member` and normal behaviour of `Select-Object -Property`, don't seem consistent with it.",
+      "created_at": "2019-03-21T06:47:56Z",
+      "updated_at": "2019-03-21T06:48:43Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I see your point re `Select-Object -Property`, @HumanEquivalentUnit.\r\n\r\nThe tension is between:\r\n\r\n* wanting to ensure in strict mode that you've only specified a _preexisting_ property\r\n\r\n* the convenience of intentionally _creating_ a property / ensuring its existence across heterogenous input.\r\n\r\nBoth use cases are valid.\r\n\r\nSimilarly, with `Get-Member`,  you could argue that `Get`ting something with an (umambiguous, non-wildcard) name that doesn't refer to something existing should fail in strict mode.\r\nIt relates to the discussion about having separate `Test-*` cmdlets if the intent is merely to _test_ existence - see https://github.com/PowerShell/PowerShell/issues/7498#issuecomment-414350751\r\n\r\nI'm not sure what the right  answer is, but I agree that at least updating the docs is called for.\r\n",
+      "created_at": "2019-03-21T15:30:40Z",
+      "updated_at": "2019-03-21T15:30:52Z"
+    },
+    {
+      "author": "leonardder",
+      "author_association": "NONE",
+      "body": "I stumbled upon this with regard to `select-object`.\r\n\r\n```\r\nSet-StrictMode -Version latest\r\n$PSVersionTable | select-object `\r\n@{ Name = \"Dummy\"; Expression = { $_.DoesNotExist } }\r\n```\r\n\r\nI would expect this to fail, or at least have a possibility to make it fail.",
+      "created_at": "2020-03-10T08:37:46Z",
+      "updated_at": "2020-03-10T08:37:46Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@leonardder \r\n\r\nProblem with that is that\r\n```powershell\r\n$PSVersionTable | Select-Object @{ n='Dummy'; e={ throw }}\r\n```\r\n\r\nalso fails silently\r\n    ",
+      "created_at": "2020-03-10T12:26:32Z",
+      "updated_at": "2020-03-10T12:26:32Z"
+    },
+    {
+      "author": "leonardder",
+      "author_association": "NONE",
+      "body": "You're correct. Slightly worrying.",
+      "created_at": "2020-03-10T12:28:43Z",
+      "updated_at": "2020-03-10T12:28:43Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah slightly, *but* that's also how properties tend to work in PS (and you could consider that expression to be somewhat of a property get accessor).  e.g.\r\n\r\n```csharp\r\npublic class MyObject\r\n{\r\n    public string MyProperty => throw new System.InvalidOperationException();\r\n}\r\n```\r\n\r\nAccessing `MyProperty` on that object will work mostly the same.",
+      "created_at": "2020-03-10T12:44:09Z",
+      "updated_at": "2020-03-10T12:44:09Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That's good to know, @SeeminglyScience, but perhaps even more worrying (I know that this ship sailed a long time ago), given that _setting_ properties and _method calls_ do surface exceptions.\r\n\r\nAs it stands, it is impossible to surface errors from the script blocks of calculated properties.\r\n\r\n",
+      "created_at": "2020-03-10T21:35:13Z",
+      "updated_at": "2020-03-10T21:35:13Z"
+    }
+  ],
+  "created_at": "2019-03-21T03:36:10Z",
+  "number": 9181,
+  "state": "open",
+  "title": "Should Get-Member behave differently in Strict Mode?",
+  "updated_at": "2021-01-15T08:48:15Z"
+}

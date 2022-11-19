@@ -1,0 +1,118 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/7704",
+  "author": "mklement0",
+  "body": "Related: #3743\r\n\r\nOn macOS, unlike on Linux, all (user-)default shell instances are started as _login_ shells.\r\n\r\nThere are two mechanisms for invoking a shell as a login shell: (a) setting its `argv[0]` to contain `-` as the 1st character (that's what Terminal.app does) or (b) passing the `-l` (or `--login`) option to the shell executable.\r\n\r\nIf you make `pwsh` your _default shell_ on macOS, certain applications may invoke `pwsh` with `-l`, which currently _breaks_ the invocation.\r\n\r\nSpecifically, Visual Studio Code does that, so on a macOS system that uses `/usr/bin/pwsh` as the default shell, _the integrated terminal fails to load_ (unless you happen to have the PowerShell extension installed and happen to open a `*.ps1` file).\r\n\r\nIt would be sufficient for `pwsh` to _accept_  `-l` / `--login` and otherwise simply _ignore_ it, as the behavioral implications of this option in the context of `bash` don't apply to PowerShell.\r\n\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\npwsh -l\r\npwsh --login\r\n```\r\n\r\nTo see the problem in action with Visual Studio Code:\r\n\r\n* Add `/usr/local/bin/pwsh` to `/etc/shells`\r\n* Make PowerShell your default shell with `chsh -s /usr/local/bin/pwsh`\r\n* Open a new terminal and close existing Visual Studio Code windows.\r\n* Use `code <file>` to open a file for editing, where `<file>` must _not_ be a PowerShell file.\r\n* Try to access the integrated terminal, which crashes due to invoking `pwsh` with `-l`.\r\n\r\nExpected behavior\r\n-----------------\r\n\r\nAn interactive PowerShell session should start, as if the option hadn't been specified.\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nInvalid argument '-l', did you mean:\r\n...\r\n\r\nThe argument '--login' is not recognized as the name of a script file. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\n...\r\n```\r\n\r\nEnvironment data\r\n----------------\r\n\r\n<!-- provide the output of $PSVersionTable -->\r\n\r\n```powershell\r\nPowerShell Core v6.1.0-rc.1 on macOS 10.13.6\r\nPowerShell Core v6.1.0-rc.1 on Ubuntu 16.04.4 LTS\r\nPowerShell Core v6.1.0-rc.1 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.165)\r\nWindows PowerShell v5.1.17134.165 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.165)\r\n```\r\n",
+  "closed_at": "2019-05-09T20:52:26Z",
+  "comments": [
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "If we add the `-l` whether users expect that we fully support PowerShell Core as login shell?",
+      "created_at": "2018-09-05T07:06:06Z",
+      "updated_at": "2018-09-05T07:06:06Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "We would have to document that it is an effective no-op.\r\n\r\nDe facto using `pwsh` as the default shell already works fine on macOS, after applying the workaround described in https://github.com/PowerShell/PowerShell/issues/6027#issuecomment-360638685\r\n\r\nEventually we'll need a documentation topic that describes all limitations with respect to using `pwsh` as the default shell on Unix-like platforms, currently summarized here: https://github.com/PowerShell/PowerShell/issues/975#issuecomment-331049792",
+      "created_at": "2018-09-05T12:46:35Z",
+      "updated_at": "2018-09-05T12:46:35Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0  Could you please clarify about \r\n> Technically, for PowerShell to detect being invoked as a login shell it must examine the equivalent of $0 (argv[0]) - the invocation name - to look for - as the 1st char.\r\n\r\nIs it `pwsh -`?\r\nCan this resolve the Issue too?\r\n",
+      "created_at": "2018-09-05T13:11:58Z",
+      "updated_at": "2018-09-05T13:11:58Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Is it `pwsh -`?\r\n\r\nNo, it is not an _argument_ that reflects `-`, it is the _name of the executable_, reflected in `argv[0]` in C terms and in `$0` in POSIX-like shell terms, which the caller sets to an arbitrary value - see below for details.\r\n\r\nGiven that we're currently not modifying the behavior based on whether we're invoked as a logon shell or not, it's not even necessary to detect `-`-prefixed invocations; of course we will have to, if we ever decide to change that (though it's not exactly clear what honoring login-shell status means, given that PowerShell cannot interpret `/etc/profile` directly).\r\n\r\n> Can this resolve the Issue too?\r\n\r\nNot necessarily, because other tools - such as VSCode and at least hypothetically other terminal applications - may still use the `-l` option rather than the `-`-prefix technique.\r\n\r\nThat's why I think we should fix it in PowerShell rather than asking VSCode to modify its default-shell invocation.\r\n\r\n---\r\n\r\n**The `-`-prefix convention**\r\n\r\nBy convention, shells should consider themselves _login_ shells if the 1st character of `$0` (`argv[0]`) is `-` (as an alternative to being passed the `-l` / `--login` option as an _argument_).\r\n\r\nThe caller can \"fake\" the name/path of the executable it invokes as reported in `$0`, so even though it is `pwsh` that is invoked, `$0` contains `-pwsh` when invoked from Terminal.app (and also from popular third-party alternative iTerm.app) while configured as the default shell.\r\n\r\nOn Unix-like platforms, for instance, you can use Bash's `exec` builtin with the `-a` option to set `$0`, and the `l` option automatically prepends `-` to it.\r\n\r\nThe tricky part is to get PowerShell to obtain this value, because `[Environment]::GetCommandLineArgs()` doesn't reflect it (it just contains the _DLL_ path, e.g., `/usr/local/microsoft/powershell/6-preview/pwsh.dll`).\r\n\r\nThe only way I personally know of to get this information from inside PowerShell (I haven't looked hard) would be to call the `ps` utility as follows, but that is obviously an undesirable cost to incur on startup:\r\n\r\n```sh\r\nps -o comm= $PID  # get true argv[0] / $0 value\r\n```\r\n\r\n\r\n",
+      "created_at": "2018-09-05T14:21:39Z",
+      "updated_at": "2018-09-05T14:25:02Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Seems we have already discussed that we could use different file names to address such scenarios (login shell, hide console windows, graphical shell and etc.). For the Issue we could create `pwshl` or `pwsh_login` runner.",
+      "created_at": "2018-09-05T15:08:34Z",
+      "updated_at": "2018-09-05T15:08:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "That would add unnecessary complexity:\r\n\r\n* It requires creating, maintaining, shipping, documenting  a new executable, even though its sole purpose would be to ignore the `-l` / `--login` options.\r\n\r\n* User will need to know and remember that they must specify that a different executable when changing their default shell to PowerShell with `chsh -s`, which is far from obvious (adding the right executable to `/etc/shells` as a prerequisite should be done by the installer, which may already be happening).\r\n",
+      "created_at": "2018-09-05T15:26:20Z",
+      "updated_at": "2018-09-05T15:26:20Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "With -l option we only fix VS Code issue not Terminal.app \r\nI found the PowerShell Committee approvement https://github.com/PowerShell/PowerShell/issues/992#issuecomment-384455760\r\n",
+      "created_at": "2018-09-05T15:37:20Z",
+      "updated_at": "2018-09-05T15:37:20Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "_There is nothing to fix_ for Terminal.app or any other tools that use the `-`-prefix convention, because PowerShell doesn't and need not care about what `argv[0]` truly contains - it simply has no impact.\r\n\r\nThe approval you link to is in a way the _opposite_ of what we're discussing here: a dedicated `pwsh-np` would _suppress_ loading of profiles, whereas option `-l` in POSIX-like shells explicitly loads profiles (even in non-interactive shells) - and we definitely want to load `$PROFILE` if `-l` is passed.",
+      "created_at": "2018-09-05T15:47:01Z",
+      "updated_at": "2018-09-05T15:47:48Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "My idea was that we should use one approach if we want to follow the \"standard\"/bash/posix behavior.\r\nThese settings are not for end users. Users should continue to use pwsh. System settings is for the installer or for the distributive creator - in this case, the end user does not need to know that another file is being launched.",
+      "created_at": "2018-09-06T05:22:36Z",
+      "updated_at": "2018-09-06T05:22:36Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> These settings are not for end users.\r\n> in this case, the end user does not need to know that another file is being launched.\r\n\r\nThat would be nice, but it's already not true for `pwsh-np`: As a script author, you must know to use _it_ as the executable in the shebang line in order to get predictable behavior that doesn't load `$PROFILE`.\r\n\r\nUnfortunately, backward-compatibility concerns leave us no choice there, so a separate executable is required.\r\n\r\nSimilarly, as stated, the end user would need to know that it's not `pwsh`, but `pwshl` (or whatever it would be) that must be passed to `chsh -s` _in order to make PowerShell the default shell._\r\n\r\nFortunately, in this case we _do_ have the option to support that with the existing executable, by implementing `-l` / `--login` as no-op switches.\r\n",
+      "created_at": "2018-09-06T12:46:10Z",
+      "updated_at": "2018-09-06T12:46:41Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "Modern devices is locked - owners haven't root permissions. Corporate users too. Special devices (net devices, storage systems and so in) is locked too. Only a manufacturer configure the device. Or there is a config tools. Or installer. If user has a root permission one is high quality professional user. On windows systems we traditionally have GUI that helps eliminate errors in the configuration. In PowerShell we can add cmdlets to configure shells, schedule tasks and so on in right way.\r\n\r\nPosix discribes Bash behaviors. If somebody want to implement something Posix-compatible one have to implement or port new-Bash. For any other shell like PowerShell we are forced to seek a compromise and implement only what is possible. \r\nIf the team published PowerShell specifications under Posix, we would be so Posix-compatible :-) \r\nI think real way is to develop and publish RFC to standardize PowerShell shell behavior. Then any manufacturer of distributions and systems can embed PowerShell in a standard and compatible manner. It may even be quite different than Posix/Bash.\r\nIt should also be noted that in the 6.x version we must comply with backward compatibility, but we can do some useful workarounds (like you suggest). But this should be done so that in next 7.x version we could make more significant changes.",
+      "created_at": "2018-09-07T03:47:16Z",
+      "updated_at": "2018-09-07T03:47:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@iSazonov:\r\n\r\nHonestly, I have no idea what your first paragraph is talking about and how it relates to this discussion.\r\n\r\nAs for the second paragraph:\r\n\r\n> Posix describes Bash behaviors.\r\n\r\nAs an aside: No, POSIX comprises a _specification_ for a shell, whose executable is `/bin/sh`. Bash is a POSIX-_like_ shell, but even when you run it in POSIX compatibility mode it isn't fully POSIX-compliant.\r\n\r\n> For any other shell like PowerShell we are forced to seek a compromise \r\n\r\nAnd implementing `-l` / `--login` as quiet no-op options is exactly such a _compromise_.\r\n\r\nNo one is looking for 100% POSIX compatibility, which fundamentally cannot be achieved by PowerShell.\r\n\r\nWhat matters is that _in practice_ you can use it _as your default shell_ on _all of the supported platforms_, and the proposed change is a step in that direction.\r\n\r\nIf someone wants to take on the work of formalizing the extent to which PowerShell is POSIX-compatible, that's great, but doing so is not a prerequisite for the change proposed here.\r\n\r\n",
+      "created_at": "2018-09-07T03:58:25Z",
+      "updated_at": "2018-09-07T03:59:11Z"
+    },
+    {
+      "author": "iSazonov",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Thanks for great discussion!\r\n\r\nYes, adding '-l' we resolve the Issue with VS Code.\r\nMy main fear was and is that with getting '-l' users will expect that we implementfully fully functional login shell. So first of all we need to create RFC and describe all shell modes. This will allow Community to use PowerShell in the standard way.\r\n\r\nIt is a question for PowerShell Committee.",
+      "created_at": "2018-09-07T06:32:22Z",
+      "updated_at": "2018-09-07T06:32:22Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee would accept adding `-l` that output a warning message akin to: \"The -l switch was used to indicate starting a login shell, however, PowerShell Core 6 does not currently support this meaning that certain environment variables will not be available or complete.\".  This would allow tools that expect `-l` to be there to work and pwsh to startup and allows us to support the complete work of a login shell in the future.",
+      "created_at": "2018-09-19T22:55:16Z",
+      "updated_at": "2018-09-19T22:55:16Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Resolved in #9528, which adds a `-l` / `-LoadProfile` switch that is a no-op for now.\r\n\r\nSee also: the RFC to make `-l` _functional_: https://github.com/PowerShell/PowerShell-RFC/pull/171/files ",
+      "created_at": "2019-05-09T20:52:26Z",
+      "updated_at": "2019-05-09T20:58:09Z"
+    }
+  ],
+  "created_at": "2018-09-04T17:42:22Z",
+  "number": 7704,
+  "state": "closed",
+  "title": "The pwsh CLI should support the -l / --login option for macOS compatibility, e.g. in VSCode",
+  "updated_at": "2019-05-27T09:00:59Z"
+}

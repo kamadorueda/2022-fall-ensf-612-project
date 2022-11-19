@@ -1,0 +1,146 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10654",
+  "author": "mklement0",
+  "body": "Please see #10688\r\n\r\n---\r\n\r\nIf a given type implements the following method overloads:\r\n\r\n* one with an `[object]`-typed parameter\r\n* one with an `[int]`-typed parameter\r\n\r\nthe _more specifically typed_ `[int]` overload should take precedence over the `[object]`-typed one, if an `[int]` instance is passed on invocation, but that is not _guaranteed_ to be the case and currently depends on the _implementation details_ of the type at hand.\r\n\r\nThe problem is that a more specific overload that is part of an _explicit interface implementation_ isn't considered if a match was found as a _direct type member_. (#7633 is related, but doesn't solve this problem, because it only consults the explicit interfaces if no direct member is found.) See [@SeeminglyScience's comment below](https://github.com/PowerShell/PowerShell/issues/10654#issuecomment-537106627).\r\n\r\nNote: A **real-world example** are the two indexers (parameterized `.Item` property) overloads that Json.NET's `[JObject]` type exposes: one from the type directly, for _named_ indexing (property names), and one from the implementation of the `IList[JToken]` interface, for _numeric_ indexing - the latter is ignored.\r\n\r\nThe `.Item()` overloads are:\r\n\r\n```powershell\r\nPS> ([Newtonsoft.Json.Linq.JObject]::Parse('{\"foo\": \"bar\"}') | Get-Member Item).Definition -split ', '\r\n\r\nNewtonsoft.Json.Linq.JToken Item(System.Object key) {get;set;}\r\nNewtonsoft.Json.Linq.JToken IList[JToken].Item(int index) {get;set;}\r\n```\r\n\r\nThe only - impractical - **workaround** at the moment is to use _reflection_:\r\n\r\n```powershell\r\n# Get the interface's parameterized [int]-parameter .Item() property that underlies the indexer.\r\n$intIndexer = [System.Collections.Generic.IList[Newtonsoft.Json.Linq.JToken]].GetProperty('Item')\r\n\r\n$obj = [Newtonsoft.Json.Linq.JObject]::Parse('{\"foo\": \"bar\"}')\r\n\r\n# Call the indexer with an [int]\r\n$intIndexer.GetValue($obj, 0).ToString()\r\n```\r\n\r\n# Steps to reproduce\r\n\r\n```powershell\r\nAdd-Type -TypeDefinition @'\r\n\r\n  // Interface with NUMERIC indexer.\r\n  public interface IFoo {\r\n    string this[int index] { get; }\r\n  }\r\n\r\n  // Class with [object] indexer and IMPLICIT IFoo implementation.\r\n  public class FooImplicit : IFoo {\r\n    public string this[object key] {\r\n      get => $\"item with KEY {key}\";\r\n    }\r\n    public string this[int index] {\r\n      get => $\"item with INTEGER {index}\";\r\n    }\r\n  }\r\n\r\n  // Class with [object] indexer and EXPLICIT IFoo implementation.\r\n  public class FooExplicit : IFoo {\r\n    public string this[object key] {\r\n      get => $\"item with KEY {key}\";\r\n    }\r\n    string IFoo.this[int index] {\r\n      get => $\"item with INTEGER {index}\";\r\n    }\r\n  }\r\n'@\r\n\r\n# OK - direct-member [int] overload takes precedence.\r\n[FooImplicit]::new()[1] | Should -Match 'INTEGER'\r\n\r\n# BROKEN - [int] overload from explicit interface method implementation is\r\n#          NOT used.\r\n[FooExplicit]::new()[1] | Should -Match 'INTEGER'\r\n\r\n# OK - explicit cast to interface [IFoo], \r\n# !! but note that the same approach does NOT work with [JObject]\r\n([IFoo] [FooExplicit]::new())[1] | Should -Match 'INTEGER'\r\n```\r\n\r\n# Expected behavior\r\n\r\nAll tests should pass.\r\n\r\n# Actual behavior\r\n\r\nThe 2nd test fails with:\r\n\r\n```none\r\nExpected regular expression 'INTEGER' to match 'item with KEY 1', but it did not match.\r\n```\r\n\r\nThat is, the more specific `[int]`-typed overload from the _explicit_ interface implementation was not called.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 7.0.0-preview.4\r\n```\r\n",
+  "closed_at": "2019-10-02T21:21:40Z",
+  "comments": [
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "I believe this is more of a general problem with method resolution.  The first matching overload seems to be the one picked, making the indexer explicit just changes the order in which the `Adapter` retrieves them (explicitly implemented methods need to be retrieved separately from the initial `Type.GetMethods` call).\r\n\r\nAnother example that isn't indexer related is `Marshal.SizeOf(Type)`. \r\n\r\n```powershell\r\nPS> [Runtime.InteropServices.Marshal]::SizeOf\r\n# OverloadDefinitions\r\n# -------------------\r\n# static int SizeOf(System.Object structure)\r\n# static int SizeOf[T](T structure)\r\n# static int SizeOf(type t)\r\n# static int SizeOf[T]()\r\n\r\n# This picks SizeOf(Object) instead of SizeOf(Type)\r\nPS> [Runtime.InteropServices.Marshal]::SizeOf([datetime])\r\n# Exception calling \"SizeOf\" with \"1\" argument(s): \"Type 'System.RuntimeType' cannot be marshaled \r\n# as an unmanaged structure; no meaningful size or offset can be computed.\"\r\n# At line:1 char:1\r\n# + [Runtime.InteropServices.Marshal]::SizeOf([datetime])\r\n# + ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n# + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException\r\n# + FullyQualifiedErrorId : ArgumentException",
+      "created_at": "2019-10-01T14:06:18Z",
+      "updated_at": "2019-10-01T14:06:18Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience - I thought the problem with `Marshal.SizeOf` is the generic. I believe PowerShell is trying to invoke `Marshal.SizeOf<System.RuntimeType>([datetime])` and it shouldn't be trying that overload because `RuntimeType` is not a public type.",
+      "created_at": "2019-10-01T14:58:45Z",
+      "updated_at": "2019-10-01T14:58:45Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience  and @lzybkr. \r\n\r\nDoes @SeeminglyScience's basic point still stand, however? I've updated the OP - please let me know if it now accurately describes the problem without incorrectly inferring causes.\r\n\r\n\r\n",
+      "created_at": "2019-10-01T15:11:10Z",
+      "updated_at": "2019-10-01T15:11:10Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> I thought the problem with Marshal.SizeOf is the generic. \r\n\r\n@lzybkr Yep that's my bad, since this works: \r\n\r\n```powershell\r\nAdd-Type -TypeDefinition '\r\npublic static class OverloadTesting\r\n{\r\n    public static int SizeOf(object structure) { return 1; }\r\n\r\n    public static int SizeOf(System.Type t) { return 2; }\r\n}'\r\n\r\nPS> [OverloadTesting]::([int])\r\n# 2\r\n```\r\n\r\n> I believe PowerShell is trying to invoke Marshal.SizeOf<System.RuntimeType>([datetime]) and it shouldn't be trying that overload because RuntimeType is not a public type.\r\n\r\nEven if it fell back to `TypeInfo` it would still act the same right?  What overload should win between a single generic argument and an exact type match.  And can that even be safely changed? Probably off topic now though.",
+      "created_at": "2019-10-01T15:11:20Z",
+      "updated_at": "2019-10-01T15:13:37Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Thanks, @SeeminglyScience and @lzybkr.\r\n> \r\n> Does @SeeminglyScience's basic point still stand, however? I've updated the OP - please let me know if it now accurately describes the problem without incorrectly inferring causes.\r\n\r\nThey are similar problems, but I don't think they're strictly related like I initially thought.  Fixing one probably won't fix the other.",
+      "created_at": "2019-10-01T15:12:52Z",
+      "updated_at": "2019-10-01T15:12:52Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "And do we have an issue for the related generics problem yet? If not, would you mind creating one, @SeeminglyScience?",
+      "created_at": "2019-10-01T15:16:17Z",
+      "updated_at": "2019-10-01T15:16:17Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 oh you know what, this really should have clicked for me immediately.  I added support for indexers that are explicitly implemented interface methods, that didn't work before #7633 (it says `ITuple` in the title, but ended up being a general fix).\r\n\r\nLooking for explicit interface implementations is only done as a fall back because it's pretty expensive (you need iterate and reflect on all declared interfaces).",
+      "created_at": "2019-10-01T15:36:13Z",
+      "updated_at": "2019-10-01T15:36:13Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "I was wondering about performance implications.\r\n\r\nIt's not clear to me from glancing at #7633: are you saying that it fixes this problem also, or that it doesn't, because if a matching direct-member indexer is present, the explicit interfaces aren't consulted?\r\n",
+      "created_at": "2019-10-01T15:48:58Z",
+      "updated_at": "2019-10-01T15:48:58Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@mklement0 Yeah it doesn't fix *this* issue, but before if there was an object that *only* had an explicitly implemented indexer (like all `Tuple`'s), it just wouldn't find an indexer.  My PR made it so if it doesn't find any indexer, it then checks for explicitly implemented indexers.\r\n\r\nPersonally I think it's probably *fine* to always check so it can find the best \"match\", but part of me also thinks that this is the more \"correct\" route.  I say that because in order for you to invoke that indexer in C# you'd have to do something like this:\r\n\r\n```csharp\r\nJObject obj = GetJObjectSomehow();\r\n((IList<JToken>)obj)[10];\r\n```\r\n\r\nThe point of explicitly implementing something is typically to hide it except in specific scenarios.  Typically it's more advisable to use the implicit implementation.  Ideally you'd be able to do something like that in PowerShell:\r\n\r\n```powershell\r\n([IList[JToken]]$obj)[10]\r\n```\r\n\r\nBut unfortunately you can't really cast as something that isn't a concrete type.  Well you can, but it won't actually effect anything since `$obj` technically already is `IList[JToken]` and PowerShell doesn't remember that you cast that to customize binding.\r\n\r\nAlso worth noting that `JObject` implements `IDynamicMetaObjectProvider` which means in most cases PowerShell is going to let `JObject` decide how it's bound. This problem does exist in PowerShell's binder as well, but PowerShell might also defer binding to `JObject` in this case.",
+      "created_at": "2019-10-01T16:02:26Z",
+      "updated_at": "2019-10-01T16:02:26Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Good stuff, @SeeminglyScience, thanks.\r\n\r\nI do see the point re requiring an explicit action to call the explicitly implemented interface method in general, and in C# it makes perfect sense, given that a simple cast will do that.\r\n\r\nUnfortunately, as you point out, we don't have that option in PowerShell  - and the workaround via reflection, as now shown in the OP, is quite cumbersome.\r\n\r\nMore generally, interfaces are not on the average PowerShell user's mind, if I were to guess, and seeing a method / property in `Get-Member's` output for a given type leads to a reasonable expectation that it can actually be called. The conditions under which they can't are far from obvious.\r\n\r\nThat said, perhaps this is too exotic a scenario to worry about - especially if the fix would come with an always-paid performance penalty - so perhaps the pragmatic solution is to simply _document_ the issue.\r\n\r\n@lzybkr, any thoughts?\r\n\r\n---\r\n\r\nOn a side note, @SeeminglyScience, since you mention `IDynamicMetaObjectProvider`:\r\n\r\nI've noticed that, for example, `[JObject]` instances do not have the usual hidden properties such as `.psobject` and `.pstypenames`; e.g., `[Newtonsoft.Json.Linq.JObject]::Parse('{\"foo\":1}').pstypenames` yields `$null`.\r\n\r\nIs this (a) due to delegating to `IDynamicMetaObjectProvider`, and (b) as designed?\r\n",
+      "created_at": "2019-10-01T17:23:30Z",
+      "updated_at": "2019-10-01T17:24:54Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> Is this (a) due to delegating to IDynamicMetaObjectProvider\r\n\r\nYeah\r\n\r\n> and (b) as designed?\r\n\r\nProbably not\r\n\r\n",
+      "created_at": "2019-10-01T17:31:56Z",
+      "updated_at": "2019-10-01T17:31:56Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience Regarding\r\n\r\n> But unfortunately you can't really cast as something that isn't a concrete type\r\n\r\n[PSMethodInvocationConstraints](https://github.com/PowerShell/PowerShell/blob/bd6fdae73520931f0d27a29d6290e18761772141/src/System.Management.Automation/engine/MshMemberInfo.cs#L1902) is used for exactly this scenario - the cast is meaningless other than to guide overload resolution.\r\n",
+      "created_at": "2019-10-01T18:06:47Z",
+      "updated_at": "2019-10-01T18:06:47Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah I thought that was used exclusively in PowerShell classes as an analog to C#'s `base.Method()` syntax.  Is it hooked up in other spots? Any time I've tried to do it it hasn't worked for me, but if it's supposed to work then I probably need to file some issues",
+      "created_at": "2019-10-01T18:26:08Z",
+      "updated_at": "2019-10-01T18:26:08Z"
+    },
+    {
+      "author": "lzybkr",
+      "author_association": "MEMBER",
+      "body": "@SeeminglyScience - I believe the invocation constraints are wired through everywhere they need to be. See [here](https://github.com/PowerShell/PowerShell/blob/bd6fdae73520931f0d27a29d6290e18761772141/src/System.Management.Automation/engine/CoreAdapter.cs#L1224) where explicit method impls are explicitly tested.",
+      "created_at": "2019-10-01T19:29:32Z",
+      "updated_at": "2019-10-01T19:29:32Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Using the cast approach actually _does_ work with the repro code in the OP, so again there must be something special about the Json.NET types involved:\r\n\r\n```powershell\r\nusing namespace System.Collections.Generic\r\nusing namespace Newtonsoft.Json.Linq\r\n\r\n# OK, due to the cast to [IFoo]\r\n([IFoo] [FooExplicit]::new())[1] | Should -Match 'INTEGER'\r\n\r\n# !! BROKEN when the same approach is applied to  [JObject] / [IList[JToken]]:\r\n# !! returns $null.\r\n([IList[JToken]] [JObject]::Parse('{\"foo\":1}'))[0] | Should -BeOfType ([JProperty])\r\n```\r\n\r\nI don't know if it's relevant, but using the name-based indexer, which works in principle, breaks the `Should` call, with an error that I've also seen in #10650 and #10652, `Target type System.Collections.IEnumerator is not a value type or a non-abstract class. (Parameter 'targetType')`\r\n\r\n```powershell\r\n# !! Indexing works, but the result breaks the Should call.\r\n([JObject]::Parse('{\"foo\":1}'))['foo'] | Should -BeOfType ([JProperty])\r\n```\r\n\r\n",
+      "created_at": "2019-10-01T20:17:00Z",
+      "updated_at": "2019-10-01T20:17:00Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "@lzybkr oh neat! Now that I think about it, I've probably only tried that on non-`IDispatch` COM objects. Learn something new every day \ud83d\ude42 Thanks!\r\n\r\n@mklement0 \r\n\r\n> Using the cast approach actually does work with the repro code in the OP, so again there must be something special about the Json.NET types involved:\r\n\r\nYeah probably IDMOP.  That's also where the `Target type System.Collections.IEnumerator is not a value type or a non-abstract class` error comes from.  If you look at the call stack, you can see their convert method being called.",
+      "created_at": "2019-10-02T12:15:38Z",
+      "updated_at": "2019-10-02T12:18:17Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Thanks, @SeeminglyScience; please confirm my current understanding:\r\n\r\n* If an overload match is found as a direct member, explicit interface implementations aren't consulted for more specific matches - this is by design, not least because changing this would be a performance concern.\r\n\r\n* The solution is to explicitly cast to the interface in order to reliably target the overload of interest.\r\n\r\n* The latter is currently broken in some situations, presumably relating to types that implement `IDynamicMetaObjectProvider`, so a fix is needed.\r\n\r\n---\r\n\r\nIf the above is correct, it probably makes sense to close this issue and create a new, more focused one.\r\n\r\nWhile I'm happy to take a stab at it, I wonder if it makes sense for you to do it, given that I am out of my depth here with respect to the implementation.\r\n\r\nI also wonder, whether the following issues could / should be folded into the new one, as they all seem related; at the very least it's worth linking to them:\r\n\r\n* #10650 \r\n* #10652\r\n* #10668\r\n\r\n",
+      "created_at": "2019-10-02T15:47:29Z",
+      "updated_at": "2019-10-02T15:47:52Z"
+    },
+    {
+      "author": "SeeminglyScience",
+      "author_association": "COLLABORATOR",
+      "body": "> If an overload match is found as a direct member, explicit interface implementations aren't consulted for more specific matches - this is by design, not least because changing this would be a performance concern.\r\n\r\nJust to be clear, I did purposefully add the check for explicit implementations only as a fallback, but truthfully I wasn't considering the scenario of calculating the best overload to use.  It was more of a \"if we already found one, we probably don't need to find more\" type of thing.  Would it be a performance hit? Yeah for sure.  Would it be impactful? Ehhhh only benchmarks could tell.  The binder is cached so I would think it would be pretty minimal.\r\n\r\nWhat I'm trying to get at is that saying it's by design on my part would be generous.  I think it mostly makes sense the way it is, or rather not particularly worth changing. But if you disagree I encourage you to switch it up in the binder and run some benchmarks.\r\n\r\n> The latter is currently broken in some situations, presumably relating to types that implement `IDynamicMetaObjectProvider`, so a fix is needed.\r\n\r\nA fix is needed for sure, what's unclear is who needs to fix what.  It seems bizarre to me that their convert binder wouldn't account for interfaces.  Maybe PowerShell should swallow the exception depending on where it happens. Maybe it should approach conversions for IDMOP more delicately, but imo that's kind of the point of `IDMOP`, especially in PowerShell.  My gut reaction is that the fix should be in Json.NET but I haven't looked closely enough at the PowerShell side to see if there's something better it could do there.",
+      "created_at": "2019-10-02T16:12:22Z",
+      "updated_at": "2019-10-02T16:12:22Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Understood re design intent and thanks for clarifying, @SeeminglyScience.\r\n\r\nNow that I understand the issue better and now that I know that casting to an interface _generally_ works, I'm not personally interested in pursuing this aspect further.\r\n\r\nInstead I've created a docs issue at https://github.com/MicrosoftDocs/PowerShell-Docs/issues/4871\r\n\r\nI've opened a new issue focused on fixing the broken interface casting at #10688\r\n\r\nI'm closing this.",
+      "created_at": "2019-10-02T21:21:40Z",
+      "updated_at": "2019-10-02T21:21:40Z"
+    }
+  ],
+  "created_at": "2019-09-30T19:14:54Z",
+  "number": 10654,
+  "state": "closed",
+  "title": "More specific method (indexer) overloads are not considered during overload resolution if they're part of an explicit interface implementation",
+  "updated_at": "2021-04-11T19:03:27Z"
+}

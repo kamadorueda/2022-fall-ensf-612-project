@@ -1,0 +1,76 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/9576",
+  "author": "mklement0",
+  "body": "Note: This problem may not often arise in practice, but there is no good reason for this inconsistency.\r\n\r\nThe simplified syntax for `Where-Object` and `ForEach-Object` introduced in v3 - called comparison and operation statement respectively - is meant to be just syntactic sugar that makes for less \"noisy\" commands, due to not requiring  a script block and operation on `$_` being implied.\r\n\r\nHowever, in the case of input objects that are _themselves collections_, the behaviors differ: script-block syntax performs _member enumeration_, whereas the simplified syntax does not.\r\n\r\nThat is, a given property `Foo` isn't automatically looked for on the _elements_ of an input object, if it happens to be a collection, unlike when `$_.Foo` is used in a script block.\r\n\r\n# Steps to reproduce\r\n\r\nRun the following Pester tests:\r\n\r\n```powershell\r\nDescribe \"Both script-block and operation/comparison-statement syntax perform member enumeration.\" {\r\n  BeforeAll {\r\n    $arr = ([pscustomobject] @{ prop = 1 }), ([pscustomobject] @{ prop = 2 })\r\n  }\r\n  It \"ForEach-Object\" {\r\n    $expected = 1, 2\r\n    # Note how $arr is sent as a *single object* through the pipeline\r\n    # and how the output should be a single array of the property values, \r\n    # courtesy of member enumeration.\r\n    , $arr | ForEach-Object { $_.prop } | Should -Be $expected\r\n    , $arr | ForEach-Object prop | Should -Be $expected    \r\n  }\r\n  It \"Where-Object\" {\r\n    # Note that the entire input array should be output as-is, as a single object.\r\n    , $arr | Where-Object { $_.prop -eq 1 } | Should -HaveCount 1\r\n    , $arr | Where-Object prop -eq 1 | Should -HaveCount 1\r\n  }\r\n}\r\n```\r\n\r\n# Expected behavior\r\n\r\nAll tests should pass.\r\n\r\n# Actual behavior\r\n\r\nThe commands using operation / comparison syntax fail, because they don't apply member enumeration.\r\n\r\n# Environment data\r\n\r\n```none\r\nPowerShell Core 6.2.0\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "The behavior changes if you remove the array operator `,` from in front of $args in the pipeline.  I think this makes the pipeline an [array[array[]], so you are only seeing it process the first array level.   I think the issue is with what the `,` operator does, and not with the simplified syntax.",
+      "created_at": "2019-05-16T17:24:59Z",
+      "updated_at": "2019-05-16T17:24:59Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Try this: (using $arr above)\r\n\r\n```PowerShell\r\n, $arr | foreach {$_.gettype()} # returns one type\r\n$arr | foreach {$_.gettype()} # returns two types\r\n```",
+      "created_at": "2019-05-16T17:32:11Z",
+      "updated_at": "2019-05-16T17:32:11Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "That's precisely the point. Typically when you pass an array to a comparison operator, the comparison _also_ enumerates the array. For example.\r\n\r\n```powershell\r\nPS> @(1, 2, 3, 4) -gt 2\r\n3\r\n4\r\n```\r\n\r\nThe Where-Object simplified syntax implementation seems to avoid this somehow, creating inconsistent results.",
+      "created_at": "2019-05-16T17:40:23Z",
+      "updated_at": "2019-05-16T17:41:54Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Yes, but `, @(1, 2, 3, 4) -gt 2` will fail \u2026  its not comparable.   Adding the comma operator in front of an array invalidates the logic because the array is now contained in another array.\r\n\r\nThe simplified syntax is working correctly, the scriptblock syntax is somehow breaking down the array of an array.",
+      "created_at": "2019-05-16T17:43:07Z",
+      "updated_at": "2019-05-16T17:44:43Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yes to the first point\r\n\r\nAs for the second... not true. The _pipeline_ is breaking down the outer array, as designed, and the operator is behaving as it ought. The fact that the cmdlet obscures this and breaks the operators' behaviour from the norm is an abnormality.\r\n\r\nFor example:\r\n\r\n```powershell\r\n$Array = @( 1, 2, 3, 4 )\r\n\r\n, $Array | ForEach-Object { $_ -lt 4 }\r\n```\r\n\r\nThe scriptblock syntax is working as it should. The simplified syntax is modifying how the operators actually behave.",
+      "created_at": "2019-05-16T18:35:13Z",
+      "updated_at": "2019-05-16T18:35:13Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "The pipeline doesn't break down the array, the Where-Object command breaks down the array in its process block.   The pipeline passes the first collection item, which only contains one item.  Where-Object's simplified syntax is then only able to see one object, and that object does not contain the member you have requested.  The simplified syntax only works against members of the object, where as the scriptblock version is able to access the original pipeline object (iterated of course), for which now the scriptblock's operator is able to further iterate.\r\n",
+      "created_at": "2019-05-16T19:41:39Z",
+      "updated_at": "2019-05-16T19:41:39Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I see what you're saying, but PowerShell typically applies automatic enumeration when you request a property value that doesn't exist on the collection itself. For example:\r\n\r\n```powershell\r\n$array = @(\r\n    [PSCustomObject]@{ a = 1; b = 3 }\r\n    [PSCustomObject]@{ a = 4; b = -1 }\r\n)\r\n$array.b\r\n#  outputs\r\n3\r\n-1\r\n```\r\n\r\nThe cmdlet isn't applying this rather standard PS logic to a collection that is received over the pipeline.",
+      "created_at": "2019-05-16T19:47:03Z",
+      "updated_at": "2019-05-16T19:49:12Z"
+    },
+    {
+      "author": "msftrncs",
+      "author_association": "CONTRIBUTOR",
+      "body": "Just to be correct in the examples so far,\r\n\r\n```PowerShell\r\n(, $array).b\r\n(, $array).count # verify only 1 object at this point\r\n```\r\nWhich does work.   In some ways though I think this is flawed and should not work.   At the point here where I am requesting property/member `b`, it doesn't exist, because I am testing an array of an array of hashtable/custom object's.   I should need to deliberately iterate the first level objects to get to properties stored in the second level.  I should have to do this, for consistency.\r\n\r\nSay for instance I had a list of lists.  Which way would be the right behavior there?   Should `[array]` have a special behavior as it mostly does now?",
+      "created_at": "2019-05-16T20:06:47Z",
+      "updated_at": "2019-05-16T20:06:47Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I don't think this issue is necessarily the right place to argue against the well established paradigm of member enumeration; it's been around for a long time now, and this issue is about bringing nonconformant parts of PS into line such that they behave as one might expect compared to alternate but generally equivalent methods.\r\n\r\nIf you had a list of lists, the member enumeration would generally be non functional. Since the top level list has all the properties that the second-level lists do, it would mask all their properties. Items stored in each of the second level lists would be masked from normal member enumeration until you start unwrapping the top level collection, e.g., with a pipeline.\r\n\r\n",
+      "created_at": "2019-05-16T20:13:51Z",
+      "updated_at": "2019-05-16T20:13:51Z"
+    }
+  ],
+  "created_at": "2019-05-10T17:04:38Z",
+  "number": 9576,
+  "state": "open",
+  "title": "Comparison and operation statement syntax does not apply member enumeration (ForEach-Object, Where-Object)",
+  "updated_at": "2019-05-16T20:13:51Z"
+}

@@ -1,0 +1,251 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/10917",
+  "author": "KevinMarquette",
+  "body": "# Support Question\r\n\r\nI was experimenting with the new `&&` and `||` statement operators and they do not work like I would expect. A left hand side evaluation of `$false` is considered \"succeed\" in the chain operators.\r\n\r\nHere is my specific use case where I ran into this issue:\r\n```\r\nTest-Path -Path $Path || return\r\n```\r\nI was exiting a function early when the file was missing. If the left side did not \"succeed\", I expected the right side to execute. That is not what happened. \r\n\r\nBecause of this unexpected behavior, I turned to the [RFC0046-Chain-Operators](https://github.com/PowerShell/PowerShell-RFC/blob/master/4-Experimental-Accepted/RFC0046-Chain-Operators.md) document. I used the bash examples from the top of the document and translated them into PowerShell. The results did not match the inline description.\r\n\r\nThese two specific examples executed incorrectly (I replaced `false` with `$false`):\r\n```\r\n$false && echo 'Second success' # Executes only the left-hand command (false always \"fails\")\r\n$false || echo 'Second success' # Executes both left-hand and right-hand commands\r\n```\r\n\r\nI have no background with bash so I was approaching this as a PowerShell user trying to do what felt intuitive. I expected the evaluation to work just like the `if(...){...}` statement when it came to \"succeeded\" or \"not succeeded\". This discrepancy will be a frequent source of confusion if it is left as implemented. \r\n\r\n\r\n\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "The notes in the RFC section you mention indicate that in Bash, the result of `false` is always considered \"failure\", unlike in PowerShell where an expression can result in `$true` or `$false` while still being considered as executing successfully.\r\n> ```bash\r\n> false && echo 'Second success' # Executes only the left-hand command (false always \"fails\")\r\n> ```\r\n\r\nThat said, I agree that it feels a bit counterintuitive, especially as you _also_ have to manually handle errors that occur within the expression if you want to hide the error from the user. I feel like if you're using an expression like `<command> || something-else`  then you probably want _that_ to BE your error handling, and not have to **also** take the additional effort to suppress / hide / handle the error after the expression completes.\r\n\r\n![image](https://user-images.githubusercontent.com/32407840/67643416-b2126b80-f8ed-11e9-86e9-23c4c49437e0.png)\r\n",
+      "created_at": "2019-10-27T23:12:21Z",
+      "updated_at": "2019-10-27T23:13:25Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I feel like we captured the technical bash implementation but not the spirit it of it. \r\n\r\n> The notes in the RFC section you mention indicate that in Bash, result of false is always considered \"failure\"\r\n\r\nThis statement leaves a lot open to interpretation. \r\n\r\n* in bash, false sets an exit code but PowerShell doesn't so false won't work like that in the chain operators\r\n* in bash, false is a failure so PowerShell should also treat $false as a failure in the chain operators\r\n\r\n\r\nI do have to give it credit for giving us a good tool for working with native executable and a better way to handle the way they indicate errors. If that is all that is intended for it to ever do, we need to describe it as a native executable error handling feature. Instead of saying \"succeeded\" or not \"succeeded\", we should be clear in saying having errors/exit codes or does not have errors/exit codes. \r\n\r\nBut I am looking at this as someone trying to use it with PowerShell functions and it doesn't fit very well. My example is confusing because I am using `Test-Path` where `$true` is a \"success\" and `$false` is not \"success\". Because the implementation is tied to `$?`, we need a command that will give it a value. If I write my own test function, I can't set `$?` to 1 directly because it's readonly (and managed by the engine).\r\n\r\n## CmdLets\r\n\r\nIt was suggested that I use `Resolve-Path` instead because it gives an error. This will correctly trigger the chain operator. But I also get an error written to the console.\r\n\r\n```\r\nPS> Resolve-Path -Path $Path || Write-Host \"Second success\"\r\nResolve-Path: Cannot find path 'C:\\temp\\testpath' because it does not exist.\r\nSecond success\r\n```\r\n\r\nBut we can control the error with `-ErrorAction SilentlyContinue `.\r\n\r\n```\r\nResolve-Path -Path testpath -ErrorAction SilentlyContinue || Write-Host \"Second success\"\r\nSecond success\r\n```\r\n\r\nOddly enough, `-ErrorAction Ignore` also triggers the chain when I would expect it not to fail.\r\n```\r\nResolve-Path -Path testpath -ErrorAction Ignore || Write-Host \"Second success\"\r\nSecond success\r\n```\r\n\r\nIf we use `-ErrorAction Stop`, then we get an error but the chain is also stopped. If this was for error handling, don't we kind of need that to still execute?\r\n```\r\nResolve-Path -Path testpath -ErrorAction Stop || Write-Host \"Second success\"\r\nCannot find path 'C:\\temp\\testpath' because it does not exist.\r\nAt line:1 char:1\r\n```\r\nI am getting some strange results with advanced functions using Write-Error. I'm going to experiment a bit more with that.\r\n",
+      "created_at": "2019-10-28T00:48:16Z",
+      "updated_at": "2019-10-28T00:48:16Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "For the RFC, the @PowerShell/powershell-committee explicitly decided to only look at $?.  This explains the behavior you're seeing.  `-ErrorAction Ignore` doesn't put an error in `$Error`, but `$?` is still `$false` as that command failed.  It's just that no error was produced.  `-ErrorAction Stop` stops the script so the right side of `||` doesn't get a chance to execute.  This would be the same if you `throw` without a `catch`.",
+      "created_at": "2019-10-28T01:15:49Z",
+      "updated_at": "2019-10-28T01:15:49Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "Calling `Write-Error` will set `$?` to `$false`. But, if you call `Write-Error` from within a function, the function will set `$?` to `$true`.\r\n\r\n```\r\nPS> function Test-Chain{\r\n    Write-Error 'Failed'\r\n}\r\n\r\nPS> Test-Chain \r\nWrite-Error 'Failed': Failed\r\nPS> $?\r\nTrue\r\n```\r\n\r\nThis means that using `Write-Error` from a function is not sufficient to trigger the chain operators. I was able to get it to work if I used `$PSCmdlet.ThrowTerminatingError($PSitem)`. So this will work with some functions but not others depending on how the internal error handling is managed.\r\n",
+      "created_at": "2019-10-28T01:30:59Z",
+      "updated_at": "2019-10-28T01:33:14Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@KevinMarquette `ThrowTerminatingError()` will terminate the entire expression, making `||` effectively useless. You can use `$PSCmdlet.WriteError()` to write a non-terminating error instead, which does correctly set `$?`\r\n\r\nIt's really silly that `Write-Error` doesn't do that from within a function, though; that's kind of what it's for in a very fundamental way, I think.",
+      "created_at": "2019-10-28T01:42:37Z",
+      "updated_at": "2019-10-28T01:42:57Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I was thinking we could use it this way.\r\n\r\n```\r\nPS> \r\nfunction Test-Chain2{\r\n    [cmdletbinding()]\r\n    param()\r\n    try{\r\n        Write-Error 'Failed' -ErrorAction Stop\r\n    }catch{\r\n        $PSCmdlet.ThrowTerminatingError($PSitem)\r\n    }\r\n}\r\n\r\nPS> Test-Chain2 || Write-Host \"Second success\"\r\nTest-Chain2: Failed\r\nSecond success\r\n```\r\n\r\nI'm looking for ways to make this work outside of native executables. ",
+      "created_at": "2019-10-28T01:45:13Z",
+      "updated_at": "2019-10-28T01:45:13Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "My last concern is that you need to use more errors to make use of these operators. But use of `-ErrorAction Stop` is common and would turn those into terminating errors.\r\n\r\n```\r\nPS> \r\nfunction Test-Chain3 {\r\n    [cmdletbinding()]\r\n    param()\r\n    Resolve-Path -Path testpath || Write-Host \"Second success\"\r\n}\r\n\r\nPS> Test-Chain3\r\nResolve-Path: \r\nLine |\r\n   4 |     Resolve-Path -Path testpath || Write-Host \"Second success\"\r\n\r\n     |     ^ Cannot find path 'C:\\temp\\testpath' because it does not exist.\r\nSecond success\r\n\r\nPS> Test-Chain3 -ErrorAction Stop\r\nCannot find path 'C:\\Users\\kevma\\testpath' because it does not exist.\r\nAt line:4 char:5\r\n```",
+      "created_at": "2019-10-28T01:51:23Z",
+      "updated_at": "2019-10-28T01:51:23Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Given all the above, I have a fairly strong suspicion that with the present implementation of `||` we are _vastly_ increasing the complexity of proper error handling in PS rather than simplifying it.\r\n\r\nThe present state of things here is not particularly great. Ideally, use of `||` should _simplify_ error handling, not complicate it. I'll list out what I see as complications, along with possible resolutions.\r\n\r\n## Complication 1\r\n\r\n`||` lets errors bleed through, forcing us to silence or discard errors _in addition to_ using `||` in many cases. As a result, use of `||` tends to complicate error handling, as we have to both apply an erroraction preference _and_ take some other action. \r\n\r\n### Solution\r\n\r\nHave `||` implicitly hide errors, while still populating `$error` as normal (a la `-ErrorAction SilentlyContinue`). This would allow us to do things like this: `<command> || throw $error[0]` (which effectively behaves akin to `-ErrorAction Stop`, but we could then apply this to an entire scriptblock, for example, which could terminate the parent command whilst still allowing the operations within the scriptblock to complete.\r\n\r\nIf `||` set `$_` to the last error (or all errors?) it is handed during the execution of the left-hand command or expression, I think it could be rather useful to be able to do something like `<command> || throw [AggregateException]::new($_.Exception)` to collate all errors and exceptions into one thing to throw to the caller and handle there.\r\n\r\n## Complication 2\r\n\r\n`||` doesn't handle terminating errors, forcing us to use try/catch and making this an even more complicated tool to use; on a command line, `<command> || <other-command>` should probably _not_ be a failing expression that _just errors_ and does nothing else, by the very definition of `||` (at least in spirit).\r\n\r\n### Solution\r\n\r\nAllowing `||` to also handle terminating errors would allow us to use it as a sort of _inline_ try/catch, however, which vastly simplifies how we might handle such errors and whether we choose to rethrow them or not.\r\n\r\n## Complication 3\r\n\r\n`||` doesn't deal with $true/$false. I'm mostly stating this here as it's the main body of request for this issue. I think that we may _want_ this to be the case. I'm not sure. With current behaviour we can do something like `$var ? $result : $(throw) || <command>`  in lieu of implicit \"`$false` is terrible\" behaviour or perhaps a slightly simpler `<command> | Assert-True || <command>` sort of structure. That may be a bit too clunky for what we're looking for, though.\r\n\r\n### Solution\r\n\r\nAs Kevin has pointed out, we _may_ want `||` to simply treat `$false` as an error, wherein it becomes a kind of soft-assert, which is treated as an error state and executes the fallback.\r\n\r\nWe do need to be careful introducing semantics around boolean conversions, I think, because several things _can_ cast to `$false` in a boolean conversion, giving us a short list of things that would actually cause the error state to trigger here if they are handed to `||` as output:\r\n\r\n- `$false` itself\r\n- An empty array/collection: `@()` \r\n- The number zero: `0`\r\n- An empty string: `''` (possibly the most worrying, given there are probably at least a handful of native commands that don't output anything even when they do their job properly; this may need to be explicitly excluded so that it works with executables running with an `/s` switch for example).\r\n- An array with exactly one element that is any of the above.\r\n\r\nAdditional consideration here: should `||` be swallowing _output_ from the left-hand side? Or would it conditionally swallow `$false`-y output? Or not at all?",
+      "created_at": "2019-10-28T02:19:11Z",
+      "updated_at": "2019-10-28T03:36:35Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "cc @rjmholt ",
+      "created_at": "2019-10-28T03:02:09Z",
+      "updated_at": "2019-10-28T03:02:09Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "My ask would be that if `$?` was True, then perform the same evaluation we would do in `if(...)` or in the ternary operator.",
+      "created_at": "2019-10-28T04:28:55Z",
+      "updated_at": "2019-10-28T04:28:55Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for `Write-Error` not setting `$?` in the caller's scope: that's a longstanding bug a fix for which has now gained urgency with `&&` and `||` - see #3629\r\n\r\nThe workaround is to use `$PSCmdlet.WriteError()`, as @vexx32  mentioned, but, just like `$PSCmdlet.ThrowTerminatingError()`, it is only available in _advanced_ functions / scripts.",
+      "created_at": "2019-10-28T15:43:05Z",
+      "updated_at": "2019-10-28T15:50:57Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "As for `-ErrorAction Ignore` unexpectedly still resulting in `$?` reflecting `$false`: this is another known problem that @KirkMunro reported a while ago - see #4613\r\n\r\n_Update_: The correct behavior is debatable; if `$?` always resulted in `$true` with `-ErrorAction Ignore`, then combination with `&&` / `||` is of limited use, because `&&` would always  and `||` never kick in - in which case you could just sequence commands with `;`.",
+      "created_at": "2019-10-28T15:49:22Z",
+      "updated_at": "2019-10-29T14:10:09Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "I was hoping the RFC (especially the examples) would address some of the confusion here, but we might need to add to the documentation. The current documentation is [here](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/7/Microsoft.PowerShell.Core/About/about_Pipeline_Chain_Operators.md).\r\n\r\nIn order to make pipeline chain operators simple and cohesive with PowerShell, I specced them to reuse existing PowerShell concepts without interfering with others. The concept we reuse is `$?`, whether PowerShell considers a pipeline successful or not.\r\n\r\nThat means that `x && y` should be directly equivalent to:\r\n\r\n```powershell\r\nx\r\nif ($?) { y }\r\n```\r\n\r\nNotice that there's no error handling around `x`, and whether `y` is executed depends purely on `$?`, not on the *value* of `x`. This is intended to keep the concept of the pipeline chain operators simple and reducible to a single existing concept. It's just syntactic sugar.\r\n\r\nThere was discussion of both expression and error handling in the [original issue](https://github.com/PowerShell/PowerShell/issues/3241).\r\n\r\nIn particular, after some discussion of expression-based evaluation, @mklement0 summed up why that should not affect `&&`/`||` best [here](https://github.com/PowerShell/PowerShell/issues/3241#issuecomment-383296399):\r\n\r\n> - they only decide what commands get executed in principle, based on the commands' exit codes\r\n> - but do not interfere with the commands' output streams\r\n> - and what the commands do or do not output (send to the output streams) is irrelevant for the determination of execution success.\r\n\r\nSo when `$false && Write-Host \"Hi\"` is executed, the value `$false` is executed in a pipeline successfully (under the hood, this is really `Write-Output $false`), `$?` is true and execution proceeds to the right-hand side pipeline.\r\n\r\nSimilarly, there's some discussion in there around errors and error handling. Ultimately in PowerShell `ErrorAction` is a form of `try`/`catch`, it talks about *what to do when an error occurs*, but the fact is that *an error still occurred*, so the command failed. When `Invoke-NonTerminatingError -ErrorAction Ignore` is invoked, the error is ignored (suppressed) but it still occurred, so the command failed.\r\n\r\nMore importantly than this, absorbing an error with `||` was something deliberately prevented. This is described briefly [in the RFC](https://github.com/PowerShell/PowerShell-RFC/blob/master/4-Experimental-Accepted/RFC0046-Chain-Operators.md#error-semantics). This is also documented to some extent in the [documentation](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/7/Microsoft.PowerShell.Core/About/about_Pipeline_Chain_Operators.md#error-interaction).\r\n\r\nIn fact we test fairly comprehensively for error semantics cases, because it's very important for the way the feature works:\r\n\r\nhttps://github.com/PowerShell/PowerShell/blob/2746cb7b89ce009d392a464d080eaf9ab652d1ff/test/powershell/Language/Operators/PipelineChainOperator.Tests.ps1#L189-L234\r\n\r\nAgain the logic comes down to this being a syntactic sugar for `x; if ($?) { y }`. But also I wanted to avoid very serious complexity occurring in cases where `||` is combined with `trap` or `try`/`catch`/`finally`, because if they all handle errors, it's complicated to say who wins. They way it is, `&&`/`||` do not interfere with error handling, they just sequence execution based on success.\r\n\r\nSo `&&` and `||` **do not handle errors or expression values, they sequence execution based on pipeline execution success**.\r\n\r\nParticularly `&&` and `||` are not *expression-mode* operators, they act more like statement separators (like their counterparts in CMD and Bourne shell). For this, I personally think `-then` and `-else` would be fitting, but that's another discussion.\r\n\r\nThere are, I think, some serious problems with how `$?` is set (i.e. how we determine whether a pipeline succeeded), particularly with `(...)`, `$(...)` and using `Write-Error` within a function. But those issues are with `$?`. The `&&`/`||` operators hitched their wagon to `$?` so that PowerShell didn't have *yet another* concept around pipeline failure; `$?` is closest to how `&&`/`||` work in other shells, so to keep things simple we just reuse that concept (with no special corner cases depending on other mechanisms). So I think the logic for setting `$?` should be discussed and pinned down better, but that `&&` and `||` depending solely on `$?` is the simplest option for us.\r\n",
+      "created_at": "2019-10-28T18:27:10Z",
+      "updated_at": "2019-10-28T18:49:15Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "I think that sounds sensible. The natural result of that, though, is that we now have a rather more pressing need to properly pin down the logic for setting `$?`\r\n\r\nIs that in scope for PS7? \ud83d\ude42 ",
+      "created_at": "2019-10-28T18:44:57Z",
+      "updated_at": "2019-10-28T18:44:57Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Because of this unexpected behavior, I turned to the RFC0046-Chain-Operators document. I used the bash examples from the top of the document and translated them into PowerShell. The results did not match the inline description.\r\n\r\nUnfortunately in this case, the simplest example in bash does not translate perfectly into PowerShell. `true` and `false` are actually native utilities (source code [here](https://github.com/coreutils/coreutils/blob/master/src/true.c)). Famously `false`'s man page says that it [does nothing, unsuccessfully](https://linux.die.net/man/1/false). So when bash evaluates `&&` and `||`, it considers whether `false` succeeded, rather than its output; in bash, `false` outputs nothing unsuccessfully, in PowerShell it outputs the value `$false`, successfully.",
+      "created_at": "2019-10-28T19:09:01Z",
+      "updated_at": "2019-10-28T19:09:01Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> Is that in scope for PS7? \ud83d\ude42\r\n\r\n@SteveL-MSFT @joeyaiello @PowerShell/powershell-committee ",
+      "created_at": "2019-10-28T19:18:12Z",
+      "updated_at": "2019-10-28T19:18:12Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "Great summary and framing of the issue, @rjmholt.\r\n\r\nAs a separate issue, it's worth thinking about @KevinMarquette's initial example,\r\n`Test-Path -Path $Path || return`.\r\n\r\nWhile we've established that the design of PowerShell's `Test-*` cmdlets - where the test result is output _as data_, a Boolean written to the pipeline - is fundamentally at odds with the exit-code/success-status-based `&&` and `||`:\r\n\r\n* Thinking that `Test-*` cmdlets _can_ be used with `&&` and `||` is an understandable assumption to make (especially for Bash users used to something like `test -f $file || exit 1`), and should explicitly be called out as a pitfall [in the documentation](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/staging/reference/7/Microsoft.PowerShell.Core/About/about_Pipeline_Chain_Operators.md).\r\n\r\n  * Additionally, the existing sample commands in the linked help topic currently confusingly _are_ named `Test-*`, even though they aren't `Test`-verb cmdlets in the PowerShell sense - this should be changed.\r\n\r\n* It would still be nice to have _some_ way to have bona fide `Test-*` cmdlets work with `&&` and `||` - for concision as well:\r\n\r\nCurrently, you need the following, which doesn't exactly roll off the keyboard:\r\n\r\n```\r\nif (-not (Test-Path -Path $Path)) { return }\r\n```\r\n\r\n(Simplifying this with different syntax has been proposed before, but no one wrote an RFC: https://github.com/PowerShell/PowerShell/issues/1970)\r\n\r\nThere's no easy solution I can think of; perhaps a switch that makes `Test-*` cmdlets emit no output and signal the test result via `$?`:\r\n\r\n`-Quiet` seems like a natural candidate, but, alas, it's been used to output a _Boolean_ instead of the usual data - the very thing we're trying to avoid here.\r\n\r\n`-NoOutput`? It's hard to keep the name short while conveying the semantics.\r\n\r\n```\r\nTest-Path $path -NoOutput || return\r\n```\r\n\r\n\r\n",
+      "created_at": "2019-10-28T20:49:54Z",
+      "updated_at": "2019-10-28T20:49:54Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "> Unfortunately in this case, the simplest example in bash does not translate perfectly into PowerShell. true and false are actually native utilities (source code here). Famously false's man page says that it does nothing, unsuccessfully. So when bash evaluates && and ||, it considers whether false succeeded, rather than its output; in bash, false outputs nothing unsuccessfully, in PowerShell it outputs the value $false, successfully.\r\n\r\nThis is exactly why I feel like we captured the technical bash implementation but not the spirit of it. I guess I should ask a different question.\r\n\r\nAre there any examples in bash of expressions used in `if` statements that would work differently with chain operators? These expressions for example, whats the equivalent in PowerShell with the chain operator? \r\n\r\n```\r\n$ [ 1 == 1 ] && echo \"matches\"\r\nmatches\r\n$ [ 1 == 2 ] || echo \"not matches\"\r\nnot matches \r\n```\r\n\r\nDo we need `$?` to evaluate to FALSE if the last statement is `$false` or `$null`?",
+      "created_at": "2019-10-29T01:01:25Z",
+      "updated_at": "2019-10-29T01:11:08Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> not the spirit of it\r\n\r\nThere are two incompatible spirits at play:\r\n\r\n* In Bash / POSIX-like shells, success vs. failure is exclusively communicated via invisible process exit codes that are independent of the output streams.\r\n\r\n    * _Tests_ - either with the `test` builtin/utility or with quasi-alias `[ ... ]` (POSIX-compliant) / `[[ ... ]]` (nonstandard extension in, among others, Bash) exhibit the same behavior: they solely signal the test result via their exit code, while producing _no output_.\r\n\r\n  * `&&` and `||` exclusively operate on these exit codes, while passing output streams through - therefore,  they uniformly operate on program invocations and tests alike.\r\n\r\n* In PowerShell, success vs. failure  is - poorly (hopefully to be fixed) - reflected in the automatic `$?` variable, and, prior to `&&` and `||`, no language elements acted on it - `$?` had to be queried explicitly. \r\n\r\n  * _Tests_ by contrast - cmdlets that use the approved `Test` verb and _Boolean expressions_ such as `$foo -eq 'bar'` - communicate  test results by way of _data output_: the Boolean value they send to the success output stream, while _always_ setting `$?` to `$true` (unless something goes wrong fundamentally)\r\n\r\n  * `&&` and `||` exclusively operate on `$?`, PowerShell's analog to exit codes (which is set to `$false` when an external program reports a nonzero exit code), and also pass output streams through.\r\n\r\n  * `&&` and `||` therefore work well with:\r\n      * External programs that properly signal success vs. failure via their exit code.\r\n      * PowerShell commands (not _expressions_) _other than_ `Test-*` cmdlets, which properly signal their overall success vs. failure via `$?`.\r\n\r\n  * `&&` and `||` are currently fundamentally at odds with:\r\n     * `Test-*` cmdlets and Boolean expressions\r\n---\r\n\r\nThis means that there's currently no meaningful way to combine `Test-*` cmdlets and Boolean expressions with `&&` and `||`\r\n\r\nTherefore, the equivalents of \r\n` [ 1 == 1 ] && echo \"matches\"` and `[ 1 == 2 ] || echo \"not matches\"`\r\nare good old \r\n`if (1 -eq 1) { \"matches\" }` and (spelled out) `if (-not (1 -eq 1)) { \"not matches\" }`\r\n\r\n---\r\n\r\nNote that even if we decided to modify  the behavior of `Test-*` cmdlets and Boolean expressions to _also_ reflect the test result in `$?` (technically a breaking change), that still leaves the problem of these cmdlets / expressions producing _output_ that needs to be silenced / consumed; e.g., `1 -eq 1 && \"matches\"` outputs `$true, \"matches\"`, not just `\"matches\"`.\r\n\r\nI've proposed a way to allow `Test-*` cmdlets to work with `&&` / `||` above, via a switch, but it is of necessity awkward.\r\n\r\nAlso, it still leaves the problem with Boolean expressions.\r\n\r\nConceivably, a generic cmdlet that accepts a script block and quietly translates its Boolean outcome into the appropriate `$?` could help, but that feels clunky too:\r\n\r\n```\r\nConfirm-Success { 1 -eq 1 } && \"matches\"\r\n```\r\n",
+      "created_at": "2019-10-29T05:31:34Z",
+      "updated_at": "2019-10-29T05:31:34Z"
+    },
+    {
+      "author": "KevinMarquette",
+      "author_association": "CONTRIBUTOR",
+      "body": "I don't care how bash works or it's implementation details. It very clearly looks like I can use boolean logic with chain operators. In the limited experiments, it certainly feels that way. It makes for a nice user experience that is somewhat intuitive.\r\n\r\nIf we stepped back away from how chain operators are currently implemented in PowerShell, wouldn't it be valuable to support boolean operations? To create a richer user experience that aligns with the experience above? \r\n\r\nHow often do we see this?\r\n```\r\nif (-not (Test-Path $Path)) { \r\n    New-Item $Path -Type Directory\r\n}\r\nTest-Path $Path || New-Item $Path -Type Directory\r\n```\r\n\r\n---\r\n\r\n> In PowerShell, success vs. failure is - poorly (hopefully to be fixed) - reflected in the automatic $? variable\r\n\r\nI don't fully agree with this statement and that is why I am not in alignment. The `if` statement uses a very different definition for failure vs success. Using `$?` isn't that popular.\r\n\r\nI don't even use bash. But it feels like if we are adding new operators to the language that they would work like the rest of the PowerShell language features we use. I am advocating for what I feel is a better user experience. From a pure PowerShell point of view, it feels like a disservice if it didn't work like the `if` statement. \r\n\r\nThank you\r\n-Kevin",
+      "created_at": "2019-10-29T08:05:01Z",
+      "updated_at": "2019-10-29T08:05:01Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "* I agree that `&&` and `||` are both expressive and concise.\r\n\r\n* I agree that the inability to use `Test-*` cmdlets - or Boolean expressions in general - with them is problematic and may trip people up, [as previously pointed out](https://github.com/PowerShell/PowerShell/issues/10917#issuecomment-547139774).\r\n\r\n* I would like to find a solution - which is why I made suggestions and continued this conversation.\r\n\r\nHowever, at this point I don't see a good solution - to me, shoehorning the fundamentally different underpinnings of `Test-*` cmdlets and Boolean expressions into `&&` and `||` is problematic, but perhaps we can find a way to make it work that everyone agrees with.\r\n\r\nThe challenge is around output stream suppression - as noted, a salient feature of `&&` and `||` is that  _by design_ pass all output streams through - the operators' sole purpose is to _chain_ pipelines.\r\n\r\nIn order to integrate `Test-*` calls and Boolean expressions with `&&` and `||`, the operators would have to do the following:\r\n\r\n* interpret the Boolean return value _as `$?`_ and act accordingly\r\n* _suppress_ the Boolean return value, because in the case of _tests_ you do _not_ want output (as explained, in Bash this isn't a problem, because tests are both quiet and directly set an exit code).\r\n\r\nThe specific challenge is how to _reliably_ detect a _test_ command / expression:\r\n\r\n* Do we consider anything that returns a _Boolean scalar_ a test, and therefore apply the above?\r\n  * In the context of expressions, that would mean that you'll have to provide an _explicit_ Boolean return value (e.g., `$path -eq '' && ...`) and couldn't rely on _implicit_ Boolean conversion (`$path && ...`)\r\n* What if a cmdlet just so happens to output a Boolean scalar _as data_ that you do want passed through?\r\n\r\nThat output is _selectively_ suppressed and interpreted differently is a non-obvious inconsistency - but then again, if it \"just works\", perhaps that won't be an issue in practice.\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2019-10-29T14:45:49Z",
+      "updated_at": "2019-10-29T15:02:37Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Yeah, given the fact that PS can and will cast basically anything to boolean if you ask it to, you would need to restrict it to explicit boolean values and not apply standard casting rules.",
+      "created_at": "2019-10-29T14:57:34Z",
+      "updated_at": "2019-10-29T14:57:34Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "> This is exactly why I feel like we captured the technical bash implementation but not the spirit of it.\r\n\r\nI feel this is precisely why `&&` and `||` should *not* deal with expressions. Bash doesn't have booleans. It doesn't even have number types or support full arithmetic. Instead it uses tests and works with exit codes. The idea that booleans are simulated by test success is a bashism. Bash doesn't have expressions, only statements that write output.\r\n\r\nConversely, to bridge the gap between .NET and native utilities, PowerShell has both expressions and statements, both exceptions and exit codes. There are numerous constructs in PowerShell to manipulate expressions and manage exceptions, but relatively few for integrating with native utilities that always return a string and only set `$LASTEXITCODE` to express failure. Chain operators are statement sequence operators (not expression operators) primarily to make that a little bit easier. So you can do things like `npm install && npm test` or `ipmo build.psm1 && Start-PSBuild && Start-PSPester` or `nativebuild.exe || $(throw \"Build failed\")`.\r\n\r\nWe spent a long time in the issue, the RFC and the PR discussing how chain operators should work and I think we refined it to something that makes sense for PowerShell, isn't complicated, gels well with the rest of the language and solves a problem in PowerShell. And we were careful about it because language features are much harder to change after the fact.\r\n\r\nFor conditional expression sequencing, PowerShell already has `if`, `switch` and now the ternary. If you want to sequence two cmdlets that can fail, you can do `Invoke-First -ErrorAction Stop; Invoke-Second` or you can set `ErrorActionPreference`. But for native executions, you had no choice but to use an `if` to check `$LASTEXITCODE`. But chain operators make that sequencing just a little bit easier.\r\n\r\nImagine instead if we made `&&` and `||` test for booleans. If we make it cohesive with other PowerShell booleans, it should coerce values. So now I run something like `make && ./path/to/exe` to build and run some project, but if `make` doesn't output anything to stdout, its output is falsey from PowerShell's perspective, so it runs `make` but not the exe. That's very unexpected because make succeeded, it just didn't write any output. So then we make it only work with exact booleans. Now there's a special corner case in PowerShell we must educate everyone about where only values that are exactly `$true` or `$false` will work, and it has its own code path in the codebase because nothing else works like that. Either of those solutions is problematic because we either fail in our duty as a shell (to work nicely with utilities), or fail in our duty as a language (to be consistent).\r\n\r\nI personally like the way JavaScript uses `&&` and `||`, and I even suggested that at one point. My feeling is that PowerShell should implement those as expression operators like `-then` and `-else`.\r\n\r\nFor the particular `Test-Path` usecase above, chain operators simply aren't intended for that. It's not a scenario intended to be served by chain operators. But what will work in that case is:\r\n\r\n```powershell\r\nGet-Item $Path || New-Item $Path -ItemType Directory\r\n```\r\n\r\nThat's because `Get-Item` lies in the domain of chain operators; it's a stateful, side-effectful command that can succeed or fail.",
+      "created_at": "2019-10-29T18:56:26Z",
+      "updated_at": "2019-10-29T19:22:57Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@rjmholt, you're right in the basic functionality of it. But your closing example here illustrates almost perfectly what I feel is one of the main problems with the chain operators, which I illustrated above.\r\n\r\nActually, I think you meant:\r\n```powershell\r\nGet-Item $Path || New-Item $Path -ItemType Directory\r\n```\r\n(Because otherwise it would fail anyway; you can't create a directory that already exists.)\r\n\r\nBut even with this, it can't be used in any way neatly with PowerShell. PowerShell errors still bleed through, even though you're choosing to handle it with `||` to take some other action. I think this is rather poor UX, akin to using a much more localised `trap` except you _also_ bleed the error through... which... why? What purpose does `||` have being in PowerShell at all if it can't also handle at _least_ PowerShell errors?",
+      "created_at": "2019-10-29T19:02:36Z",
+      "updated_at": "2019-10-29T19:03:04Z"
+    },
+    {
+      "author": "rjmholt",
+      "author_association": "COLLABORATOR",
+      "body": "You're right -- fixed the example. But that example is just a party trick; I don't think this particular scenario should be shoehorned into the chain operator feature.\r\n\r\nIf we absorb the errors, we have worse problems. Something failed but there's nothing in `$error`, nothing on the screen and nowhere to know where the script failed.\r\n\r\nThis is one of the serious problems in bash; it's hard to work out where failures occurred and debug. PowerShell was explicitly designed to not replicate this. And if you pair error handling here with ErrorActionPreference, `trap` and `try`/`catch` you now have fragile logic that's hard to explain.\r\n\r\nInstead, chain operators are extremely simple: `x && y` == `x; if ($?) { y }`. That's exactly how they're implemented in the compiler.\r\n\r\nIf you want to suppress the error, you have that option. `Get-Item -ErrorAction Ignore && ...`. It's obvious, and a pre-existing concept. Works exactly the same as it always has.\r\n\r\nUltimately PowerShell's error UX is not perfect, but it's a consequence of (1) being an established language with a bunch of features, (2) juggling existing error concepts in both shells and .NET and (3) some early decisions on error handling. I think the virtue of chain operators is that they don't pile on with yet another error concept, and we'll see the value of that down the road.",
+      "created_at": "2019-10-29T19:30:42Z",
+      "updated_at": "2019-10-29T19:31:56Z"
+    },
+    {
+      "author": "KirkMunro",
+      "author_association": "CONTRIBUTOR",
+      "body": "> What purpose does `||` have being in PowerShell at all if it can't also handle at _least_ PowerShell errors?\r\n\r\nBut how would it handle errors? If you're performing automation, and you want to log all messages, including errors, you wouldn't want that to handle the errors. Isn't `||` simply about execution flow?\r\n\r\nIf I wanted to suppress the error from the path not existing, because it is indeed benign in my scenario, I'd write your example like this:\r\n\r\n```powershell\r\n$folder = Get-Item $Path -ErrorAction Ignore || New-Item $Path -ItemType Directory\r\n```\r\n\r\nMaybe it's not exactly benign though, and instead I just want to silence the error but still have it logged in `$error`. Or maybe I want to log the error by capturing it in a `$myErrorCollection = [System.Management.Automation.PSDataCollection[System.Management.Automation.ErrorRecord]]::new()` collection that I use with `-ErrorVariable +myErrorCollection`, since I can also set up event handlers when items are added to that collection for more processing in my automated system.\r\n\r\nI suggest these things because I automation solutions that do intensive logging/data processing won't necessarily want errors simply suppressed...they will more likely want to control the handling of that information themselves IMHO.",
+      "created_at": "2019-10-29T19:30:43Z",
+      "updated_at": "2019-10-29T19:30:43Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "You could still do pretty much all of those things if the operator swallows errors, @KirkMunro.\r\n\r\nLet's say, for example, that the chain operator simply behaves as though you implicitly called `-ErrorAction SilentlyContinue`:\r\n\r\n- Errors are not dropped to the console.\r\n- `$error` is still populated (and you could use it in the latter part of the chain if you wanted to)\r\n- You can still use `-ErrorVariable` however you wish to handle the error in more advanced ways.\r\n\r\nThe _only_ difference is that you're making sequences like `Get-Item $Path || New-Item $Path` more viable, by virtue of not requiring manual error handling, without also preventing a scripter from building in additional error handling as desired. The error would be handled by the mere use of `||`, which I would argue is very much in the spirit of the classic uses of the `||` operator in Bash.\r\n\r\nWithout it, it's just clunky and awkward to be used in PS at all, and I couldn't see anyone using it for anything other than native executables. And if that's _all_ it was ever designed for, I can't see how it has a place in the PowerShell language, really. \ud83d\ude15 ",
+      "created_at": "2019-10-29T19:39:56Z",
+      "updated_at": "2019-10-29T19:44:07Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "> The error would be handled by the mere use of ||, which I would argue is very much in the spirit of the classic uses of the || operator in Bash.\r\n\r\nNo; the intent is not to interfere with the output streams, and it just so happens that _tests_ are inherently quiet in Bash, due to being implemented as _commands_, not expressions. That is, they're quiet unless they involve a command that produces stderr output (to use a contrived example: `[ -n \"$(nosuch)\" ] || echo hi`)\r\n\r\nA common idiom is the following:\r\n\r\n```\r\n# If the foo invocation fails, exit the script.\r\nfoo -bar || exit 1\r\n```\r\n\r\nIn this case you _do_ want the error message so as to signal the reason for the failure indicated by the nonzero exit code (unless you want to spend the effort to capture and repackage the error).\r\n\r\nIncidentally, this currently doesn't work in PowerShell - see #10967\r\n\r\nA _unified_ way to silence commands in chained pipelines that works with both external programs and PowerShell commands is `2>$null`\r\n\r\nUnfortunately, that is currently broken with `$ErrorActionPreference = 'Stop'` in effect, but that should be easy to fix: #4002\r\n\r\nOn a general note:\r\n\r\n> And if that's all it was ever designed for, I can't see how it has a place in the PowerShell language, really.\r\n\r\nPowerShell is first and foremost a _shell_, and a core mandate of a shell is to call external programs.\r\n\r\nHistorically, PowerShell could get away with being bad at doing so in the Windows-only days, because there were few external programs of interest to call.\r\n\r\nThese days are - fortunately - gone: the Unix world has tons of useful utilities, and in the era of cross-platform utilities,  so does Windows.\r\n\r\nLess fortunately so, PowerShell is still bad at calling external utilities, owing to its fundamentally broken handling of quoting and the inability to handle or redirect raw byte data.\r\n\r\nIn short: discounting a feature because it _only_ helps with external utilities seems counterproductive in general, but note that that isn't actually the case here:\r\n\r\nIf you conceptualize `&&` and `||` as detailed by @rjmholt, you can use it to your advantage with PowerShell commands too.\r\n\r\nYes, integration with PowerShell's native tests is desirable, especially because `&&` and `||` are so much more concise than `if` statements and unified logic is generally desirable, but there seems to be no good solution, because the worlds are too different (and PowerShell has to play in many worlds).\r\n\r\n",
+      "created_at": "2019-11-01T15:23:35Z",
+      "updated_at": "2019-11-01T15:23:35Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@PowerShell/powershell-committee reviewed this.  Our recommendation is to expose a public API to allow setting `$?` and have a cmdlet that sets `$?` to false if the input to this cmdlet is $false or $null.",
+      "created_at": "2019-11-06T23:36:45Z",
+      "updated_at": "2019-11-06T23:36:45Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "@SteveL-MSFT wouldn't both of those options immediately re-set `$?` after the statement or command completes, overwriting the set value?\r\n\r\nThere any some pretty hacky ways around that, but I'm not sure any of the options I can think of would be a great idea.",
+      "created_at": "2019-11-06T23:54:49Z",
+      "updated_at": "2019-11-06T23:55:45Z"
+    },
+    {
+      "author": "SteveL-MSFT",
+      "author_association": "MEMBER",
+      "body": "@vexx32 the public API would have to manipulate engine internals.  Conceptually the api would set some state and in the engine code that sets `$?`, it would check if this state was set and use that instead of the normal path. ",
+      "created_at": "2019-11-07T01:41:22Z",
+      "updated_at": "2019-11-07T01:41:22Z"
+    },
+    {
+      "author": "vexx32",
+      "author_association": "COLLABORATOR",
+      "body": "Quoting what I mentioned on Twitter with respect to that idea to keep the discussion more or less in one place:\r\n\r\n> Even if that works (which I think is infeasible as it would involve rewriting a good many core pwsh commands to include setting $?) you'd be diluting the purpose of $? so in reality this is not really different to having && or || respect true/false values from the output stream.\r\n\r\n> Also, we still need to fix $?; if this works:\r\n>\r\n> Test-Path $path || New-Item $path\r\n>\r\n> But this fails:\r\n>\r\n> (Test-Path $path) || New-Item $Path\r\n>\r\n> Then we still have a problem, imo. Technicalities or not, it will never make sense to users for a simple grouping to modify the result.\r\n\r\n> I don't think there's really a valid reason for keeping that behaviour from a UX standpoint. Since anything wrapped in a simple pair of ( ) (short of an actual parse error) sets $?=$true, that result is useless.\r\n\r\n> The problem is that we **do not have** any method of grouping statements that does not reset $?; to most folx, that task SHOULD fall to regular parentheses, as it does in every other language. Wrapping in parens should not change execution conditions.\r\n",
+      "created_at": "2019-11-11T05:00:26Z",
+      "updated_at": "2019-11-11T05:00:40Z"
+    },
+    {
+      "author": "Jaykul",
+      "author_association": "CONTRIBUTOR",
+      "body": "> it just so happens that tests are inherently quiet in Bash, due to being implemented as commands, not expressions.\r\n\r\nRight, and in PowerShell tests are inherently **Boolean** and don't write errors or set $? to false. I mean, we all complain when someone makes a `Test` verb command that behaves differently, right? We want test commands to behave like `Test-Path`: return `$true` or `$false` without populating `$error` or `$?`\r\n\r\nWhich is why conditionally continuing operators that can't handle booleans don't make sense. Frankly, I'm not sure a command that sets `$?` when it gets falsish input is going to make things better:\r\n\r\nDo we really think this is readable, or an expression we want to see?\r\n```posh\r\nTest-Path $Path | Test-Pipeline || New-Item $Path\r\n```",
+      "created_at": "2019-12-05T07:01:11Z",
+      "updated_at": "2019-12-05T07:01:11Z"
+    },
+    {
+      "author": "Herr-Sepp",
+      "author_association": "NONE",
+      "body": "How about new chain operators that take $true and $false into account?\r\n\r\nI have stumbled over the problem of this issue so many times, but I also understand that && and || can't be changed easily.\r\n(and maybe doesn't fit to powershell as default behavior either).\r\n\r\nAs a \"simple\" solution without breaking change I could imagine\r\n\r\n_&&&_ \r\nand \r\n_|||_ \r\nas new chain operators that also consider boolean values.\r\n\r\nThis would be more readable than a new cmdlet that changes $? and has to be inserted into the pipeline as noted by Jaykul.",
+      "created_at": "2022-05-19T15:04:59Z",
+      "updated_at": "2022-05-19T15:04:59Z"
+    }
+  ],
+  "created_at": "2019-10-27T22:30:57Z",
+  "number": 10917,
+  "state": "open",
+  "title": "&& and || pipeline chain operator should also check for $false",
+  "updated_at": "2022-05-19T20:39:16Z"
+}

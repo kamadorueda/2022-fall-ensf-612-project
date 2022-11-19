@@ -1,0 +1,48 @@
+{
+  "_url": "https://github.com/PowerShell/PowerShell/issues/8040",
+  "author": "mklement0",
+  "body": "`New-Variable -Scope Private` doesn't create a private variable, only `New-Variable -Option Private` does (the other `-Scope` values work as intended).\r\n\r\n(`New-Alias -Scope Private` works fine, by contrast.)\r\n\r\nSteps to reproduce\r\n------------------\r\n\r\n```powershell\r\n(New-Variable foo1 -Scope Private -PassThru).Options\r\n(New-Variable foo2 -Option Private -PassThru).Options\r\n```\r\n\r\nExpected behavior\r\n-----------------\r\n\r\n```none\r\nPrivate\r\nPrivate\r\n```\r\n\r\nActual behavior\r\n---------------\r\n\r\n```none\r\nNone\r\nPrivate\r\n```\r\n\r\nThat is, `-Scope Private` was quietly ignored.\r\n\r\nWhile the private \"scope\" ultimately translates into an _option_ on a variable created in the current scope, `-Scope Private` should still be supported, given that `-Scope Global` and `-Scope Script` work as intended.\r\n\r\nEnvironment data\r\n----------------\r\n\r\n```powershell\r\nPowerShell Core v6.1.0 on macOS 10.14\r\nPowerShell Core v6.1.0 on Ubuntu 16.04.5 LTS\r\nPowerShell Core v6.1.0 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.165)\r\nWindows PowerShell v5.1.17134.228 on Microsoft Windows 10 Pro (64-bit; Version 1803, OS Build: 17134.165)\r\n```\r\n",
+  "closed_at": null,
+  "comments": [
+    {
+      "author": "whitequill",
+      "author_association": "NONE",
+      "body": "I was just noticing a similar problem.\r\n`New-Variable -Scope private -Name test -Value \"D:\\Users\\brazg\\Documents\\test\"`\r\nif you type\r\n`$global:test` or `$local:test` or `$private:test` they will all return the same value.\r\nThe scope can be anything at all it will still show on global, local and private.\r\n`$env:test` is a seperate variable from the others.",
+      "created_at": "2018-10-19T06:55:38Z",
+      "updated_at": "2018-10-19T07:03:27Z"
+    },
+    {
+      "author": "YogurtTheHorse",
+      "author_association": "NONE",
+      "body": "Interesting, because if you write `Private` in lower-case (`private`), it will work as supposed. As I see, equality test made with case ignorance (https://github.com/PowerShell/PowerShell/blob/v6.1.0/src/Microsoft.PowerShell.Commands.Utility/commands/utility/Var.cs#L832), but it doesn't work",
+      "created_at": "2018-10-21T16:54:38Z",
+      "updated_at": "2018-10-21T16:54:38Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@whitequill:\r\n\r\nThat's not a valid test, because if you use scope modifiers that in effect refer to the _same_ scope, variable access will still succeed; in the global scope, `$global:test`, `$local:test`, `$script:test` and `$private:test` all refer to the same `$test` variable in the global scope - whether the variable is private or not.\r\n\r\n@yegorf1: The check is indeed case-insensitive, as it should be, and it does work - the case of scope modifier `private` is irrelevant.\r\n\r\nHere's a statement that show that creating private variables with scope modifier `private` _does_ work (you can try it with any case variation of `private`) .\r\n\r\n```powershell\r\n# Be sure that you haven't previously created a $foo variable.\r\nPS> $private:foo = 'private'; & { $global:foo }\r\n# no output, because the child scope in { ... } doesn't see $foo in the global scope, \r\n# because it is private.\r\n```\r\n\r\nIn short: Creating private variables with either of the following methods DOES currently work as intended:\r\n\r\n * `$private:varName = ...`\r\n * `New-Variable -Option Private varName ...`\r\n\r\nBy contrast, `New-Variable -Scope Private varName ...` does NOT - note the difference in parameter names: `-Option` vs. `-Scope`.\r\n\r\n\r\n\r\n\r\n",
+      "created_at": "2018-10-21T21:26:54Z",
+      "updated_at": "2018-10-21T21:27:52Z"
+    },
+    {
+      "author": "whitequill",
+      "author_association": "NONE",
+      "body": "@mklement0 maybe you missed reading the documetation about scopes and how they are supposed to work.\r\nhttps://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_scopes?view=powershell-6\r\nI may be mistaken on how `$local` works but `$private` should be its own scope independent of other variable names.\r\n\r\nif `New-Variable -Scope` has to do with where the code is run and what code sees other code running, what does `New-Variable -Option` do if it is just setting a scope?",
+      "created_at": "2018-10-22T09:23:29Z",
+      "updated_at": "2018-10-22T09:40:34Z"
+    },
+    {
+      "author": "mklement0",
+      "author_association": "CONTRIBUTOR",
+      "body": "@whitequill: I've read the topic, but it doesn't tell you the whole story.\r\n\r\n> if `New-Variable -Scope` has to do with where the code is run\r\n\r\n`-Scope` specifies in what the scope the variable is _created_, as also reflected in the [`New-Variable`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/new-variable?view=powershell-6) help topic:\r\n\r\n> Specifies the scope of the new variable.\r\n\r\nAnd that is indeed how it works for `-Scope Global`, `-Scope Script` and `-Scope Local`, but it doesn't work for `-Scope Private`, which is the inconsistency this issue is about.\r\n\r\nAn example of where it works:\r\n \r\n```powershell\r\n& { new-variable -scope script hi there } # from a child scope, create a variable in the script scope\r\n$hi  # output the newly created script-scope variable\r\n```\r\n\r\nNote that in the global scope (from the command line) the  `script` scope is the same as the global scope.\r\n\r\n> but `$private` should be its own scope independent of other variable names.\r\n\r\nStrictly speaking, `private` is _not a separate scope_.\r\nInstead, it is a _flag_ (option) on a _variable_ in a given scope that prevents descendant scopes from seeing its value or modifying it with explicit cross-scope access.\r\n\r\nThus, `New-Variable -Option Private` is the technically more accurate way to create a private variable - and it does work as intended.\r\n\r\nYou can even _combine_ that with `-Scope`  to create a private variable in a _different_ scope:\r\n\r\n```powershell\r\n& { new-variable -scope script -option Private hi there } # create private var. in script scope\r\n$hi # OK, private script-level var. was created, and is (obviously) accessible in the script scope.\r\n& { $hi } # NO output in child scope, because the script-scope variable is private.\r\n```\r\n\r\nSince variables in the  private \"scope\" are only ever accessible in the `local` i.e. current scope, there is some _technical_ justification in treating `-Scope Local` and `-Scope Private` both as `-Scope Local`, but it certainly _confounds user expectations_, needlessly so, not least because it works differently - and as expected - with `New-Alias`.\r\n\r\n\r\n\r\n",
+      "created_at": "2018-10-22T12:50:51Z",
+      "updated_at": "2018-10-22T15:52:12Z"
+    }
+  ],
+  "created_at": "2018-10-16T02:52:11Z",
+  "number": 8040,
+  "state": "open",
+  "title": "New-Variable -Scope Private doesn't create a private variable.",
+  "updated_at": "2018-10-22T15:52:12Z"
+}
