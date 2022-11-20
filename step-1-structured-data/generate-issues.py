@@ -45,7 +45,6 @@ def main() -> None:
                             "body": comment["body"],
                             "created_at": comment["created_at"],
                             "updated_at": comment["updated_at"],
-                            "updated_at": comment["updated_at"],
                             "author": comment["user"]["login"],
                         }
                     )

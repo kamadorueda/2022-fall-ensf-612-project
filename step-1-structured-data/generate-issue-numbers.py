@@ -11,7 +11,7 @@ def main() -> None:
 
     issue_numbers.sort(reverse=True)
     with open(
-        f"step-1-structured-data/issue-numbers.json",
+        "step-1-structured-data/issue-numbers.json",
         mode="w",
         encoding="utf-8",
     ) as file:
