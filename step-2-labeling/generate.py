@@ -20,7 +20,7 @@ def main() -> None:
         writer = csv.DictWriter(
             file,
             fieldnames=[COLUMN_URL, COLUMN_WAS_FIXED],
-            quoting=csv.QUOTE_NONNUMERIC,
+            quoting=csv.QUOTE_NONE,
         )
         writer.writeheader()
 
