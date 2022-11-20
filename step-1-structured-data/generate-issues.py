@@ -8,6 +8,9 @@ def main() -> None:
             issues = json.load(issues_file)
 
         for issue in issues:
+            if "pull_request" in issue:
+                continue
+
             print(issue["number"])
             issue = {
                 "_url": f"https://github.com/PowerShell/PowerShell/issues/{issue['number']}",
