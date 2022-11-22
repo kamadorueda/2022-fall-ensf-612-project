@@ -22,6 +22,7 @@ def main() -> None:
                 "closed_at": issue["closed_at"],
                 "updated_at": issue["updated_at"],
                 "author": issue["user"]["login"],
+                "labels": [label["name"] for label in issue["labels"]],
                 "comments": [],
             }
 
